@@ -457,23 +457,38 @@ sb.auth.onAuthStateChange(async (event, session) => {
 })
 
 async function initApp(user) {
-  let { data: profile } = await sb.from('profiles').select('*, team:teams(name,location)').eq('id', user.id).single()
+  // Pokus 1: hledat podle UUID
+  let { data: profile, error: err1 } = await sb.from('profiles').select('*, team:teams(name,location)').eq('id', user.id).maybeSingle()
+  console.log('[initApp] by id:', profile, err1)
+
+  // Pokus 2: hledat podle emailu
   if (!profile) {
-    const { data: p2 } = await sb.from('profiles').select('*, team:teams(name,location)').eq('email', user.email).single()
+    const { data: p2, error: err2 } = await sb.from('profiles').select('*, team:teams(name,location)').eq('email', user.email).maybeSingle()
+    console.log('[initApp] by email:', p2, err2)
     profile = p2
   }
+
   currentUser = user
   currentProfile = profile
 
   if (!profile) {
-    showToast('Profil nenalezen — kontaktujte admina')
+    const errMsg = 'Profil nenalezen pro: ' + user.email
+    console.error('[initApp]', errMsg)
+    showToast('⚠️ ' + errMsg)
     await sb.auth.signOut()
     return
   }
 
-  if (profile.role === 'osvec' || profile.role === 'partak') {
+  console.log('[initApp] role:', profile.role)
+
+  if (profile.role === 'osvec') {
     showOsvec(profile)
+  } else if (profile.role === 'partak') {
+    showOsvec(profile) // parták používá stejné mobilní rozhraní
+  } else if (profile.role === 'klient') {
+    showAdmin(profile) // klient dostane read-only admin view (TODO: vlastní view)
   } else {
+    // admin a cokoliv jiného
     showAdmin(profile)
   }
 }
