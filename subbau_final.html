@@ -774,7 +774,24 @@ async function doRegister() {
   btn.disabled = true
 
   // 1. Vytvoř auth uživatele
-  const { data: authData, error: authErr } = await sb.auth.signUp({ email, password: pwd })
+  const { data: authData, error: authErr } = await sb.auth.signUp({
+    email,
+    password: pwd,
+    options: {
+      emailRedirectTo: 'https://subbau.vercel.app',
+      data: {
+        full_name: name,
+        phone,
+        profession: prof,
+        locality,
+        german_level: german,
+        start_date: startDate || '',
+        has_car: hasCar,
+        is_osvec: isOsvec,
+        role: 'osvec'
+      }
+    }
+  })
 
   if (authErr) {
     err.textContent = 'Chyba: ' + authErr.message
@@ -793,37 +810,48 @@ async function doRegister() {
     return
   }
 
-  // 2. Vytvoř profil
-  const { error: profileErr } = await sb.from('profiles').insert({
-    id: userId,
-    email,
-    full_name: name,
-    phone,
-    profession: prof,
-    locality,
-    german_level: german,
-    start_date: startDate || null,
-    has_car: hasCar,
-    is_osvec: isOsvec,
-    role: 'osvec',
-    is_active: false,
-    registration_status: 'pending'
-  })
+  // 2. Vytvoř profil — počkej na session
+  const { data: sessionData } = await sb.auth.getSession()
+  const session = sessionData?.session
 
-  if (profileErr) {
-    err.textContent = 'Chyba profilu: ' + profileErr.message
-    err.style.display = 'block'
-    btn.textContent = 'Odeslat registraci →'
-    btn.disabled = false
-    return
+  if (session) {
+    // Email potvrzení je vypnuté — máme session hned
+    const { error: profileErr } = await sb.from('profiles').insert({
+      id: userId,
+      email,
+      full_name: name,
+      phone,
+      profession: prof,
+      locality,
+      german_level: german,
+      start_date: startDate || null,
+      has_car: hasCar,
+      is_osvec: isOsvec,
+      role: 'osvec',
+      is_active: false,
+      registration_status: 'pending'
+    })
+    if (profileErr) {
+      console.error('Profile insert error:', profileErr)
+      err.textContent = 'Chyba profilu: ' + profileErr.message
+      err.style.display = 'block'
+      btn.textContent = 'Odeslat registraci →'
+      btn.disabled = false
+      return
+    }
+  } else {
+    // Email potvrzení je zapnuté — profil se vytvoří po potvrzení
+    console.log('Email confirmation required — profile will be created after confirmation')
   }
 
   // 3. Úspěch
-  ok.textContent = '✅ Registrace odeslána! Čekejte na schválení administrátorem.'
+  ok.textContent = session
+    ? '✅ Registrace dokončena! Čekejte na schválení administrátorem.'
+    : '✅ Registrace odeslána! Zkontrolujte email a potvrďte registraci.'
   ok.style.display = 'block'
   btn.textContent = 'Odeslat registraci →'
   btn.disabled = false
-  showPending()
+  if (session) showPending()
 }
 
 async function doLogout() {
