@@ -438,8 +438,26 @@ tr:hover td{background:#fafbfc}
         <div style="padding:8px 10px;background:var(--blue-l);border-radius:8px;margin-bottom:12px;font-size:12px;color:var(--blue)">
           📍 <span id="mob-gps">Načítám polohu...</span>
         </div>
-        <div id="mob-btns">
+        <!-- Stav badge -->
+        <div id="mob-state-badge" style="text-align:center;padding:10px;border-radius:10px;margin-bottom:12px;font-size:13px;font-weight:700;background:var(--bg);color:var(--text2)">
+          ● Načítám...
+        </div>
+        <!-- Tlačítka — vždy v DOM, show/hide přes JS -->
+        <div id="btn-in" style="display:block">
           <button class="big-btn" style="background:var(--green);color:#fff" onclick="mobCheckin('in')">✅ PŘÍCHOD — Zaznamenat</button>
+        </div>
+        <div id="btn-working" style="display:none">
+          <div class="grid2" style="gap:8px">
+            <button class="sm-btn" style="background:var(--amber-l);color:var(--amber);padding:14px" onclick="mobCheckin('break-start')">☕ Začít přestávku</button>
+            <button class="sm-btn" style="background:var(--red-l);color:var(--red);padding:14px" onclick="mobCheckin('out')">🚪 Odchod</button>
+          </div>
+        </div>
+        <div id="btn-break" style="display:none">
+          <button class="big-btn" style="background:var(--amber);color:#fff;margin-bottom:8px" onclick="mobCheckin('break-end')">▶ Ukončit přestávku</button>
+          <button class="big-btn" style="background:var(--red-l);color:var(--red);font-size:13px" onclick="mobCheckin('out')">🚪 Odchod domů</button>
+        </div>
+        <div id="btn-done" style="display:none">
+          <div style="text-align:center;padding:16px;color:var(--green);font-size:15px;font-weight:700" id="btn-done-text">✅ Dnes hotovo!</div>
         </div>
       </div>
       <div class="mob-card">
@@ -1114,43 +1132,40 @@ async function getTodayRecord() {
 }
 
 function updateMobStatus(rec) {
+  // show/hide pevných tlačítek — spolehlivější než innerHTML
+  const show = id => { const el=document.getElementById(id); if(el) el.style.display='block' }
+  const hide = id => { const el=document.getElementById(id); if(el) el.style.display='none' }
+  const badge = document.getElementById('mob-state-badge')
   const bar = document.getElementById('mob-status')
-  const btns = document.getElementById('mob-btns')
-  if (!bar || !btns) return
 
-  if (rec.check_out) {
-    // Hotovo
-    bar.style.background = 'var(--blue-l)'
-    bar.innerHTML = `<span style="font-size:13px;font-weight:600;color:var(--blue)">● Hotovo — ${rec.check_in?.slice(0,5)} → ${rec.check_out?.slice(0,5)}</span><span style="font-size:12px;color:var(--blue)">${rec.total_hours}h</span>`
-    btns.innerHTML = `<div style="text-align:center;padding:16px;color:var(--green);font-size:15px;font-weight:700">✅ Dnes hotovo! (${rec.total_hours}h)</div>`
+  // Schovej vše
+  hide('btn-in'); hide('btn-working'); hide('btn-break'); hide('btn-done')
+
+  if (!rec || !rec.check_in) {
+    // Žádný záznam — zobraz příchod
+    if(badge){ badge.style.background='var(--bg)'; badge.style.color='var(--text2)'; badge.textContent='● Zadejte příchod' }
+    if(bar){ bar.style.background='var(--bg)'; bar.innerHTML='<span style="font-size:13px;font-weight:600;color:var(--text2)">● Nepřihlášen</span>' }
+    show('btn-in')
+
+  } else if (rec.check_out) {
+    // Hotovo — zamknout
+    if(badge){ badge.style.background='var(--blue-l)'; badge.style.color='var(--blue)'; badge.textContent=`✅ Hotovo: ${rec.check_in.slice(0,5)} → ${rec.check_out.slice(0,5)} · ${rec.total_hours}h` }
+    if(bar){ bar.style.background='var(--blue-l)'; bar.innerHTML=`<span style="font-size:13px;font-weight:600;color:var(--blue)">● Hotovo — ${rec.check_in.slice(0,5)} → ${rec.check_out.slice(0,5)}</span><span style="font-size:12px;color:var(--blue)">${rec.total_hours}h</span>` }
+    const done = document.getElementById('btn-done-text')
+    if(done) done.textContent = `✅ Dnes hotovo! Odpracováno: ${rec.total_hours}h`
+    show('btn-done')
 
   } else if (rec.break_start && !rec.break_end) {
-    // Probíhá přestávka
-    bar.style.background = 'var(--amber-l)'
-    bar.innerHTML = `<span style="font-size:13px;font-weight:600;color:var(--amber)">☕ Přestávka od ${rec.break_start?.slice(0,5)}</span>`
-    btns.innerHTML = `
-      <button class="big-btn" style="background:var(--amber);color:#fff;margin-bottom:8px" onclick="mobCheckin('break-end')">
-        ▶ Ukončit přestávku — Pokračovat v práci
-      </button>
-      <button class="big-btn" style="background:var(--red-l);color:var(--red);font-size:13px" onclick="mobCheckin('out')">
-        🚪 Odchod domů
-      </button>`
-
-  } else if (rec.check_in) {
-    // Pracuje
-    bar.style.background = 'var(--green-l)'
-    bar.innerHTML = `<span style="font-size:13px;font-weight:600;color:var(--green)">● Pracuješ od ${rec.check_in?.slice(0,5)}</span>`
-    btns.innerHTML = `
-      <div class="grid2" style="margin-bottom:8px">
-        <button class="sm-btn" style="background:var(--amber-l);color:var(--amber)" onclick="mobCheckin('break-start')">☕ Přestávka</button>
-        <button class="sm-btn" style="background:var(--red-l);color:var(--red)" onclick="mobCheckin('out')">🚪 Odchod</button>
-      </div>`
+    // Přestávka
+    if(badge){ badge.style.background='var(--amber-l)'; badge.style.color='var(--amber)'; badge.textContent=`☕ Přestávka od ${rec.break_start.slice(0,5)}` }
+    if(bar){ bar.style.background='var(--amber-l)'; bar.innerHTML=`<span style="font-size:13px;font-weight:600;color:var(--amber)">☕ Přestávka od ${rec.break_start.slice(0,5)}</span>` }
+    show('btn-break')
 
   } else {
-    // Žádný záznam — příchod
-    bar.style.background = 'var(--bg)'
-    bar.innerHTML = `<span style="font-size:13px;font-weight:600;color:var(--text2)">● Nepřihlášen</span>`
-    btns.innerHTML = `<button class="big-btn" style="background:var(--green);color:#fff" onclick="mobCheckin('in')">✅ PŘÍCHOD — Zaznamenat</button>`
+    // Pracuje
+    if(badge){ badge.style.background='var(--green-l)'; badge.style.color='var(--green)'; badge.textContent=`● Pracuješ od ${rec.check_in.slice(0,5)}` }
+    if(bar){ bar.style.background='var(--green-l)'; bar.innerHTML=`<span style="font-size:13px;font-weight:600;color:var(--green)">● Pracuješ od ${rec.check_in.slice(0,5)}</span>` }
+    show('btn-working')
   }
 }
 
@@ -1204,8 +1219,10 @@ async function mobCheckin(type) {
 
     } else if (type === 'out') {
       // Načti aktuální záznam pro výpočet hodin
-      const { data: rec } = await sb.from('attendance').select('check_in,break_start,break_end').eq('id', todayAttId).single()
+      const { data: rec } = await sb.from('attendance').select('check_in,break_start,break_end,check_out').eq('id', todayAttId).single()
       if (!rec) { showToast('❌ Záznam nenalezen'); return }
+      // Zamezit dvojitému odchodu
+      if (rec.check_out) { showToast('⚠️ Odchod již byl zaznamenán'); return }
       const h = calcHours(rec.check_in, timeStr, rec.break_start, rec.break_end)
       const { error } = await sb.from('attendance').update({ check_out: timeStr, total_hours: h }).eq('id', todayAttId)
       if (error) { showToast('❌ Chyba odchodu: ' + error.message); return }
