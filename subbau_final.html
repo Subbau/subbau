@@ -1099,10 +1099,17 @@ async function loadTeams() {
 // ============ OSVČ MOBILE ============
 async function getTodayRecord() {
   const today = new Date().toISOString().split('T')[0]
-  const { data } = await sb.from('attendance').select('*').eq('worker_id',currentUser.id).eq('work_date',today).single()
+  const { data } = await sb.from('attendance').select('*').eq('worker_id',currentUser.id).eq('work_date',today).maybeSingle()
   if (data) {
     todayAttId = data.id
+    console.log('[getTodayRecord] nalezen zaznam, id:', todayAttId)
     updateMobStatus(data)
+  } else {
+    todayAttId = null
+    console.log('[getTodayRecord] zadny zaznam dnes')
+    // Zobraz tlacitko prichod
+    const btns = document.getElementById('mob-btns')
+    if (btns) btns.innerHTML = '<button class="big-btn" style="background:var(--green);color:#fff" onclick="mobCheckin(\'in\')">✅ PŘÍCHOD — Zaznamenat</button>'
   }
 }
 
@@ -1125,31 +1132,65 @@ async function mobCheckin(type) {
   const now = new Date()
   const timeStr = now.toTimeString().slice(0,8)
   const kw = getKW()
-  if (type==='in') {
-    const { data } = await sb.from('attendance').insert({
-      worker_id:currentUser.id, work_date:now.toISOString().split('T')[0],
-      check_in:timeStr, location_address:gpsAddr,
-      location_lat:gpsLat, location_lng:gpsLng,
-      kw:kw.week, kw_year:kw.year, is_saturday:now.getDay()===6
+
+  if (type === 'in') {
+    // Příchod — vytvoř nový záznam
+    const { data, error } = await sb.from('attendance').insert({
+      worker_id: currentUser.id,
+      work_date: now.toISOString().split('T')[0],
+      check_in: timeStr,
+      location_address: gpsAddr,
+      location_lat: gpsLat,
+      location_lng: gpsLng,
+      kw: kw.week,
+      kw_year: kw.year,
+      is_saturday: now.getDay() === 6
     }).select().single()
-    if (data) { todayAttId=data.id; updateMobStatus(data) }
-    showToast('✅ Příchod '+timeStr)
-  } else if (todayAttId) {
-    if (type==='out') {
-      const { data:rec } = await sb.from('attendance').select('check_in,break_start,break_end').eq('id',todayAttId).single()
-      const h = calcHours(rec?.check_in,timeStr,rec?.break_start,rec?.break_end)
-      await sb.from('attendance').update({check_out:timeStr,total_hours:h}).eq('id',todayAttId)
-      showToast('🚪 Odchod '+timeStr)
-    } else if (type==='break-start') {
-      await sb.from('attendance').update({break_start:timeStr}).eq('id',todayAttId)
-      showToast('☕ Přestávka')
-    } else if (type==='break-end') {
-      await sb.from('attendance').update({break_end:timeStr}).eq('id',todayAttId)
-      showToast('▶ Pokračuješ')
+
+    if (error) { showToast('❌ Chyba příchodu: ' + error.message); return }
+    if (data) {
+      todayAttId = data.id
+      console.log('[mobCheckin] Příchod, todayAttId:', todayAttId)
+      updateMobStatus(data)
+      showToast('✅ Příchod ' + timeStr)
     }
-    const { data:updated } = await sb.from('attendance').select('*').eq('id',todayAttId).single()
+
+  } else {
+    // Přestávka / odchod — potřebujeme todayAttId
+    if (!todayAttId) {
+      // Zkus znovu načíst dnešní záznam
+      await getTodayRecord()
+    }
+    if (!todayAttId) {
+      showToast('⚠️ Nejprve zaznamenejte příchod')
+      return
+    }
+
+    if (type === 'break-start') {
+      const { error } = await sb.from('attendance').update({ break_start: timeStr }).eq('id', todayAttId)
+      if (error) { showToast('❌ Chyba: ' + error.message); return }
+      showToast('☕ Přestávka začala ' + timeStr)
+
+    } else if (type === 'break-end') {
+      const { error } = await sb.from('attendance').update({ break_end: timeStr }).eq('id', todayAttId)
+      if (error) { showToast('❌ Chyba: ' + error.message); return }
+      showToast('▶ Pokračuješ od ' + timeStr)
+
+    } else if (type === 'out') {
+      // Načti aktuální záznam pro výpočet hodin
+      const { data: rec } = await sb.from('attendance').select('check_in,break_start,break_end').eq('id', todayAttId).single()
+      if (!rec) { showToast('❌ Záznam nenalezen'); return }
+      const h = calcHours(rec.check_in, timeStr, rec.break_start, rec.break_end)
+      const { error } = await sb.from('attendance').update({ check_out: timeStr, total_hours: h }).eq('id', todayAttId)
+      if (error) { showToast('❌ Chyba odchodu: ' + error.message); return }
+      showToast('🚪 Odchod ' + timeStr + ' · celkem ' + h + 'h')
+    }
+
+    // Načti aktualizovaný záznam a obnov UI
+    const { data: updated } = await sb.from('attendance').select('*').eq('id', todayAttId).single()
     if (updated) updateMobStatus(updated)
   }
+
   loadMobWeek()
 }
 
@@ -1245,12 +1286,18 @@ function getKW(date=new Date()) {
   return {week:Math.ceil(((d-y)/86400000+1)/7),year:d.getUTCFullYear()}
 }
 
-function calcHours(ci,co,bs,be) {
-  if(!ci||!co)return 0
-  const tm=t=>{ const [h,m]=t.slice(0,5).split(':').map(Number); return h*60+m }
-  const total=tm(co)-tm(ci)
-  const brk=(bs&&be)?tm(be)-tm(bs):0
-  return Math.round((total-brk)/60*100)/100
+function calcHours(ci, co, bs, be) {
+  if (!ci || !co) return 0
+  const tm = t => {
+    const [h, m, s] = t.slice(0, 8).split(':').map(Number)
+    return h * 60 + m + (s || 0) / 60
+  }
+  const total = tm(co) - tm(ci)
+  if (total <= 0) return 0
+  // Odečti přestávku pouze pokud má začátek I konec
+  const brk = (bs && be) ? Math.max(0, tm(be) - tm(bs)) : 0
+  const net = total - brk
+  return Math.round(net / 60 * 100) / 100
 }
 
 function setKWChip() {
