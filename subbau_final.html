@@ -217,6 +217,7 @@ tr:hover td{background:#fafbfc}
         <button class="sb-a" onclick="sv('smlouvy',this)">✍️ Smlouvy</button>
         <button class="sb-a" onclick="sv('faktury',this)">🧾 Faktury / KW</button>
         <div class="sb-sec">Systém</div>
+        <button class="sb-a" onclick="sv('zpravy',this)">🔔 Zprávy <span id="notif-badge" style="display:none;background:var(--red);color:#fff;border-radius:10px;font-size:10px;padding:1px 6px;margin-left:4px">0</span></button>
         <button class="sb-a" onclick="sv('pristupy',this)">🔐 Přístupy</button>
         <button class="sb-a" onclick="doLogout()" style="color:var(--red)">🚪 Odhlásit se</button>
       </div>
@@ -408,6 +409,41 @@ tr:hover td{background:#fafbfc}
           </div>
         </div>
 
+        <!-- ZPRÁVY / NOTIFIKACE -->
+        <div id="v-zpravy" class="view">
+          <div class="g2">
+            <!-- Odeslat zprávu -->
+            <div class="card">
+              <div class="card-h"><h4>📤 Odeslat zprávu pracovníkovi</h4></div>
+              <div style="padding:16px">
+                <div class="fg">
+                  <label>Pracovník</label>
+                  <select id="notif-worker" style="width:100%"><option value="">— Vyberte pracovníka —</option></select>
+                </div>
+                <div class="fg">
+                  <label>Typ zprávy</label>
+                  <select id="notif-type" style="width:100%" onchange="updateNotifTemplate()">
+                    <option value="obecna">📢 Obecná zpráva</option>
+                    <option value="stavba">🏗 Změna stavby</option>
+                    <option value="pracovni_doba">⏰ Změna pracovní doby</option>
+                    <option value="ukonceni">❌ Ukončení spolupráce</option>
+                  </select>
+                </div>
+                <div class="fg">
+                  <label>Zpráva</label>
+                  <textarea id="notif-message" rows="5" style="width:100%;padding:10px;border:1.5px solid var(--brd);border-radius:8px;font-size:13px;font-family:inherit;resize:vertical" placeholder="Napište zprávu..."></textarea>
+                </div>
+                <button class="btn-pri" onclick="sendNotification()" style="width:100%;padding:11px">📤 Odeslat zprávu</button>
+              </div>
+            </div>
+            <!-- Historie odeslaných zpráv -->
+            <div class="card">
+              <div class="card-h"><h4>📋 Odeslané zprávy</h4></div>
+              <div id="notif-history" style="padding:8px 0">Načítám...</div>
+            </div>
+          </div>
+        </div>
+
         <!-- PŘÍSTUPY -->
         <div id="v-pristupy" class="view">
           <div class="card">
@@ -578,6 +614,16 @@ tr:hover td{background:#fafbfc}
       </div>
     </div>
 
+    <div class="mob-view" id="mob-v-zpravy">
+      <div class="mob-card">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+          <div class="mob-card-title" style="margin-bottom:0">🔔 Zprávy od SubBau</div>
+          <button onclick="markAllRead()" style="padding:6px 12px;background:var(--bg);border:1px solid var(--brd);border-radius:8px;font-size:11px;cursor:pointer;font-family:inherit">Vše přečteno</button>
+        </div>
+        <div id="mob-notifications">Načítám...</div>
+      </div>
+    </div>
+
     <div class="mob-view" id="mob-v-profil">
       <div class="mob-card" id="mob-profil-card">Načítám...</div>
       <button onclick="doLogout()" style="width:100%;padding:12px;background:var(--red-l);color:var(--red);border:none;border-radius:12px;font-size:14px;font-weight:700;cursor:pointer;font-family:inherit;margin-top:8px">🚪 Odhlásit se</button>
@@ -587,6 +633,7 @@ tr:hover td{background:#fafbfc}
     <button class="mob-nav-btn" onclick="mobSv('dochazka',this)"><div style="font-size:18px">⏱</div><div style="font-size:9px;font-weight:600;color:var(--blue)">Docházka</div></button>
     <button class="mob-nav-btn" onclick="mobSv('dokumenty',this)"><div style="font-size:18px">📄</div><div style="font-size:9px;font-weight:600;color:var(--text3)">Dokumenty</div></button>
     <button class="mob-nav-btn" onclick="mobSv('dovolena',this)"><div style="font-size:18px">🏖</div><div style="font-size:9px;font-weight:600;color:var(--text3)">Dovolená</div></button>
+    <button class="mob-nav-btn" onclick="mobSv('zpravy',this)" id="mob-notif-btn"><div style="font-size:18px">🔔</div><div style="font-size:9px;font-weight:600;color:var(--text3)">Zprávy <span id="mob-notif-count" style="display:none;background:var(--red);color:#fff;border-radius:8px;font-size:9px;padding:0 4px"></span></div></button>
     <button class="mob-nav-btn" onclick="mobSv('profil',this)"><div style="font-size:18px">👤</div><div style="font-size:9px;font-weight:600;color:var(--text3)">Profil</div></button>
   </div>
 </div>
@@ -839,6 +886,10 @@ function showAdmin(profile) {
   loadInvoices()
   setKWChip()
   checkDocumentAlerts()
+  loadMobNotifications()
+  checkUnreadNotifications()
+  loadNotifWorkers()
+  loadNotifHistory()
 }
 
 function showOsvec(profile) {
@@ -1591,7 +1642,7 @@ function sv(name, navEl) {
   if(v)v.classList.add('on')
   document.querySelectorAll('.sb-a').forEach(a=>a.classList.remove('on'))
   if(navEl)navEl.classList.add('on')
-  const titles={dashboard:'Dashboard',tymy:'Týmy / Teams',dochazka:'Docházka / Stunden',pracovnici:'Pracovníci',dokumenty:'Dokumenty',smlouvy:'Smlouvy',faktury:'Faktury / KW',pristupy:'Přístupy'}
+  const titles={dashboard:'Dashboard',tymy:'Týmy / Teams',dochazka:'Docházka / Stunden',pracovnici:'Pracovníci',dokumenty:'Dokumenty',smlouvy:'Smlouvy',faktury:'Faktury / KW',zpravy:'Zprávy / Notifikace',pristupy:'Přístupy'}
   document.getElementById('pt').textContent=titles[name]||name
 }
 
@@ -1680,6 +1731,155 @@ function showToast(msg) {
 
 
 
+
+
+// ============ NOTIFIKACE ============
+const notifTemplates = {
+  obecna: '',
+  stavba: 'Dobrý den, oznamujeme vám změnu stavby. Nová adresa: ',
+  pracovni_doba: 'Dobrý den, oznamujeme vám změnu pracovní doby. Od příštího týdne: ',
+  ukonceni: 'Dobrý den, informujeme vás o ukončení spolupráce ke dni '
+}
+
+const notifIcons = {
+  obecna: '📢',
+  stavba: '🏗',
+  pracovni_doba: '⏰',
+  ukonceni: '❌'
+}
+
+function updateNotifTemplate() {
+  const type = document.getElementById('notif-type').value
+  const msg = document.getElementById('notif-message')
+  if (msg && !msg.value) msg.value = notifTemplates[type] || ''
+}
+
+async function loadNotifWorkers() {
+  const { data } = await sb.from('profiles').select('id,full_name').in('role',['osvec','partak']).eq('is_active',true).order('full_name')
+  const sel = document.getElementById('notif-worker')
+  if (!sel || !data) return
+  sel.innerHTML = '<option value="">— Vyberte pracovníka —</option>' +
+    data.map(w => `<option value="${w.id}">${w.full_name}</option>`).join('')
+}
+
+async function sendNotification() {
+  const workerId = document.getElementById('notif-worker').value
+  const type = document.getElementById('notif-type').value
+  const message = document.getElementById('notif-message').value.trim()
+  const icon = notifIcons[type] || '📢'
+  const titles = { obecna:'Zpráva od SubBau', stavba:'Změna stavby', pracovni_doba:'Změna pracovní doby', ukonceni:'Ukončení spolupráce' }
+
+  if (!workerId) { showToast('⚠️ Vyberte pracovníka'); return }
+  if (!message) { showToast('⚠️ Napište zprávu'); return }
+
+  const { error } = await sb.from('notifications').insert({
+    worker_id: workerId,
+    title: icon + ' ' + titles[type],
+    message,
+    type,
+    is_read: false
+  })
+
+  if (error) { showToast('❌ Chyba: ' + error.message); return }
+
+  showToast('✅ Zpráva odeslána')
+  document.getElementById('notif-message').value = ''
+  document.getElementById('notif-worker').value = ''
+  loadNotifHistory()
+}
+
+async function loadNotifHistory() {
+  const { data } = await sb.from('notifications')
+    .select('*, worker:profiles(full_name)')
+    .order('created_at', { ascending: false })
+    .limit(30)
+  const div = document.getElementById('notif-history')
+  if (!div) return
+  if (!data?.length) {
+    div.innerHTML = '<div style="text-align:center;padding:20px;color:var(--text3);font-size:13px">Žádné odeslané zprávy</div>'
+    return
+  }
+  div.innerHTML = data.map(n => `
+    <div style="padding:10px 16px;border-bottom:1px solid var(--brd);${!n.is_read?'background:var(--blue-l)':''}">
+      <div style="display:flex;justify-content:space-between;align-items:flex-start">
+        <div>
+          <div style="font-size:12px;font-weight:700">${n.worker?.full_name||'—'}</div>
+          <div style="font-size:13px;margin:2px 0">${n.title}</div>
+          <div style="font-size:12px;color:var(--text2)">${n.message}</div>
+        </div>
+        <div style="text-align:right;flex-shrink:0;margin-left:8px">
+          <div style="font-size:10px;color:var(--text3)">${n.created_at?.slice(0,10)}</div>
+          <span class="pill ${n.is_read?'pq':'pb'}" style="margin-top:4px;display:inline-block">${n.is_read?'Přečteno':'Nepřečteno'}</span>
+        </div>
+      </div>
+    </div>`).join('')
+}
+
+async function loadMobNotifications() {
+  if (!currentUser) return
+  const { data } = await sb.from('notifications')
+    .select('*')
+    .eq('worker_id', currentUser.id)
+    .order('created_at', { ascending: false })
+  const div = document.getElementById('mob-notifications')
+  if (!div) return
+
+  // Badge počet nepřečtených
+  const unread = data?.filter(n => !n.is_read).length || 0
+  const badge = document.getElementById('mob-notif-count')
+  if (badge) {
+    badge.textContent = unread
+    badge.style.display = unread > 0 ? 'inline' : 'none'
+  }
+
+  if (!data?.length) {
+    div.innerHTML = '<div style="text-align:center;padding:20px;color:var(--text3);font-size:13px">Žádné zprávy</div>'
+    return
+  }
+
+  div.innerHTML = data.map(n => `
+    <div onclick="markRead('${n.id}', this)" style="padding:12px;border-radius:10px;margin-bottom:8px;background:${n.is_read?'var(--bg)':'var(--blue-l)'};border:1.5px solid ${n.is_read?'var(--brd)':'var(--blue-m)'};cursor:pointer">
+      <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:4px">
+        <div style="font-size:13px;font-weight:700">${n.title}</div>
+        ${!n.is_read ? '<span style="width:8px;height:8px;border-radius:50%;background:var(--blue);display:inline-block;flex-shrink:0;margin-top:4px"></span>' : ''}
+      </div>
+      <div style="font-size:13px;color:var(--text)">${n.message}</div>
+      <div style="font-size:11px;color:var(--text3);margin-top:4px">${n.created_at?.slice(0,10)}</div>
+    </div>`).join('')
+}
+
+async function markRead(id, el) {
+  await sb.from('notifications').update({ is_read: true }).eq('id', id)
+  if (el) {
+    el.style.background = 'var(--bg)'
+    el.style.border = '1.5px solid var(--brd)'
+    const dot = el.querySelector('span[style*="border-radius:50%"]')
+    if (dot) dot.remove()
+  }
+  // Aktualizuj badge
+  loadMobNotifications()
+}
+
+async function markAllRead() {
+  if (!currentUser) return
+  await sb.from('notifications').update({ is_read: true }).eq('worker_id', currentUser.id)
+  showToast('✅ Vše označeno jako přečteno')
+  loadMobNotifications()
+}
+
+// Zobraz upozornění po přihlášení pokud jsou nepřečtené zprávy
+async function checkUnreadNotifications() {
+  if (!currentUser || currentProfile?.role === 'admin') return
+  const { data } = await sb.from('notifications')
+    .select('id,title')
+    .eq('worker_id', currentUser.id)
+    .eq('is_read', false)
+  if (data?.length) {
+    showToast(`🔔 Máte ${data.length} nových zpráv`)
+    const badge = document.getElementById('mob-notif-count')
+    if (badge) { badge.textContent = data.length; badge.style.display = 'inline' }
+  }
+}
 
 // ============ DOCUMENT ALERTS ============
 async function checkDocumentAlerts() {
