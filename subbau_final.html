@@ -242,6 +242,12 @@ tr:hover td{background:#fafbfc}
             <div class="sc a"><div class="sc-lbl">Týmy aktivní</div><div class="sc-val" style="color:var(--amber)" id="stat-teams">—</div><div class="sc-sub">z databáze</div></div>
             <div class="sc r"><div class="sc-lbl">Chybí dokumenty</div><div class="sc-val" style="color:var(--red)" id="stat-docs">—</div><div class="sc-sub">vyžaduje akci</div></div>
           </div>
+          <!-- UPOZORNĚNÍ NA DOKUMENTY -->
+          <div class="card" id="doc-alerts-card" style="display:none;border-left:4px solid var(--red)">
+            <div class="card-h"><h4 style="color:var(--red)">⚠️ Dokumenty vyžadující akci</h4></div>
+            <div id="doc-alerts-list" style="padding:0 16px 8px"></div>
+          </div>
+
           <div class="card">
             <div class="card-h"><h4>Poslední záznamy docházky</h4><button class="btn-pri" onclick="sv('dochazka',null)" style="font-size:12px;padding:5px 12px">Zobrazit vše</button></div>
             <table>
@@ -443,7 +449,12 @@ tr:hover td{background:#fafbfc}
           ● Načítám...
         </div>
         <!-- Tlačítka — vždy v DOM, show/hide přes JS -->
-        <div id="btn-in" style="display:block">
+        <!-- Upozornění na dokumenty pro OSVČ -->
+      <div id="mob-doc-alert" style="display:none;background:var(--red-l);border:1.5px solid var(--red);border-radius:10px;padding:12px;margin-bottom:12px">
+        <div style="font-size:13px;font-weight:700;color:var(--red);margin-bottom:4px">⚠️ Zkontrolujte dokumenty</div>
+        <div id="mob-doc-alert-text" style="font-size:12px;color:var(--red)"></div>
+      </div>
+      <div id="btn-in" style="display:block">
           <button class="big-btn" style="background:var(--green);color:#fff" onclick="mobCheckin('in')">✅ PŘÍCHOD — Zaznamenat</button>
         </div>
         <div id="btn-working" style="display:none">
@@ -800,6 +811,7 @@ function showAdmin(profile) {
   loadContracts()
   loadInvoices()
   setKWChip()
+  checkDocumentAlerts()
 }
 
 function showOsvec(profile) {
@@ -815,6 +827,7 @@ function showOsvec(profile) {
   loadMobVacations()
   loadMobProfil(profile)
   getTodayRecord()
+  checkDocumentAlerts()
 }
 
 // ============ AUTH ============
@@ -1635,6 +1648,96 @@ function showToast(msg) {
 }
 
 
+
+
+// ============ DOCUMENT ALERTS ============
+async function checkDocumentAlerts() {
+  const today = new Date()
+  const in30days = new Date(today.getTime() + 30 * 86400000).toISOString().split('T')[0]
+  const todayStr = today.toISOString().split('T')[0]
+
+  const typeLabels = {
+    op: 'Občanský průkaz',
+    gewerbeschein: 'Gewerbeschein (DE)',
+    zivnost: 'Živnostenské oprávnění (CZ)',
+    a1: 'A1 Bescheinigung',
+    freistellung: 'Freistellung',
+    other: 'Dokument'
+  }
+
+  if (currentProfile?.role === 'admin') {
+    // Admin — zkontroluj všechny dokumenty
+    const { data } = await sb.from('documents')
+      .select('*, worker:profiles(full_name)')
+      .not('valid_until', 'is', null)
+      .lte('valid_until', in30days)
+      .eq('status', 'ok')
+
+    const { data: unreadable } = await sb.from('documents')
+      .select('*, worker:profiles(full_name)')
+      .eq('status', 'unreadable')
+
+    const all = [...(data||[]), ...(unreadable||[])]
+    if (!all.length) return
+
+    const card = document.getElementById('doc-alerts-card')
+    const list = document.getElementById('doc-alerts-list')
+    if (!card || !list) return
+
+    card.style.display = 'block'
+    list.innerHTML = all.map(d => {
+      const isExpired = d.valid_until && d.valid_until < todayStr
+      const isUnreadable = d.status === 'unreadable'
+      const daysLeft = d.valid_until ? Math.ceil((new Date(d.valid_until) - today) / 86400000) : null
+      const msg = isUnreadable
+        ? '❌ Nečitelný dokument'
+        : isExpired
+        ? `❌ Expiroval ${d.valid_until}`
+        : `⚠️ Expiruje za ${daysLeft} dní (${d.valid_until})`
+      return `<div style="display:flex;justify-content:space-between;align-items:center;padding:9px 0;border-bottom:1px solid var(--brd)">
+        <div>
+          <span style="font-weight:600;font-size:13px">${d.worker?.full_name||'—'}</span>
+          <span style="font-size:12px;color:var(--text2)"> · ${typeLabels[d.doc_type]||d.doc_type}</span>
+        </div>
+        <span style="font-size:12px;font-weight:600;color:${isExpired||isUnreadable?'var(--red)':'var(--amber)'}">${msg}</span>
+      </div>`
+    }).join('')
+
+    // Aktualizuj stat counter
+    const statEl = document.getElementById('stat-docs')
+    if (statEl) statEl.textContent = all.length
+
+  } else if (currentProfile?.role === 'osvec') {
+    // OSVČ — zkontroluj jen své dokumenty
+    const { data } = await sb.from('documents')
+      .select('*')
+      .eq('worker_id', currentUser.id)
+
+    if (!data?.length) return
+
+    const alerts = []
+    data.forEach(d => {
+      if (d.status === 'unreadable') {
+        alerts.push(`❌ ${typeLabels[d.doc_type]||'Dokument'} — nečitelný, nahrajte znovu`)
+      } else if (d.valid_until) {
+        const daysLeft = Math.ceil((new Date(d.valid_until) - today) / 86400000)
+        if (daysLeft < 0) {
+          alerts.push(`❌ ${typeLabels[d.doc_type]||'Dokument'} — expiroval ${d.valid_until}`)
+        } else if (daysLeft < 30) {
+          alerts.push(`⚠️ ${typeLabels[d.doc_type]||'Dokument'} — expiruje za ${daysLeft} dní`)
+        }
+      }
+    })
+
+    if (!alerts.length) return
+
+    const banner = document.getElementById('mob-doc-alert')
+    const text = document.getElementById('mob-doc-alert-text')
+    if (!banner || !text) return
+    banner.style.display = 'block'
+    text.innerHTML = alerts.map(a => `<div style="margin-bottom:2px">${a}</div>`).join('')
+  }
+}
 
 // ============ DOVOLENÁ ============
 function toggleVacForm() {
