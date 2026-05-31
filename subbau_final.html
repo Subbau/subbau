@@ -333,6 +333,57 @@ tr:hover td{background:#fafbfc}
               </div>
             </div>
           </div>
+          <!-- RUČNÍ ZÁPIS ZPĚTNĚ -->
+          <div class="card" style="border-left:4px solid var(--amber)">
+            <div class="card-h" style="cursor:pointer" onclick="toggleManualForm()">
+              <h4>✏️ Ruční zápis docházky (zpětně)</h4>
+              <span id="manual-toggle-icon" style="color:var(--text3);font-size:18px">＋</span>
+            </div>
+            <div id="manual-att-form" style="display:none;padding:16px">
+              <div class="g2">
+                <div class="fg">
+                  <label>Pracovník *</label>
+                  <select id="manual-worker" style="width:100%"><option value="">— Vyberte —</option></select>
+                </div>
+                <div class="fg">
+                  <label>Datum *</label>
+                  <input type="date" id="manual-date">
+                </div>
+                <div class="fg">
+                  <label>Příchod *</label>
+                  <input type="time" id="manual-checkin" placeholder="07:00">
+                </div>
+                <div class="fg">
+                  <label>Odchod *</label>
+                  <input type="time" id="manual-checkout" placeholder="15:30">
+                </div>
+                <div class="fg">
+                  <label>Přestávka od</label>
+                  <input type="time" id="manual-break-start" placeholder="12:00">
+                </div>
+                <div class="fg">
+                  <label>Přestávka do</label>
+                  <input type="time" id="manual-break-end" placeholder="12:30">
+                </div>
+              </div>
+              <div class="fg">
+                <label>Adresa stavby</label>
+                <input type="text" id="manual-site" placeholder="Dachauerstr. 45, München">
+              </div>
+              <div class="fg">
+                <label>Poznámka (důvod zpětného zápisu)</label>
+                <input type="text" id="manual-note" placeholder="např. nešlo přihlášení, technický problém...">
+              </div>
+              <div id="manual-hours-preview" style="padding:10px;background:var(--blue-l);border-radius:8px;font-size:13px;color:var(--blue);margin-bottom:12px;display:none">
+                ⏱ Výpočet hodin: <b id="manual-hours-val">0h</b>
+              </div>
+              <div style="display:flex;gap:8px">
+                <button class="btn-pri" onclick="saveManualAttendance()" style="flex:1;padding:11px">💾 Uložit záznam</button>
+                <button class="btn-sec" onclick="toggleManualForm()">Zrušit</button>
+              </div>
+            </div>
+          </div>
+
           <div class="card">
             <div class="card-h">
               <h4>KW přehled hodin</h4>
@@ -1306,6 +1357,113 @@ async function requestReupload(id) {
   showToast('📧 Pracovník byl upozorněn'); loadDocuments()
 }
 
+
+// ============ RUČNÍ ZÁPIS DOCHÁZKY ============
+function toggleManualForm() {
+  const form = document.getElementById('manual-att-form')
+  const icon = document.getElementById('manual-toggle-icon')
+  const isOpen = form.style.display !== 'none'
+  form.style.display = isOpen ? 'none' : 'block'
+  if (icon) icon.textContent = isOpen ? '＋' : '－'
+  if (!isOpen) {
+    // Nastav dnešní datum
+    document.getElementById('manual-date').value = new Date().toISOString().split('T')[0]
+    loadManualWorkers()
+  }
+}
+
+async function loadManualWorkers() {
+  const { data } = await sb.from('profiles').select('id,full_name').in('role',['osvec','partak']).order('full_name')
+  const sel = document.getElementById('manual-worker')
+  if (!sel || !data) return
+  sel.innerHTML = '<option value="">— Vyberte pracovníka —</option>' +
+    data.map(w=>`<option value="${w.id}">${w.full_name}</option>`).join('')
+}
+
+// Live výpočet hodin při změně času
+document.addEventListener('change', function(e) {
+  if (['manual-checkin','manual-checkout','manual-break-start','manual-break-end'].includes(e.target.id)) {
+    const ci = document.getElementById('manual-checkin').value
+    const co = document.getElementById('manual-checkout').value
+    const bs = document.getElementById('manual-break-start').value
+    const be = document.getElementById('manual-break-end').value
+    const preview = document.getElementById('manual-hours-preview')
+    const val = document.getElementById('manual-hours-val')
+    if (ci && co) {
+      const h = calcHours(ci+':00', co+':00', bs?bs+':00':null, be?be+':00':null)
+      if (preview) preview.style.display = 'block'
+      if (val) val.textContent = h + 'h'
+    }
+  }
+})
+
+async function saveManualAttendance() {
+  const workerId = document.getElementById('manual-worker').value
+  const date = document.getElementById('manual-date').value
+  const ci = document.getElementById('manual-checkin').value
+  const co = document.getElementById('manual-checkout').value
+  const bs = document.getElementById('manual-break-start').value
+  const be = document.getElementById('manual-break-end').value
+  const site = document.getElementById('manual-site').value
+  const note = document.getElementById('manual-note').value
+
+  if (!workerId) { showToast('⚠️ Vyberte pracovníka'); return }
+  if (!date) { showToast('⚠️ Zadejte datum'); return }
+  if (!ci) { showToast('⚠️ Zadejte příchod'); return }
+  if (!co) { showToast('⚠️ Zadejte odchod'); return }
+  if (co <= ci) { showToast('⚠️ Odchod musí být po příchodu'); return }
+
+  const hours = calcHours(ci+':00', co+':00', bs?bs+':00':null, be?be+':00':null)
+  const kw = getKW(new Date(date))
+
+  // Zkontroluj jestli záznam pro tento den a pracovníka už existuje
+  const { data: existing } = await sb.from('attendance')
+    .select('id,check_in,check_out')
+    .eq('worker_id', workerId)
+    .eq('work_date', date)
+    .maybeSingle()
+
+  if (existing) {
+    // Záznam existuje — nabídni update
+    if (!confirm(`Pro tento den již existuje záznam (${existing.check_in?.slice(0,5)} → ${existing.check_out?.slice(0,5)||'?'}). Přepsat?`)) return
+    const { error } = await sb.from('attendance').update({
+      check_in: ci+':00',
+      check_out: co+':00',
+      break_start: bs ? bs+':00' : null,
+      break_end: be ? be+':00' : null,
+      total_hours: hours,
+      location_address: site || null,
+      manual_note: note || null,
+      is_manual: true
+    }).eq('id', existing.id)
+    if (error) { showToast('❌ Chyba: ' + error.message); return }
+    showToast('✅ Záznam aktualizován — ' + hours + 'h')
+  } else {
+    // Nový záznam
+    const { error } = await sb.from('attendance').insert({
+      worker_id: workerId,
+      work_date: date,
+      check_in: ci+':00',
+      check_out: co+':00',
+      break_start: bs ? bs+':00' : null,
+      break_end: be ? be+':00' : null,
+      total_hours: hours,
+      location_address: site || null,
+      kw: kw.week,
+      kw_year: kw.year,
+      is_saturday: new Date(date).getDay() === 6,
+      is_manual: true
+    })
+    if (error) { showToast('❌ Chyba: ' + error.message); return }
+    showToast('✅ Záznam přidán — ' + hours + 'h')
+  }
+
+  // Reset formuláře
+  toggleManualForm()
+  loadKWData()
+  loadDashboard()
+}
+
 // ============ SMLOUVY ============
 async function loadContracts() {
   const { data } = await sb.from('contracts').select('*, worker:profiles(full_name)').order('created_at',{ascending:false})
@@ -1789,6 +1947,113 @@ function showToast(msg) {
 
 
 
+
+
+// ============ RUČNÍ ZÁPIS DOCHÁZKY ============
+function toggleManualForm() {
+  const form = document.getElementById('manual-att-form')
+  const icon = document.getElementById('manual-toggle-icon')
+  const isOpen = form.style.display !== 'none'
+  form.style.display = isOpen ? 'none' : 'block'
+  if (icon) icon.textContent = isOpen ? '＋' : '－'
+  if (!isOpen) {
+    // Nastav dnešní datum
+    document.getElementById('manual-date').value = new Date().toISOString().split('T')[0]
+    loadManualWorkers()
+  }
+}
+
+async function loadManualWorkers() {
+  const { data } = await sb.from('profiles').select('id,full_name').in('role',['osvec','partak']).order('full_name')
+  const sel = document.getElementById('manual-worker')
+  if (!sel || !data) return
+  sel.innerHTML = '<option value="">— Vyberte pracovníka —</option>' +
+    data.map(w=>`<option value="${w.id}">${w.full_name}</option>`).join('')
+}
+
+// Live výpočet hodin při změně času
+document.addEventListener('change', function(e) {
+  if (['manual-checkin','manual-checkout','manual-break-start','manual-break-end'].includes(e.target.id)) {
+    const ci = document.getElementById('manual-checkin').value
+    const co = document.getElementById('manual-checkout').value
+    const bs = document.getElementById('manual-break-start').value
+    const be = document.getElementById('manual-break-end').value
+    const preview = document.getElementById('manual-hours-preview')
+    const val = document.getElementById('manual-hours-val')
+    if (ci && co) {
+      const h = calcHours(ci+':00', co+':00', bs?bs+':00':null, be?be+':00':null)
+      if (preview) preview.style.display = 'block'
+      if (val) val.textContent = h + 'h'
+    }
+  }
+})
+
+async function saveManualAttendance() {
+  const workerId = document.getElementById('manual-worker').value
+  const date = document.getElementById('manual-date').value
+  const ci = document.getElementById('manual-checkin').value
+  const co = document.getElementById('manual-checkout').value
+  const bs = document.getElementById('manual-break-start').value
+  const be = document.getElementById('manual-break-end').value
+  const site = document.getElementById('manual-site').value
+  const note = document.getElementById('manual-note').value
+
+  if (!workerId) { showToast('⚠️ Vyberte pracovníka'); return }
+  if (!date) { showToast('⚠️ Zadejte datum'); return }
+  if (!ci) { showToast('⚠️ Zadejte příchod'); return }
+  if (!co) { showToast('⚠️ Zadejte odchod'); return }
+  if (co <= ci) { showToast('⚠️ Odchod musí být po příchodu'); return }
+
+  const hours = calcHours(ci+':00', co+':00', bs?bs+':00':null, be?be+':00':null)
+  const kw = getKW(new Date(date))
+
+  // Zkontroluj jestli záznam pro tento den a pracovníka už existuje
+  const { data: existing } = await sb.from('attendance')
+    .select('id,check_in,check_out')
+    .eq('worker_id', workerId)
+    .eq('work_date', date)
+    .maybeSingle()
+
+  if (existing) {
+    // Záznam existuje — nabídni update
+    if (!confirm(`Pro tento den již existuje záznam (${existing.check_in?.slice(0,5)} → ${existing.check_out?.slice(0,5)||'?'}). Přepsat?`)) return
+    const { error } = await sb.from('attendance').update({
+      check_in: ci+':00',
+      check_out: co+':00',
+      break_start: bs ? bs+':00' : null,
+      break_end: be ? be+':00' : null,
+      total_hours: hours,
+      location_address: site || null,
+      manual_note: note || null,
+      is_manual: true
+    }).eq('id', existing.id)
+    if (error) { showToast('❌ Chyba: ' + error.message); return }
+    showToast('✅ Záznam aktualizován — ' + hours + 'h')
+  } else {
+    // Nový záznam
+    const { error } = await sb.from('attendance').insert({
+      worker_id: workerId,
+      work_date: date,
+      check_in: ci+':00',
+      check_out: co+':00',
+      break_start: bs ? bs+':00' : null,
+      break_end: be ? be+':00' : null,
+      total_hours: hours,
+      location_address: site || null,
+      kw: kw.week,
+      kw_year: kw.year,
+      is_saturday: new Date(date).getDay() === 6,
+      is_manual: true
+    })
+    if (error) { showToast('❌ Chyba: ' + error.message); return }
+    showToast('✅ Záznam přidán — ' + hours + 'h')
+  }
+
+  // Reset formuláře
+  toggleManualForm()
+  loadKWData()
+  loadDashboard()
+}
 
 // ============ SMLOUVY ============
 let contractFile = null
