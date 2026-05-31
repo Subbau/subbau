@@ -739,17 +739,34 @@ let todayAttId = null
 let clockInt = null
 
 // ============ INIT ============
+let appInitialized = false
+
 window.addEventListener('load', async () => {
-  const { data: { session } } = await sb.auth.getSession()
-  if (session) await initApp(session.user)
   setKWChip()
   fillKWSelect()
   getGPS()
+  // onAuthStateChange se postará o session
 })
 
 sb.auth.onAuthStateChange(async (event, session) => {
-  if (session) await initApp(session.user)
-  else showLogin()
+  console.log('[auth] event:', event)
+
+  if (event === 'SIGNED_OUT') {
+    appInitialized = false
+    currentUser = null
+    currentProfile = null
+    todayAttId = null
+    showLogin()
+    return
+  }
+
+  if (event === 'SIGNED_IN' || event === 'INITIAL_SESSION' || event === 'TOKEN_REFRESHED') {
+    if (!session) { showLogin(); return }
+    // Zabrani dvojitemu volani se stejnym userem
+    if (appInitialized && currentUser?.id === session.user.id) return
+    appInitialized = true
+    await initApp(session.user)
+  }
 })
 
 async function initApp(user) {
@@ -793,6 +810,16 @@ function showLogin() {
   document.getElementById('app').style.display = 'none'
   document.getElementById('osvec-app').style.display = 'none'
   document.getElementById('pending-app').style.display = 'none'
+  // Reset login formu
+  const btn = document.getElementById('login-btn')
+  if (btn) { btn.textContent = 'Přihlásit se →'; btn.disabled = false }
+  const err = document.getElementById('login-err')
+  if (err) err.style.display = 'none'
+  // Zobraz login form (ne registraci)
+  const fl = document.getElementById('form-login')
+  const fr = document.getElementById('form-register')
+  if (fl) fl.style.display = 'block'
+  if (fr) fr.style.display = 'none'
   stopClock()
 }
 
@@ -979,9 +1006,13 @@ async function doRegister() {
 }
 
 async function doLogout() {
-  await sb.auth.signOut()
-  showLogin()
+  appInitialized = false
+  currentUser = null
+  currentProfile = null
+  todayAttId = null
   stopClock()
+  await sb.auth.signOut()
+  // showLogin() zavolá onAuthStateChange → SIGNED_OUT
 }
 
 // ============ DASHBOARD ============
