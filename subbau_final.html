@@ -470,8 +470,62 @@ tr:hover td{background:#fafbfc}
       </div>
     </div>
     <div class="mob-view" id="mob-v-dokumenty">
+      <!-- Upload formulář -->
+      <div class="mob-card" id="upload-form-card" style="display:none">
+        <div class="mob-card-title">📤 Nahrát dokument</div>
+        <div class="fg" style="margin-bottom:10px">
+          <label>Typ dokumentu</label>
+          <select id="upload-doc-type" style="width:100%;padding:10px;border:1.5px solid var(--brd);border-radius:8px;font-size:14px">
+            <option value="op">🪪 Občanský průkaz / Pas</option>
+            <option value="gewerbeschein">📋 Gewerbeschein</option>
+            <option value="a1">🇪🇺 A1 Bescheinigung</option>
+            <option value="freistellung">📄 Freistellungsbescheinigung</option>
+            <option value="other">📎 Jiný dokument</option>
+          </select>
+        </div>
+        <div class="fg" style="margin-bottom:10px">
+          <label>Platnost do (volitelné)</label>
+          <input type="date" id="upload-valid-until" style="width:100%;padding:10px;border:1.5px solid var(--brd);border-radius:8px;font-size:14px">
+        </div>
+        <!-- Foto nebo soubor -->
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:12px">
+          <label style="display:flex;flex-direction:column;align-items:center;padding:16px;background:var(--blue-l);border-radius:10px;cursor:pointer;border:2px dashed var(--blue-m)">
+            <span style="font-size:28px">📷</span>
+            <span style="font-size:12px;font-weight:700;color:var(--blue);margin-top:4px">Vyfotit</span>
+            <input type="file" id="upload-camera" accept="image/*" capture="environment" style="display:none" onchange="handleFileSelect(this)">
+          </label>
+          <label style="display:flex;flex-direction:column;align-items:center;padding:16px;background:var(--bg);border-radius:10px;cursor:pointer;border:2px dashed var(--brd)">
+            <span style="font-size:28px">📁</span>
+            <span style="font-size:12px;font-weight:700;color:var(--text2);margin-top:4px">Vybrat soubor</span>
+            <input type="file" id="upload-file" accept="image/*,application/pdf" style="display:none" onchange="handleFileSelect(this)">
+          </label>
+        </div>
+        <!-- Preview -->
+        <div id="upload-preview" style="display:none;margin-bottom:12px;text-align:center">
+          <img id="upload-img-preview" style="max-width:100%;max-height:200px;border-radius:8px;border:1px solid var(--brd)" src="">
+          <div id="upload-file-name" style="font-size:12px;color:var(--text2);margin-top:6px"></div>
+        </div>
+        <div id="upload-progress" style="display:none;padding:10px;background:var(--blue-l);border-radius:8px;font-size:13px;color:var(--blue);text-align:center;margin-bottom:10px">
+          ⏳ Nahrávám...
+        </div>
+        <div style="display:flex;gap:8px">
+          <button onclick="uploadDocument()" id="upload-btn" style="flex:1;padding:12px;background:var(--blue);color:#fff;border:none;border-radius:10px;font-size:14px;font-weight:700;cursor:pointer;font-family:inherit">
+            📤 Nahrát
+          </button>
+          <button onclick="closeUploadForm()" style="padding:12px 16px;background:var(--bg);border:1.5px solid var(--brd);border-radius:10px;font-size:14px;cursor:pointer;font-family:inherit">
+            Zrušit
+          </button>
+        </div>
+      </div>
+
+      <!-- Seznam dokumentů -->
       <div class="mob-card">
-        <div class="mob-card-title">Moje dokumenty</div>
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+          <div class="mob-card-title" style="margin-bottom:0">Moje dokumenty</div>
+          <button onclick="openUploadForm()" style="padding:8px 14px;background:var(--blue);color:#fff;border:none;border-radius:8px;font-size:12px;font-weight:700;cursor:pointer;font-family:inherit">
+            + Nahrát
+          </button>
+        </div>
         <div id="mob-docs">Načítám...</div>
       </div>
     </div>
@@ -1254,22 +1308,165 @@ async function loadMobWeek() {
 
 async function loadMobDocs() {
   if (!currentUser) return
-  const { data } = await sb.from('documents').select('*').eq('worker_id',currentUser.id)
+  const { data } = await sb.from('documents').select('*').eq('worker_id', currentUser.id).order('uploaded_at', {ascending: false})
   const div = document.getElementById('mob-docs')
-  const types = [{key:'op',label:'Občanský průkaz',icon:'🪪'},{key:'gewerbeschein',label:'Gewerbeschein',icon:'📋'},{key:'a1',label:'A1 Bescheinigung',icon:'🇪🇺'},{key:'freistellung',label:'Freistellung',icon:'📄'}]
-  div.innerHTML = types.map(t=>{
-    const d=data?.find(x=>x.doc_type===t.key)
-    const ok=d?.status==='ok', warn=d?.status==='expiring', bad=d?.status==='unreadable'||d?.status==='expired'
-    return `<div class="doc-card" style="border-color:${ok?'var(--green)':bad?'var(--red)':warn?'var(--amber)':'var(--brd)'};background:${ok?'var(--green-l)':bad?'var(--red-l)':warn?'var(--amber-l)':'var(--bg)'}">
-      <div style="display:flex;gap:10px;align-items:flex-start">
-        <span style="font-size:22px">${t.icon}</span>
-        <div style="flex:1">
-          <div style="font-size:12px;font-weight:700;margin-bottom:3px">${t.label}</div>
-          <div style="font-size:11px;color:${ok?'var(--green)':bad?'var(--red)':'var(--amber)'}">${ok?'✅ Nahráno a schváleno':bad?'❌ '+(d?.status==='unreadable'?'Nečitelný':'Expiroval'):'⚠️ '+(d?'Brzy expiruje':'Chybí')}</div>
-        </div>
+  const today = new Date()
+
+  const typeLabels = {
+    op: '🪪 Občanský průkaz / Pas',
+    gewerbeschein: '📋 Gewerbeschein',
+    a1: '🇪🇺 A1 Bescheinigung',
+    freistellung: '📄 Freistellungsbescheinigung',
+    other: '📎 Jiný dokument'
+  }
+
+  if (!data?.length) {
+    div.innerHTML = `<div style="text-align:center;padding:20px;color:var(--text3)">
+      <div style="font-size:32px;margin-bottom:8px">📄</div>
+      <div style="font-size:13px">Žádné dokumenty</div>
+      <div style="font-size:12px;margin-top:4px">Klikněte na + Nahrát</div>
+    </div>`
+    return
+  }
+
+  // Zkontroluj expiraci
+  const warnings = []
+  data.forEach(d => {
+    if (d.valid_until) {
+      const exp = new Date(d.valid_until)
+      const daysLeft = Math.ceil((exp - today) / 86400000)
+      if (daysLeft < 0) {
+        warnings.push(`❌ ${typeLabels[d.doc_type]||d.doc_type} — EXPIROVAL ${d.valid_until}`)
+      } else if (daysLeft < 30) {
+        warnings.push(`⚠️ ${typeLabels[d.doc_type]||d.doc_type} — expiruje za ${daysLeft} dní`)
+      }
+    }
+    if (d.status === 'unreadable') {
+      warnings.push(`❌ ${typeLabels[d.doc_type]||d.doc_type} — NEČITELNÝ, nahrajte znovu`)
+    }
+  })
+
+  let warningHtml = ''
+  if (warnings.length) {
+    warningHtml = `<div style="background:var(--red-l);border:1.5px solid var(--red);border-radius:10px;padding:12px;margin-bottom:12px">
+      <div style="font-size:13px;font-weight:700;color:var(--red);margin-bottom:6px">⚠️ Vyžaduje akci:</div>
+      ${warnings.map(w=>`<div style="font-size:12px;color:var(--red);margin-bottom:3px">${w}</div>`).join('')}
+    </div>`
+  }
+
+  div.innerHTML = warningHtml + data.map(d => {
+    const isExpired = d.valid_until && new Date(d.valid_until) < today
+    const daysLeft = d.valid_until ? Math.ceil((new Date(d.valid_until) - today) / 86400000) : null
+    const isExpiring = daysLeft !== null && daysLeft >= 0 && daysLeft < 30
+    const isBad = d.status === 'unreadable' || d.status === 'expired' || isExpired
+    const isOk = d.status === 'ok' && !isBad
+
+    const statusText = isBad
+      ? (d.status === 'unreadable' ? '❌ Nečitelný — nahrajte znovu' : `❌ Expiroval ${d.valid_until}`)
+      : isExpiring ? `⚠️ Expiruje za ${daysLeft} dní`
+      : isOk ? '✅ Schváleno'
+      : '🕐 Čeká na schválení'
+
+    const borderColor = isBad ? 'var(--red)' : isExpiring ? 'var(--amber)' : isOk ? 'var(--green)' : 'var(--brd)'
+    const bgColor = isBad ? 'var(--red-l)' : isExpiring ? 'var(--amber-l)' : isOk ? 'var(--green-l)' : 'var(--bg)'
+
+    return `<div style="border:1.5px solid ${borderColor};background:${bgColor};border-radius:10px;padding:12px;margin-bottom:8px">
+      <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:4px">
+        <div style="font-size:13px;font-weight:700">${typeLabels[d.doc_type]||d.doc_type}</div>
+        ${d.file_url ? `<a href="${d.file_url}" target="_blank" style="font-size:11px;color:var(--blue);text-decoration:none">👁 Zobrazit</a>` : ''}
       </div>
+      <div style="font-size:12px;color:${isBad?'var(--red)':isExpiring?'var(--amber)':isOk?'var(--green)':'var(--text2)'}">${statusText}</div>
+      <div style="font-size:11px;color:var(--text3);margin-top:3px">${d.file_name||''} · ${d.uploaded_at?.slice(0,10)||''}</div>
     </div>`
   }).join('')
+}
+
+let selectedFile = null
+
+function handleFileSelect(input) {
+  selectedFile = input.files[0]
+  if (!selectedFile) return
+  const preview = document.getElementById('upload-preview')
+  const img = document.getElementById('upload-img-preview')
+  const name = document.getElementById('upload-file-name')
+  preview.style.display = 'block'
+  name.textContent = selectedFile.name + ' (' + (selectedFile.size/1024).toFixed(0) + ' KB)'
+  if (selectedFile.type.startsWith('image/')) {
+    img.style.display = 'block'
+    img.src = URL.createObjectURL(selectedFile)
+  } else {
+    img.style.display = 'none'
+  }
+}
+
+function openUploadForm() {
+  document.getElementById('upload-form-card').style.display = 'block'
+  document.getElementById('upload-preview').style.display = 'none'
+  document.getElementById('upload-progress').style.display = 'none'
+  selectedFile = null
+}
+
+function closeUploadForm() {
+  document.getElementById('upload-form-card').style.display = 'none'
+  selectedFile = null
+}
+
+async function uploadDocument() {
+  if (!selectedFile) { showToast('⚠️ Vyberte soubor nebo vyfoťte dokument'); return }
+  if (!currentUser) return
+
+  const docType = document.getElementById('upload-doc-type').value
+  const validUntil = document.getElementById('upload-valid-until').value
+  const btn = document.getElementById('upload-btn')
+  const progress = document.getElementById('upload-progress')
+
+  btn.disabled = true
+  btn.textContent = '⏳ Nahrávám...'
+  progress.style.display = 'block'
+
+  // Upload do Supabase Storage
+  const ext = selectedFile.name.split('.').pop()
+  const filePath = `${currentUser.id}/${docType}_${Date.now()}.${ext}`
+
+  const { data: storageData, error: storageErr } = await sb.storage
+    .from('documents')
+    .upload(filePath, selectedFile, { upsert: true })
+
+  if (storageErr) {
+    showToast('❌ Chyba nahrávání: ' + storageErr.message)
+    btn.disabled = false
+    btn.textContent = '📤 Nahrát'
+    progress.style.display = 'none'
+    return
+  }
+
+  // Získej public URL
+  const { data: urlData } = sb.storage.from('documents').getPublicUrl(filePath)
+  const fileUrl = urlData?.publicUrl
+
+  // Ulož záznam do documents tabulky
+  const { error: dbErr } = await sb.from('documents').insert({
+    worker_id: currentUser.id,
+    doc_type: docType,
+    file_name: selectedFile.name,
+    file_url: fileUrl,
+    valid_until: validUntil || null,
+    status: 'pending',
+    uploaded_by: currentUser.id,
+    uploaded_at: new Date().toISOString()
+  })
+
+  if (dbErr) {
+    showToast('❌ Chyba záznamu: ' + dbErr.message)
+  } else {
+    showToast('✅ Dokument nahrán!')
+    closeUploadForm()
+    loadMobDocs()
+  }
+
+  btn.disabled = false
+  btn.textContent = '📤 Nahrát'
+  progress.style.display = 'none'
 }
 
 async function loadMobContracts() {
