@@ -793,42 +793,50 @@ tr:hover td{background:#fafbfc}
         <div id="mob-state-badge" style="text-align:center;padding:10px;border-radius:10px;margin-bottom:12px;font-size:13px;font-weight:700;background:var(--bg);color:var(--text2)">
           ● Načítám...
         </div>
-        <!-- Tlačítka — vždy v DOM, show/hide přes JS -->
         <!-- Upozornění na dokumenty pro OSVČ -->
-      <div id="mob-doc-alert" style="display:none;background:var(--red-l);border:1.5px solid var(--red);border-radius:10px;padding:12px;margin-bottom:12px">
-        <div style="font-size:13px;font-weight:700;color:var(--red);margin-bottom:4px">⚠️ Zkontrolujte dokumenty</div>
-        <div id="mob-doc-alert-text" style="font-size:12px;color:var(--red)"></div>
-      </div>
-         <div id="btn-in" style="display:block">
+        <div id="mob-doc-alert" style="display:none;background:var(--red-l);border:1.5px solid var(--red);border-radius:10px;padding:12px;margin-bottom:12px">
+          <div style="font-size:13px;font-weight:700;color:var(--red);margin-bottom:4px">⚠️ Zkontrolujte dokumenty</div>
+          <div id="mob-doc-alert-text" style="font-size:12px;color:var(--red)"></div>
+        </div>
+
+        <!-- Dnešní směny (zobrazí se po odchodu) -->
+        <div id="dnes-smeny" style="display:none;background:var(--green-l);border:1px solid var(--green);border-radius:12px;padding:12px;margin-bottom:12px">
+          <div style="font-size:12px;font-weight:700;color:var(--green);margin-bottom:6px">📋 Dnes odpracováno</div>
+          <div id="dnes-smeny-list"></div>
+        </div>
+
+        <!-- PŘÍCHOD -->
+        <div id="btn-in" style="display:block">
           <button class="big-btn" style="background:#1d9e75;color:#fff;font-size:18px;padding:22px" onclick="mobCheckin('in')">
             ✅ Zaznamenat příchod
           </button>
         </div>
+
+        <!-- PRACUJE: Přestávka + Odchod -->
         <div id="btn-working" style="display:none">
+          <div style="background:var(--green-l);border-radius:12px;padding:10px;text-align:center;margin-bottom:10px">
+            <div style="font-size:12px;color:var(--green);font-weight:700" id="working-since">● Pracuješ</div>
+          </div>
           <div class="grid2">
             <button class="sm-btn" style="background:#fff8e0;color:#ba7517;border:2px solid #e6a800" onclick="mobCheckin('break-start')">
-              <div style="font-size:22px;margin-bottom:4px">☕</div>
-              <div>Přestávka</div>
+              <div style="font-size:26px;margin-bottom:4px">☕</div>
+              <div style="font-size:14px;font-weight:700">Pauza</div>
             </button>
             <button class="sm-btn" style="background:#fdf0ee;color:#c0392b;border:2px solid #c0392b" onclick="mobCheckin('out')">
-              <div style="font-size:22px;margin-bottom:4px">🚪</div>
-              <div>Odchod</div>
+              <div style="font-size:26px;margin-bottom:4px">🚪</div>
+              <div style="font-size:14px;font-weight:700">Odchod</div>
             </button>
           </div>
         </div>
+
+        <!-- PAUZA: pouze Ukončit pauzu -->
         <div id="btn-break" style="display:none">
-          <button class="big-btn" style="background:#e6a800;color:#1a1a1a;margin-bottom:10px;font-size:17px" onclick="mobCheckin('break-end')">
-            ▶ Ukončit přestávku
-          </button>
-          <button class="big-btn" style="background:#fdf0ee;color:#c0392b;font-size:15px;border:2px solid #c0392b" onclick="mobCheckin('out')">
-            🚪 Odchod domů
-          </button>
-        </div>
-        <div id="btn-done" style="display:none">
-          <div style="text-align:center;padding:20px;background:#e1f5ee;border-radius:12px">
-            <div style="font-size:32px;margin-bottom:8px">✅</div>
-            <div style="color:var(--green);font-size:16px;font-weight:800" id="btn-done-text">Dnes hotovo!</div>
+          <div style="background:var(--amber-l);border-radius:12px;padding:10px;text-align:center;margin-bottom:10px">
+            <div style="font-size:12px;color:var(--amber);font-weight:700" id="break-since">☕ Přestávka probíhá</div>
           </div>
+          <button class="big-btn" style="background:#e6a800;color:#1a1a1a;font-size:17px;padding:20px" onclick="mobCheckin('break-end')">
+            ▶ Ukončit přestávku — pokračovat
+          </button>
         </div>
         </div>
       </div>
@@ -2578,56 +2586,80 @@ async function loadTeams() {
 async function getTodayRecord() {
   if (!currentUser) return
   const today = new Date().toISOString().split('T')[0]
+  // Načti VŠECHNY záznamy pro dnešek (může být více směn)
   const { data, error } = await sb.from('attendance').select('*')
     .eq('worker_id', currentUser.id)
     .eq('work_date', today)
-    .maybeSingle()
-  if (error) { console.error('[getTodayRecord]', error); updateMobStav(null); return }
-  if (data) {
-    todayAttId = data.id
-    console.log('[getTodayRecord] zaznam nalezen, id:', todayAttId)
-    updateMobStav(data)
+    .order('check_in', {ascending: false})
+
+  if (error) { console.error('[getTodayRecord]', error); updateMobStav(null, []); return }
+
+  if (data && data.length > 0) {
+    // Najdi první záznam bez odchodu (aktivní směna)
+    const active = data.find(r => !r.check_out)
+    if (active) {
+      todayAttId = active.id
+      updateMobStav(active, data)
+    } else {
+      // Všechny směny skončily — zobraz příchod pro novou směnu
+      todayAttId = null
+      updateMobStav(null, data)
+    }
   } else {
     todayAttId = null
-    console.log('[getTodayRecord] zadny zaznam')
-    updateMobStav(null)
+    updateMobStav(null, [])
   }
 }
 
-function updateMobStav(rec) {
-  // show/hide pevných tlačítek — spolehlivější než innerHTML
+function updateMobStav(rec, allToday) {
   const show = id => { const el=document.getElementById(id); if(el) el.style.display='block' }
   const hide = id => { const el=document.getElementById(id); if(el) el.style.display='none' }
   const badge = document.getElementById('mob-state-badge')
   const bar = document.getElementById('mob-status')
 
   // Schovej vše
-  hide('btn-in'); hide('btn-working'); hide('btn-break'); hide('btn-done')
+  hide('btn-in'); hide('btn-working'); hide('btn-break')
+
+  // Zobraz přehled dokončených směn
+  const done = (allToday || []).filter(r => r.check_out)
+  const smenyDiv = document.getElementById('dnes-smeny')
+  const smenyList = document.getElementById('dnes-smeny-list')
+  if (smenyDiv && smenyList && done.length > 0) {
+    smenyDiv.style.display = 'block'
+    const totalH = done.reduce((s,r) => s+(r.total_hours||0), 0)
+    smenyList.innerHTML = done.map(r =>
+      `<div style="display:flex;justify-content:space-between;font-size:12px;padding:3px 0;border-bottom:1px solid rgba(0,0,0,0.07)">
+        <span style="color:var(--text2)">${r.check_in?.slice(0,5)} → ${r.check_out?.slice(0,5)}</span>
+        <span style="font-weight:700;color:var(--green)">${r.total_hours}h</span>
+      </div>`
+    ).join('') + `<div style="display:flex;justify-content:space-between;font-size:13px;font-weight:800;padding:5px 0;margin-top:2px">
+      <span style="color:var(--green)">Celkem dnes</span>
+      <span style="color:var(--green)">${totalH.toFixed(1)}h</span>
+    </div>`
+  } else if (smenyDiv) {
+    smenyDiv.style.display = 'none'
+  }
 
   if (!rec || !rec.check_in) {
-    // Žádný záznam — zobraz příchod
-    if(badge){ badge.style.background='var(--bg)'; badge.style.color='var(--text2)'; badge.textContent='● Zadejte příchod' }
-    if(bar){ bar.style.background='var(--bg)'; bar.innerHTML='<span style="font-size:13px;font-weight:600;color:var(--text2)">● Nepřihlášen</span>' }
+    // Žádná aktivní směna — zobraz příchod
+    if(badge){ badge.style.background='var(--bg)'; badge.style.color='var(--text2)'; badge.textContent = done.length > 0 ? '● Zahájit novou směnu' : '● Zadejte příchod' }
+    if(bar){ bar.style.background='var(--bg)'; bar.innerHTML='<span style="font-size:13px;font-weight:600;color:var(--text2)">● Volno</span>' }
     show('btn-in')
 
-  } else if (rec.check_out) {
-    // Hotovo — zamknout
-    if(badge){ badge.style.background='var(--blue-l)'; badge.style.color='var(--blue)'; badge.textContent=`✅ Hotovo: ${rec.check_in.slice(0,5)} → ${rec.check_out.slice(0,5)} · ${rec.total_hours}h` }
-    if(bar){ bar.style.background='var(--blue-l)'; bar.innerHTML=`<span style="font-size:13px;font-weight:600;color:var(--blue)">● Hotovo — ${rec.check_in.slice(0,5)} → ${rec.check_out.slice(0,5)}</span><span style="font-size:12px;color:var(--blue)">${rec.total_hours}h</span>` }
-    const done = document.getElementById('btn-done-text')
-    if(done) done.textContent = `✅ Dnes hotovo! Odpracováno: ${rec.total_hours}h`
-    show('btn-done')
-
   } else if (rec.break_start && !rec.break_end) {
-    // Přestávka
+    // Probíhá přestávka
     if(badge){ badge.style.background='var(--amber-l)'; badge.style.color='var(--amber)'; badge.textContent=`☕ Přestávka od ${rec.break_start.slice(0,5)}` }
     if(bar){ bar.style.background='var(--amber-l)'; bar.innerHTML=`<span style="font-size:13px;font-weight:600;color:var(--amber)">☕ Přestávka od ${rec.break_start.slice(0,5)}</span>` }
+    const bs = document.getElementById('break-since')
+    if(bs) bs.textContent = `☕ Přestávka od ${rec.break_start.slice(0,5)}`
     show('btn-break')
 
   } else {
     // Pracuje
     if(badge){ badge.style.background='var(--green-l)'; badge.style.color='var(--green)'; badge.textContent=`● Pracuješ od ${rec.check_in.slice(0,5)}` }
     if(bar){ bar.style.background='var(--green-l)'; bar.innerHTML=`<span style="font-size:13px;font-weight:600;color:var(--green)">● Pracuješ od ${rec.check_in.slice(0,5)}</span>` }
+    const ws = document.getElementById('working-since')
+    if(ws) ws.textContent = `● Pracuješ od ${rec.check_in.slice(0,5)}`
     show('btn-working')
   }
 }
@@ -2641,24 +2673,27 @@ async function mobCheckin(type) {
   checkinInProgress = true
   const now = new Date()
   const timeStr = now.toTimeString().slice(0,8)
+  const today = now.toISOString().split('T')[0]
   const kw = getKW()
 
   try {
     if (type === 'in') {
-      // Zkontroluj jestli uz dnes neexistuje zaznam
-      const today = now.toISOString().split('T')[0]
-      const { data: existing } = await sb.from('attendance').select('id,check_in,check_out')
-        .eq('worker_id', currentUser.id).eq('work_date', today).maybeSingle()
+      // Zkontroluj jestli není aktivní neukončená směna
+      const { data: active } = await sb.from('attendance').select('id,check_in')
+        .eq('worker_id', currentUser.id)
+        .eq('work_date', today)
+        .is('check_out', null)
+        .maybeSingle()
 
-      if (existing) {
-        todayAttId = existing.id
-        showToast('ℹ️ Příchod dnes již zaznamenán (' + existing.check_in?.slice(0,5) + ')')
-        const { data: full } = await sb.from('attendance').select('*').eq('id', existing.id).single()
-        if (full) updateMobStav(full)
+      if (active) {
+        todayAttId = active.id
+        showToast('ℹ️ Příchod dnes již zaznamenán (' + active.check_in?.slice(0,5) + ')')
         checkinInProgress = false
+        await getTodayRecord()
         return
       }
 
+      // Vytvoř nový záznam (nová směna)
       const { data, error } = await sb.from('attendance').insert({
         worker_id: currentUser.id,
         work_date: today,
@@ -2673,32 +2708,32 @@ async function mobCheckin(type) {
 
       if (error) { showToast('❌ Chyba příchodu: ' + error.message); checkinInProgress = false; return }
       todayAttId = data.id
-      console.log('[mobCheckin] Příchod OK, id:', todayAttId)
-      updateMobStav(data)
-      showToast('✅ Příchod ' + timeStr)
+      await getTodayRecord()
+      showToast('✅ Příchod zaznamenán — ' + timeStr)
 
     } else {
-      // Pro vsechny ostatni akce potrebujeme todayAttId
-      if (!todayAttId) await getTodayRecord()
+      // Přestávka / Odchod
       if (!todayAttId) {
-        showToast('⚠️ Nejprve zaznamenejte příchod')
-        checkinInProgress = false
-        return
+        await getTodayRecord()
+        if (!todayAttId) {
+          showToast('⚠️ Nejprve zaznamenejte příchod')
+          checkinInProgress = false
+          return
+        }
       }
 
-      // Nacti aktualni stav ze serveru (ne z cache)
+      // Načti aktuální stav ze serveru
       const { data: current } = await sb.from('attendance').select('*').eq('id', todayAttId).single()
       if (!current) { showToast('❌ Záznam nenalezen'); checkinInProgress = false; return }
 
       if (type === 'break-start') {
         if (current.break_start && !current.break_end) {
           showToast('⚠️ Přestávka již probíhá')
-          updateMobStav(current)
           checkinInProgress = false
           return
         }
         await sb.from('attendance').update({ break_start: timeStr, break_end: null }).eq('id', todayAttId)
-        showToast('☕ Přestávka začala ' + timeStr)
+        showToast('☕ Přestávka začala — ' + timeStr)
 
       } else if (type === 'break-end') {
         if (!current.break_start) {
@@ -2707,23 +2742,22 @@ async function mobCheckin(type) {
           return
         }
         await sb.from('attendance').update({ break_end: timeStr }).eq('id', todayAttId)
-        showToast('▶ Pokračuješ od ' + timeStr)
+        showToast('▶ Pokračuješ v práci od ' + timeStr)
 
       } else if (type === 'out') {
         if (current.check_out) {
           showToast('⚠️ Odchod již byl zaznamenán')
-          updateMobStav(current)
           checkinInProgress = false
           return
         }
         const h = calcHours(current.check_in, timeStr, current.break_start, current.break_end)
         await sb.from('attendance').update({ check_out: timeStr, total_hours: h }).eq('id', todayAttId)
-        showToast('🚪 Odchod ' + timeStr + ' · celkem ' + h + 'h')
+        todayAttId = null  // Reset pro novou směnu
+        showToast('🚪 Odchod ' + timeStr + ' · odpracováno ' + h + 'h')
       }
 
-      // Nacti aktualizovany stav a obnov UI
-      const { data: updated } = await sb.from('attendance').select('*').eq('id', todayAttId).single()
-      if (updated) updateMobStav(updated)
+      // Načti aktualizovaný stav
+      await getTodayRecord()
     }
 
     loadMobWeek()
