@@ -2808,38 +2808,52 @@ async function mobCheckin(type) {
       const { data: current } = await sb.from('attendance').select('*').eq('id', todayAttId).single()
       if (!current) { showToast('❌ Záznam nenalezen'); checkinInProgress = false; return }
 
+      // Vytvoř lokální kopii záznamu pro okamžitou aktualizaci UI
+      const updated = { ...current }
+
       if (type === 'break-start') {
         if (current.break_start && !current.break_end) {
           showToast('⚠️ Přestávka již probíhá')
+          updateMobStav(current, [current])
           checkinInProgress = false
           return
         }
-        await sb.from('attendance').update({ break_start: timeStr, break_end: null }).eq('id', todayAttId)
+        const { error } = await sb.from('attendance').update({ break_start: timeStr, break_end: null }).eq('id', todayAttId)
+        if (error) { showToast('❌ Chyba: ' + error.message); checkinInProgress = false; return }
+        updated.break_start = timeStr
+        updated.break_end = null
         showToast('☕ Přestávka začala — ' + timeStr)
 
       } else if (type === 'break-end') {
         if (!current.break_start) {
           showToast('⚠️ Přestávka nebyla zahájena')
+          updateMobStav(current, [current])
           checkinInProgress = false
           return
         }
-        await sb.from('attendance').update({ break_end: timeStr }).eq('id', todayAttId)
+        const { error } = await sb.from('attendance').update({ break_end: timeStr }).eq('id', todayAttId)
+        if (error) { showToast('❌ Chyba: ' + error.message); checkinInProgress = false; return }
+        updated.break_end = timeStr
         showToast('▶ Pokračuješ v práci od ' + timeStr)
 
       } else if (type === 'out') {
         if (current.check_out) {
           showToast('⚠️ Odchod již byl zaznamenán')
+          updateMobStav(current, [current])
           checkinInProgress = false
           return
         }
         const h = calcHours(current.check_in, timeStr, current.break_start, current.break_end)
-        await sb.from('attendance').update({ check_out: timeStr, total_hours: h }).eq('id', todayAttId)
+        const { error } = await sb.from('attendance').update({ check_out: timeStr, total_hours: h }).eq('id', todayAttId)
+        if (error) { showToast('❌ Chyba odchodu: ' + error.message); checkinInProgress = false; return }
+        updated.check_out = timeStr
+        updated.total_hours = h
         todayAttId = null  // Reset pro novou směnu
         showToast('🚪 Odchod ' + timeStr + ' · odpracováno ' + h + 'h')
       }
 
-      // Načti aktualizovaný stav
-      await getTodayRecord()
+      // Aktualizuj UI OKAMŽITĚ z lokální kopie — bez čekání na server
+      updateMobStav(todayAttId ? updated : null, todayAttId ? [updated] : [updated])
     }
 
     loadMobWeek()
