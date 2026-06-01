@@ -1200,6 +1200,9 @@ tr:hover td{background:#fafbfc}
   </div>
 </div>
 
+<div id="offline-banner" style="display:none;position:fixed;top:0;left:0;right:0;z-index:99999;background:#c0392b;color:#fff;text-align:center;padding:10px;font-size:14px;font-weight:700">
+  ⚡ Žádné internetové připojení — záznamy nelze uložit
+</div>
 <div class="toast" id="toast"></div>
 
 <script>
@@ -1222,6 +1225,16 @@ let clockInt = null
 let appInitialized = false
 let authHandling = false  // zamek proti soubehu
 
+window.addEventListener('online', () => {
+  const b = document.getElementById('offline-banner')
+  if (b) b.style.display = 'none'
+  showToast('✅ Připojení obnoveno')
+})
+window.addEventListener('offline', () => {
+  const b = document.getElementById('offline-banner')
+  if (b) b.style.display = 'block'
+})
+
 window.addEventListener('load', async () => {
   // Reset všech stavových zamků při načtení
   checkinInProgress = false
@@ -1229,6 +1242,11 @@ window.addEventListener('load', async () => {
   appInitialized = false
   authHandling = false
   console.log('[load] page loaded, flags reset')
+  // Zkontroluj připojení
+  if (!navigator.onLine) {
+    const b = document.getElementById('offline-banner')
+    if (b) b.style.display = 'block'
+  }
   setKWChip()
   fillKWSelect()
   getGPS()
@@ -1260,17 +1278,42 @@ sb.auth.onAuthStateChange(async (event, session) => {
 })
 
 async function initApp(user) {
-  let { data: profile } = await sb.from('profiles').select('*, team:teams!profiles_team_id_fkey(name,location)').eq('id', user.id).maybeSingle()
-  if (!profile) {
-    const { data: p2 } = await sb.from('profiles').select('*, team:teams!profiles_team_id_fkey(name,location)').eq('email', user.email).maybeSingle()
-    profile = p2
-  }
+  // Nastav currentUser IHNED — před jakýmkoliv síťovým voláním
   currentUser = user
+  console.log('[initApp] currentUser nastaven:', user.email)
+
+  let profile = null
+  try {
+    const { data: p1 } = await sb.from('profiles')
+      .select('*, team:teams!profiles_team_id_fkey(name,location)')
+      .eq('id', user.id).maybeSingle()
+    profile = p1
+
+    if (!profile) {
+      const { data: p2 } = await sb.from('profiles')
+        .select('*, team:teams!profiles_team_id_fkey(name,location)')
+        .eq('email', user.email).maybeSingle()
+      profile = p2
+    }
+  } catch(e) {
+    console.error('[initApp] chyba načítání profilu:', e)
+    // Zkus znovu po 2 sekundách
+    await new Promise(r => setTimeout(r, 2000))
+    try {
+      const { data: p3 } = await sb.from('profiles')
+        .select('*, team:teams!profiles_team_id_fkey(name,location)')
+        .eq('id', user.id).maybeSingle()
+      profile = p3
+    } catch(e2) {
+      console.error('[initApp] druhý pokus selhal:', e2)
+    }
+  }
+
   currentProfile = profile
 
   if (!profile) {
-    showToast('Profil nenalezen — kontaktujte admina')
-    await sb.auth.signOut()
+    showToast('⚠️ Profil nenalezen — zkuste se přihlásit znovu')
+    setTimeout(() => sb.auth.signOut(), 2000)
     return
   }
 
@@ -1291,7 +1334,7 @@ async function initApp(user) {
   } else if (role === 'admin') {
     showAdmin(profile)
   } else {
-    console.warn('[initApp] Neznama role, pouzivam admin fallback:', role)
+    console.warn('[initApp] Neznama role, fallback admin:', role)
     showAdmin(profile)
   }
 }
@@ -1942,6 +1985,7 @@ async function loadMobChat() {
   if (!currentUser) return
   const div = document.getElementById('mob-chat-messages')
   if (!div) return
+  try {
 
   const { data } = await sb.from('chat_messages')
     .select('*')
@@ -1960,6 +2004,12 @@ async function loadMobChat() {
 
   updateChatBadge()
   scrollChatBottom('mob-chat-messages')
+
+  } catch(e) {
+    console.error('[loadMobChat] error:', e)
+    if (div) div.innerHTML = '<div style="text-align:center;padding:20px;color:var(--text3);font-size:13px">Chat není dostupný.<br>Zkontrolujte připojení.</div>'
+    return
+  }
 
   // Realtime
   if (chatRealtimeSub) sb.removeChannel(chatRealtimeSub)
@@ -2709,6 +2759,7 @@ async function mobCheckin(type) {
   console.log('[mobCheckin] called with type:', type, '| checkinInProgress:', checkinInProgress, '| currentUser:', !!currentUser)
   if (checkinInProgress) { showToast('⏳ Počkejte...'); return }
   if (!currentUser) { showToast('❌ Nejste přihlášeni'); return }
+  if (!navigator.onLine) { showToast('❌ Žádné připojení k internetu'); return }
 
   checkinInProgress = true
   const now = new Date()
@@ -2804,7 +2855,11 @@ async function mobCheckin(type) {
 
   } catch(e) {
     console.error('[mobCheckin] exception:', e)
-    showToast('❌ Neočekávaná chyba')
+    if (!navigator.onLine) {
+      showToast('❌ Žádné připojení k internetu')
+    } else {
+      showToast('❌ Chyba: ' + (e.message || 'Zkuste znovu'))
+    }
   } finally {
     checkinInProgress = false
   }
