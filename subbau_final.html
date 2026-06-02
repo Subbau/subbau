@@ -1268,11 +1268,11 @@ window.addEventListener('offline', () => {
 })
 
 window.addEventListener('load', async () => {
-  // Reset všech stavových zamků při načtení
+  // Resetuj jen "action" zámky, NE auth flow zámky
   checkinInProgress = false
   loginInProgress = false
-  appInitialized = false
-  authHandling = false
+  // POZOR: authHandling a appInitialized NERESETOVAT — Supabase auth může
+  // střílet synchronně před load eventem, resetování by rozbilo flow
   console.log('[load] page loaded, flags reset')
   // Zkontroluj připojení
   if (!navigator.onLine) {
@@ -1283,6 +1283,24 @@ window.addEventListener('load', async () => {
   fillKWSelect()
   getGPS()
 })
+
+// Globální fallback — pokud app neodpoví za 15s, zobraz login
+let authTimeoutId = null
+function startAuthTimeout() {
+  if (authTimeoutId) clearTimeout(authTimeoutId)
+  authTimeoutId = setTimeout(() => {
+    if (!appInitialized) {
+      console.warn('[auth] timeout — zobrazuji login')
+      appInitialized = false
+      authHandling = false
+      loginInProgress = false
+      showLogin()
+    }
+  }, 15000)
+}
+function clearAuthTimeout() {
+  if (authTimeoutId) { clearTimeout(authTimeoutId); authTimeoutId = null }
+}
 
 sb.auth.onAuthStateChange(async (event, session) => {
   console.log('[auth] event:', event, '| session:', !!session)
@@ -1306,11 +1324,13 @@ sb.auth.onAuthStateChange(async (event, session) => {
 
   if (event === 'SIGNED_IN' || event === 'INITIAL_SESSION') {
     if (!session?.user) { showLogin(); return }
-    if (appInitialized && currentUser?.id === session.user.id) return
+    if (appInitialized && currentUser?.id === session.user.id) { clearAuthTimeout(); return }
     if (authHandling) return
     authHandling = true
     appInitialized = true
+    startAuthTimeout()
     await initApp(session.user)
+    clearAuthTimeout()
     authHandling = false
   }
 })
@@ -1350,8 +1370,11 @@ async function initApp(user) {
   currentProfile = profile
 
   if (!profile) {
-    showToast('⚠️ Profil nenalezen — zkuste se přihlásit znovu')
-    setTimeout(() => sb.auth.signOut(), 2000)
+    showToast('⚠️ Profil nenalezen — přihlaste se znovu')
+    appInitialized = false
+    authHandling = false
+    try { await sb.auth.signOut() } catch(e) { console.error('signOut failed:', e) }
+    showLogin()  // Vždy zobraz login, i když signOut selže
     return
   }
 
