@@ -1876,16 +1876,22 @@ async function loadKWData() {
   const tbody = document.getElementById('kw-table')
   if (!data?.length) { tbody.innerHTML='<tr><td colspan="9" style="text-align:center;color:var(--text3);padding:20px">Žádné záznamy pro KW '+week+'</td></tr>'; return }
   const workers = {}
-  const now = new Date()
-  const nowStr = now.toTimeString().slice(0,8)
+  const nowAdmin = new Date()
+  const nowStrAdmin = nowAdmin.toTimeString().slice(0,8)
+  const todayStrAdmin = nowAdmin.toISOString().split('T')[0]
   data.forEach(r => {
     const wid = r.worker_id
     if (!workers[wid]) workers[wid] = { name: r.worker?.full_name, prof: r.worker?.profession, days:{}, total:0 }
     const day = new Date(r.work_date).getDay()
-    // Pokud záznam nemá odchod, spočítej běžící hodiny
     let h = r.total_hours || 0
     if (!r.check_out && r.check_in) {
-      h = calcHours(r.check_in, nowStr, r.break_start, r.break_end)
+      if (r.work_date === todayStrAdmin) {
+        // Dnešní aktivní směna
+        h = calcHours(r.check_in, nowStrAdmin, r.break_start, r.break_end)
+      } else {
+        // Stará nezavřená — ignoruj
+        h = 0
+      }
     }
     workers[wid].days[day] = (workers[wid].days[day] || 0) + h
     workers[wid].total += h
@@ -2923,17 +2929,47 @@ async function loadMobWeek() {
   const { data } = await sb.from('attendance').select('*').eq('worker_id',currentUser?.id).eq('kw',kw.week).eq('kw_year',kw.year)
   if (!data) return
 
-  const nowStr = new Date().toTimeString().slice(0,8)
+  const now = new Date()
+  const nowStr = now.toTimeString().slice(0,8)
+  const todayStr = now.toISOString().split('T')[0]
 
-  // Spočítej hodiny pro každý záznam — včetně běžících směn
+  // Spočítej hodiny pro každý záznam — správně dle data
   function getHours(r) {
-    if (r.total_hours) return r.total_hours  // Ukončená směna
-    if (r.check_in && !r.check_out) return calcHours(r.check_in, nowStr, r.break_start, r.break_end)  // Běžící směna
+    if (r.total_hours) return r.total_hours  // Ukončená směna — přesné číslo
+    if (r.check_in && !r.check_out) {
+      if (r.work_date === todayStr) {
+        // Dnešní aktivní směna — počítej do teď
+        return calcHours(r.check_in, nowStr, r.break_start, r.break_end)
+      } else {
+        // Stará nezavřená směna — ignoruj (nezapočítávej fiktivní hodiny)
+        return 0
+      }
+    }
     return 0
   }
 
+  // Funkce pro zobrazení stavu dne
+  function getDayLabel(dayRecs) {
+    const h = dayRecs.reduce((s,r) => s + getHours(r), 0)
+    const hasWork = dayRecs.length > 0
+    const activeToday = dayRecs.some(r => r.check_in && !r.check_out && r.work_date === todayStr)
+    const unclosed = dayRecs.some(r => r.check_in && !r.check_out && r.work_date !== todayStr)
+    if (activeToday && h > 0) return { label: h.toFixed(1)+'h▶', bg: 'var(--amber)', color: '#fff' }
+    if (activeToday) return { label: '▶', bg: 'var(--amber)', color: '#fff' }
+    if (unclosed) return { label: '!', bg: 'var(--red)', color: '#fff', title: 'Nezavřená směna' }
+    if (h > 0) return { label: h.toFixed(1)+'h', bg: 'var(--green)', color: '#fff' }
+    if (hasWork) return { label: '—', bg: 'var(--bg)', color: 'var(--text3)' }
+    return { label: '—', bg: 'var(--bg)', color: 'var(--text3)' }
+  }
+
   const total = data.reduce((s,r) => s + getHours(r), 0)
-  document.getElementById('mob-total').textContent = total.toFixed(1)+'h'
+  // Nezavřené záznamy z minulých dnů
+  const unclosedOld = data.filter(r => r.check_in && !r.check_out && r.work_date !== todayStr)
+  const totalEl = document.getElementById('mob-total')
+  if (totalEl) {
+    totalEl.textContent = total.toFixed(1)+'h'
+    if (unclosedOld.length > 0) totalEl.title = `⚠️ ${unclosedOld.length} nezavřená směna z minulých dní`
+  }
 
   const days=['Ne','Po','Út','St','Čt','Pá','So']
   const div = document.getElementById('mob-week')
@@ -2944,15 +2980,10 @@ async function loadMobWeek() {
 
   div.innerHTML=`<div style="display:grid;grid-template-columns:repeat(7,1fr);gap:3px">${[1,2,3,4,5,6,0].map(d=>{
     const dayRecs = data.filter(a => new Date(a.work_date).getDay()===d)
-    const h = dayRecs.reduce((s,r) => s + getHours(r), 0)
-    const hasWork = dayRecs.length > 0
-    const active = dayRecs.some(r => r.check_in && !r.check_out)
-    const bg = active ? 'var(--amber)' : h > 0 ? 'var(--green)' : 'var(--bg)'
-    const color = hasWork ? '#fff' : 'var(--text3)'
-    const label = active && h > 0 ? h.toFixed(1)+'h▶' : h > 0 ? h.toFixed(1)+'h' : hasWork ? '▶' : '—'
+    const st = getDayLabel(dayRecs)
     return `<div style="text-align:center">
       <div style="font-size:9px;color:var(--text3)">${days[d]}</div>
-      <div style="border-radius:6px;padding:4px 2px;font-size:9px;font-weight:700;background:${bg};color:${color}">${label}</div>
+      <div style="border-radius:6px;padding:4px 2px;font-size:9px;font-weight:700;background:${st.bg};color:${st.color}" title="${st.title||''}">${st.label}</div>
     </div>`
   }).join('')}</div>`
 }
@@ -4418,8 +4449,13 @@ async function loadWdAttendance() {
     if (r.total_hours) {
       hoursDisplay = `<b style="color:var(--blue)">${r.total_hours}h</b>`
     } else if (r.check_in && !r.check_out) {
-      const running = calcHours(r.check_in, nowForAtt, r.break_start, r.break_end)
-      hoursDisplay = `<b style="color:var(--amber)">${running.toFixed(1)}h ▶</b>`
+      const isToday = r.work_date === new Date().toISOString().split('T')[0]
+      if (isToday) {
+        const running = calcHours(r.check_in, nowForAtt, r.break_start, r.break_end)
+        hoursDisplay = `<b style="color:var(--amber)">${running.toFixed(1)}h ▶</b>`
+      } else {
+        hoursDisplay = `<b style="color:var(--red)" title="Nezavřená směna">⚠️ nezavřeno</b>`
+      }
     }
     const breakStr = r.break_start
       ? r.break_start.slice(0,5) + (r.break_end ? ' → ' + r.break_end.slice(0,5) : ' (probíhá)')
