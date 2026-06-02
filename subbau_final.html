@@ -1274,9 +1274,15 @@ sb.auth.onAuthStateChange(async (event, session) => {
     return
   }
 
+  // Uživatel klikl na reset hesla v emailu
+  if (event === 'PASSWORD_RECOVERY') {
+    currentUser = session?.user || null
+    showPasswordRecovery()
+    return
+  }
+
   if (event === 'SIGNED_IN' || event === 'INITIAL_SESSION') {
     if (!session?.user) { showLogin(); return }
-    // Zamez dvojitemu spusteni pro stejneho usera
     if (appInitialized && currentUser?.id === session.user.id) return
     if (authHandling) return
     authHandling = true
@@ -1348,11 +1354,51 @@ async function initApp(user) {
   }
 }
 
+
+// ============ PASSWORD RECOVERY ============
+function showPasswordRecovery() {
+  document.getElementById('login').style.display = 'none'
+  document.getElementById('app').style.display = 'none'
+  document.getElementById('osvec-app').style.display = 'none'
+  document.getElementById('pending-app').style.display = 'none'
+  const mn = document.querySelector('.mob-nav'); if(mn) mn.style.display = 'none'
+  const rec = document.getElementById('recovery-app')
+  if (rec) rec.style.display = 'flex'
+  document.body.style.overflow = ''
+  document.getElementById('recovery-err').style.display = 'none'
+  document.getElementById('recovery-ok').style.display = 'none'
+}
+
+async function doPasswordRecovery() {
+  const pwd = document.getElementById('recovery-pwd').value
+  const pwd2 = document.getElementById('recovery-pwd2').value
+  const err = document.getElementById('recovery-err')
+  const ok = document.getElementById('recovery-ok')
+  const btn = document.getElementById('recovery-btn')
+  err.style.display = 'none'; ok.style.display = 'none'
+  if (!pwd || pwd.length < 6) { err.textContent = 'Heslo musí mít alespoň 6 znaků.'; err.style.display='block'; return }
+  if (pwd !== pwd2) { err.textContent = 'Hesla se neshodují.'; err.style.display='block'; return }
+  btn.textContent = 'Ukládám...'; btn.disabled = true
+  const { error } = await sb.auth.updateUser({ password: pwd })
+  btn.textContent = 'Uložit nové heslo →'; btn.disabled = false
+  if (error) {
+    err.textContent = 'Chyba: ' + error.message; err.style.display = 'block'
+  } else {
+    ok.textContent = '✅ Heslo bylo změněno! Přesměrovávám...'; ok.style.display = 'block'
+    setTimeout(() => {
+      document.getElementById('recovery-app').style.display = 'none'
+      showLogin()
+    }, 2000)
+  }
+}
+
 function showLogin() {
   document.getElementById('login').style.display = 'flex'
   document.getElementById('app').style.display = 'none'
   document.getElementById('osvec-app').style.display = 'none'
   document.getElementById('pending-app').style.display = 'none'
+  const recApp = document.getElementById('recovery-app')
+  if (recApp) recApp.style.display = 'none'
   const mn = document.querySelector('.mob-nav'); if(mn) mn.style.display = 'none'
   // Reset login formu
   const btn = document.getElementById('login-btn')
@@ -1519,7 +1565,7 @@ async function doForgotPassword() {
   btn.disabled = true
 
   const { error } = await sb.auth.resetPasswordForEmail(email, {
-    redirectTo: 'https://subbau.vercel.app'
+    redirectTo: window.location.origin + window.location.pathname
   })
 
   if (error) {
@@ -4783,6 +4829,29 @@ document.getElementById('login-pwd').addEventListener('keydown', e=>{if(e.key===
       <button id="tut-next" onclick="tutNext()" style="flex:2;padding:12px;background:#FFCD00;color:#1a1a1a;border:none;border-radius:12px;font-size:15px;font-weight:800;cursor:pointer;font-family:inherit">Další →</button>
     </div>
 
+  </div>
+</div>
+
+
+<!-- RECOVERY HESLA -->
+<div id="recovery-app" style="display:none;min-height:100vh;background:var(--bg);display:none;align-items:center;justify-content:center">
+  <div style="width:100%;max-width:360px;background:#fff;border-radius:16px;padding:32px 24px;margin:20px;box-shadow:0 4px 24px rgba(0,0,0,0.1)">
+    <div style="text-align:center;margin-bottom:24px">
+      <div style="font-size:40px;margin-bottom:8px">🔐</div>
+      <h2 style="margin:0;font-size:20px;font-weight:800">Nastavit nové heslo</h2>
+      <p style="color:var(--text2);font-size:13px;margin-top:6px">Zadejte své nové heslo</p>
+    </div>
+    <div class="fg">
+      <label>Nové heslo</label>
+      <input type="password" id="recovery-pwd" placeholder="Minimálně 6 znaků" autocomplete="new-password">
+    </div>
+    <div class="fg">
+      <label>Potvrdit heslo</label>
+      <input type="password" id="recovery-pwd2" placeholder="Zadejte heslo znovu" autocomplete="new-password">
+    </div>
+    <div id="recovery-err" style="display:none;color:var(--red);font-size:13px;margin-bottom:10px"></div>
+    <div id="recovery-ok" style="display:none;color:var(--green);font-size:13px;margin-bottom:10px"></div>
+    <button class="btn-login" id="recovery-btn" onclick="doPasswordRecovery()">Uložit nové heslo →</button>
   </div>
 </div>
 
