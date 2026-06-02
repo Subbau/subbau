@@ -1200,6 +1200,7 @@ let currentUser = null
 let currentProfile = null
 let gpsLat = null, gpsLng = null, gpsAddr = ''
 let todayAttId = null
+let todayRecord = null  // Lokální kopie dnešního záznamu
 let clockInt = null
 
 // ============ INIT ============
@@ -1677,7 +1678,7 @@ async function loadDashboard() {
       <td>${r.work_date}</td>
       <td>${r.check_in?.slice(0,5)||'—'}</td>
       <td>${r.check_out?.slice(0,5)||'—'}</td>
-      <td><b>${r.total_hours||'—'}${r.total_hours?'h':''}</b></td>
+      <td><b>${r.check_out ? (r.total_hours||0)+'h' : r.check_in ? calcHours(r.check_in, new Date().toTimeString().slice(0,8), r.break_start, r.break_end)+'h ▶' : '—'}</b></td>
       <td style="font-size:12px">${r.location_address||'—'}</td>
     </tr>`).join('')
 }
@@ -1789,19 +1790,29 @@ async function loadKWData() {
   const tbody = document.getElementById('kw-table')
   if (!data?.length) { tbody.innerHTML='<tr><td colspan="9" style="text-align:center;color:var(--text3);padding:20px">Žádné záznamy pro KW '+week+'</td></tr>'; return }
   const workers = {}
+  const now = new Date()
+  const nowStr = now.toTimeString().slice(0,8)
   data.forEach(r => {
     const wid = r.worker_id
     if (!workers[wid]) workers[wid] = { name: r.worker?.full_name, prof: r.worker?.profession, days:{}, total:0 }
     const day = new Date(r.work_date).getDay()
-    workers[wid].days[day] = (r.total_hours||0)
-    workers[wid].total += (r.total_hours||0)
+    // Pokud záznam nemá odchod, spočítej běžící hodiny
+    let h = r.total_hours || 0
+    if (!r.check_out && r.check_in) {
+      h = calcHours(r.check_in, nowStr, r.break_start, r.break_end)
+    }
+    workers[wid].days[day] = (workers[wid].days[day] || 0) + h
+    workers[wid].total += h
   })
   tbody.innerHTML = Object.values(workers).map(w=>`
     <tr>
       <td><b>${w.name}</b></td><td style="font-size:12px">${w.prof||''}</td>
-      <td>${w.days[1]?w.days[1]+'h':'—'}</td><td>${w.days[2]?w.days[2]+'h':'—'}</td>
-      <td>${w.days[3]?w.days[3]+'h':'—'}</td><td>${w.days[4]?w.days[4]+'h':'—'}</td>
-      <td>${w.days[5]?w.days[5]+'h':'—'}</td><td>${w.days[6]?w.days[6]+'h':'—'}</td>
+      <td>${w.days[1]!==undefined?w.days[1].toFixed(1)+'h':'—'}</td>
+      <td>${w.days[2]!==undefined?w.days[2].toFixed(1)+'h':'—'}</td>
+      <td>${w.days[3]!==undefined?w.days[3].toFixed(1)+'h':'—'}</td>
+      <td>${w.days[4]!==undefined?w.days[4].toFixed(1)+'h':'—'}</td>
+      <td>${w.days[5]!==undefined?w.days[5].toFixed(1)+'h':'—'}</td>
+      <td>${w.days[6]!==undefined?w.days[6].toFixed(1)+'h':'—'}</td>
       <td><b style="color:var(--blue)">${w.total.toFixed(1)}h</b></td>
     </tr>`).join('')
 }
@@ -2701,18 +2712,19 @@ async function getTodayRecord() {
   if (error) { console.error('[getTodayRecord]', error); updateMobStav(null, []); return }
 
   if (data && data.length > 0) {
-    // Najdi první záznam bez odchodu (aktivní směna)
     const active = data.find(r => !r.check_out)
     if (active) {
       todayAttId = active.id
+      todayRecord = { ...active }  // Ulož lokální kopii
       updateMobStav(active, data)
     } else {
-      // Všechny směny skončily — zobraz příchod pro novou směnu
       todayAttId = null
+      todayRecord = null
       updateMobStav(null, data)
     }
   } else {
     todayAttId = null
+    todayRecord = null
     updateMobStav(null, [])
   }
 }
@@ -2840,11 +2852,17 @@ async function mobCheckin(type) {
         }
       }
 
-      // Načti aktuální stav ze serveru
-      const { data: current } = await sb.from('attendance').select('*').eq('id', todayAttId).single()
-      if (!current) { showToast('❌ Záznam nenalezen'); checkinInProgress = false; return }
+      // Použij lokální kopii záznamu (vyhne se stale cache problémům v Safari)
+      let current = todayRecord
+      if (!current || current.id !== todayAttId) {
+        // Fallback: načti ze serveru pokud lokální kopie chybí
+        const { data: fetched } = await sb.from('attendance').select('*').eq('id', todayAttId).single()
+        if (!fetched) { showToast('❌ Záznam nenalezen'); checkinInProgress = false; return }
+        current = fetched
+        todayRecord = { ...fetched }
+      }
 
-      // Vytvoř lokální kopii záznamu pro okamžitou aktualizaci UI
+      // Pracovní kopie pro aktualizace
       const updated = { ...current }
 
       if (type === 'break-start') {
@@ -2858,6 +2876,7 @@ async function mobCheckin(type) {
         if (error) { showToast('❌ Chyba: ' + error.message); checkinInProgress = false; return }
         updated.break_start = timeStr
         updated.break_end = null
+        todayRecord = { ...updated }  // Aktualizuj lokální kopii
         showToast('☕ Přestávka začala — ' + timeStr)
 
       } else if (type === 'break-end') {
@@ -2870,6 +2889,7 @@ async function mobCheckin(type) {
         const { error } = await sb.from('attendance').update({ break_end: timeStr }).eq('id', todayAttId)
         if (error) { showToast('❌ Chyba: ' + error.message); checkinInProgress = false; return }
         updated.break_end = timeStr
+        todayRecord = { ...updated }  // Aktualizuj lokální kopii
         showToast('▶ Pokračuješ v práci od ' + timeStr)
 
       } else if (type === 'out') {
@@ -2879,7 +2899,9 @@ async function mobCheckin(type) {
           checkinInProgress = false
           return
         }
-        const h = calcHours(current.check_in, timeStr, current.break_start, current.break_end)
+        // Použij updated (má aktuální break_end) místo current (může být starý)
+        const h = calcHours(updated.check_in, timeStr, updated.break_start, updated.break_end)
+        console.log('[mobCheckin out] check_in:', updated.check_in, 'break_start:', updated.break_start, 'break_end:', updated.break_end, 'hours:', h)
         const { error } = await sb.from('attendance').update({ check_out: timeStr, total_hours: h }).eq('id', todayAttId)
         if (error) { showToast('❌ Chyba odchodu: ' + error.message); checkinInProgress = false; return }
         updated.check_out = timeStr
