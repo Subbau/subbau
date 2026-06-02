@@ -1538,7 +1538,10 @@ function showOsvec(profile) {
     loadMobNotifications()
     updateChatBadge()
     checkDocumentAlerts()
-    checkShowTutorial()  // Zobraz průvodce jen při prvním přihlášení
+    checkShowTutorial()
+    // Po přihlášení skryj badge — badge se zobrazí až přijde NOVÁ zpráva
+    // Označí jako přečtené zprávy které pracovník již viděl
+    _markReadIfChatOpen()  // Zobraz průvodce jen při prvním přihlášení
     console.log('[showOsvec] all loaded')
   } catch(e) {
     console.error('[showOsvec] CHYBA:', e)
@@ -2317,7 +2320,8 @@ async function sendAdminChatMessage() {
     type: 'chat',
     is_read: false
   })
-}// ============ PRŮVODCE / TUTORIAL ============
+}
+// ============ PRŮVODCE / TUTORIAL ============
 const tutorialSteps = [
   {
     icon: '👋',
@@ -2802,8 +2806,8 @@ function updateMobStav(rec, allToday) {
     smenyDiv.style.display = 'none'
   }
 
-  if (!rec || !rec.check_in) {
-    // Stav: žádný příchod — jen Příchod aktivní
+  if (!rec || !rec.check_in || rec.check_out) {
+    // Stav: žádný příchod NEBO odchod již zaznamenán → zobraz Příchod
     if(badge){ badge.style.background='var(--bg)'; badge.style.color='var(--text2)'; badge.textContent = done.length > 0 ? '● Zahájit novou směnu' : '● Zadejte příchod' }
     setBtn('att-btn-in',         true,  '#1d9e75', '#fff', '#1d9e75')
     setBtn('att-btn-break-start',false, '', '', '')
@@ -4058,6 +4062,32 @@ async function loadInvoiceWeeks() {
     const [w, y] = key.split('/')
     return `<option value="${key}">Týden ${w}/${y} — ${h.toFixed(1)}h</option>`
   }).join('')
+}
+
+
+function _markReadIfChatOpen() {
+  // Badge zpráv: nezobrazovat pokud má user otevřené zprávy nebo chat
+  // Skryj badge při přihlášení — znovu se ukáže jen při NOVÉ zprávě
+  const notifBadge = document.getElementById('mob-notif-count')
+  if (notifBadge) notifBadge.style.display = 'none'
+  const chatBadge = document.getElementById('mob-chat-count')
+  if (chatBadge) chatBadge.style.display = 'none'
+  // Pak označ jako přečtené v DB
+  if (currentUser) {
+    sb.from('notifications')
+      .update({ is_read: true })
+      .eq('worker_id', currentUser.id)
+      .eq('is_read', false)
+      .then(() => updateChatBadge())
+      .catch(() => {})
+    sb.from('chat_messages')
+      .update({ is_read: true })
+      .eq('worker_id', currentUser.id)
+      .eq('sender_role', 'admin')
+      .eq('is_read', false)
+      .then(() => {})
+      .catch(() => {})
+  }
 }
 
 // ============ PRŮVODCE / TUTORIAL ============
