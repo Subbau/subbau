@@ -1379,7 +1379,8 @@ function showAdmin(profile) {
   document.getElementById('osvec-app').style.display = 'none'
   const mn2 = document.querySelector('.mob-nav'); if(mn2) mn2.style.display = 'none'
   document.getElementById('sb-name').textContent = profile.full_name
-  document.getElementById('sb-role').textContent = profile.role === 'admin' ? 'Admin' : profile.role
+  const roleLabels = {admin:'Admin',osvec:'OSVČ',partak:'Parťák',klient:'Klient'}
+  document.getElementById('sb-role').textContent = roleLabels[profile.role] || profile.role
   document.getElementById('sb-av').textContent = profile.full_name.split(' ').map(n=>n[0]).join('').slice(0,2)
   loadDashboard()
   loadWorkers()
@@ -1396,6 +1397,7 @@ function showAdmin(profile) {
   loadAdminContracts()
   loadActiveAnnouncements()
   loadAdminChatList()
+  loadDocumentAlertsStat()
 }
 
 function showOsvec(profile) {
@@ -1698,8 +1700,8 @@ async function loadDashboard() {
   }, 0) || 0
   document.getElementById('stat-hours').textContent = totalH.toFixed(1)+'h'
 
-  const { data: docs } = await sb.from('documents').select('id').in('status',['unreadable','expired'])
-  document.getElementById('stat-docs').textContent = docs?.length || 0
+  // Pracovníci kteří nemají všechny dokumenty schválené
+  await loadDocumentAlertsStat()
 
   const { data: recent } = await sb.from('attendance').select('*, worker:profiles(full_name,profession)').order('created_at',{ascending:false}).limit(10)
   const tbody = document.getElementById('dash-attendance')
@@ -1725,7 +1727,7 @@ async function loadWorkers() {
       <td><b>${w.full_name}</b><br><small style="color:var(--text3)">${w.profession||''}</small></td>
       <td style="font-size:12px">${w.email}</td>
       <td>${w.profession||'—'}</td>
-      <td><span class="pill pb">${w.role}</span></td>
+      <td><span class="pill pb">${{admin:'Admin',osvec:'OSVČ',partak:'Parťák',klient:'Klient'}[w.role]||w.role}</span></td>
       <td><span class="pill ${w.is_active?'pg':'pr'}">${w.is_active?'Aktivní':'Neaktivní'}</span></td>
       <td onclick="event.stopPropagation()"><button onclick="toggleAccess('${w.id}',${w.is_active})" style="font-size:12px;padding:4px 10px;border:1px solid var(--brd);border-radius:6px;cursor:pointer;background:none;font-family:inherit">${w.is_active?'Odebrat':'Obnovit'}</button></td>
     </tr>`).join('')
@@ -2306,6 +2308,111 @@ async function sendAdminChatMessage() {
     type: 'chat',
     is_read: false
   })
+}
+
+
+// ============ DOCUMENT ALERTS ADMIN ============
+async function loadDocumentAlertsStat() {
+  const today = new Date()
+  const todayStr = today.toISOString().split('T')[0]
+  const in30days = new Date(today.getTime() + 30*86400000).toISOString().split('T')[0]
+
+  // Povinné typy dokumentů
+  const REQUIRED_TYPES = ['op', 'zivnost']
+  const typeLabels = {
+    op: 'Občanský průkaz / Pas',
+    zivnost: 'Živnostenský list',
+    gewerbeschein: 'Živnostenský list (DE)',
+    a1: 'Potvrzení A1',
+    freistellung: 'Potvrzení o osvobození',
+    other: 'Dokument'
+  }
+
+  // Načti všechny aktivní OSVČ pracovníky
+  const { data: workers } = await sb.from('profiles')
+    .select('id, full_name, profession')
+    .in('role', ['osvec', 'partak'])
+    .eq('is_active', true)
+    .order('full_name')
+
+  if (!workers?.length) {
+    const el = document.getElementById('stat-docs')
+    if (el) el.textContent = '0'
+    return
+  }
+
+  // Načti všechny dokumenty těchto pracovníků
+  const workerIds = workers.map(w => w.id)
+  const { data: allDocs } = await sb.from('documents')
+    .select('*')
+    .in('worker_id', workerIds)
+
+  const alerts = []
+
+  workers.forEach(w => {
+    const myDocs = (allDocs || []).filter(d => d.worker_id === w.id)
+    const workerAlerts = []
+
+    // 1. Chybějící povinné dokumenty (nikdy nenahrány)
+    REQUIRED_TYPES.forEach(type => {
+      const hasDocs = myDocs.some(d => d.doc_type === type)
+      if (!hasDocs) {
+        workerAlerts.push({ type: 'missing', msg: `❌ Chybí: ${typeLabels[type]}`, color: 'var(--red)' })
+      }
+    })
+
+    // 2. Dokumenty čekající na schválení (status = pending)
+    myDocs.filter(d => d.status === 'pending').forEach(d => {
+      workerAlerts.push({ type: 'pending', msg: `⏳ Ke schválení: ${typeLabels[d.doc_type]||d.doc_type}`, color: 'var(--amber)' })
+    })
+
+    // 3. Nečitelné dokumenty
+    myDocs.filter(d => d.status === 'unreadable').forEach(d => {
+      workerAlerts.push({ type: 'unreadable', msg: `❌ Nečitelný: ${typeLabels[d.doc_type]||d.doc_type}`, color: 'var(--red)' })
+    })
+
+    // 4. Expirované nebo expirující dokumenty (status=ok)
+    myDocs.filter(d => d.status === 'ok' && d.valid_until).forEach(d => {
+      const daysLeft = Math.ceil((new Date(d.valid_until) - today) / 86400000)
+      if (daysLeft < 0) {
+        workerAlerts.push({ type: 'expired', msg: `❌ Expiroval: ${typeLabels[d.doc_type]||d.doc_type} (${d.valid_until})`, color: 'var(--red)' })
+      } else if (daysLeft <= 30) {
+        workerAlerts.push({ type: 'expiring', msg: `⚠️ Expiruje za ${daysLeft}d: ${typeLabels[d.doc_type]||d.doc_type}`, color: 'var(--amber)' })
+      }
+    })
+
+    if (workerAlerts.length > 0) {
+      alerts.push({ worker: w, issues: workerAlerts })
+    }
+  })
+
+  // Aktualizuj stat counter
+  const statEl = document.getElementById('stat-docs')
+  if (statEl) {
+    statEl.textContent = alerts.length
+    statEl.style.color = alerts.length > 0 ? 'var(--red)' : 'var(--green)'
+  }
+
+  // Zobraz kartu s upozorněními
+  const card = document.getElementById('doc-alerts-card')
+  const list = document.getElementById('doc-alerts-list')
+  if (!card || !list) return
+
+  if (!alerts.length) {
+    card.style.display = 'none'
+    return
+  }
+
+  card.style.display = 'block'
+  list.innerHTML = alerts.map(({ worker, issues }) => `
+    <div style="padding:10px 0;border-bottom:1px solid var(--brd)">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:5px">
+        <b style="font-size:13px;cursor:pointer;color:var(--blue)" onclick="openWorkerModal('${worker.id}')">${worker.full_name} ↗</b>
+        <span style="font-size:11px;color:var(--text3)">${worker.profession||''}</span>
+      </div>
+      ${issues.map(i => `<div style="font-size:12px;color:${i.color};padding:2px 0">${i.msg}</div>`).join('')}
+    </div>
+  `).join('')
 }
 
 // ============ PRŮVODCE / TUTORIAL ============
@@ -3594,6 +3701,111 @@ async function saveManualAttendance() {
 
 
 // ============ CHAT ============
+
+// ============ DOCUMENT ALERTS ADMIN ============
+async function loadDocumentAlertsStat() {
+  const today = new Date()
+  const todayStr = today.toISOString().split('T')[0]
+  const in30days = new Date(today.getTime() + 30*86400000).toISOString().split('T')[0]
+
+  // Povinné typy dokumentů
+  const REQUIRED_TYPES = ['op', 'zivnost']
+  const typeLabels = {
+    op: 'Občanský průkaz / Pas',
+    zivnost: 'Živnostenský list',
+    gewerbeschein: 'Živnostenský list (DE)',
+    a1: 'Potvrzení A1',
+    freistellung: 'Potvrzení o osvobození',
+    other: 'Dokument'
+  }
+
+  // Načti všechny aktivní OSVČ pracovníky
+  const { data: workers } = await sb.from('profiles')
+    .select('id, full_name, profession')
+    .in('role', ['osvec', 'partak'])
+    .eq('is_active', true)
+    .order('full_name')
+
+  if (!workers?.length) {
+    const el = document.getElementById('stat-docs')
+    if (el) el.textContent = '0'
+    return
+  }
+
+  // Načti všechny dokumenty těchto pracovníků
+  const workerIds = workers.map(w => w.id)
+  const { data: allDocs } = await sb.from('documents')
+    .select('*')
+    .in('worker_id', workerIds)
+
+  const alerts = []
+
+  workers.forEach(w => {
+    const myDocs = (allDocs || []).filter(d => d.worker_id === w.id)
+    const workerAlerts = []
+
+    // 1. Chybějící povinné dokumenty (nikdy nenahrány)
+    REQUIRED_TYPES.forEach(type => {
+      const hasDocs = myDocs.some(d => d.doc_type === type)
+      if (!hasDocs) {
+        workerAlerts.push({ type: 'missing', msg: `❌ Chybí: ${typeLabels[type]}`, color: 'var(--red)' })
+      }
+    })
+
+    // 2. Dokumenty čekající na schválení (status = pending)
+    myDocs.filter(d => d.status === 'pending').forEach(d => {
+      workerAlerts.push({ type: 'pending', msg: `⏳ Ke schválení: ${typeLabels[d.doc_type]||d.doc_type}`, color: 'var(--amber)' })
+    })
+
+    // 3. Nečitelné dokumenty
+    myDocs.filter(d => d.status === 'unreadable').forEach(d => {
+      workerAlerts.push({ type: 'unreadable', msg: `❌ Nečitelný: ${typeLabels[d.doc_type]||d.doc_type}`, color: 'var(--red)' })
+    })
+
+    // 4. Expirované nebo expirující dokumenty (status=ok)
+    myDocs.filter(d => d.status === 'ok' && d.valid_until).forEach(d => {
+      const daysLeft = Math.ceil((new Date(d.valid_until) - today) / 86400000)
+      if (daysLeft < 0) {
+        workerAlerts.push({ type: 'expired', msg: `❌ Expiroval: ${typeLabels[d.doc_type]||d.doc_type} (${d.valid_until})`, color: 'var(--red)' })
+      } else if (daysLeft <= 30) {
+        workerAlerts.push({ type: 'expiring', msg: `⚠️ Expiruje za ${daysLeft}d: ${typeLabels[d.doc_type]||d.doc_type}`, color: 'var(--amber)' })
+      }
+    })
+
+    if (workerAlerts.length > 0) {
+      alerts.push({ worker: w, issues: workerAlerts })
+    }
+  })
+
+  // Aktualizuj stat counter
+  const statEl = document.getElementById('stat-docs')
+  if (statEl) {
+    statEl.textContent = alerts.length
+    statEl.style.color = alerts.length > 0 ? 'var(--red)' : 'var(--green)'
+  }
+
+  // Zobraz kartu s upozorněními
+  const card = document.getElementById('doc-alerts-card')
+  const list = document.getElementById('doc-alerts-list')
+  if (!card || !list) return
+
+  if (!alerts.length) {
+    card.style.display = 'none'
+    return
+  }
+
+  card.style.display = 'block'
+  list.innerHTML = alerts.map(({ worker, issues }) => `
+    <div style="padding:10px 0;border-bottom:1px solid var(--brd)">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:5px">
+        <b style="font-size:13px;cursor:pointer;color:var(--blue)" onclick="openWorkerModal('${worker.id}')">${worker.full_name} ↗</b>
+        <span style="font-size:11px;color:var(--text3)">${worker.profession||''}</span>
+      </div>
+      ${issues.map(i => `<div style="font-size:12px;color:${i.color};padding:2px 0">${i.msg}</div>`).join('')}
+    </div>
+  `).join('')
+}
+
 // ============ PRŮVODCE / TUTORIAL ============
 // ============ SMLOUVY ============
 let contractFile = null
@@ -4106,46 +4318,7 @@ async function checkDocumentAlerts() {
   }
 
   if (currentProfile?.role === 'admin') {
-    // Admin — zkontroluj všechny dokumenty
-    const { data } = await sb.from('documents')
-      .select('*, worker:profiles(full_name)')
-      .not('valid_until', 'is', null)
-      .lte('valid_until', in30days)
-      .eq('status', 'ok')
-
-    const { data: unreadable } = await sb.from('documents')
-      .select('*, worker:profiles(full_name)')
-      .eq('status', 'unreadable')
-
-    const all = [...(data||[]), ...(unreadable||[])]
-    if (!all.length) return
-
-    const card = document.getElementById('doc-alerts-card')
-    const list = document.getElementById('doc-alerts-list')
-    if (!card || !list) return
-
-    card.style.display = 'block'
-    list.innerHTML = all.map(d => {
-      const isExpired = d.valid_until && d.valid_until < todayStr
-      const isUnreadable = d.status === 'unreadable'
-      const daysLeft = d.valid_until ? Math.ceil((new Date(d.valid_until) - today) / 86400000) : null
-      const msg = isUnreadable
-        ? '❌ Nečitelný dokument'
-        : isExpired
-        ? `❌ Expiroval ${d.valid_until}`
-        : `⚠️ Expiruje za ${daysLeft} dní (${d.valid_until})`
-      return `<div style="display:flex;justify-content:space-between;align-items:center;padding:9px 0;border-bottom:1px solid var(--brd)">
-        <div>
-          <span style="font-weight:600;font-size:13px">${d.worker?.full_name||'—'}</span>
-          <span style="font-size:12px;color:var(--text2)"> · ${typeLabels[d.doc_type]||d.doc_type}</span>
-        </div>
-        <span style="font-size:12px;font-weight:600;color:${isExpired||isUnreadable?'var(--red)':'var(--amber)'}">${msg}</span>
-      </div>`
-    }).join('')
-
-    // Aktualizuj stat counter
-    const statEl = document.getElementById('stat-docs')
-    if (statEl) statEl.textContent = all.length
+    await loadDocumentAlertsStat()
 
   } else if (currentProfile?.role === 'osvec') {
     // OSVČ — zkontroluj jen své dokumenty
@@ -4335,12 +4508,12 @@ async function openWorkerModal(id) {
   if (!w) return
 
   document.getElementById('wd-name').textContent = w.full_name
-  document.getElementById('wd-sub').textContent = (w.profession||'') + ' · ' + w.role
+  document.getElementById('wd-sub').textContent = (w.profession||'') + ' · ' + ({admin:'Admin',osvec:'OSVČ',partak:'Parťák',klient:'Klient'}[w.role]||w.role)
   document.getElementById('wd-fullname').textContent = w.full_name
   document.getElementById('wd-email').textContent = w.email
   document.getElementById('wd-phone').textContent = w.phone || '—'
   document.getElementById('wd-profession').textContent = w.profession || '—'
-  document.getElementById('wd-role').textContent = w.role
+  document.getElementById('wd-role').textContent = {admin:'Admin',osvec:'OSVČ',partak:'Parťák',klient:'Klient'}[w.role] || w.role
   document.getElementById('wd-status').innerHTML = `<span class="pill ${w.is_active?'pg':'pr'}">${w.is_active?'Aktivní':'Neaktivní'}</span>`
   document.getElementById('wd-rate').value = w.hourly_rate_worker || ''
   document.getElementById('wd-notes').value = w.notes || ''
@@ -4398,14 +4571,27 @@ async function loadWdAttendance() {
     document.getElementById('wd-att-total').textContent='0h'
     return
   }
-  tbody.innerHTML = data.map(r=>`<tr>
-    <td>${r.work_date}</td>
-    <td>${r.check_in?.slice(0,5)||'—'}</td>
-    <td>${r.check_out?.slice(0,5)||'—'}</td>
-    <td>${r.break_start?.slice(0,5)||'—'}${r.break_end?' → '+r.break_end.slice(0,5):''}</td>
-    <td><b>${r.total_hours||'—'}${r.total_hours?'h':''}</b></td>
-    <td style="font-size:11px">${r.location_address||'—'}</td>
-  </tr>`).join('')
+  const nowForAtt = new Date().toTimeString().slice(0,8)
+  tbody.innerHTML = data.map(r => {
+    let hoursDisplay = '—'
+    if (r.total_hours) {
+      hoursDisplay = `<b style="color:var(--blue)">${r.total_hours}h</b>`
+    } else if (r.check_in && !r.check_out) {
+      const running = calcHours(r.check_in, nowForAtt, r.break_start, r.break_end)
+      hoursDisplay = `<b style="color:var(--amber)">${running.toFixed(1)}h ▶</b>`
+    }
+    const breakStr = r.break_start
+      ? r.break_start.slice(0,5) + (r.break_end ? ' → ' + r.break_end.slice(0,5) : ' (probíhá)')
+      : '—'
+    return `<tr>
+      <td>${r.work_date}</td>
+      <td>${r.check_in?.slice(0,5)||'—'}</td>
+      <td>${r.check_out?.slice(0,5)||'—'}</td>
+      <td style="font-size:11px">${breakStr}</td>
+      <td>${hoursDisplay}</td>
+      <td style="font-size:11px">${r.location_address||'—'}</td>
+    </tr>`
+  }).join('')
   const nowStr2 = new Date().toTimeString().slice(0,8)
   const total = data.reduce((s,r) => {
     if (r.total_hours) return s + r.total_hours
