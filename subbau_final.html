@@ -1324,10 +1324,15 @@ sb.auth.onAuthStateChange(async (event, session) => {
 
   if (event === 'SIGNED_IN' || event === 'INITIAL_SESSION') {
     if (!session?.user) { showLogin(); return }
-    if (appInitialized && currentUser?.id === session.user.id) { clearAuthTimeout(); return }
+    // Silný guard: stejný user a app je inicializovaná nebo běží
+    if (currentUser?.id === session.user.id && (appInitialized || authHandling)) {
+      clearAuthTimeout()
+      return
+    }
     if (authHandling) return
     authHandling = true
     appInitialized = true
+    currentUser = session.user  // Nastav okamžitě před async
     startAuthTimeout()
     await initApp(session.user)
     clearAuthTimeout()
@@ -1370,11 +1375,12 @@ async function initApp(user) {
   currentProfile = profile
 
   if (!profile) {
-    showToast('⚠️ Profil nenalezen — přihlaste se znovu')
-    appInitialized = false
+    showToast('⚠️ Profil nenalezen — kontaktujte admina')
+    // NERESETUJ appInitialized — jinak by double SIGNED_IN spustil initApp znovu
     authHandling = false
     try { await sb.auth.signOut() } catch(e) { console.error('signOut failed:', e) }
-    showLogin()  // Vždy zobraz login, i když signOut selže
+    appInitialized = false  // Reset až po signOut
+    showLogin()
     return
   }
 
