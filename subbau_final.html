@@ -101,7 +101,7 @@ tr:hover td{background:#fafbfc}
 .mob-status{padding:10px 16px;display:flex;align-items:center;justify-content:space-between;font-size:13px;font-weight:600}
 
 /* Content area */
-.mob-body{padding:12px 12px 90px}
+.mob-body{padding:12px 12px 100px}
 .mob-card{background:#fff;border-radius:16px;padding:16px;margin-bottom:12px;box-shadow:0 1px 4px rgba(0,0,0,0.08)}
 .mob-card-title{font-size:14px;font-weight:800;margin-bottom:14px;color:#1a1a1a;letter-spacing:-0.2px}
 
@@ -1025,7 +1025,7 @@ tr:hover td{background:#fafbfc}
         </div>
       </div>
 
-      <button onclick="doLogout()" style="width:100%;padding:12px;background:var(--red-l);color:var(--red);border:none;border-radius:12px;font-size:14px;font-weight:700;cursor:pointer;font-family:inherit;margin-top:8px">🚪 Odhlásit se</button>
+      <button onclick="doLogout()" style="width:100%;padding:14px;background:var(--red-l);color:var(--red);border:none;border-radius:12px;font-size:14px;font-weight:700;cursor:pointer;font-family:inherit;margin-top:8px;margin-bottom:20px">🚪 Odhlásit se</button>
     </div>
   </div>
   <div class="mob-nav">
@@ -1662,8 +1662,13 @@ async function loadDashboard() {
   document.getElementById('stat-teams').textContent = teams?.length || 0
 
   const kw = getKW()
-  const { data: att } = await sb.from('attendance').select('total_hours').eq('kw',kw.week).eq('kw_year',kw.year)
-  const totalH = att?.reduce((s,a)=>s+(a.total_hours||0),0)||0
+  const { data: att } = await sb.from('attendance').select('*').eq('kw',kw.week).eq('kw_year',kw.year)
+  const nowStrDash = new Date().toTimeString().slice(0,8)
+  const totalH = att?.reduce((s,a) => {
+    if (a.total_hours) return s + a.total_hours
+    if (a.check_in && !a.check_out) return s + calcHours(a.check_in, nowStrDash, a.break_start, a.break_end)
+    return s
+  }, 0) || 0
   document.getElementById('stat-hours').textContent = totalH.toFixed(1)+'h'
 
   const { data: docs } = await sb.from('documents').select('id').in('status',['unreadable','expired'])
@@ -2222,6 +2227,12 @@ async function openAdminChat(workerId, workerName) {
     .eq('sender_role', 'osvec')
     .eq('is_read', false)
 
+  // Aktualizuj badge ihned
+  const badge = document.getElementById('admin-chat-badge')
+  if (badge) {
+    const current = parseInt(badge.textContent || '0')
+    // Badge se aktualizuje přes loadAdminChatList
+  }
   loadAdminChatList()
 
   // Realtime
@@ -2921,17 +2932,39 @@ async function loadMobWeek() {
   const kw = getKW()
   document.getElementById('mob-kw').textContent = 'Týden '+kw.week
   const { data } = await sb.from('attendance').select('*').eq('worker_id',currentUser?.id).eq('kw',kw.week).eq('kw_year',kw.year)
-  const total = data?.reduce((s,r)=>s+(r.total_hours||0),0)||0
+  if (!data) return
+
+  const nowStr = new Date().toTimeString().slice(0,8)
+
+  // Spočítej hodiny pro každý záznam — včetně běžících směn
+  function getHours(r) {
+    if (r.total_hours) return r.total_hours  // Ukončená směna
+    if (r.check_in && !r.check_out) return calcHours(r.check_in, nowStr, r.break_start, r.break_end)  // Běžící směna
+    return 0
+  }
+
+  const total = data.reduce((s,r) => s + getHours(r), 0)
   document.getElementById('mob-total').textContent = total.toFixed(1)+'h'
+
   const days=['Ne','Po','Út','St','Čt','Pá','So']
   const div = document.getElementById('mob-week')
-  if (!data?.length) { div.innerHTML='<div style="color:var(--text3);font-size:12px;text-align:center">Žádné záznamy tento týden</div>'; return }
+  if (!data.length) {
+    div.innerHTML='<div style="color:var(--text3);font-size:12px;text-align:center">Žádné záznamy tento týden</div>'
+    return
+  }
+
   div.innerHTML=`<div style="display:grid;grid-template-columns:repeat(7,1fr);gap:3px">${[1,2,3,4,5,6,0].map(d=>{
-    const dayRecs=data.filter(a=>new Date(a.work_date).getDay()===d)
-    const h = dayRecs.reduce((s,r)=>s+(r.total_hours||0),0)
+    const dayRecs = data.filter(a => new Date(a.work_date).getDay()===d)
+    const h = dayRecs.reduce((s,r) => s + getHours(r), 0)
     const hasWork = dayRecs.length > 0
     const active = dayRecs.some(r => r.check_in && !r.check_out)
-    return `<div style="text-align:center"><div style="font-size:9px;color:var(--text3)">${days[d]}</div><div style="border-radius:6px;padding:4px 2px;font-size:9px;font-weight:700;background:${active?'var(--amber)':hasWork&&h>0?'var(--green)':hasWork?'var(--amber)':'var(--bg)'};color:${hasWork?'#fff':'var(--text3)'}">${active?'▶':h>0?h.toFixed(1)+'h':hasWork?'▶':'—'}</div></div>`
+    const bg = active ? 'var(--amber)' : h > 0 ? 'var(--green)' : 'var(--bg)'
+    const color = hasWork ? '#fff' : 'var(--text3)'
+    const label = active && h > 0 ? h.toFixed(1)+'h▶' : h > 0 ? h.toFixed(1)+'h' : hasWork ? '▶' : '—'
+    return `<div style="text-align:center">
+      <div style="font-size:9px;color:var(--text3)">${days[d]}</div>
+      <div style="border-radius:6px;padding:4px 2px;font-size:9px;font-weight:700;background:${bg};color:${color}">${label}</div>
+    </div>`
   }).join('')}</div>`
 }
 
@@ -3228,6 +3261,7 @@ function sv(name, navEl) {
   document.querySelectorAll('.sb-a').forEach(a=>a.classList.remove('on'))
   if(navEl)navEl.classList.add('on')
   if(name === 'chat') { loadAdminChatList() }
+  if(name === 'zpravy') { loadNotifHistory() }
   const titles={dashboard:'Dashboard',tymy:'Týmy',dochazka:'Docházka',pracovnici:'Pracovníci',dokumenty:'Dokumenty',smlouvy:'Smlouvy',faktury:'Faktury',zpravy:'Zprávy',chat:'Chat',oznameni:'Oznámení',pristupy:'Přístupy'}
   document.getElementById('pt').textContent=titles[name]||name
 }
@@ -3248,7 +3282,9 @@ function mobSv(name, btn) {
     if(lbl){ lbl.style.color='#1a1a1a'; lbl.style.fontWeight='800' }
   }
   // Lazy load chat
-  if (name === 'chat') loadMobChat()
+  if (name === 'chat') { loadMobChat(); updateChatBadge() }
+  // Označ zprávy jako přečtené při otevření záložky
+  if (name === 'zpravy') markNotificationsRead()
 }
 
 // ============ UTILS ============
@@ -3889,6 +3925,19 @@ async function loadMobNotifications() {
     </div>`).join('')
 }
 
+async function markNotificationsRead() {
+  if (!currentUser) return
+  try {
+    await sb.from('notifications')
+      .update({ is_read: true })
+      .eq('worker_id', currentUser.id)
+      .eq('is_read', false)
+    // Skryj badge
+    const badge = document.getElementById('mob-notif-count')
+    if (badge) badge.style.display = 'none'
+  } catch(e) { console.error('markNotificationsRead:', e) }
+}
+
 async function markRead(id, el) {
   await sb.from('notifications').update({ is_read: true }).eq('id', id)
   if (el) {
@@ -4238,7 +4287,12 @@ async function loadWdAttendance() {
     <td><b>${r.total_hours||'—'}${r.total_hours?'h':''}</b></td>
     <td style="font-size:11px">${r.location_address||'—'}</td>
   </tr>`).join('')
-  const total = data.reduce((s,r)=>s+(r.total_hours||0),0)
+  const nowStr2 = new Date().toTimeString().slice(0,8)
+  const total = data.reduce((s,r) => {
+    if (r.total_hours) return s + r.total_hours
+    if (r.check_in && !r.check_out) return s + calcHours(r.check_in, nowStr2, r.break_start, r.break_end)
+    return s
+  }, 0)
   document.getElementById('wd-att-total').textContent = total.toFixed(1)+'h'
 }
 
@@ -4278,8 +4332,13 @@ async function loadWdFinance() {
   const div = document.getElementById('wd-finance-list')
   
   // Načti hodiny z evidence
-  const { data: att } = await sb.from('attendance').select('total_hours').eq('worker_id',currentWorkerId).eq('kw',week).eq('kw_year',year)
-  const hoursWorked = att?.reduce((s,r)=>s+(r.total_hours||0),0)||0
+  const { data: att } = await sb.from('attendance').select('*').eq('worker_id',currentWorkerId).eq('kw',week).eq('kw_year',year)
+  const nowStrFin = new Date().toTimeString().slice(0,8)
+  const hoursWorked = att?.reduce((s,r) => {
+    if (r.total_hours) return s + r.total_hours
+    if (r.check_in && !r.check_out) return s + calcHours(r.check_in, nowStrFin, r.break_start, r.break_end)
+    return s
+  }, 0) || 0
 
   if(!data?.length){
     div.innerHTML=`<div style="padding:12px;background:var(--bg);border-radius:8px;font-size:13px;color:var(--text2)">
