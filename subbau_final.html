@@ -2937,12 +2937,17 @@ async function mobCheckin(type) {
         if (error) { showToast('❌ Chyba odchodu: ' + error.message); checkinInProgress = false; return }
         updated.check_out = timeStr
         updated.total_hours = h
-        todayAttId = null  // Reset pro novou směnu
+        todayAttId = null   // Reset pro novou směnu
+        todayRecord = null  // Reset lokální kopie
         showToast('🚪 Odchod ' + timeStr + ' · odpracováno ' + h + 'h')
       }
 
       // Aktualizuj UI OKAMŽITĚ z lokální kopie — bez čekání na server
-      updateMobStav(todayAttId ? updated : null, todayAttId ? [updated] : [updated])
+      // Po odchodu: todayAttId=null, předáme null jako rec a updated v allToday pro přehled
+      updateMobStav(
+        todayAttId ? updated : null,
+        [updated]  // Vždy předej updated pro přehled směn
+      )
     }
 
     loadMobWeek()
@@ -3388,7 +3393,14 @@ function mobSv(name, btn) {
   // Lazy load chat
   if (name === 'chat') { loadMobChat(); updateChatBadge() }
   // Označ zprávy jako přečtené při otevření záložky
-  if (name === 'zpravy') markNotificationsRead()
+  if (name === 'zpravy') {
+    // Okamžitě skryj badge
+    const nb = document.getElementById('mob-notif-count')
+    if (nb) nb.style.display = 'none'
+    // Načti a označ jako přečtené
+    loadMobNotifications()
+    markNotificationsRead()
+  }
 }
 
 // ============ UTILS ============
@@ -4008,9 +4020,12 @@ async function loadMobNotifications() {
   // Badge počet nepřečtených
   const unread = data?.filter(n => !n.is_read).length || 0
   const badge = document.getElementById('mob-notif-count')
+  // Zobraz badge jen pokud záložka zprávy NENÍ aktivní
+  const zpravyView = document.getElementById('mob-v-zpravy')
+  const zpravyOpen = zpravyView?.classList.contains('on')
   if (badge) {
     badge.textContent = unread
-    badge.style.display = unread > 0 ? 'inline' : 'none'
+    badge.style.display = (unread > 0 && !zpravyOpen) ? 'inline' : 'none'
   }
 
   if (!data?.length) {
