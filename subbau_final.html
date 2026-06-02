@@ -1931,118 +1931,8 @@ async function approveDoc(id) {
 async function requestReupload(id) {
   await sb.from('documents').update({ status:'unreadable' }).eq('id',id)
   showToast('📧 Pracovník byl upozorněn'); loadDocuments()
-}
-
-
-// ============ RUČNÍ ZÁPIS DOCHÁZKY ============
-function toggleManualForm() {
-  const form = document.getElementById('manual-att-form')
-  const icon = document.getElementById('manual-toggle-icon')
-  const isOpen = form.style.display !== 'none'
-  form.style.display = isOpen ? 'none' : 'block'
-  if (icon) icon.textContent = isOpen ? '＋' : '－'
-  if (!isOpen) {
-    // Nastav dnešní datum
-    document.getElementById('manual-date').value = new Date().toISOString().split('T')[0]
-    loadManualWorkers()
-  }
-}
-
-async function loadManualWorkers() {
-  const { data } = await sb.from('profiles').select('id,full_name').in('role',['osvec','partak']).order('full_name')
-  const sel = document.getElementById('manual-worker')
-  if (!sel || !data) return
-  sel.innerHTML = '<option value="">— Vyberte pracovníka —</option>' +
-    data.map(w=>`<option value="${w.id}">${w.full_name}</option>`).join('')
-}
-
-// Live výpočet hodin při změně času
-document.addEventListener('change', function(e) {
-  if (['manual-checkin','manual-checkout','manual-break-start','manual-break-end'].includes(e.target.id)) {
-    const ci = document.getElementById('manual-checkin').value
-    const co = document.getElementById('manual-checkout').value
-    const bs = document.getElementById('manual-break-start').value
-    const be = document.getElementById('manual-break-end').value
-    const preview = document.getElementById('manual-hours-preview')
-    const val = document.getElementById('manual-hours-val')
-    if (ci && co) {
-      const h = calcHours(ci+':00', co+':00', bs?bs+':00':null, be?be+':00':null)
-      if (preview) preview.style.display = 'block'
-      if (val) val.textContent = h + 'h'
-    }
-  }
-})
-
-async function saveManualAttendance() {
-  const workerId = document.getElementById('manual-worker').value
-  const date = document.getElementById('manual-date').value
-  const ci = document.getElementById('manual-checkin').value
-  const co = document.getElementById('manual-checkout').value
-  const bs = document.getElementById('manual-break-start').value
-  const be = document.getElementById('manual-break-end').value
-  const site = document.getElementById('manual-site').value
-  const note = document.getElementById('manual-note').value
-
-  if (!workerId) { showToast('⚠️ Vyberte pracovníka'); return }
-  if (!date) { showToast('⚠️ Zadejte datum'); return }
-  if (!ci) { showToast('⚠️ Zadejte příchod'); return }
-  if (!co) { showToast('⚠️ Zadejte odchod'); return }
-  if (co <= ci) { showToast('⚠️ Odchod musí být po příchodu'); return }
-
-  const hours = calcHours(ci+':00', co+':00', bs?bs+':00':null, be?be+':00':null)
-  const kw = getKW(new Date(date))
-
-  // Zkontroluj jestli záznam pro tento den a pracovníka už existuje
-  const { data: existing } = await sb.from('attendance')
-    .select('id,check_in,check_out')
-    .eq('worker_id', workerId)
-    .eq('work_date', date)
-    .maybeSingle()
-
-  if (existing) {
-    // Záznam existuje — nabídni update
-    if (!confirm(`Pro tento den již existuje záznam (${existing.check_in?.slice(0,5)} → ${existing.check_out?.slice(0,5)||'?'}). Přepsat?`)) return
-    const { error } = await sb.from('attendance').update({
-      check_in: ci+':00',
-      check_out: co+':00',
-      break_start: bs ? bs+':00' : null,
-      break_end: be ? be+':00' : null,
-      total_hours: hours,
-      location_address: site || null,
-      manual_note: note || null,
-      is_manual: true
-    }).eq('id', existing.id)
-    if (error) { showToast('❌ Chyba: ' + error.message); return }
-    showToast('✅ Záznam aktualizován — ' + hours + 'h')
-  } else {
-    // Nový záznam
-    const { error } = await sb.from('attendance').insert({
-      worker_id: workerId,
-      work_date: date,
-      check_in: ci+':00',
-      check_out: co+':00',
-      break_start: bs ? bs+':00' : null,
-      break_end: be ? be+':00' : null,
-      total_hours: hours,
-      location_address: site || null,
-      kw: kw.week,
-      kw_year: kw.year,
-      is_saturday: new Date(date).getDay() === 6,
-      is_manual: true
-    })
-    if (error) { showToast('❌ Chyba: ' + error.message); return }
-    showToast('✅ Záznam přidán — ' + hours + 'h')
-  }
-
-  // Reset formuláře
-  toggleManualForm()
-  loadKWData()
-  loadDashboard()
-}
-
-
-
-// ============ CHAT ============
+}// Live výpočet hodin při změně času
+)// ============ CHAT ============
 let activeChatWorkerId = null
 let chatRealtimeSub = null
 let adminChatRealtimeSub = null
@@ -2236,9 +2126,15 @@ async function loadAdminChatList() {
   const lastMap = {}
   lastMsgs?.forEach(m => { if (!lastMap[m.worker_id]) lastMap[m.worker_id] = m })
 
-  const totalUnread = Object.values(unreadMap).reduce((a,b) => a+b, 0)
+  // Nepočítej zprávy z právě otevřené konverzace
+  const chatView = document.getElementById('v-chat')
+  const chatOpen = chatView?.classList.contains('on')
+  const effectiveUnread = Object.entries(unreadMap).reduce((total, [wid, count]) => {
+    if (chatOpen && activeChatWorkerId === wid) return total  // otevřená konverzace
+    return total + count
+  }, 0)
   const badge = document.getElementById('admin-chat-badge')
-  if (badge) { badge.textContent = totalUnread; badge.style.display = totalUnread > 0 ? 'inline' : 'none' }
+  if (badge) { badge.textContent = effectiveUnread; badge.style.display = effectiveUnread > 0 ? 'inline' : 'none' }
 
   // Seřaď — nejprve s nepřečtenými, pak s poslední zprávou
   workers.sort((a, b) => {
@@ -2301,20 +2197,15 @@ async function openAdminChat(workerId, workerName) {
 
   scrollChatBottom('admin-chat-messages')
 
-  // Označ jako přečtené
+  // Označ VŠECHNY zprávy tohoto pracovníka jako přečtené
   await sb.from('chat_messages')
     .update({is_read: true})
     .eq('worker_id', workerId)
     .eq('sender_role', 'osvec')
     .eq('is_read', false)
 
-  // Aktualizuj badge ihned
-  const badge = document.getElementById('admin-chat-badge')
-  if (badge) {
-    const current = parseInt(badge.textContent || '0')
-    // Badge se aktualizuje přes loadAdminChatList
-  }
-  loadAdminChatList()
+  // Aktualizuj seznam a badge
+  await loadAdminChatList()
 
   // Realtime
   if (adminChatRealtimeSub) sb.removeChannel(adminChatRealtimeSub)
@@ -2322,11 +2213,17 @@ async function openAdminChat(workerId, workerName) {
     .on('postgres_changes', {
       event: 'INSERT', schema: 'public', table: 'chat_messages',
       filter: `worker_id=eq.${workerId}`
-    }, payload => {
+    }, async payload => {
       const div = document.getElementById('admin-chat-messages')
       if (!div) return
-      div.insertAdjacentHTML('beforeend', chatBubble(payload.new, payload.new.sender_role === 'admin'))
+      const isMine = payload.new.sender_role === 'admin'
+      const name = !isMine ? workerName : null
+      div.insertAdjacentHTML('beforeend', chatBubble(payload.new, isMine, name))
       scrollChatBottom('admin-chat-messages')
+      // Pokud je konverzace otevřená, označ zprávu jako přečtenou okamžitě
+      if (!isMine && activeChatWorkerId === workerId) {
+        await sb.from('chat_messages').update({is_read: true}).eq('id', payload.new.id)
+      }
       loadAdminChatList()
     })
     .subscribe()
@@ -2363,111 +2260,7 @@ async function sendAdminChatMessage() {
 }
 
 
-// ============ DOCUMENT ALERTS ADMIN ============
-async function loadDocumentAlertsStat() {
-  const today = new Date()
-  const todayStr = today.toISOString().split('T')[0]
-  const in30days = new Date(today.getTime() + 30*86400000).toISOString().split('T')[0]
-
-  // Povinné typy dokumentů
-  const REQUIRED_TYPES = ['op', 'zivnost']
-  const typeLabels = {
-    op: 'Občanský průkaz / Pas',
-    zivnost: 'Živnostenský list',
-    gewerbeschein: 'Živnostenský list (DE)',
-    a1: 'Potvrzení A1',
-    freistellung: 'Potvrzení o osvobození',
-    other: 'Dokument'
-  }
-
-  // Načti všechny aktivní OSVČ pracovníky
-  const { data: workers } = await sb.from('profiles')
-    .select('id, full_name, profession')
-    .in('role', ['osvec', 'partak'])
-    .eq('is_active', true)
-    .order('full_name')
-
-  if (!workers?.length) {
-    const el = document.getElementById('stat-docs')
-    if (el) el.textContent = '0'
-    return
-  }
-
-  // Načti všechny dokumenty těchto pracovníků
-  const workerIds = workers.map(w => w.id)
-  const { data: allDocs } = await sb.from('documents')
-    .select('*')
-    .in('worker_id', workerIds)
-
-  const alerts = []
-
-  workers.forEach(w => {
-    const myDocs = (allDocs || []).filter(d => d.worker_id === w.id)
-    const workerAlerts = []
-
-    // 1. Chybějící povinné dokumenty (nikdy nenahrány)
-    REQUIRED_TYPES.forEach(type => {
-      const hasDocs = myDocs.some(d => d.doc_type === type)
-      if (!hasDocs) {
-        workerAlerts.push({ type: 'missing', msg: `❌ Chybí: ${typeLabels[type]}`, color: 'var(--red)' })
-      }
-    })
-
-    // 2. Dokumenty čekající na schválení (status = pending)
-    myDocs.filter(d => d.status === 'pending').forEach(d => {
-      workerAlerts.push({ type: 'pending', msg: `⏳ Ke schválení: ${typeLabels[d.doc_type]||d.doc_type}`, color: 'var(--amber)' })
-    })
-
-    // 3. Nečitelné dokumenty
-    myDocs.filter(d => d.status === 'unreadable').forEach(d => {
-      workerAlerts.push({ type: 'unreadable', msg: `❌ Nečitelný: ${typeLabels[d.doc_type]||d.doc_type}`, color: 'var(--red)' })
-    })
-
-    // 4. Expirované nebo expirující dokumenty (status=ok)
-    myDocs.filter(d => d.status === 'ok' && d.valid_until).forEach(d => {
-      const daysLeft = Math.ceil((new Date(d.valid_until) - today) / 86400000)
-      if (daysLeft < 0) {
-        workerAlerts.push({ type: 'expired', msg: `❌ Expiroval: ${typeLabels[d.doc_type]||d.doc_type} (${d.valid_until})`, color: 'var(--red)' })
-      } else if (daysLeft <= 30) {
-        workerAlerts.push({ type: 'expiring', msg: `⚠️ Expiruje za ${daysLeft}d: ${typeLabels[d.doc_type]||d.doc_type}`, color: 'var(--amber)' })
-      }
-    })
-
-    if (workerAlerts.length > 0) {
-      alerts.push({ worker: w, issues: workerAlerts })
-    }
-  })
-
-  // Aktualizuj stat counter
-  const statEl = document.getElementById('stat-docs')
-  if (statEl) {
-    statEl.textContent = alerts.length
-    statEl.style.color = alerts.length > 0 ? 'var(--red)' : 'var(--green)'
-  }
-
-  // Zobraz kartu s upozorněními
-  const card = document.getElementById('doc-alerts-card')
-  const list = document.getElementById('doc-alerts-list')
-  if (!card || !list) return
-
-  if (!alerts.length) {
-    card.style.display = 'none'
-    return
-  }
-
-  card.style.display = 'block'
-  list.innerHTML = alerts.map(({ worker, issues }) => `
-    <div style="padding:10px 0;border-bottom:1px solid var(--brd)">
-      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:5px">
-        <b style="font-size:13px;cursor:pointer;color:var(--blue)" onclick="openWorkerModal('${worker.id}')">${worker.full_name} ↗</b>
-        <span style="font-size:11px;color:var(--text3)">${worker.profession||''}</span>
-      </div>
-      ${issues.map(i => `<div style="font-size:12px;color:${i.color};padding:2px 0">${i.msg}</div>`).join('')}
-    </div>
-  `).join('')
-}
-
-// ============ PRŮVODCE / TUTORIAL ============
+// ============ DOCUMENT ALERTS ADMIN ============// ============ PRŮVODCE / TUTORIAL ============
 const tutorialSteps = [
   {
     icon: '👋',
@@ -3488,21 +3281,7 @@ async function uploadDocument() {
   btn.disabled = false
   btn.textContent = '📤 Nahrát'
   progress.style.display = 'none'
-}
-
-async function loadMobContracts() {
-  if (!currentUser) return
-  const { data } = await sb.from('contracts').select('*').eq('worker_id',currentUser.id)
-  const div = document.getElementById('mob-contracts')
-  if (!data?.length) { div.innerHTML='<div style="text-align:center;color:var(--text3);font-size:13px;padding:20px">Žádné smlouvy k podpisu</div>'; return }
-  div.innerHTML = data.map(c=>`<div style="border:1.5px solid ${c.status==='pending'?'var(--amber)':'var(--green)'};border-radius:10px;padding:12px;margin-bottom:8px">
-    <div style="font-size:13px;font-weight:700;margin-bottom:4px">${c.title}</div>
-    <div style="font-size:12px;color:var(--text2)">${c.status==='pending'?'⏳ Čeká na tvůj podpis':'✅ Podepsána'}</div>
-    ${c.status==='pending'?`<button onclick="signContract('${c.id}')" style="width:100%;margin-top:10px;padding:9px;background:var(--blue);color:#fff;border:none;border-radius:8px;font-size:12px;font-weight:700;cursor:pointer;font-family:inherit">✍️ Podepsat</button>`:''}
-  </div>`).join('')
-}
-
-async function signContract(id) {
+}async function signContract(id) {
   await sb.from('contracts').update({status:'signed_electronic',signed_at:new Date().toISOString()}).eq('id',id)
   showToast('✅ Smlouva podepsána!')
   loadMobContracts()
@@ -3528,7 +3307,16 @@ function sv(name, navEl) {
   if(v)v.classList.add('on')
   document.querySelectorAll('.sb-a').forEach(a=>a.classList.remove('on'))
   if(navEl)navEl.classList.add('on')
-  if(name === 'chat') { loadAdminChatList() }
+  if(name === 'chat') {
+    loadAdminChatList()
+  } else {
+    // Když admin odejde z chatu, odpoj realtime a reset active worker
+    if (adminChatRealtimeSub && typeof sb !== 'undefined') {
+      try { sb.removeChannel(adminChatRealtimeSub) } catch(e) {}
+      adminChatRealtimeSub = null
+    }
+    activeChatWorkerId = null
+  }
   if(name === 'zpravy') { loadNotifHistory() }
   const titles={dashboard:'Dashboard',tymy:'Týmy',dochazka:'Docházka',pracovnici:'Pracovníci',dokumenty:'Dokumenty',smlouvy:'Smlouvy',faktury:'Faktury',zpravy:'Zprávy',chat:'Chat',oznameni:'Oznámení',pristupy:'Přístupy'}
   document.getElementById('pt').textContent=titles[name]||name
