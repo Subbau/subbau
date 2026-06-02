@@ -3486,6 +3486,78 @@ function showToast(msg) {
 
 
 
+
+// ── EDITACE ZÁZNAMU DOCHÁZKY ──
+function editAttRecord(id, date, ci, co, bs, be) {
+  document.getElementById('edit-att-id').value = id
+  document.getElementById('edit-att-date').value = date
+  document.getElementById('edit-att-ci').value = ci ? ci.slice(0,5) : ''
+  document.getElementById('edit-att-co').value = co ? co.slice(0,5) : ''
+  document.getElementById('edit-att-bs').value = bs ? bs.slice(0,5) : ''
+  document.getElementById('edit-att-be').value = be ? be.slice(0,5) : ''
+  document.getElementById('edit-att-modal').style.display = 'flex'
+  updateEditHoursPreview()
+}
+
+function closeEditAttModal() {
+  document.getElementById('edit-att-modal').style.display = 'none'
+}
+
+function updateEditHoursPreview() {
+  const ci = document.getElementById('edit-att-ci').value
+  const co = document.getElementById('edit-att-co').value
+  const bs = document.getElementById('edit-att-bs').value
+  const be = document.getElementById('edit-att-be').value
+  const preview = document.getElementById('edit-hours-preview')
+  const val = document.getElementById('edit-hours-val')
+  if (ci && co) {
+    const h = calcHours(ci+':00', co+':00', bs?bs+':00':null, be?be+':00':null)
+    if (preview) preview.style.display = 'block'
+    if (val) val.textContent = h.toFixed(2) + 'h'
+  } else {
+    if (preview) preview.style.display = 'none'
+  }
+}
+
+async function saveEditAttRecord() {
+  const id = document.getElementById('edit-att-id').value
+  const ci = document.getElementById('edit-att-ci').value
+  const co = document.getElementById('edit-att-co').value
+  const bs = document.getElementById('edit-att-bs').value
+  const be = document.getElementById('edit-att-be').value
+
+  if (!ci) { showToast('⚠️ Zadejte příchod'); return }
+
+  const hours = (ci && co) ? calcHours(ci+':00', co+':00', bs?bs+':00':null, be?be+':00':null) : null
+
+  const { error } = await sb.from('attendance').update({
+    check_in: ci + ':00',
+    check_out: co ? co + ':00' : null,
+    break_start: bs ? bs + ':00' : null,
+    break_end: be ? be + ':00' : null,
+    total_hours: hours,
+    is_manual: true
+  }).eq('id', id)
+
+  if (error) { showToast('❌ Chyba: ' + error.message); return }
+
+  showToast('✅ Záznam uložen')
+  closeEditAttModal()
+  loadWdAttendance()
+  loadKWData()
+}
+
+async function deleteAttRecord() {
+  const id = document.getElementById('edit-att-id').value
+  if (!confirm('Opravdu smazat tento záznam docházky?')) return
+  const { error } = await sb.from('attendance').delete().eq('id', id)
+  if (error) { showToast('❌ Chyba: ' + error.message); return }
+  showToast('🗑 Záznam smazán')
+  closeEditAttModal()
+  loadWdAttendance()
+  loadKWData()
+}
+
 // ============ RUČNÍ ZÁPIS DOCHÁZKY ============
 function toggleManualForm() {
   const form = document.getElementById('manual-att-form')
@@ -3545,15 +3617,18 @@ async function saveManualAttendance() {
   const kw = getKW(new Date(date))
 
   // Zkontroluj jestli záznam pro tento den a pracovníka už existuje
-  const { data: existing } = await sb.from('attendance')
+  // Načti všechny záznamy pro daný den (může být více směn)
+  const { data: existingAll } = await sb.from('attendance')
     .select('id,check_in,check_out')
     .eq('worker_id', workerId)
     .eq('work_date', date)
-    .maybeSingle()
+    .order('check_in')
+
+  const existing = existingAll?.[0] || null
 
   if (existing) {
-    // Záznam existuje — nabídni update
-    if (!confirm(`Pro tento den již existuje záznam (${existing.check_in?.slice(0,5)} → ${existing.check_out?.slice(0,5)||'?'}). Přepsat?`)) return
+    const countMsg = existingAll.length > 1 ? ` (${existingAll.length} záznamy — aktualizuji první)` : ''
+    if (!confirm(`Pro tento den již existuje záznam (${existing.check_in?.slice(0,5)} → ${existing.check_out?.slice(0,5)||'?'})${countMsg}. Přepsat?`)) return
     const { error } = await sb.from('attendance').update({
       check_in: ci+':00',
       check_out: co+':00',
@@ -4731,19 +4806,23 @@ async function loadWdAttendance() {
       ? r.break_start.slice(0,5) + (r.break_end ? ' → ' + r.break_end.slice(0,5) : ' (probíhá)')
       : '—'
     return `<tr>
-      <td>${r.work_date}</td>
+      <td style="font-size:12px">${r.work_date}</td>
       <td>${r.check_in?.slice(0,5)||'—'}</td>
       <td>${r.check_out?.slice(0,5)||'—'}</td>
       <td style="font-size:11px">${breakStr}</td>
       <td>${hoursDisplay}</td>
       <td style="font-size:11px">${r.location_address||'—'}</td>
+      <td><button onclick="editAttRecord('${r.id}','${r.work_date}','${r.check_in||''}','${r.check_out||''}','${r.break_start||''}','${r.break_end||''}')" style="padding:3px 8px;font-size:11px;border:1px solid var(--brd);border-radius:6px;cursor:pointer;background:var(--bg);font-family:inherit">✏️</button></td>
     </tr>`
   }).join('')
   const nowStr2 = new Date().toTimeString().slice(0,8)
+  const todayDateStr = new Date().toISOString().split('T')[0]
   const total = data.reduce((s,r) => {
     if (r.total_hours) return s + r.total_hours
-    if (r.check_in && !r.check_out) return s + calcHours(r.check_in, nowStr2, r.break_start, r.break_end)
-    return s
+    if (r.check_in && !r.check_out && r.work_date === todayDateStr) {
+      return s + calcHours(r.check_in, nowStr2, r.break_start, r.break_end)
+    }
+    return s  // Nezavřené staré záznamy se nepočítají
   }, 0)
   document.getElementById('wd-att-total').textContent = total.toFixed(1)+'h'
 }
@@ -4979,6 +5058,47 @@ document.getElementById('login-pwd').addEventListener('keydown', e=>{if(e.key===
   #invoice-content { border-radius:0!important; }
 }
 </style>
+
+
+<!-- EDIT ATTENDANCE MODAL -->
+<div id="edit-att-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.5);z-index:400;display:none;align-items:center;justify-content:center;padding:20px">
+  <div style="background:#fff;border-radius:16px;padding:24px;width:100%;max-width:400px;box-shadow:0 8px 32px rgba(0,0,0,0.2)">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
+      <h3 style="margin:0;font-size:16px">✏️ Upravit záznam docházky</h3>
+      <button onclick="closeEditAttModal()" style="background:none;border:none;font-size:20px;cursor:pointer;color:var(--text2)">✕</button>
+    </div>
+    <input type="hidden" id="edit-att-id">
+    <div class="fg">
+      <label>Datum</label>
+      <input type="date" id="edit-att-date" style="width:100%">
+    </div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
+      <div class="fg">
+        <label>Příchod</label>
+        <input type="time" id="edit-att-ci" oninput="updateEditHoursPreview()">
+      </div>
+      <div class="fg">
+        <label>Odchod</label>
+        <input type="time" id="edit-att-co" oninput="updateEditHoursPreview()">
+      </div>
+      <div class="fg">
+        <label>Přestávka začala</label>
+        <input type="time" id="edit-att-bs" oninput="updateEditHoursPreview()">
+      </div>
+      <div class="fg">
+        <label>Přestávka skončila</label>
+        <input type="time" id="edit-att-be" oninput="updateEditHoursPreview()">
+      </div>
+    </div>
+    <div id="edit-hours-preview" style="background:var(--blue-l);border-radius:8px;padding:10px;text-align:center;margin:10px 0;display:none">
+      <span style="font-size:13px;color:var(--blue);font-weight:700" id="edit-hours-val">0h</span>
+    </div>
+    <div style="display:flex;gap:8px;margin-top:16px">
+      <button onclick="deleteAttRecord()" style="padding:10px;background:var(--red-l);color:var(--red);border:none;border-radius:8px;cursor:pointer;font-family:inherit;font-size:13px">🗑 Smazat</button>
+      <button onclick="saveEditAttRecord()" class="btn-pri" style="flex:1;padding:10px">💾 Uložit změny</button>
+    </div>
+  </div>
+</div>
 
 </body>
 </html>
