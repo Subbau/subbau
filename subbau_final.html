@@ -1052,6 +1052,29 @@ tr:hover td{background:#fafbfc}
         </div>
       </div>
 
+      <!-- Generátor faktur -->
+      <div class="mob-card" style="margin-top:0">
+        <div class="mob-card-title">📄 Generátor faktury</div>
+        <p style="font-size:12px;color:var(--text2);margin-bottom:12px">Vygenerujte fakturu pro odpracovaný týden.</p>
+        <div class="fg" style="margin-bottom:10px">
+          <label style="font-size:12px">Týden</label>
+          <select id="inv-week-sel" style="width:100%;padding:8px;border:1px solid var(--brd);border-radius:8px;font-size:13px;font-family:inherit"></select>
+        </div>
+        <div class="fg" style="margin-bottom:10px">
+          <label style="font-size:12px">Váš IBAN</label>
+          <input type="text" id="inv-iban" placeholder="CZ00 0000 0000 0000 0000 0000" style="width:100%;padding:8px;border:1px solid var(--brd);border-radius:8px;font-size:13px;font-family:inherit">
+        </div>
+        <div class="fg" style="margin-bottom:10px">
+          <label style="font-size:12px">SWIFT / BIC</label>
+          <input type="text" id="inv-swift" placeholder="AIRACZPP" style="width:100%;padding:8px;border:1px solid var(--brd);border-radius:8px;font-size:13px;font-family:inherit">
+        </div>
+        <div class="fg" style="margin-bottom:12px">
+          <label style="font-size:12px">Hodinová sazba (EUR)</label>
+          <input type="number" id="inv-rate" placeholder="18" style="width:100%;padding:8px;border:1px solid var(--brd);border-radius:8px;font-size:13px;font-family:inherit">
+        </div>
+        <button onclick="generateInvoiceMob()" style="width:100%;padding:12px;background:#1a1a1a;color:#FFCD00;border:none;border-radius:10px;font-size:14px;font-weight:700;cursor:pointer;font-family:inherit">📄 Vygenerovat fakturu</button>
+      </div>
+
       <div style="margin-top:8px;margin-bottom:20px;text-align:center;font-size:12px;color:var(--text3)">Odhlášení je dostupné v záhlaví aplikace ↗</div>
     </div>
   </div>
@@ -1482,6 +1505,7 @@ function showOsvec(profile) {
     loadMobContracts()
     loadMobVacations()
     loadMobProfil(profile)
+    loadInvoiceWeeks()
     loadMobNotifications()
     updateChatBadge()
     checkDocumentAlerts()
@@ -2264,10 +2288,7 @@ async function sendAdminChatMessage() {
     type: 'chat',
     is_read: false
   })
-}
-
-
-// ============ DOCUMENT ALERTS ADMIN ============// ============ PRŮVODCE / TUTORIAL ============
+}// ============ PRŮVODCE / TUTORIAL ============
 const tutorialSteps = [
   {
     icon: '👋',
@@ -3679,6 +3700,255 @@ async function loadDocumentAlertsStat() {
   `).join('')
 }
 
+
+// ============ GENERÁTOR FAKTUR ============
+async function generateInvoiceMob() {
+  if (!currentUser || !currentProfile) { showToast('❌ Nejste přihlášeni'); return }
+
+  const weekSel = document.getElementById('inv-week-sel')
+  const iban = document.getElementById('inv-iban').value.trim()
+  const swift = document.getElementById('inv-swift').value.trim()
+  const rate = parseFloat(document.getElementById('inv-rate').value) || 0
+
+  if (!weekSel?.value) { showToast('⚠️ Vyberte týden'); return }
+  if (!iban) { showToast('⚠️ Zadejte IBAN'); return }
+  if (!rate) { showToast('⚠️ Zadejte hodinovou sazbu'); return }
+
+  const [week, year] = weekSel.value.split('/')
+  showToast('⏳ Načítám docházku...')
+
+  // Načti hodiny za vybraný týden
+  const { data: att } = await sb.from('attendance')
+    .select('*')
+    .eq('worker_id', currentUser.id)
+    .eq('kw', parseInt(week))
+    .eq('kw_year', parseInt(year))
+
+  const totalHours = (att || []).reduce((s,r) => s + (r.total_hours||0), 0)
+  const totalAmount = Math.round(totalHours * rate * 100) / 100
+
+  // Data faktury
+  const today = new Date()
+  const dueDate = new Date(today.getTime() + 14 * 86400000)
+  const fmt = d => d.toLocaleDateString('en-GB').replace(/\//g, '.')
+  const invoiceNum = `${year}${week.toString().padStart(2,'0')}`
+
+  // Profese v angličtině
+  const profEN = {
+    'Svářeč — elektroda (111)': 'Welder electrode (111)',
+    'Svářeč — MIG/MAG (135/136/138)': 'Welder MIG/MAG (135/136/138)',
+    'Pokrývač — rovné i šikmé střechy': 'Roofer flat and pitched roofs',
+    'Pokrývač — bitumen': 'Roofer bitumen',
+    'Pokrývač — fólie': 'Roofer membrane',
+    'Pomocný střechař': 'Roofing assistant',
+    'Tesař': 'Carpenter',
+    'Pomocný tesař': 'Carpentry assistant',
+    'Dřevostavby': 'Timber frame construction',
+    'Topenář': 'Heating engineer',
+    'Instalatér': 'Plumber',
+    'Vzduchotechnik': 'HVAC technician',
+    'Montáž dveří a oken': 'Door and window installation',
+    'Instalace solárních panelů': 'Solar panel installation',
+    'Elektrikář': 'Electrician',
+    'Pomocný elektrikář': 'Electrician assistant',
+    'Zedník': 'Bricklayer',
+    'Zedník — klinker': 'Bricklayer klinker',
+    'Obkladač': 'Tiler',
+    'Omítkář': 'Plasterer',
+    'Fasádník': 'Facade worker',
+    'Sádrokartonář': 'Drywaller',
+    'Pokladač zámkové dlažby': 'Paving installer',
+    'Klempíř (střechař)': 'Sheet metal worker',
+    'Lešenář': 'Scaffolder',
+    'Jeřábník': 'Crane operator',
+    'Bagrista': 'Excavator operator',
+    'Malíř': 'Painter',
+    'Pomocné práce na stavbě': 'General construction worker',
+  }
+  const profEn = profEN[currentProfile.profession] || currentProfile.profession || 'Construction worker'
+  const serviceDesc = `${profEn} service — week ${week}/${year}`
+
+  // Jméno na větvě
+  const workerName = currentProfile.full_name || ''
+  const workerAddr = currentProfile.locality || ''
+  const workerIC = currentProfile.ic || ''
+
+  renderInvoice({
+    invoiceNum, today: fmt(today), dueDate: fmt(dueDate),
+    workerName, workerAddr, workerIC,
+    iban: iban.replace(/\s+/g,'').replace(/(.{4})/g,'$1 ').trim(),
+    swift,
+    serviceDesc, totalHours, rate, totalAmount, week, year
+  })
+}
+
+function renderInvoice(d) {
+  const overlay = document.getElementById('invoice-overlay')
+  const content = document.getElementById('invoice-content')
+  if (!overlay || !content) return
+
+  content.innerHTML = `
+  <div style="font-family:'Calibri','Arial',sans-serif;font-size:11pt;color:#000;max-width:100%;padding:0">
+
+    <!-- HEADER ROW -->
+    <table style="width:100%;border-collapse:collapse">
+      <tr>
+        <!-- IDENTIFICATION DATA -->
+        <td style="width:55%;vertical-align:top;padding:16px 16px 0 16px;border-right:1px solid #000">
+          <div style="font-size:7pt;font-weight:700;color:#666;letter-spacing:1px;text-transform:uppercase;writing-mode:vertical-lr;transform:rotate(180deg);float:left;margin-right:10px;border-right:2px solid #000;padding-right:6px;height:120px;display:flex;align-items:center">IDENTIFICATION DATA</div>
+          <div style="margin-left:24px">
+            <table style="width:100%;font-size:10pt">
+              <tr><td style="color:#666;padding:2px 8px 2px 0;width:80px">Supplier</td><td style="font-weight:700">${d.workerName}</td></tr>
+              <tr><td style="color:#666;padding:2px 8px 2px 0">Address</td><td>${d.workerAddr || '___________________'}</td></tr>
+              <tr><td style="color:#666;padding:2px 8px 2px 0">ID</td><td>${d.workerIC || '___________________'}</td></tr>
+              <tr><td colspan="2" style="color:#666;font-size:9pt;padding-top:4px">Not a VAT-payer</td></tr>
+            </table>
+            <div style="margin-top:10px;font-size:9pt;color:#666">
+              <div>Email: ___________________</div>
+              <div>Phone: ___________________</div>
+            </div>
+          </div>
+        </td>
+        <!-- INVOICE NUMBER + CUSTOMER -->
+        <td style="width:45%;vertical-align:top;padding:16px">
+          <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:12px">
+            <div style="font-size:14pt;font-weight:700">Invoice</div>
+            <div style="text-align:right">
+              <div style="font-size:14pt;font-weight:700;border:1px solid #000;padding:4px 12px">${d.invoiceNum}</div>
+              <div style="font-size:8pt;color:#666;margin-top:2px">Invoice No.</div>
+            </div>
+          </div>
+          <div style="font-size:9pt;color:#666;margin-bottom:4px">Customer</div>
+          <div style="font-size:10pt;font-weight:700">Treskower Zimmermann und Dachdecker GmbH</div>
+          <div style="font-size:10pt">Ahornallee 9</div>
+          <div style="font-size:10pt">16818 Märkisch Linden/ OT Werder</div>
+          <div style="font-size:10pt">Germany</div>
+          <div style="font-size:9pt;color:#666;margin-top:4px">ID: 198456703 &nbsp; VAT ID: DE198456703</div>
+        </td>
+      </tr>
+    </table>
+
+    <!-- DATES ROW -->
+    <table style="width:100%;border-collapse:collapse;border-top:1px solid #000">
+      <tr>
+        <td style="padding:8px 16px">
+          <span style="color:#666;font-size:9pt">Date of issue: </span>
+          <span style="font-weight:700">${d.today}</span>
+        </td>
+        <td style="padding:8px 16px">
+          <span style="color:#666;font-size:9pt">Due date: </span>
+          <span style="font-weight:700">${d.dueDate}</span>
+        </td>
+        <td style="padding:8px 16px;text-align:right">
+          <span style="color:#666;font-size:9pt">Payment: </span>
+          <span style="font-weight:700">Bank transfer</span>
+        </td>
+      </tr>
+    </table>
+
+    <!-- PAYMENT DATA -->
+    <table style="width:100%;border-collapse:collapse;border-top:1px solid #000;background:#f8f8f8">
+      <tr>
+        <td style="vertical-align:top;padding:12px 16px;width:55%;border-right:1px solid #ccc">
+          <div style="font-size:7pt;font-weight:700;color:#666;letter-spacing:1px;text-transform:uppercase;margin-bottom:8px">PAYMENT DATA</div>
+          <table style="width:100%;font-size:10pt">
+            <tr><td style="color:#666;padding:2px 8px 2px 0;width:60px">IBAN</td><td style="font-weight:700;font-family:monospace">${d.iban}</td></tr>
+            <tr><td style="color:#666;padding:2px 8px 2px 0">SWIFT</td><td>${d.swift || '___________'}</td></tr>
+          </table>
+        </td>
+        <td style="vertical-align:top;padding:12px 16px;width:45%">
+          <table style="width:100%;font-size:10pt">
+            <tr><td style="color:#666;padding:2px 8px 2px 0">Variable symbol</td><td style="font-weight:700">${d.invoiceNum}</td></tr>
+            <tr><td style="color:#666;padding:2px 8px 2px 0">Constant symbol</td><td>0308</td></tr>
+            <tr><td colspan="2" style="padding-top:8px">
+              <span style="font-size:9pt;color:#666">For payment: </span>
+              <span style="font-size:14pt;font-weight:700">${d.totalAmount.toFixed(2)} EUR</span>
+            </td></tr>
+          </table>
+        </td>
+      </tr>
+    </table>
+
+    <!-- SERVICE TABLE -->
+    <table style="width:100%;border-collapse:collapse;border-top:1px solid #000">
+      <tr style="background:#e8e8e8">
+        <td style="padding:6px 16px;font-size:9pt;font-weight:700;border-bottom:1px solid #ccc">Delivery name</td>
+        <td style="padding:6px 8px;font-size:9pt;font-weight:700;text-align:center;border-bottom:1px solid #ccc">Quantity</td>
+        <td style="padding:6px 8px;font-size:9pt;font-weight:700;text-align:center;border-bottom:1px solid #ccc">Unit</td>
+        <td style="padding:6px 8px;font-size:9pt;font-weight:700;text-align:right;border-bottom:1px solid #ccc">Unit price</td>
+        <td style="padding:6px 16px;font-size:9pt;font-weight:700;text-align:right;border-bottom:1px solid #ccc">Total</td>
+      </tr>
+      <tr>
+        <td style="padding:10px 16px;font-size:10pt">${d.serviceDesc}</td>
+        <td style="padding:10px 8px;text-align:center;font-size:10pt">${d.totalHours.toFixed(2)}</td>
+        <td style="padding:10px 8px;text-align:center;font-size:10pt">h</td>
+        <td style="padding:10px 8px;text-align:right;font-size:10pt">${d.rate.toFixed(2)}</td>
+        <td style="padding:10px 16px;text-align:right;font-size:10pt;font-weight:700">${d.totalAmount.toFixed(2)}</td>
+      </tr>
+      <tr style="background:#f8f8f8">
+        <td colspan="3"></td>
+        <td style="padding:6px 8px;font-size:9pt;color:#666;text-align:right;border-top:1px solid #ccc">VAT (0%)</td>
+        <td style="padding:6px 16px;text-align:right;font-size:10pt;border-top:1px solid #ccc">0.00</td>
+      </tr>
+    </table>
+
+    <!-- SUMMARY -->
+    <table style="width:100%;border-collapse:collapse;border-top:2px solid #000">
+      <tr>
+        <td style="padding:16px;vertical-align:top;width:55%;border-right:1px solid #ccc">
+          <div style="font-size:7pt;font-weight:700;color:#666;letter-spacing:1px;text-transform:uppercase;margin-bottom:12px">SUMMARY</div>
+          <div style="font-size:9pt;color:#666;margin-bottom:30px">Stamp and signature:</div>
+          <div style="border-bottom:1px solid #999;width:200px;margin-bottom:4px"></div>
+          <div style="font-size:8pt;color:#666">${d.workerName}</div>
+        </td>
+        <td style="padding:16px;vertical-align:middle;width:45%;text-align:right">
+          <div style="font-size:9pt;color:#666;margin-bottom:4px">Total amount:</div>
+          <div style="font-size:20pt;font-weight:700;border-bottom:2px solid #000;padding-bottom:8px;margin-bottom:8px">${d.totalAmount.toFixed(2)} EUR</div>
+          <div style="font-size:8pt;color:#666">REVERSE CHARGE</div>
+        </td>
+      </tr>
+    </table>
+
+    <!-- FOOTER -->
+    <div style="border-top:1px solid #ccc;padding:8px 16px;text-align:center;font-size:8pt;color:#999;background:#f8f8f8">
+      By SubBau invoice generator &nbsp;|&nbsp; Page 1/1
+    </div>
+  </div>`
+
+  overlay.style.display = 'block'
+  document.body.style.overflow = 'hidden'
+}
+
+async function loadInvoiceWeeks() {
+  if (!currentUser) return
+  const sel = document.getElementById('inv-week-sel')
+  if (!sel) return
+
+  const { data } = await sb.from('attendance')
+    .select('kw, kw_year, total_hours')
+    .eq('worker_id', currentUser.id)
+    .order('kw_year', {ascending: false})
+    .order('kw', {ascending: false})
+
+  if (!data?.length) {
+    sel.innerHTML = '<option value="">Žádné odpracované týdny</option>'
+    return
+  }
+
+  // Seskup po týdnech
+  const weeks = {}
+  data.forEach(r => {
+    const key = `${r.kw}/${r.kw_year}`
+    if (!weeks[key]) weeks[key] = 0
+    weeks[key] += r.total_hours || 0
+  })
+
+  sel.innerHTML = Object.entries(weeks).map(([key, h]) => {
+    const [w, y] = key.split('/')
+    return `<option value="${key}">Týden ${w}/${y} — ${h.toFixed(1)}h</option>`
+  }).join('')
+}
+
 // ============ PRŮVODCE / TUTORIAL ============
 // ============ SMLOUVY ============
 let contractFile = null
@@ -4685,6 +4955,30 @@ document.getElementById('login-pwd').addEventListener('keydown', e=>{if(e.key===
     <button class="btn-login" id="recovery-btn" onclick="doPasswordRecovery()">Uložit nové heslo →</button>
   </div>
 </div>
+
+
+<!-- FAKTURA OVERLAY -->
+<div id="invoice-overlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.9);z-index:10000;overflow-y:auto;padding:20px">
+  <div style="max-width:700px;margin:0 auto">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
+      <div style="color:#FFCD00;font-weight:700;font-size:16px">📄 Faktura — náhled</div>
+      <div style="display:flex;gap:8px">
+        <button onclick="window.print()" style="padding:8px 16px;background:#FFCD00;color:#1a1a1a;border:none;border-radius:8px;font-weight:700;cursor:pointer;font-family:inherit">🖨 Tisk / PDF</button>
+        <button onclick="document.getElementById('invoice-overlay').style.display='none';document.body.style.overflow=''" style="padding:8px 14px;background:rgba(255,255,255,.1);color:#fff;border:none;border-radius:8px;cursor:pointer;font-family:inherit">✕ Zavřít</button>
+      </div>
+    </div>
+    <div id="invoice-content" style="background:#fff;border-radius:8px;overflow:hidden"></div>
+  </div>
+</div>
+
+<style>
+@media print {
+  body > *:not(#invoice-overlay) { display: none !important; }
+  #invoice-overlay { position:static!important; background:white!important; padding:0!important; }
+  #invoice-overlay > div > div:first-child { display:none!important; }
+  #invoice-content { border-radius:0!important; }
+}
+</style>
 
 </body>
 </html>
