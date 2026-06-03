@@ -799,9 +799,20 @@ tr:hover td{background:#fafbfc}
         <!-- PŘÍSTUPY -->
         <div id="v-pristupy" class="view">
           <div class="card">
-            <div class="card-h"><h4>Správa přístupů</h4></div>
+            <div class="card-h">
+              <h4>🔑 Reset hesla pro pracovníka</h4>
+              <span style="font-size:12px;color:var(--text3)">Pracovník dostane email s odkazem na nastavení nového hesla</span>
+            </div>
             <table>
-              <thead><tr><th>Pracovník</th><th>Email</th><th>Role</th><th>Stav</th><th>Akce</th></tr></thead>
+              <thead>
+                <tr>
+                  <th>Jméno</th>
+                  <th>Email</th>
+                  <th>Role</th>
+                  <th>Stav</th>
+                  <th style="text-align:center">Reset hesla</th>
+                </tr>
+              </thead>
               <tbody id="access-table">
                 <tr><td colspan="5" style="text-align:center;color:var(--text3);padding:20px">Načítám...</td></tr>
               </tbody>
@@ -1863,6 +1874,61 @@ async function doLogout() {
   stopClock()
   try { await sb.auth.signOut() } catch(e) { console.error('signOut error:', e) }
   showLogin()  // Vždy přejdi na login, i kdyby event selhal
+}
+
+
+// ============ PŘÍSTUPY - RESET HESLA ============
+async function loadAccess() {
+  const tbody = document.getElementById('access-table')
+  if (!tbody) return
+  tbody.innerHTML = '<tr><td colspan="5" style="text-align:center;padding:20px;color:var(--text3)">Načítám...</td></tr>'
+
+  const { data } = await sb.from('profiles')
+    .select('id, full_name, email, role, is_active')
+    .in('role', ['osvec', 'partak'])
+    .order('full_name')
+
+  if (!data?.length) {
+    tbody.innerHTML = '<tr><td colspan="5" style="text-align:center;padding:20px;color:var(--text3)">Žádní pracovníci</td></tr>'
+    return
+  }
+
+  const roleLabels = { osvec: 'OSVČ', partak: 'Parťák' }
+
+  tbody.innerHTML = data.map(w => `
+    <tr>
+      <td><b>${w.full_name}</b></td>
+      <td style="font-size:12px;color:var(--text2)">${w.email}</td>
+      <td><span class="pill pb">${roleLabels[w.role] || w.role}</span></td>
+      <td><span class="pill ${w.is_active ? 'pg' : 'pr'}">${w.is_active ? 'Aktivní' : 'Neaktivní'}</span></td>
+      <td style="text-align:center">
+        <button onclick="sendPasswordReset('${w.email}','${w.full_name}')"
+          style="padding:5px 14px;font-size:12px;background:#1a1a1a;color:#FFCD00;border:none;border-radius:6px;cursor:pointer;font-family:inherit;font-weight:700">
+          📧 Odeslat reset
+        </button>
+      </td>
+    </tr>`).join('')
+}
+
+async function sendPasswordReset(email, name) {
+  if (!confirm('Odeslat reset hesla pro ' + name + ' (' + email + ')?')) return
+
+  const btn = event.target
+  btn.textContent = 'Odesílám...'
+  btn.disabled = true
+
+  const { error } = await sb.auth.resetPasswordForEmail(email, {
+    redirectTo: window.location.origin + window.location.pathname
+  })
+
+  btn.textContent = '📧 Odeslat reset'
+  btn.disabled = false
+
+  if (error) {
+    showToast('Chyba: ' + error.message)
+  } else {
+    showToast('Email odeslán: ' + name + ' dostane odkaz na reset hesla')
+  }
 }
 
 // ============ DASHBOARD ============
@@ -3646,6 +3712,7 @@ function sv(name, navEl) {
     activeChatWorkerId = null
   }
   if(name === 'zpravy') { loadNotifHistory() }
+  if(name === 'pristupy') { loadAccess() }
   if(name === 'tymy') { loadTeams() }
   const titles={dashboard:'Dashboard',tymy:'Skupiny / Týmy',dochazka:'Docházka',pracovnici:'Pracovníci',dokumenty:'Dokumenty',smlouvy:'Smlouvy',faktury:'Faktury',zpravy:'Zprávy',chat:'Chat',oznameni:'Oznámení',pristupy:'Přístupy'}
   const pt = document.getElementById('pt')
