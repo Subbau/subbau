@@ -3931,7 +3931,100 @@ function startClock() {
 }
 function stopClock(){if(clockInt)clearInterval(clockInt)}
 
-function exportKW(){showToast('📥 Export PDF — připravujeme...')}
+async function exportKW() {
+  const kw = document.getElementById('kw-sel')?.value
+  if (!kw) { showToast('⚠️ Vyberte týden'); return }
+  const [week, year] = kw.split('-').map(Number)
+  showToast('⏳ Generuji přehled hodin...')
+
+  // Načti data
+  const startDate = getWeekStartDate(week, year)
+  const endDate = new Date(startDate); endDate.setDate(endDate.getDate() + 6)
+  const fmt = d => d.toISOString().split('T')[0]
+
+  const { data: att } = await sb.from('attendance')
+    .select('*, worker:profiles(full_name, profession)')
+    .gte('work_date', fmt(startDate))
+    .lte('work_date', fmt(endDate))
+    .order('work_date')
+
+  if (!att?.length) { showToast('❌ Žádná data pro tento týden'); return }
+
+  // Seskup podle pracovníka
+  const workers = {}
+  att.forEach(r => {
+    const wid = r.worker_id
+    if (!workers[wid]) workers[wid] = { name: r.worker?.full_name, prof: r.worker?.profession, days: {}, total: 0 }
+    const day = new Date(r.work_date).toLocaleDateString('cs-CZ', {weekday:'short', day:'2-digit', month:'2-digit'})
+    const h = r.total_hours || 0
+    workers[wid].days[day] = (workers[wid].days[day] || 0) + h
+    workers[wid].total += h
+  })
+
+  const days = [...new Set(att.map(r => {
+    const d = new Date(r.work_date)
+    return d.toLocaleDateString('cs-CZ', {weekday:'short', day:'2-digit', month:'2-digit'})
+  }))].sort()
+
+  const totalAll = Object.values(workers).reduce((s, w) => s + w.total, 0)
+
+  // Generuj HTML pro tisk
+  const rows = Object.values(workers).map(w => `
+    <tr>
+      <td style="padding:8px 12px;border:1px solid #ddd;font-weight:600">${w.name}</td>
+      <td style="padding:8px 12px;border:1px solid #ddd;color:#666;font-size:12px">${w.prof||''}</td>
+      ${days.map(d => `<td style="padding:8px 12px;border:1px solid #ddd;text-align:center">${w.days[d] ? w.days[d].toFixed(2)+'h' : '—'}</td>`).join('')}
+      <td style="padding:8px 12px;border:1px solid #ddd;text-align:center;font-weight:700;background:#f5f5f5">${w.total.toFixed(2)}h</td>
+    </tr>`).join('')
+
+  const printHTML = `<!DOCTYPE html><html><head><meta charset="UTF-8">
+  <title>Přehled hodin KW${week}/${year}</title>
+  <style>
+    body{font-family:Arial,sans-serif;font-size:13px;color:#000;margin:20px}
+    h1{font-size:18px;margin-bottom:4px}
+    .sub{color:#666;font-size:12px;margin-bottom:20px}
+    table{width:100%;border-collapse:collapse}
+    thead tr{background:#1a1a1a;color:#fff}
+    thead th{padding:10px 12px;text-align:left;border:1px solid #333;font-size:12px}
+    tfoot tr{background:#e8e8e8;font-weight:700}
+    tfoot td{padding:8px 12px;border:1px solid #ddd}
+    @media print{@page{size:A4 landscape;margin:15mm}}
+  </style>
+  </head><body>
+  <h1>Přehled odpracovaných hodin — KW${week}/${year}</h1>
+  <div class="sub">SubBau s.r.o. &nbsp;|&nbsp; ${startDate.toLocaleDateString('cs-CZ')} – ${endDate.toLocaleDateString('cs-CZ')} &nbsp;|&nbsp; Celkem: ${totalAll.toFixed(2)}h</div>
+  <table>
+    <thead><tr>
+      <th>Pracovník</th><th>Profese</th>
+      ${days.map(d => `<th style="text-align:center">${d}</th>`).join('')}
+      <th style="text-align:center">Celkem</th>
+    </tr></thead>
+    <tbody>${rows}</tbody>
+    <tfoot><tr>
+      <td colspan="2">Celkem KW${week}/${year}</td>
+      ${days.map(d => { const tot = Object.values(workers).reduce((s,w) => s+(w.days[d]||0),0); return `<td style="text-align:center">${tot>0?tot.toFixed(2)+'h':'—'}</td>` }).join('')}
+      <td style="text-align:center">${totalAll.toFixed(2)}h</td>
+    </tr></tfoot>
+  </table>
+  <div style="margin-top:30px;font-size:11px;color:#999">Vygenerováno: ${new Date().toLocaleString('cs-CZ')} | SubBau Docházkový systém</div>
+  </body></html>`
+
+  // Otevři print okno
+  const win = window.open('', '_blank', 'width=900,height=600')
+  win.document.write(printHTML)
+  win.document.close()
+  win.focus()
+  setTimeout(() => { win.print() }, 500)
+}
+
+function getWeekStartDate(week, year) {
+  const jan4 = new Date(year, 0, 4)
+  const startOfWeek1 = new Date(jan4)
+  startOfWeek1.setDate(jan4.getDate() - ((jan4.getDay() + 6) % 7))
+  const startDate = new Date(startOfWeek1)
+  startDate.setDate(startOfWeek1.getDate() + (week - 1) * 7)
+  return startDate
+}
 
 let toastT
 function showToast(msg) {
