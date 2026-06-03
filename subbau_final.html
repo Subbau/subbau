@@ -1831,12 +1831,11 @@ async function doRegister() {
     return
   }
 
-  // 2. Vytvoř profil — počkej na session
-  const { data: sessionData } = await sb.auth.getSession()
-  const session = sessionData?.session
+  // 2. Vytvoř profil — použij session z authData přímo
+  const session = authData.session
 
   if (session) {
-    // Email potvrzení je vypnuté — máme session hned
+    // Máme session — vytvoř profil ihned
     const { error: profileErr } = await sb.from('profiles').insert({
       id: userId,
       email,
@@ -1861,8 +1860,26 @@ async function doRegister() {
       return
     }
   } else {
-    // Email potvrzení je zapnuté — profil se vytvoří po potvrzení
-    console.log('Email confirmation required — profile will be created after confirmation')
+    // Zkus profil vložit i bez okamžité session — Supabase ho může mít
+    // (nebo email konfirmace je zapnutá — v tom případě uložíme základní data)
+    const { error: profileErrNoSession } = await sb.from('profiles').insert({
+      id: userId,
+      email,
+      full_name: name,
+      phone,
+      profession: prof,
+      locality,
+      german_level: german,
+      start_date: startDate || null,
+      has_car: hasCar,
+      is_osvec: isOsvec,
+      role: 'osvec',
+      is_active: false,
+      registration_status: 'pending'
+    })
+    if (profileErrNoSession) {
+      console.warn('Profile insert without session failed:', profileErrNoSession.message)
+    }
   }
 
   // 3. Úspěch
