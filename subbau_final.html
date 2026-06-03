@@ -597,7 +597,7 @@ tr:hover td{background:#fafbfc}
                   </label>
                 </div>
                 <div id="contract-upload-progress" style="display:none;padding:10px;background:var(--blue-l);border-radius:8px;font-size:13px;color:var(--blue);text-align:center;margin-bottom:10px">⏳ Nahrávám...</div>
-                <button class="btn-pri" onclick="uploadContract()" style="width:100%;padding:11px">📤 Nahrát a odeslat pracovníkovi</button>
+                <button class="btn-pri" onclick="uploadContract()" style="width:100%;padding:11px">📤 Nahrát a podepsat jako admin</button>
               </div>
             </div>
             <!-- Seznam smluv -->
@@ -3532,6 +3532,83 @@ function showToast(msg) {
 
 
 
+
+// -- ADMIN PODPIS SMLOUVY --
+let adminSignContractId = null
+
+function openAdminSignModal(contractId, title, fileUrl) {
+  adminSignContractId = contractId
+  const modal = document.getElementById('admin-sign-modal')
+  if (!modal) return
+  const titleEl = document.getElementById('admin-sign-title')
+  if (titleEl) titleEl.textContent = title
+  const link = document.getElementById('admin-sign-pdf-link')
+  if (link) { link.href = fileUrl || '#'; link.style.display = fileUrl ? 'block' : 'none' }
+  const area = document.getElementById('admin-sign-canvas-area')
+  if (area) area.innerHTML = '<canvas id="admin-sign-canvas" width="480" height="180" style="border:2px solid #1a1a1a;border-radius:8px;background:#fff;cursor:crosshair;touch-action:none;width:100%"></canvas>'
+  modal.style.display = 'flex'
+  setupAdminSignCanvas()
+}
+
+function closeAdminSignModal() {
+  const modal = document.getElementById('admin-sign-modal')
+  if (modal) modal.style.display = 'none'
+  adminSignContractId = null
+}
+
+function setupAdminSignCanvas() {
+  const canvas = document.getElementById('admin-sign-canvas')
+  if (!canvas) return
+  const ctx = canvas.getContext('2d')
+  let drawing = false
+  function getPos(e) {
+    const rect = canvas.getBoundingClientRect()
+    const src = e.touches ? e.touches[0] : e
+    return { x: (src.clientX-rect.left)*(canvas.width/rect.width), y: (src.clientY-rect.top)*(canvas.height/rect.height) }
+  }
+  ctx.strokeStyle = '#1a1a1a'; ctx.lineWidth = 2; ctx.lineCap = 'round'
+  canvas.onmousedown = e => { drawing=true; const p=getPos(e); ctx.beginPath(); ctx.moveTo(p.x,p.y) }
+  canvas.onmousemove = e => { if(!drawing) return; const p=getPos(e); ctx.lineTo(p.x,p.y); ctx.stroke() }
+  canvas.onmouseup = () => drawing=false; canvas.onmouseleave = () => drawing=false
+  canvas.ontouchstart = e => { e.preventDefault(); drawing=true; const p=getPos(e); ctx.beginPath(); ctx.moveTo(p.x,p.y) }
+  canvas.ontouchmove = e => { e.preventDefault(); if(!drawing) return; const p=getPos(e); ctx.lineTo(p.x,p.y); ctx.stroke() }
+  canvas.ontouchend = () => drawing=false
+}
+
+function clearAdminSignCanvas() {
+  const c = document.getElementById('admin-sign-canvas')
+  if (c) c.getContext('2d').clearRect(0,0,c.width,c.height)
+}
+
+async function submitAdminSignature() {
+  if (!adminSignContractId) return
+  const canvas = document.getElementById('admin-sign-canvas')
+  if (!canvas) return
+  const imgData = canvas.getContext('2d').getImageData(0,0,canvas.width,canvas.height).data
+  if (!imgData.some((v,i) => i%4===3 && v>0)) { showToast('Nejdrive nakreslete podpis'); return }
+  const btn = document.getElementById('admin-sign-submit-btn')
+  if (btn) { btn.textContent='Ukladam...'; btn.disabled=true }
+  const blob = await new Promise(r => canvas.toBlob(r,'image/png'))
+  const filePath = 'admin_signatures/'+adminSignContractId+'_'+Date.now()+'.png'
+  const { error: storErr } = await sb.storage.from('contracts').upload(filePath, blob, {upsert:true})
+  if (storErr) { showToast('Chyba: '+storErr.message); if(btn){btn.textContent='Podepsat';btn.disabled=false}; return }
+  const { data: urlData } = sb.storage.from('contracts').getPublicUrl(filePath)
+  const { error } = await sb.from('contracts').update({
+    admin_signature_url: urlData && urlData.publicUrl,
+    admin_signed_at: new Date().toISOString(),
+    status: 'pending'
+  }).eq('id', adminSignContractId)
+  if (btn) { btn.textContent='Podepsat'; btn.disabled=false }
+  if (error) { showToast('Chyba: '+error.message); return }
+  const { data: cont } = await sb.from('contracts').select('worker_id,title').eq('id',adminSignContractId).maybeSingle()
+  if (cont) {
+    await sb.from('notifications').insert({worker_id:cont.worker_id,title:'Nova smlouva k podpisu',message:'Smlouva "'+cont.title+'" ceka na vas podpis.',type:'smlouva',is_read:false})
+  }
+  showToast('Smlouva podepsana - odeslana pracovnikovi!')
+  closeAdminSignModal()
+  loadAdminContracts()
+}
+
 // ── EDITACE ZÁZNAMU DOCHÁZKY ──
 function editAttRecord(id, date, ci, co, bs, be) {
   document.getElementById('edit-att-id').value = id
@@ -4153,7 +4230,7 @@ async function uploadContract() {
     worker_id: workerId,
     title,
     file_url: fileUrl,
-    status: 'pending',
+    status: 'admin_pending',
     created_at: new Date().toISOString()
   })
   if (dbErr) { showToast('❌ Chyba DB: ' + dbErr.message); progress.style.display='none'; return }
@@ -4173,6 +4250,7 @@ async function uploadContract() {
   document.getElementById('contract-file-name').textContent = 'Žádný soubor'
   document.getElementById('contract-title').value = ''
   document.getElementById('contract-worker').value = ''
+  openAdminSignModal(contract.id, title, fileUrl)
   loadAdminContracts()
 }
 
@@ -5195,6 +5273,27 @@ document.getElementById('login-pwd').addEventListener('keydown', e=>{if(e.key===
     <div style="display:flex;gap:8px;margin-top:16px">
       <button onclick="deleteAttRecord()" style="padding:10px;background:var(--red-l);color:var(--red);border:none;border-radius:8px;cursor:pointer;font-family:inherit;font-size:13px">🗑 Smazat</button>
       <button onclick="saveEditAttRecord()" class="btn-pri" style="flex:1;padding:10px">💾 Uložit změny</button>
+    </div>
+  </div>
+</div>
+
+
+<!-- ADMIN PODPIS SMLOUVY -->
+<div id="admin-sign-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.7);z-index:500;align-items:center;justify-content:center;padding:20px">
+  <div style="background:#fff;border-radius:16px;padding:24px;width:100%;max-width:540px;box-shadow:0 8px 32px rgba(0,0,0,0.3)">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+      <h3 style="margin:0;font-size:15px">Podepsat smlouvu jako admin</h3>
+      <button onclick="closeAdminSignModal()" style="background:none;border:none;font-size:22px;cursor:pointer">&times;</button>
+    </div>
+    <div id="admin-sign-title" style="font-size:13px;font-weight:700;margin-bottom:8px;color:var(--text2)"></div>
+    <a id="admin-sign-pdf-link" href="#" target="_blank" style="font-size:13px;color:var(--blue);margin-bottom:10px;display:none">Zobrazit PDF smlouvy</a>
+    <p style="font-size:12px;color:var(--text2);margin-bottom:10px">Nakreslete podpis. Po podpisu bude smlouva odeslana pracovnikovi k podpisu.</p>
+    <div id="admin-sign-canvas-area" style="margin-bottom:12px">
+      <canvas id="admin-sign-canvas" width="480" height="180" style="border:2px solid #1a1a1a;border-radius:8px;background:#fff;cursor:crosshair;touch-action:none;width:100%"></canvas>
+    </div>
+    <div style="display:flex;gap:8px">
+      <button onclick="clearAdminSignCanvas()" style="padding:10px 16px;background:var(--bg);border:1px solid var(--brd);border-radius:8px;cursor:pointer;font-family:inherit;font-size:13px">Vymazat</button>
+      <button onclick="submitAdminSignature()" id="admin-sign-submit-btn" class="btn-pri" style="flex:1;padding:10px">Podepsat a odeslat pracovnikovi</button>
     </div>
   </div>
 </div>
