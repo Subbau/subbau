@@ -2812,12 +2812,14 @@ async function loadTeams() {
   const div = document.getElementById('teams-list')
   const unassignedDiv = document.getElementById('unassigned-workers')
   if (!div) return
+  div.innerHTML = '<div style="text-align:center;color:var(--text3);padding:20px">Načítám...</div>'
 
   // Načti týmy + jejich členy
-  const { data: teams } = await sb.from('teams').select('*').eq('is_active', true).order('name')
+  const { data: teams, error: teamsErr } = await sb.from('teams').select('*').eq('is_active', true).order('name')
+  if (teamsErr) { div.innerHTML = '<div style="color:var(--red);padding:12px">Chyba: '+teamsErr.message+'</div>'; return }
   // Načti všechny pracovníky s jejich team_id
   const { data: workers } = await sb.from('profiles')
-    .select('id, full_name, profession, team_id')
+    .select('id, full_name, profession, role, team_id')
     .in('role', ['osvec', 'partak'])
     .eq('is_active', true)
     .order('full_name')
@@ -2878,17 +2880,37 @@ async function loadTeams() {
 }
 
 function openNewTeamModal() {
-  const name = prompt('Název skupiny/týmu:')
-  if (!name?.trim()) return
-  const location = prompt('Lokalita stavby (nepovinné):') || ''
-  createTeam(name.trim(), location.trim())
+  const m = document.getElementById('new-team-modal')
+  if (m) {
+    document.getElementById('new-team-name').value = ''
+    document.getElementById('new-team-location').value = ''
+    m.style.display = 'flex'
+    setTimeout(() => document.getElementById('new-team-name').focus(), 100)
+  }
+}
+
+function closeNewTeamModal() {
+  const m = document.getElementById('new-team-modal')
+  if (m) m.style.display = 'none'
+}
+
+async function submitNewTeam() {
+  const name = document.getElementById('new-team-name').value.trim()
+  if (!name) { showToast('Zadejte název skupiny'); return }
+  const location = document.getElementById('new-team-location').value.trim()
+  closeNewTeamModal()
+  await createTeam(name, location)
 }
 
 async function createTeam(name, location) {
-  const { error } = await sb.from('teams').insert({ name, location, is_active: true })
+  const { data: inserted, error } = await sb.from('teams')
+    .insert({ name, location, is_active: true })
+    .select()
+    .single()
   if (error) { showToast('Chyba: ' + error.message); return }
-  showToast('Skupina vytvorena!')
-  loadTeams()
+  showToast('Skupina "' + name + '" vytvořena!')
+  // Krátký delay - Safari potřebuje čas na propagaci
+  setTimeout(() => loadTeams(), 500)
 }
 
 async function deleteTeam(teamId) {
@@ -5523,6 +5545,23 @@ document.getElementById('login-pwd').addEventListener('keydown', e=>{if(e.key===
     <input type="hidden" id="add-member-team-id">
     <div id="add-member-list" style="display:flex;flex-direction:column;gap:8px;max-height:400px;overflow-y:auto">
       <div style="text-align:center;color:var(--text3);padding:20px">Nacitam...</div>
+    </div>
+  </div>
+</div>
+
+
+<!-- NOVA SKUPINA MODAL -->
+<div id="new-team-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.6);z-index:300;align-items:center;justify-content:center;padding:20px">
+  <div style="background:#fff;border-radius:16px;padding:24px;width:100%;max-width:400px;box-shadow:0 8px 32px rgba(0,0,0,0.2)">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
+      <h3 style="margin:0;font-size:16px">Nova skupina</h3>
+      <button onclick="closeNewTeamModal()" style="background:none;border:none;font-size:22px;cursor:pointer">&times;</button>
+    </div>
+    <div class="fg"><label>Nazev skupiny *</label><input type="text" id="new-team-name" placeholder="Stavba Praha..." style="width:100%" onkeydown="if(event.key==='Enter')submitNewTeam()"></div>
+    <div class="fg"><label>Lokalita stavby</label><input type="text" id="new-team-location" placeholder="Praha, Andel..." style="width:100%" onkeydown="if(event.key==='Enter')submitNewTeam()"></div>
+    <div style="display:flex;gap:8px;margin-top:8px">
+      <button onclick="closeNewTeamModal()" style="flex:1;padding:10px;border:1px solid var(--brd);border-radius:8px;cursor:pointer;font-family:inherit;background:var(--bg)">Zrusit</button>
+      <button onclick="submitNewTeam()" class="btn-pri" style="flex:2;padding:10px">Vytvorit skupinu</button>
     </div>
   </div>
 </div>
