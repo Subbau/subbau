@@ -1307,6 +1307,13 @@ const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBh
 const { createClient } = supabase
 const sb = createClient(SUPABASE_URL, SUPABASE_ANON_KEY)
 
+// Detekuj recovery link z URL PŘED auth eventy (SIGNED_IN přijde před PASSWORD_RECOVERY)
+let isRecoveryMode = window.location.hash.includes('type=recovery') ||
+                     new URLSearchParams(window.location.hash.slice(1)).get('type') === 'recovery'
+if (isRecoveryMode) {
+  console.log('[recovery] Recovery mode detekován z URL')
+}
+
 // ============ STATE ============
 let currentUser = null
 let currentProfile = null
@@ -1379,15 +1386,23 @@ sb.auth.onAuthStateChange(async (event, session) => {
 
   // Uživatel klikl na reset hesla v emailu
   if (event === 'PASSWORD_RECOVERY') {
+    isRecoveryMode = false  // Teď jsme v správném recovery stavu
     currentUser = session?.user || null
-    appInitialized = true    // Zabrání SIGNED_IN spustit initApp
+    appInitialized = false
     authHandling = false
+    console.log('[recovery] PASSWORD_RECOVERY event - zobrazuji formulář')
     showPasswordRecovery()
     return
   }
 
   if (event === 'SIGNED_IN' || event === 'INITIAL_SESSION') {
     if (!session?.user) { showLogin(); return }
+    // Pokud je recovery mode - počkej na PASSWORD_RECOVERY event, nespouštěj app
+    if (isRecoveryMode) {
+      console.log('[auth] Recovery mode - ignoruji SIGNED_IN, čekám na PASSWORD_RECOVERY')
+      currentUser = session.user
+      return
+    }
     // Silný guard: stejný user a app je inicializovaná nebo běží
     if (currentUser?.id === session.user.id && (appInitialized || authHandling)) {
       clearAuthTimeout()
