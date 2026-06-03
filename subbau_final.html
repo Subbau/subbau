@@ -5101,15 +5101,18 @@ async function uploadContract() {
   const { data: urlData } = sb.storage.from('contracts').getPublicUrl(filePath)
   const fileUrl = urlData?.publicUrl
 
-  // Ulož do DB
-  const { error: dbErr } = await sb.from('contracts').insert({
+  // Ulož do DB - vrať data pro získání ID
+  const { data: contractData, error: dbErr } = await sb.from('contracts').insert({
     worker_id: workerId,
     title,
     file_url: fileUrl,
     status: 'admin_pending',
     created_at: new Date().toISOString()
-  })
+  }).select().single()
   if (dbErr) { showToast('❌ Chyba DB: ' + dbErr.message); progress.style.display='none'; return }
+
+  const contractId = contractData?.id
+  if (!contractId) { showToast('❌ Nepodařilo se získat ID smlouvy'); progress.style.display='none'; return }
 
   // Pošli notifikaci pracovníkovi
   await sb.from('notifications').insert({
@@ -5120,14 +5123,16 @@ async function uploadContract() {
     is_read: false
   })
 
-  showToast('✅ Smlouva nahrána a odeslána!')
   progress.style.display = 'none'
   contractFile = null
   document.getElementById('contract-file-name').textContent = 'Žádný soubor'
   document.getElementById('contract-title').value = ''
   document.getElementById('contract-worker').value = ''
-  openAdminSignModal(contract.id, title, fileUrl)
   loadAdminContracts()
+
+  // Otevři modal pro admin podpis
+  showToast('✅ Smlouva nahrána — nyní ji podepište!')
+  setTimeout(() => openAdminSignModal(contractId, title, fileUrl), 500)
 }
 
 async function loadAdminContracts() {
