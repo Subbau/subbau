@@ -1244,7 +1244,10 @@ tr:hover td{background:#fafbfc}
         </table>
         <div style="margin-top:10px;padding:10px 14px;background:var(--blue-l);border-radius:8px;display:flex;justify-content:space-between">
           <span style="font-size:13px;color:var(--blue)">Celkem tento týden</span>
-          <span style="font-size:16px;font-weight:700;color:var(--blue)" id="wd-att-total">0h</span>
+          <div style="display:flex;align-items:center;gap:10px">
+            <span style="font-size:16px;font-weight:700;color:var(--blue)" id="wd-att-total">0h</span>
+            <button id="wd-download-btn" style="padding:5px 12px;font-size:12px;background:#1a1a1a;color:#FFCD00;border:none;border-radius:6px;cursor:pointer;font-family:inherit;font-weight:700">📥 PDF</button>
+          </div>
         </div>
       </div>
 
@@ -1685,6 +1688,7 @@ function showOsvec(profile) {
     loadMobVacations()
     loadMobProfil(profile)
     loadInvoiceWeeks()
+    loadMobExportWeeks()
     loadMobNotifications()
     updateChatBadge()
     checkDocumentAlerts()
@@ -3932,8 +3936,9 @@ function startClock() {
 function stopClock(){if(clockInt)clearInterval(clockInt)}
 
 async function exportKW() {
-  const kw = document.getElementById('kw-sel')?.value
-  if (!kw) { showToast('⚠️ Vyberte týden'); return }
+  const kwEl = document.getElementById('kw-select') || document.getElementById('kw-sel')
+  const kw = kwEl?.value
+  if (!kw) { showToast('⚠️ Vyberte týden v přehledu níže'); return }
   const [week, year] = kw.split('-').map(Number)
   showToast('⏳ Generuji přehled hodin...')
 
@@ -4067,6 +4072,94 @@ async function saveWorkerInvoiceCustomer() {
   }).eq('id', currentWorkerId)
   if (error) { showToast('Chyba: ' + error.message); return }
   showToast('Odběratel uložen!')
+}
+
+
+// -- EXPORT HODIN PRACOVNÍKA --
+async function exportWorkerKW(workerId, workerName, week, year) {
+  showToast('⏳ Generuji přehled...')
+
+  const startDate = getWeekStartDate(week, year)
+  const endDate = new Date(startDate); endDate.setDate(endDate.getDate() + 6)
+  const fmt = d => d.toISOString().split('T')[0]
+
+  const { data: att } = await sb.from('attendance')
+    .select('*')
+    .eq('worker_id', workerId)
+    .gte('work_date', fmt(startDate))
+    .lte('work_date', fmt(endDate))
+    .order('work_date')
+
+  const totalHours = (att||[]).reduce((s,r) => s + (r.total_hours||0), 0)
+
+  const rows = (att||[]).map(r => {
+    const d = new Date(r.work_date).toLocaleDateString('cs-CZ', {weekday:'long',day:'2-digit',month:'2-digit'})
+    const h = (r.total_hours||0).toFixed(2)
+    const ci = r.check_in?.slice(0,5) || '—'
+    const co = r.check_out?.slice(0,5) || '—'
+    const bs = r.break_start?.slice(0,5) || '—'
+    const be = r.break_end?.slice(0,5) || '—'
+    return `<tr>
+      <td style="padding:8px 12px;border:1px solid #ddd">${d}</td>
+      <td style="padding:8px 12px;border:1px solid #ddd;text-align:center">${ci}</td>
+      <td style="padding:8px 12px;border:1px solid #ddd;text-align:center">${co}</td>
+      <td style="padding:8px 12px;border:1px solid #ddd;text-align:center">${bs} – ${be}</td>
+      <td style="padding:8px 12px;border:1px solid #ddd;text-align:center;font-weight:700">${h}h</td>
+      <td style="padding:8px 12px;border:1px solid #ddd;font-size:11px;color:#666">${r.location_address||'—'}</td>
+    </tr>`
+  }).join('')
+
+  const printHTML = `<!DOCTYPE html><html><head><meta charset="UTF-8">
+  <title>Hodiny ${workerName} KW${week}/${year}</title>
+  <style>
+    body{font-family:Arial,sans-serif;font-size:13px;margin:20px}
+    h1{font-size:18px;margin-bottom:4px}
+    .sub{color:#666;font-size:12px;margin-bottom:20px}
+    table{width:100%;border-collapse:collapse}
+    thead tr{background:#1a1a1a;color:#fff}
+    thead th{padding:10px 12px;text-align:left;border:1px solid #333}
+    tfoot tr{background:#f0f0f0;font-weight:700}
+    tfoot td{padding:8px 12px;border:1px solid #ddd}
+    @media print{@page{size:A4;margin:15mm}}
+  </style></head><body>
+  <h1>Přehled hodin — ${workerName}</h1>
+  <div class="sub">KW${week}/${year} &nbsp;|&nbsp; ${startDate.toLocaleDateString('cs-CZ')} – ${endDate.toLocaleDateString('cs-CZ')} &nbsp;|&nbsp; SubBau s.r.o.</div>
+  <table>
+    <thead><tr>
+      <th>Den</th><th style="text-align:center">Příchod</th><th style="text-align:center">Odchod</th><th style="text-align:center">Přestávka</th><th style="text-align:center">Hodiny</th><th>Adresa</th>
+    </tr></thead>
+    <tbody>${rows.length ? rows : '<tr><td colspan="6" style="text-align:center;padding:20px;color:#999">Žádné záznamy</td></tr>'}</tbody>
+    <tfoot><tr>
+      <td colspan="4">Celkem KW${week}/${year}</td>
+      <td style="text-align:center">${totalHours.toFixed(2)}h</td>
+      <td></td>
+    </tr></tfoot>
+  </table>
+  <div style="margin-top:30px;font-size:11px;color:#999">Vygenerováno: ${new Date().toLocaleString('cs-CZ')} | SubBau Docházkový systém</div>
+  </body></html>`
+
+  const win = window.open('', '_blank', 'width=850,height=600')
+  win.document.write(printHTML)
+  win.document.close()
+  win.focus()
+  setTimeout(() => win.print(), 500)
+}
+
+
+async function exportMobWorkerHours() {
+  const sel = document.getElementById('mob-export-week')
+  if (!sel?.value) { showToast('Vyberte týden'); return }
+  const [week, year] = sel.value.split('/').map(Number)
+  await exportWorkerKW(currentUser.id, currentProfile?.full_name || 'Pracovník', week, year)
+}
+
+async function loadMobExportWeeks() {
+  const sel = document.getElementById('mob-export-week')
+  if (!sel || !currentUser) return
+  const { data } = await sb.from('attendance').select('kw,kw_year').eq('worker_id', currentUser.id).order('kw_year',{ascending:false}).order('kw',{ascending:false})
+  if (!data?.length) { sel.innerHTML = '<option>Žádné týdny</option>'; return }
+  const weeks = [...new Map(data.map(r => [r.kw+'/'+r.kw_year, r])).values()]
+  sel.innerHTML = weeks.map(r => `<option value="${r.kw}/${r.kw_year}">Týden ${r.kw}/${r.kw_year}</option>`).join('')
 }
 
 // -- NASTAVENÍ ZÁKAZNÍKA FAKTUR --
@@ -5578,6 +5671,17 @@ async function loadWdAttendance() {
     return s  // Nezavřené staré záznamy se nepočítají
   }, 0)
   document.getElementById('wd-att-total').textContent = total.toFixed(1)+'h'
+
+  // Přidej download button pod tabulku
+  const kwVal = document.getElementById('wd-kw-sel')?.value
+  if (kwVal && currentWorkerId) {
+    const [w, y] = kwVal.split('-').map(Number)
+    const workerName = document.getElementById('wd-worker-name')?.textContent || 'Pracovník'
+    const dlBtn = document.getElementById('wd-download-btn')
+    if (dlBtn) {
+      dlBtn.onclick = () => exportWorkerKW(currentWorkerId, workerName, w, y)
+    }
+  }
 
   // Event delegation pro edit tlačítka - spolehlivější než inline onclick
   const tableEl = document.getElementById('wd-att-table')
