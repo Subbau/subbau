@@ -676,14 +676,24 @@ tr:hover td{background:#fafbfc}
 
         <!-- TÝMY -->
         <div id="v-tymy" class="view">
-          <div class="card">
-            <div class="card-h"><h4>Aktivní týmy</h4><button class="btn-pri" style="font-size:12px;padding:5px 12px">+ Nový tým</button></div>
-            <table>
-              <thead><tr><th>Název týmu</th><th>Klient</th><th>Lokace</th><th>Partak</th><th>Počet lidí</th></tr></thead>
-            <tbody id="teams-table">
-              <tr><td colspan="5" style="text-align:center;color:var(--text3);padding:20px">Načítám týmy...</td></tr>
-            </tbody>
-            </table>
+          <div class="g2">
+            <!-- Týmy seznam -->
+            <div class="card">
+              <div class="card-h">
+                <h4>Skupiny / Týmy</h4>
+                <button class="btn-pri" style="font-size:12px;padding:5px 12px" onclick="openNewTeamModal()">+ Nová skupina</button>
+              </div>
+              <div id="teams-list" style="display:flex;flex-direction:column;gap:12px;margin-top:8px">
+                <div style="text-align:center;color:var(--text3);padding:20px">Načítám skupiny...</div>
+              </div>
+            </div>
+            <!-- Nepřiřazení pracovníci -->
+            <div class="card">
+              <div class="card-h"><h4>Nepřiřazení pracovníci</h4></div>
+              <div id="unassigned-workers" style="display:flex;flex-direction:column;gap:8px;margin-top:8px">
+                <div style="text-align:center;color:var(--text3);padding:20px">Načítám...</div>
+              </div>
+            </div>
           </div>
         </div>
 
@@ -2799,17 +2809,147 @@ async function generateInvoice() {
 
 // ============ TÝMY ============
 async function loadTeams() {
-  const { data } = await sb.from('teams').select('*, partak:profiles(full_name)').eq('is_active',true)
-  const tbody = document.getElementById('teams-table')
-  if (!data?.length) { tbody.innerHTML='<tr><td colspan="5" style="text-align:center;color:var(--text3);padding:20px">Žádné týmy</td></tr>'; return }
-  tbody.innerHTML = data.map(t=>`
-    <tr>
-      <td><b>${t.name}</b></td>
-      <td>${t.client_name||'—'}</td>
-      <td>${t.location||'—'}</td>
-      <td>${t.partak?.full_name||'—'}</td>
-      <td>—</td>
-    </tr>`).join('')
+  const div = document.getElementById('teams-list')
+  const unassignedDiv = document.getElementById('unassigned-workers')
+  if (!div) return
+
+  // Načti týmy + jejich členy
+  const { data: teams } = await sb.from('teams').select('*').eq('is_active', true).order('name')
+  // Načti všechny pracovníky s jejich team_id
+  const { data: workers } = await sb.from('profiles')
+    .select('id, full_name, profession, team_id')
+    .in('role', ['osvec', 'partak'])
+    .eq('is_active', true)
+    .order('full_name')
+
+  if (!teams?.length && !workers?.length) {
+    div.innerHTML = '<div style="text-align:center;color:var(--text3);padding:20px">Žádné skupiny</div>'
+    return
+  }
+
+  const profLabels = {osvec:'OSVČ', partak:'Parťák'}
+
+  // Zobraz skupiny s členy
+  if (teams?.length) {
+    div.innerHTML = teams.map(t => {
+      const members = (workers||[]).filter(w => w.team_id === t.id)
+      return `<div style="border:1.5px solid var(--brd);border-radius:12px;padding:14px">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+          <div>
+            <div style="font-size:15px;font-weight:800">${t.name}</div>
+            ${t.location ? `<div style="font-size:12px;color:var(--text2)">📍 ${t.location}</div>` : ''}
+          </div>
+          <div style="display:flex;gap:6px">
+            <button onclick="openAddMemberModal('${t.id}','${t.name.replace(/'/g,'')}')" style="padding:4px 10px;font-size:12px;border:1px solid var(--brd);border-radius:6px;cursor:pointer;background:var(--bg);font-family:inherit">+ Přidat</button>
+            <button onclick="deleteTeam('${t.id}')" style="padding:4px 8px;font-size:12px;border:1px solid var(--red);border-radius:6px;cursor:pointer;background:none;color:var(--red);font-family:inherit">🗑</button>
+          </div>
+        </div>
+        <div style="display:flex;flex-direction:column;gap:6px">
+          ${members.length ? members.map(m => `
+            <div style="display:flex;justify-content:space-between;align-items:center;padding:8px 10px;background:var(--bg);border-radius:8px">
+              <div>
+                <span style="font-size:13px;font-weight:600">${m.full_name}</span>
+                <span style="font-size:11px;color:var(--text3);margin-left:6px">${profLabels[m.role]||''}</span>
+              </div>
+              <button onclick="removeFromTeam('${m.id}')" style="padding:2px 8px;font-size:11px;border:1px solid var(--brd);border-radius:6px;cursor:pointer;background:none;font-family:inherit">✕</button>
+            </div>`).join('') : '<div style="font-size:12px;color:var(--text3);text-align:center;padding:8px">Žádní členové</div>'}
+        </div>
+        <div style="font-size:11px;color:var(--text3);margin-top:8px;text-align:right">${members.length} ${members.length===1?'člen':'členů'}</div>
+      </div>`
+    }).join('')
+  } else {
+    div.innerHTML = '<div style="text-align:center;color:var(--text3);padding:20px">Žádné skupiny — vytvořte první</div>'
+  }
+
+  // Zobraz nepřiřazené pracovníky
+  const unassigned = (workers||[]).filter(w => !w.team_id)
+  if (unassignedDiv) {
+    unassignedDiv.innerHTML = unassigned.length
+      ? unassigned.map(w => `
+        <div style="display:flex;justify-content:space-between;align-items:center;padding:8px 10px;background:var(--bg);border-radius:8px">
+          <span style="font-size:13px">${w.full_name}</span>
+          ${teams?.length ? `<select onchange="assignToTeam('${w.id}',this.value)" style="font-size:11px;padding:3px 6px;border:1px solid var(--brd);border-radius:6px;font-family:inherit">
+            <option value="">Přiřadit do...</option>
+            ${teams.map(t=>`<option value="${t.id}">${t.name}</option>`).join('')}
+          </select>` : ''}
+        </div>`).join('')
+      : '<div style="font-size:12px;color:var(--text3);text-align:center;padding:12px">Všichni pracovníci jsou ve skupinách</div>'
+  }
+}
+
+function openNewTeamModal() {
+  const name = prompt('Název skupiny/týmu:')
+  if (!name?.trim()) return
+  const location = prompt('Lokalita stavby (nepovinné):') || ''
+  createTeam(name.trim(), location.trim())
+}
+
+async function createTeam(name, location) {
+  const { error } = await sb.from('teams').insert({ name, location, is_active: true })
+  if (error) { showToast('Chyba: ' + error.message); return }
+  showToast('Skupina vytvorena!')
+  loadTeams()
+}
+
+async function deleteTeam(teamId) {
+  if (!confirm('Smazat skupinu? Pracovnici budou odprirazen.')) return
+  // Odpřiraď pracovníky
+  await sb.from('profiles').update({ team_id: null }).eq('team_id', teamId)
+  const { error } = await sb.from('teams').update({ is_active: false }).eq('id', teamId)
+  if (error) { showToast('Chyba: ' + error.message); return }
+  showToast('Skupina smazana')
+  loadTeams()
+}
+
+function openAddMemberModal(teamId, teamName) {
+  // Najdi neprirazene pracovniky
+  const modal = document.getElementById('add-member-modal')
+  if (!modal) return
+  document.getElementById('add-member-team-id').value = teamId
+  document.getElementById('add-member-team-name').textContent = teamName
+  loadUnassignedForModal()
+  modal.style.display = 'flex'
+}
+
+function closeAddMemberModal() {
+  const modal = document.getElementById('add-member-modal')
+  if (modal) modal.style.display = 'none'
+}
+
+async function loadUnassignedForModal() {
+  const teamId = document.getElementById('add-member-team-id').value
+  const { data } = await sb.from('profiles').select('id, full_name').in('role',['osvec','partak']).eq('is_active',true).is('team_id', null).order('full_name')
+  const list = document.getElementById('add-member-list')
+  if (!list) return
+  if (!data?.length) { list.innerHTML = '<div style="text-align:center;color:var(--text3);padding:12px">Vsichni jsou jiz ve skupinach</div>'; return }
+  list.innerHTML = data.map(w => `
+    <div style="display:flex;justify-content:space-between;align-items:center;padding:8px 10px;border:1px solid var(--brd);border-radius:8px">
+      <span style="font-size:13px">${w.full_name}</span>
+      <button onclick="addToTeam('${w.id}','${teamId}')" style="padding:4px 12px;font-size:12px;background:#1a1a1a;color:#FFCD00;border:none;border-radius:6px;cursor:pointer;font-family:inherit;font-weight:700">Pridat</button>
+    </div>`).join('')
+}
+
+async function addToTeam(workerId, teamId) {
+  const { error } = await sb.from('profiles').update({ team_id: teamId }).eq('id', workerId)
+  if (error) { showToast('Chyba: ' + error.message); return }
+  showToast('Pridano do skupiny!')
+  loadUnassignedForModal()
+  loadTeams()
+}
+
+async function removeFromTeam(workerId) {
+  const { error } = await sb.from('profiles').update({ team_id: null }).eq('id', workerId)
+  if (error) { showToast('Chyba: ' + error.message); return }
+  showToast('Odebrano ze skupiny')
+  loadTeams()
+}
+
+async function assignToTeam(workerId, teamId) {
+  if (!teamId) return
+  const { error } = await sb.from('profiles').update({ team_id: teamId }).eq('id', workerId)
+  if (error) { showToast('Chyba: ' + error.message); return }
+  showToast('Prirazen do skupiny!')
+  loadTeams()
 }
 
 // ============ OSVČ MOBILE ============
@@ -5362,6 +5502,24 @@ document.getElementById('login-pwd').addEventListener('keydown', e=>{if(e.key===
     <div style="display:flex;gap:8px">
       <button onclick="clearAdminSignCanvas()" style="padding:10px 16px;background:var(--bg);border:1px solid var(--brd);border-radius:8px;cursor:pointer;font-family:inherit;font-size:13px">Vymazat</button>
       <button onclick="submitAdminSignature()" id="admin-sign-submit-btn" class="btn-pri" style="flex:1;padding:10px">Podepsat a odeslat pracovnikovi</button>
+    </div>
+  </div>
+</div>
+
+
+<!-- PRIDAT DO SKUPINY MODAL -->
+<div id="add-member-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.6);z-index:300;align-items:center;justify-content:center;padding:20px">
+  <div style="background:#fff;border-radius:16px;padding:24px;width:100%;max-width:420px;box-shadow:0 8px 32px rgba(0,0,0,0.2)">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
+      <div>
+        <h3 style="margin:0;font-size:16px">Pridat do skupiny</h3>
+        <div style="font-size:13px;color:var(--text2);margin-top:2px" id="add-member-team-name"></div>
+      </div>
+      <button onclick="closeAddMemberModal()" style="background:none;border:none;font-size:22px;cursor:pointer">&times;</button>
+    </div>
+    <input type="hidden" id="add-member-team-id">
+    <div id="add-member-list" style="display:flex;flex-direction:column;gap:8px;max-height:400px;overflow-y:auto">
+      <div style="text-align:center;color:var(--text3);padding:20px">Nacitam...</div>
     </div>
   </div>
 </div>
