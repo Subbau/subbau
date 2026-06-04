@@ -527,7 +527,7 @@ tr:hover td{background:#fafbfc}
                   <button class="big-btn" style="background:var(--red-l);color:var(--red);padding:11px;font-size:13px" onclick="recordAttendance('out')">🚪 Zaznamenat odchod</button>
                 </div>
                 <div style="margin-top:12px;padding:10px;background:var(--blue-l);border-radius:8px;font-size:12px;color:var(--blue)">
-                  📍 GPS: <span id="gps-txt">Načítám polohu...</span>
+                  📍 <span id="gps-txt">Lokalizuji...</span> <span style="font-size:10px;color:var(--text3)">(poloha pracovníka se zaznamená při jeho příchodu)</span>
                 </div>
               </div>
             </div>
@@ -2102,6 +2102,12 @@ async function initApp(user) {
   console.log('[initApp] role ze Supabase:', JSON.stringify(profile.role))
   const role = (profile.role || '').trim().toLowerCase()
 
+  // Zaloguj přihlášení (async, neblokuj)
+  sb.from('profiles').update({
+    last_login_at: new Date().toISOString(),
+    login_count: (profile.login_count || 0) + 1
+  }).eq('id', user.id).then(() => {})
+
   // Čeká na schválení
   if (!profile.is_active && role !== 'admin') {
     showPending()
@@ -2572,13 +2578,24 @@ async function doLogout() {
 
 
 // ============ PŘÍSTUPY - RESET HESLA ============
+
+async function toggleWorkerActiveFromAccess(workerId, workerName, isActive) {
+  const action = isActive ? 'odebrat přístup' : 'obnovit přístup'
+  if (!confirm(`${action.charAt(0).toUpperCase() + action.slice(1)} pro ${workerName}?`)) return
+
+  const { error } = await sb.from('profiles').update({ is_active: !isActive }).eq('id', workerId)
+  if (error) { showToast('Chyba: ' + error.message); return }
+  showToast(`✅ Přístup ${isActive ? 'odebrán' : 'obnoven'}: ${workerName}`)
+  loadAccess()
+}
+
 async function loadAccess() {
   const tbody = document.getElementById('access-table')
   if (!tbody) return
   tbody.innerHTML = '<tr><td colspan="5" style="text-align:center;padding:20px;color:var(--text3)">Načítám...</td></tr>'
 
   const { data } = await sb.from('profiles')
-    .select('id, full_name, email, role, is_active')
+    .select('id, full_name, email, role, is_active, last_login_at, login_count')
     .in('role', ['osvec', 'partak'])
     .order('full_name')
 
@@ -2594,11 +2611,19 @@ async function loadAccess() {
       <td><b>${w.full_name}</b></td>
       <td style="font-size:12px;color:var(--text2)">${w.email}</td>
       <td><span class="pill pb">${roleLabels[w.role] || w.role}</span></td>
-      <td><span class="pill ${w.is_active ? 'pg' : 'pr'}">${w.is_active ? 'Aktivní' : 'Neaktivní'}</span></td>
+      <td>
+        <span class="pill ${w.is_active ? 'pg' : 'pr'}">${w.is_active ? 'Aktivní' : 'Neaktivní'}</span>
+        ${w.last_login_at ? `<div style="font-size:10px;color:var(--text3);margin-top:2px">Přihlášen: ${new Date(w.last_login_at).toLocaleDateString('cs-CZ')} ${new Date(w.last_login_at).toLocaleTimeString('cs-CZ',{hour:'2-digit',minute:'2-digit'})}</div>` : '<div style="font-size:10px;color:var(--text3)">Nikdy</div>'}
+        ${w.login_count ? `<div style="font-size:10px;color:var(--text3)">${w.login_count}× přihlášení</div>` : ''}
+      </td>
       <td style="text-align:center">
         <button onclick="sendPasswordReset('${w.email}','${w.full_name}')"
-          style="padding:5px 14px;font-size:12px;background:#1a1a1a;color:#FFCD00;border:none;border-radius:6px;cursor:pointer;font-family:inherit;font-weight:700">
-          📧 Odeslat reset
+          style="padding:5px 10px;font-size:11px;background:#1a1a1a;color:#FFCD00;border:none;border-radius:6px;cursor:pointer;font-family:inherit;font-weight:700;margin-bottom:4px">
+          📧 Reset hesla
+        </button><br>
+        <button onclick="toggleWorkerActiveFromAccess('${w.id}','${w.full_name}',${w.is_active})"
+          style="padding:5px 10px;font-size:11px;background:${w.is_active ? '#dc3545' : '#198754'};color:#fff;border:none;border-radius:6px;cursor:pointer;font-family:inherit;font-weight:700">
+          ${w.is_active ? '🔒 Odebrat přístup' : '🔓 Obnovit přístup'}
         </button>
       </td>
     </tr>`).join('')
