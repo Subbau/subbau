@@ -1170,6 +1170,10 @@ tr:hover td{background:#fafbfc}
             <input type="number" id="mob-acc-parking" placeholder="nepovinné" style="width:100%;padding:10px;border:1px solid var(--brd);border-radius:8px">
           </div>
         </div>
+        <div class="fg" style="margin-bottom:10px">
+          <label style="font-size:12px">📝 Poznámka k ubytování</label>
+          <textarea id="mob-acc-notes" rows="2" placeholder="Libovolné poznámky..." style="width:100%;font-size:14px;padding:10px;border:1px solid var(--brd);border-radius:8px;font-family:inherit;resize:vertical"></textarea>
+        </div>
         <button onclick="saveMobAccommodation()" style="width:100%;padding:12px;background:#1a1a1a;color:#FFCD00;border:none;border-radius:10px;font-size:14px;font-weight:700;cursor:pointer;font-family:inherit">💾 Uložit ubytování</button>
       </div>
 <div class="mob-card" style="margin-top:0">
@@ -1292,7 +1296,11 @@ tr:hover td{background:#fafbfc}
               <input type="number" id="wd-acc-parking" placeholder="0" style="width:100%">
             </div>
           </div>
-          <button onclick="saveWorkerAccommodation()" style="margin-top:10px;width:100%;padding:8px;background:#1a1a1a;color:#FFCD00;border:none;border-radius:8px;cursor:pointer;font-family:inherit;font-weight:700;font-size:12px">💾 Uložit ubytování</button>
+          <div class="fg" style="margin-bottom:8px;margin-top:8px">
+            <label style="font-size:11px">📝 Poznámka k ubytování</label>
+            <textarea id="wd-acc-notes" rows="2" placeholder="Libovolné poznámky..." style="width:100%;font-size:12px;padding:6px;border:1px solid var(--brd);border-radius:6px;font-family:inherit;resize:vertical"></textarea>
+          </div>
+          <button onclick="saveWorkerAccommodation()" style="margin-top:4px;width:100%;padding:8px;background:#1a1a1a;color:#FFCD00;border:none;border-radius:8px;cursor:pointer;font-family:inherit;font-weight:700;font-size:12px">💾 Uložit ubytování</button>
         </div>
       </div>
 
@@ -3980,13 +3988,17 @@ async function loadMobWeek() {
 
   // Spočítej hodiny pro každý záznam — správně dle data
   function getHours(r) {
-    if (r.total_hours) return r.total_hours  // Ukončená směna — přesné číslo
+    if (r.check_in && r.check_out) {
+      // Aplikuj pracovní pravidla zaokrouhlení
+      const adj = applyAttendanceRules(r)
+      return adj.hours
+    }
     if (r.check_in && !r.check_out) {
       if (r.work_date === todayStr) {
         // Dnešní aktivní směna — počítej do teď
         return calcHours(r.check_in, nowStr, r.break_start, r.break_end)
       } else {
-        // Stará nezavřená směna — ignoruj (nezapočítávej fiktivní hodiny)
+        // Stará nezavřená směna — ignoruj
         return 0
       }
     }
@@ -3996,13 +4008,30 @@ async function loadMobWeek() {
   // Funkce pro zobrazení stavu dne
   function getDayLabel(dayRecs) {
     const h = dayRecs.reduce((s,r) => s + getHours(r), 0)
+    // Sbírej příznaky ze všech záznamů dne
+    const dayFlags = dayRecs.flatMap(r => {
+      if (!r.check_in || !r.check_out) return []
+      const adj = applyAttendanceRules(r)
+      return Object.entries(adj.flags).filter(([k,v]) => v && k !== 'overtime').map(([k]) => k)
+    })
     const hasWork = dayRecs.length > 0
     const activeToday = dayRecs.some(r => r.check_in && !r.check_out && r.work_date === todayStr)
     const unclosed = dayRecs.some(r => r.check_in && !r.check_out && r.work_date !== todayStr)
     if (activeToday && h > 0) return { label: h.toFixed(1)+'h▶', bg: 'var(--amber)', color: '#fff' }
     if (activeToday) return { label: '▶', bg: 'var(--amber)', color: '#fff' }
     if (unclosed) return { label: '!', bg: 'var(--red)', color: '#fff', title: 'Nezavřená směna' }
-    if (h > 0) return { label: h.toFixed(1)+'h', bg: 'var(--green)', color: '#fff' }
+    if (h > 0) {
+      const flagMap = {lateIn:'⚠️',lateBreak:'⏰',earlyOut:'🔵',abnormal:'🔴'}
+      const titleMap = {lateIn:'Pozdní příchod',lateBreak:'Pozdní návrat z přestávky',earlyOut:'Brzy odešel',abnormal:'Abnormální odchod'}
+      const flagIcons = dayFlags.map(f => flagMap[f]||'').filter(Boolean).join('')
+      const flagTitle = dayFlags.map(f => titleMap[f]||'').filter(Boolean).join(', ')
+      return {
+        label: h.toFixed(1)+'h' + (flagIcons ? ' '+flagIcons : ''),
+        bg: dayFlags.length ? 'var(--amber-l)' : 'var(--green)',
+        color: dayFlags.length ? 'var(--amber)' : '#fff',
+        title: flagTitle || ''
+      }
+    }
     if (hasWork) return { label: '—', bg: 'var(--bg)', color: 'var(--text3)' }
     return { label: '—', bg: 'var(--bg)', color: 'var(--text3)' }
   }
@@ -4666,7 +4695,8 @@ async function saveMobAccommodation() {
   const { data: updMobAcc, error } = await sb.from('profiles').update({
     accommodation_address: addr,
     accommodation_price_night: parseFloat(document.getElementById('mob-acc-night')?.value) || null,
-    accommodation_parking_price: parseFloat(document.getElementById('mob-acc-parking')?.value) || null
+    accommodation_parking_price: parseFloat(document.getElementById('mob-acc-parking')?.value) || null,
+    accommodation_notes: document.getElementById('mob-acc-notes')?.value.trim() || null
   }).eq('id', currentUser.id).select()
   if (error) { showToast('Chyba: ' + error.message); return }
   if (!updMobAcc?.length) {
@@ -4689,6 +4719,8 @@ function loadMobAccommodation(profile) {
   if (a) a.value = profile?.accommodation_address || ''
   if (n) n.value = profile?.accommodation_price_night || ''
   if (p) p.value = profile?.accommodation_parking_price || ''
+  const mn = document.getElementById('mob-acc-notes')
+  if (mn) mn.value = profile?.accommodation_notes || ''
 }
 
 // -- UBYTOVÁNÍ PRACOVNÍKA --
@@ -4699,6 +4731,8 @@ function loadWorkerAccommodation(profile) {
   if (a) a.value = profile.accommodation_address || ''
   if (n) n.value = profile.accommodation_price_night || ''
   if (p) p.value = profile.accommodation_parking_price || ''
+  const notes = document.getElementById('wd-acc-notes')
+  if (notes) notes.value = profile.accommodation_notes || ''
 }
 
 async function saveWorkerAccommodation() {
@@ -4708,7 +4742,8 @@ async function saveWorkerAccommodation() {
   const { data: updAcc, error } = await sb.from('profiles').update({
     accommodation_address: addr,
     accommodation_price_night: parseFloat(document.getElementById('wd-acc-night')?.value) || null,
-    accommodation_parking_price: parseFloat(document.getElementById('wd-acc-parking')?.value) || null
+    accommodation_parking_price: parseFloat(document.getElementById('wd-acc-parking')?.value) || null,
+    accommodation_notes: document.getElementById('wd-acc-notes')?.value.trim() || null
   }).eq('id', currentWorkerId).select()
   if (error) { showToast('Chyba: ' + error.message); return }
   if (!updAcc?.length) { showToast('⚠️ Nepovedlo se uložit — zkontrolujte oprávnění k aktualizaci profilu'); return }
@@ -6240,6 +6275,133 @@ function buildKWOptions() {
   return opts
 }
 
+
+// ============ ZAOKROUHLENÍ HODIN - PRACOVNÍ PRAVIDLA ============
+// Standardní směna: příchod 7:00, přestávka 11:00-11:30, odchod 16:00
+const SHIFT = { start: 7*60, breakStart: 11*60, breakLen: 30, end: 16*60, abnormal: 18*60 }
+
+function timeToMin(t) {
+  if (!t) return null
+  const parts = t.slice(0,5).split(':')
+  return parseInt(parts[0])*60 + parseInt(parts[1])
+}
+
+function minToTime(m) {
+  if (m === null || m === undefined) return null
+  const h = Math.floor(m/60), min = m%60
+  return String(h).padStart(2,'0') + ':' + String(min).padStart(2,'0')
+}
+
+// Hlavní funkce - aplikuje pracovní pravidla na jeden docházkový záznam
+// Vrací: { checkIn, checkOut, breakStart, breakEnd, hours, flags }
+// flags: { lateIn, lateBreak, earlyOut, overtime, abnormal }
+function applyAttendanceRules(record) {
+  const ci = timeToMin(record.check_in)
+  const co = timeToMin(record.check_out)
+  const bs = timeToMin(record.break_start)
+  const be = timeToMin(record.break_end)
+
+  const flags = { lateIn: false, lateBreak: false, earlyOut: false, overtime: 0, abnormal: false }
+
+  if (ci === null || co === null) {
+    return { checkIn: record.check_in, checkOut: record.check_out,
+             breakStart: record.break_start, breakEnd: record.break_end,
+             hours: record.total_hours || 0, flags }
+  }
+
+  // --- 1. PŘÍCHOD ---
+  let adjCi = ci
+  const ciDiff = ci - SHIFT.start  // záporné = přišel dřív, kladné = přišel pozdě
+  if (ciDiff < 0) {
+    // Přišel dřív
+    if (Math.abs(ciDiff) <= 30) {
+      adjCi = SHIFT.start  // zaokrouhlit na 7:00
+    }
+    // jinak počítáme od skutečného příchodu
+  } else if (ciDiff > 0) {
+    // Přišel pozdě
+    adjCi = ci  // počítáme od skutečného
+    flags.lateIn = true
+  }
+
+  // --- 2. PŘESTÁVKA ---
+  let adjBs = bs, adjBe = be
+  if (bs !== null && be !== null) {
+    // Přestávka začíná 1 min nebo méně před 11:00 → zaokrouhlit na 11:00
+    if (bs < SHIFT.breakStart && (SHIFT.breakStart - bs) <= 2) {
+      adjBs = SHIFT.breakStart
+    }
+    const actualBreakLen = (adjBe || be) - (adjBs || bs)
+    if (actualBreakLen < SHIFT.breakLen && actualBreakLen > 0) {
+      // Kratší přestávka → počítat jako plných 30 min
+      adjBe = (adjBs || bs) + SHIFT.breakLen
+    } else if (actualBreakLen > SHIFT.breakLen) {
+      // Delší přestávka → zvýraznit pozdní návrat
+      flags.lateBreak = true
+    }
+  } else if (bs === null && be === null) {
+    // Bez přestávky - odečteme 30 min automaticky pokud je směna delší než 6h
+    // (ale jen pokud to odpovídá době přestávky - 11:00-11:30 by mělo být)
+    // Toto ponecháme na původním výpočtu
+    adjBs = null; adjBe = null
+  }
+
+  // --- 3. ODCHOD ---
+  let adjCo = co
+  const coDiff = co - SHIFT.end  // záporné = odešel dřív, kladné = odešel pozdě
+
+  if (coDiff < 0) {
+    // Odešel dřív
+    if (Math.abs(coDiff) <= 15) {
+      adjCo = SHIFT.end  // zaokrouhlit na 16:00, ale zvýraznit
+      flags.earlyOut = true
+    } else {
+      adjCo = co  // odešel hodně dřív → počítáme od skutečného
+      flags.earlyOut = true
+    }
+  } else if (coDiff >= 0 && coDiff <= 10) {
+    adjCo = SHIFT.end  // přesčas do 10 min → počítáme do 16:00
+  } else if (coDiff > 10) {
+    adjCo = co  // přesčas
+    flags.overtime = coDiff  // minuty přesčasu
+  }
+
+  if (co >= SHIFT.abnormal) {
+    flags.abnormal = true
+  }
+
+  // --- 4. VÝPOČET HODIN ---
+  let breakDeducted = 0
+  if (adjBs !== null && adjBe !== null) {
+    breakDeducted = adjBe - adjBs
+  }
+  const totalMin = Math.max(0, adjCo - adjCi - breakDeducted)
+  const hours = Math.round(totalMin * 100 / 60) / 100
+
+  return {
+    checkIn: minToTime(adjCi),
+    checkOut: minToTime(adjCo),
+    breakStart: minToTime(adjBs),
+    breakEnd: minToTime(adjBe),
+    hours,
+    flags
+  }
+}
+
+// Helper pro zobrazení s příznakem
+function flagBadge(flag, text) {
+  const badges = {
+    lateIn:    { bg: '#fff3cd', color: '#856404', label: 'Pozdní příchod' },
+    lateBreak: { bg: '#fff3cd', color: '#856404', label: 'Pozdní návrat z přestávky' },
+    earlyOut:  { bg: '#cfe2ff', color: '#0a58ca', label: 'Brzy odešel' },
+    overtime:  { bg: '#d1e7dd', color: '#146c43', label: 'Přesčas' },
+    abnormal:  { bg: '#f8d7da', color: '#842029', label: 'Abnormální doba' }
+  }
+  const b = badges[flag]
+  if (!b) return text
+  return `<span style="background:${b.bg};color:${b.color};padding:1px 5px;border-radius:4px;font-size:11px;font-weight:700" title="${b.label}">${text} ⚠️</span>`
+}
+
 async function loadWdAttendance() {
   if(!currentWorkerId) return
   const val = document.getElementById('wd-kw-sel').value
@@ -6253,6 +6415,7 @@ async function loadWdAttendance() {
   }
   const nowForAtt = new Date().toTimeString().slice(0,8)
   tbody.innerHTML = data.map(r => {
+    const adj = r.check_in && r.check_out ? applyAttendanceRules(r) : { checkIn: r.check_in?.slice(0,5), checkOut: r.check_out?.slice(0,5), breakStart: r.break_start?.slice(0,5), breakEnd: r.break_end?.slice(0,5), hours: r.total_hours||0, flags: {} }
     let hoursDisplay = '—'
     if (r.total_hours) {
       hoursDisplay = `<b style="color:var(--blue)">${r.total_hours}h</b>`
@@ -6270,10 +6433,10 @@ async function loadWdAttendance() {
       : '—'
     return `<tr>
       <td style="font-size:12px">${r.work_date}</td>
-      <td>${r.check_in?.slice(0,5)||'—'}</td>
-      <td>${r.check_out?.slice(0,5)||'—'}</td>
-      <td style="font-size:11px">${breakStr}</td>
-      <td>${hoursDisplay}</td>
+      <td>${adj.flags.lateIn ? flagBadge('lateIn', adj.checkIn||'—') : (adj.checkIn||'—')}</td>
+      <td>${adj.flags.earlyOut ? flagBadge('earlyOut', adj.checkOut||'—') : adj.flags.abnormal ? flagBadge('abnormal', adj.checkOut||'—') : (adj.checkOut||'—')}</td>
+      <td style="font-size:11px">${adj.flags.lateBreak ? flagBadge('lateBreak', breakStr) : breakStr}</td>
+      <td>${hoursDisplay}${adj.flags.overtime > 0 ? `<span style="font-size:10px;color:var(--green);margin-left:3px">+${Math.round(adj.flags.overtime/60*100)/100}h přesčas</span>` : ''}</td>
       <td style="font-size:11px">${r.location_address||'—'}</td>
       <td><button class="att-edit-btn" data-id="${r.id}" data-date="${r.work_date}" data-ci="${r.check_in||''}" data-co="${r.check_out||''}" data-bs="${r.break_start||''}" data-be="${r.break_end||''}" style="padding:3px 8px;font-size:11px;border:1px solid var(--brd);border-radius:6px;cursor:pointer;background:var(--bg);font-family:inherit">✏️</button></td>
     </tr>`
