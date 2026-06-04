@@ -4865,54 +4865,81 @@ async function saveWorkerInvoiceCustomer() {
 
 // -- PRINT BEZ POPUP - funguje v Safari anonymním okně --
 function printInPage(html) {
-  const overlay = document.getElementById('print-overlay')
-  const printContent = document.getElementById('print-content')
-  if (!overlay || !printContent) {
-    // Fallback: zkus window.open
+  // Spolehlivý iframe tisk - funguje v Safari i anonymním okně
+  const existingFrame = document.getElementById('__print_frame__')
+  if (existingFrame) existingFrame.remove()
+
+  const iframe = document.createElement('iframe')
+  iframe.id = '__print_frame__'
+  iframe.style.cssText = 'position:fixed;top:-9999px;left:-9999px;width:210mm;height:297mm;border:none;visibility:hidden'
+  document.body.appendChild(iframe)
+
+  // Počkej na načtení iframe
+  iframe.onload = () => {
     try {
-      const win = window.open('', '_blank')
-      if (win) { win.document.write(html); win.document.close(); win.print(); return }
-    } catch(e) {}
-    showToast('Povolte vyskakovací okna pro tisk PDF')
-    return
+      const iframeDoc = iframe.contentDocument || iframe.contentWindow.document
+      iframeDoc.open()
+      iframeDoc.write(html)
+      iframeDoc.close()
+
+      // Počkej na vykreslení obsahu
+      setTimeout(() => {
+        try {
+          iframe.contentWindow.focus()
+          iframe.contentWindow.print()
+        } catch(e) {
+          // Fallback na overlay pokud iframe selže
+          printViaOverlay(html)
+        }
+        // Vymaž iframe po tisku
+        setTimeout(() => { if (iframe.parentNode) iframe.remove() }, 3000)
+      }, 800)
+    } catch(e) {
+      printViaOverlay(html)
+    }
   }
 
-  // Vlož HTML do overlay
+  // Spusť onload
+  iframe.src = 'about:blank'
+}
+
+function printViaOverlay(html) {
+  // Záložní metoda - overlay v aktuální stránce
+  const overlay = document.getElementById('print-overlay')
+  const printContent = document.getElementById('print-content')
+  if (!overlay || !printContent) { showToast('⚠️ Tisk selhal — povolte vyskakovací okna'); return }
+
   const parser = new DOMParser()
   const doc = parser.parseFromString(html, 'text/html')
-  printContent.innerHTML = doc.body.innerHTML
+  printContent.innerHTML = ''
 
-  // Přidej styly z HTML dokumentu
   const style = doc.querySelector('style')
   if (style) {
     const s = document.createElement('style')
     s.textContent = style.textContent
-    printContent.prepend(s)
+    printContent.appendChild(s)
   }
+
+  const body = doc.createElement ? document.createElement('div') : document.createElement('div')
+  body.innerHTML = doc.body.innerHTML
+  printContent.appendChild(body)
 
   overlay.style.display = 'block'
   document.body.style.overflow = 'hidden'
 
-  // Přidej zavírací tlačítko
   const closeBtn = document.createElement('button')
   closeBtn.innerHTML = '✕ Zavřít'
   closeBtn.style.cssText = 'position:fixed;top:16px;right:16px;z-index:10000;padding:8px 16px;background:#1a1a1a;color:#FFCD00;border:none;border-radius:8px;cursor:pointer;font-size:14px;font-weight:700;font-family:inherit'
-  closeBtn.onclick = () => {
-    overlay.style.display = 'none'
-    document.body.style.overflow = ''
-    closeBtn.remove()
-  }
+  closeBtn.onclick = () => { overlay.style.display='none'; document.body.style.overflow=''; closeBtn.remove(); printBtn.remove() }
   overlay.appendChild(closeBtn)
 
-  // Přidej tisk tlačítko
   const printBtn = document.createElement('button')
   printBtn.innerHTML = '🖨 Tisk / PDF'
   printBtn.style.cssText = 'position:fixed;top:16px;right:140px;z-index:10000;padding:8px 16px;background:#FFCD00;color:#1a1a1a;border:none;border-radius:8px;cursor:pointer;font-size:14px;font-weight:700;font-family:inherit'
   printBtn.onclick = () => window.print()
   overlay.appendChild(printBtn)
 
-  // Auto-otevři print dialog po 500ms
-  setTimeout(() => window.print(), 600)
+  setTimeout(() => window.print(), 800)
 }
 
 // -- EXPORT HODIN PRACOVNÍKA --
