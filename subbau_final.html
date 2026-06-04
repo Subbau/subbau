@@ -1466,7 +1466,18 @@ async function openSignModal(contractId, title, fileUrl) {
   modal.style.display = 'block'
   document.body.style.overflow = 'hidden'
 
-  if (fileUrl) await loadWorkerPDF(fileUrl)
+  if (fileUrl) {
+    if (typeof pdfjsLib === 'undefined') {
+      const lEl = document.getElementById('worker-pdf-loading')
+      if (lEl) lEl.textContent = '⏳ Načítám PDF viewer...'
+      let w2 = 0
+      while (typeof pdfjsLib === 'undefined' && w2 < 3000) {
+        await new Promise(r => setTimeout(r, 200))
+        w2 += 200
+      }
+    }
+    await loadWorkerPDF(fileUrl)
+  }
 }
 
 async function loadWorkerPDF(url) {
@@ -1662,11 +1673,22 @@ async function openAdminSignModal(contractId, title, fileUrl) {
   document.body.style.overflow = 'hidden'
   try { setupAdminSignCanvas() } catch(e) { console.warn('Canvas setup:', e) }
 
-  // Načti PDF
+  // Načti PDF - počkaj na pdf.js ak ešte nie je načítaný
   if (fileUrl) {
+    const loadEl = document.getElementById('pdf-loading')
+    if (typeof pdfjsLib === 'undefined') {
+      if (loadEl) loadEl.textContent = '⏳ Načítám PDF viewer...'
+      // Počkaj max 3s na pdf.js
+      let waited = 0
+      while (typeof pdfjsLib === 'undefined' && waited < 3000) {
+        await new Promise(r => setTimeout(r, 200))
+        waited += 200
+      }
+    }
     await loadPDFForSigning(fileUrl)
   } else {
-    document.getElementById('pdf-loading').textContent = 'PDF URL není dostupná'
+    const el = document.getElementById('pdf-loading')
+    if (el) el.textContent = 'PDF URL není dostupná'
   }
 }
 
@@ -5730,18 +5752,22 @@ async function uploadContract() {
 
   const progress = document.getElementById('contract-upload-progress')
   progress.style.display = 'block'
+  progress.textContent = '⏳ Nahrávám PDF...'
 
   // Upload PDF do storage
   const filePath = `${workerId}/${Date.now()}_${contractFile.name}`
-  const { error: storageErr } = await sb.storage.from('contracts').upload(filePath, contractFile)
+  const { data: storageData, error: storageErr } = await sb.storage.from('contracts').upload(filePath, contractFile, {upsert: false})
   if (storageErr) {
     let msg = storageErr.message
+    console.error('[uploadContract] storage error:', storageErr)
     if (msg.includes('not found') || msg.includes('does not exist')) msg = 'Storage bucket "contracts" neexistuje — vytvořte ho v Supabase → Storage'
-    else if (msg.includes('security')) msg = 'Chyba oprávnění — zkontrolujte RLS polícy na storage'
-    showToast('❌ ' + msg)
+    else if (msg.includes('security') || msg.includes('policy') || msg.includes('403') || msg.includes('Unauthorized')) msg = 'Chyba oprávnění k nahrávání — kontaktujte admina SubBau'
+    else if (msg.includes('Duplicate') || msg.includes('already exists')) msg = 'Soubor již existuje — zkuste znovu'
+    showToast('❌ Upload: ' + msg)
     progress.style.display='none'
     return
   }
+  console.log('[uploadContract] storage OK:', storageData)
 
   // Získej URL
   const { data: urlData } = sb.storage.from('contracts').getPublicUrl(filePath)
@@ -5779,6 +5805,21 @@ async function uploadContract() {
   loadAdminContracts()
 }
 
+
+// Otevřít PDF - spolehlivé i v Safari anonymous okně
+function openPdfUrl(url) {
+  if (!url) { showToast('⚠️ PDF URL není dostupná'); return }
+  // Pokus 1: window.open
+  const w = window.open(url, '_blank', 'noopener,noreferrer')
+  if (!w || w.closed) {
+    // Pokus 2: iframe download
+    const a = document.createElement('a')
+    a.href = url; a.target = '_blank'; a.rel = 'noopener'
+    document.body.appendChild(a); a.click()
+    setTimeout(() => document.body.removeChild(a), 500)
+  }
+}
+
 async function loadAdminContracts() {
   const { data, error: cErr } = await sb.from('contracts').select('id,title,status,file_url,signature_url,admin_signature_url,signed_at,admin_signed_at,created_at, worker:profiles!worker_id(full_name)').order('created_at',{ascending:false})
   const div = document.getElementById('contracts-list')
@@ -5797,9 +5838,9 @@ async function loadAdminContracts() {
         <div style="text-align:right">
           <span class="pill ${c.status==='pending'?'pa':c.status==='signed_electronic'?'pg':'pr'}">${statusLabels[c.status]||c.status}</span>
           ${c.signed_at?`<div style="font-size:10px;color:var(--text3);margin-top:3px">Podepsáno: ${c.signed_at.slice(0,10)}</div>`:''}
-          ${c.file_url?`<a href="${c.file_url}" target="_blank" style="font-size:11px;color:var(--blue);display:block;margin-top:3px">📄 Smlouva PDF</a>`:''}
-          ${c.admin_signature_url?`<a href="${c.admin_signature_url}" target="_blank" style="font-size:11px;color:var(--amber);display:block;margin-top:2px">✍️ Podpis admina</a>`:''}
-          ${c.signature_url?`<a href="${c.signature_url}" target="_blank" style="font-size:11px;color:var(--green);display:block;margin-top:2px">✍️ Podpis OSVČ</a>`:''}
+          ${c.file_url?`<button onclick="openPdfUrl('${c.file_url}')" style="font-size:11px;color:var(--blue);display:block;margin-top:3px;background:none;border:none;cursor:pointer;padding:0;font-family:inherit;text-decoration:underline">📄 Smlouva PDF</button>`:''}
+          ${c.admin_signature_url?`<button onclick="openPdfUrl('${c.admin_signature_url}')" style="font-size:11px;color:var(--amber);display:block;margin-top:2px;background:none;border:none;cursor:pointer;padding:0;font-family:inherit;text-decoration:underline">✍️ Podpis admina</button>`:''}
+          ${c.signature_url?`<button onclick="openPdfUrl('${c.signature_url}')" style="font-size:11px;color:var(--green);display:block;margin-top:2px;background:none;border:none;cursor:pointer;padding:0;font-family:inherit;text-decoration:underline">✍️ Podpis OSVČ</button>`:''}
           ${c.status==='admin_pending'?`<button onclick="openAdminSignModal('${c.id}','${(c.title||'').replace(/'/g,"\'")}','${c.file_url||''}')" style="margin-top:6px;width:100%;padding:5px 8px;background:#1a1a1a;color:#FFCD00;border:none;border-radius:6px;cursor:pointer;font-size:11px;font-weight:700">✍️ Podepsat jako admin</button>`:''}
         </div>
       </div>
