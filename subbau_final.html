@@ -4909,85 +4909,54 @@ async function saveWorkerInvoiceCustomer() {
 
 // -- PRINT BEZ POPUP - funguje v Safari anonymním okně --
 function printInPage(html) {
-  // Safari-kompatibilní tisk: overlay přes celou stránku
-  const overlay = document.getElementById('print-overlay')
-  const printContent = document.getElementById('print-content')
-
-  if (!overlay || !printContent) {
-    showToast('⚠️ Chyba tisku — zkuste znovu')
-    return
-  }
-
-  // Vlož obsah
-  const parser = new DOMParser()
-  const doc = parser.parseFromString(html, 'text/html')
-  printContent.innerHTML = ''
-
-  // Přidej styly z dokumentu
-  doc.querySelectorAll('style').forEach(s => {
-    const ns = document.createElement('style')
-    ns.textContent = s.textContent
-    printContent.appendChild(ns)
-  })
-
-  // Přidej obsah těla
-  const bodyDiv = document.createElement('div')
-  bodyDiv.innerHTML = doc.body.innerHTML
-  printContent.appendChild(bodyDiv)
-
-  // Zobraz overlay
-  overlay.style.display = 'block'
-  document.body.style.overflow = 'hidden'
-
-  // Tlačítka
-  const existingBtns = overlay.querySelectorAll('button')
-  existingBtns.forEach(b => b.remove())
-
-  const closeBtn = document.createElement('button')
-  closeBtn.innerHTML = '✕ Zavřít'
-  closeBtn.style.cssText = 'position:fixed;top:16px;right:16px;z-index:10000;padding:8px 16px;background:#1a1a1a;color:#FFCD00;border:none;border-radius:8px;cursor:pointer;font-size:14px;font-weight:700;font-family:inherit'
-  closeBtn.onclick = () => {
-    overlay.style.display = 'none'
-    document.body.style.overflow = ''
-    closeBtn.remove()
-    printBtn.remove()
-  }
-  overlay.appendChild(closeBtn)
-
-  const printBtn = document.createElement('button')
-  printBtn.innerHTML = '🖨 Tisk / Uložit PDF'
-  printBtn.style.cssText = 'position:fixed;top:16px;right:160px;z-index:10000;padding:8px 16px;background:#FFCD00;color:#1a1a1a;border:none;border-radius:8px;cursor:pointer;font-size:14px;font-weight:700;font-family:inherit'
-  printBtn.onclick = () => {
-    // Dočasně skryj tlačítka při tisku
-    closeBtn.style.display = 'none'
-    printBtn.style.display = 'none'
-    setTimeout(() => {
-      window.print()
-      setTimeout(() => {
-        closeBtn.style.display = ''
-        printBtn.style.display = ''
-      }, 500)
-    }, 100)
-  }
-  overlay.appendChild(printBtn)
-
-  // Auto-tisk po renderování (2 animační snímky = DOM je hotový)
-  requestAnimationFrame(() => {
-    requestAnimationFrame(() => {
-      setTimeout(() => {
-        closeBtn.style.display = 'none'
-        printBtn.style.display = 'none'
-        window.print()
-        setTimeout(() => {
-          closeBtn.style.display = ''
-          printBtn.style.display = ''
-        }, 500)
-      }, 300)
-    })
-  })
+  // Stáhnout jako HTML soubor - spolehlivé v Safari i anonymním okně
+  downloadAsHtml(html, 'prehled-hodin.html')
 }
 
 function printViaOverlay(html) { printInPage(html) }
+
+function downloadAsHtml(html, filename) {
+  // Zobraz přehled v overlay PŘED stažením
+  const overlay = document.getElementById('print-overlay')
+  const printContent = document.getElementById('print-content')
+  if (overlay && printContent) {
+    const parser = new DOMParser()
+    const doc = parser.parseFromString(html, 'text/html')
+    printContent.innerHTML = ''
+    doc.querySelectorAll('style').forEach(s => {
+      const ns = document.createElement('style'); ns.textContent = s.textContent; printContent.appendChild(ns)
+    })
+    const bd = document.createElement('div'); bd.innerHTML = doc.body.innerHTML; printContent.appendChild(bd)
+    overlay.style.display = 'block'; document.body.style.overflow = 'hidden'
+    // Odstraň staré tlačítka
+    overlay.querySelectorAll('button').forEach(b => b.remove())
+    const closeBtn = document.createElement('button')
+    closeBtn.innerHTML = '✕ Zavřít'
+    closeBtn.style.cssText = 'position:fixed;top:16px;right:16px;z-index:10000;padding:8px 16px;background:#1a1a1a;color:#FFCD00;border:none;border-radius:8px;cursor:pointer;font-size:14px;font-weight:700;font-family:inherit'
+    closeBtn.onclick = () => { overlay.style.display='none'; document.body.style.overflow=''; closeBtn.remove(); dlBtn.remove() }
+    overlay.appendChild(closeBtn)
+    const dlBtn = document.createElement('button')
+    dlBtn.innerHTML = '📥 Stáhnout PDF/HTML'
+    dlBtn.style.cssText = 'position:fixed;top:16px;right:180px;z-index:10000;padding:8px 16px;background:#FFCD00;color:#1a1a1a;border:none;border-radius:8px;cursor:pointer;font-size:14px;font-weight:700;font-family:inherit'
+    dlBtn.onclick = () => triggerHtmlDownload(html, filename)
+    overlay.appendChild(dlBtn)
+    triggerHtmlDownload(html, filename)
+  } else {
+    triggerHtmlDownload(html, filename)
+  }
+}
+
+function triggerHtmlDownload(html, filename) {
+  const blob = new Blob([html], { type: 'text/html;charset=utf-8' })
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url; a.download = filename || 'export.html'
+  document.body.appendChild(a); a.click()
+  setTimeout(() => { document.body.removeChild(a); URL.revokeObjectURL(url) }, 1000)
+  showToast('📥 Soubor stažen — otevřete ho a vytiskněte jako PDF')
+}
+
+
 
 
 
@@ -6512,19 +6481,16 @@ function applyAttendanceRules(record) {
   const coDiff = co - SHIFT.end  // záporné = odešel dřív, kladné = odešel pozdě
 
   if (coDiff < 0) {
-    // Odešel dřív
-    if (Math.abs(coDiff) <= 15) {
-      adjCo = SHIFT.end  // zaokrouhlit na 16:00, ale zvýraznit
-      flags.earlyOut = true
-    } else {
-      adjCo = co  // odešel hodně dřív → počítáme od skutečného
-      flags.earlyOut = true
-    }
-  } else if (coDiff >= 0 && coDiff <= 10) {
-    adjCo = SHIFT.end  // přesčas do 10 min → počítáme do 16:00
-  } else if (coDiff > 10) {
-    adjCo = co  // přesčas
-    flags.overtime = coDiff  // minuty přesčasu
+    // Odešel dřív - vždy zvýrazni, zaokrouhli na 16:00
+    adjCo = SHIFT.end
+    flags.earlyOut = true
+  } else if (coDiff >= 0 && coDiff <= 30) {
+    // Přesčas do 30 min → zaokrouhli na 16:00, nepočítej
+    adjCo = SHIFT.end
+  } else if (coDiff > 30) {
+    // Přesčas nad 30 min → počítej od skutečného
+    adjCo = co
+    flags.overtime = coDiff
   }
 
   if (co >= SHIFT.abnormal) {
