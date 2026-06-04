@@ -2957,6 +2957,36 @@ async function loadKWData() {
 }
 
 // ============ DOKUMENTY ============
+
+async function deleteDocument(docId) {
+  // Načti metadata z DB
+  const { data: doc } = await sb.from('documents').select('file_name,file_path,file_url').eq('id', docId).single()
+  if (!confirm('Smazat dokument "' + (doc?.file_name||docId) + '"?\nTato akce je nevratná.')) return
+
+  // Smaž soubor ze storage
+  const toRemove = [doc?.file_path, doc?.file_url]
+    .filter(Boolean)
+    .map(u => {
+      if (u && u.startsWith('http')) {
+        const m = u.match(/\/storage\/v1\/object\/public\/documents\/(.+)/)
+        return m ? decodeURIComponent(m[1]) : null
+      }
+      return u
+    })
+    .filter(Boolean)
+
+  for (const path of toRemove) {
+    try { await sb.storage.from('documents').remove([path]) }
+    catch(e) { console.warn('Doc storage delete:', e) }
+  }
+
+  const { error } = await sb.from('documents').delete().eq('id', docId)
+  if (error) { showToast('❌ Chyba: ' + error.message); return }
+
+  showToast('🗑 Dokument smazán')
+  loadDocuments()
+}
+
 async function loadDocuments() {
   const { data } = await sb.from('documents').select('*, worker:profiles!worker_id(full_name)').order('uploaded_at',{ascending:false})
   const tbody = document.getElementById('docs-table')
@@ -2970,8 +3000,12 @@ async function loadDocuments() {
       <td><span class="pill ${d.status==='ok'?'pg':d.status==='unreadable'||d.status==='expired'?'pr':'pa'}">${d.status}</span></td>
       <td>${d.valid_until||'—'}</td>
       <td>
-        ${d.status==='unreadable'?`<button onclick="requestReupload('${d.id}')" style="font-size:11px;padding:3px 8px;border:1px solid var(--red);border-radius:6px;cursor:pointer;background:var(--red-l);color:var(--red);font-family:inherit">Vyžádat re-upload</button>`:''}
-        <button onclick="approveDoc('${d.id}')" style="font-size:11px;padding:3px 8px;border:1px solid var(--green);border-radius:6px;cursor:pointer;background:var(--green-l);color:var(--green);font-family:inherit;margin-left:4px">✅ Schválit</button>
+        <div style="display:flex;gap:4px;flex-wrap:wrap">
+          ${d.file_url?`<button onclick="openPdfUrl('${d.file_url}')" style="font-size:11px;padding:3px 8px;border:1px solid var(--blue);border-radius:6px;cursor:pointer;background:var(--bg2);color:var(--blue);font-family:inherit">👁 Zobrazit</button>`:''}
+          ${d.status==='unreadable'?`<button onclick="requestReupload('${d.id}')" style="font-size:11px;padding:3px 8px;border:1px solid var(--red);border-radius:6px;cursor:pointer;background:var(--red-l);color:var(--red);font-family:inherit">↩ Re-upload</button>`:''}
+          ${d.status!=='ok'?`<button onclick="approveDoc('${d.id}')" style="font-size:11px;padding:3px 8px;border:1px solid var(--green);border-radius:6px;cursor:pointer;background:var(--green-l);color:var(--green);font-family:inherit">✅ Schválit</button>`:''}
+          <button onclick="deleteDocument('${d.id}')" style="font-size:11px;padding:3px 8px;border:1px solid var(--red);border-radius:6px;cursor:pointer;background:none;color:var(--red);font-family:inherit">🗑</button>
+        </div>
       </td>
     </tr>`).join('')
 }
@@ -4322,23 +4356,48 @@ function onDocTypeChange() {
     else if (isMulti) side1label.textContent = '📄 Přední strana / strana 1'
     else side1label.textContent = '📄 Vyberte soubor'
   }
+  // RESET souborů při změně typu
+  resetUploadForm()
 }
 
 function openUploadForm() {
+  resetUploadForm()
   document.getElementById('upload-form-card').style.display = 'block'
-  document.getElementById('upload-progress').style.display = 'none'
-  document.getElementById('upload-check-status').style.display = 'none'
-  document.getElementById('upload-preview-1').style.display = 'none'
-  document.getElementById('upload-preview-2').style.display = 'none'
+  const typeEl = document.getElementById('upload-doc-type')
+  if (typeEl) typeEl.value = 'op'
+  onDocTypeChange()
+}
+
+
+// Kompletní reset upload formuláře
+function resetUploadForm() {
   selectedFile = null
   selectedFile2 = null
-  onDocTypeChange()
+  // Skryj a vymaž preview obrázky
+  ;['upload-preview-1','upload-preview-2'].forEach(id => {
+    const el = document.getElementById(id)
+    if (!el) return
+    el.style.display = 'none'
+    const img = el.querySelector('img')
+    if (img) img.src = ''
+    const lbl = el.querySelector('span')
+    if (lbl) lbl.textContent = ''
+  })
+  // Vymaž file inputs (Safari může cachovat předchozí soubor)
+  ;['upload-camera','upload-file','upload-camera-2','upload-file-2'].forEach(id => {
+    const el = document.getElementById(id)
+    if (el) el.value = ''
+  })
+  // Skryj status
+  const st = document.getElementById('upload-check-status')
+  if (st) { st.style.display = 'none'; st.textContent = '' }
+  const prog = document.getElementById('upload-progress')
+  if (prog) prog.style.display = 'none'
 }
 
 function closeUploadForm() {
   document.getElementById('upload-form-card').style.display = 'none'
-  selectedFile = null
-  selectedFile2 = null
+  resetUploadForm()
 }
 
 async function checkDocumentReadability(file, docType) {
