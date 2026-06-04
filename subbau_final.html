@@ -6431,7 +6431,7 @@ function applyAttendanceRules(record) {
   const bs = timeToMin(record.break_start)
   const be = timeToMin(record.break_end)
 
-  const flags = { lateIn: false, lateBreak: false, earlyOut: false, overtime: 0, abnormal: false }
+  const flags = { lateIn: false, lateBreak: false, earlyOut: false, overtime: 0, abnormal: false, incomplete: false }
 
   if (ci === null || co === null) {
     return { checkIn: record.check_in, checkOut: record.check_out,
@@ -6505,6 +6505,11 @@ function applyAttendanceRules(record) {
   const totalMin = Math.max(0, adjCo - adjCi - breakDeducted)
   const hours = Math.round(totalMin * 100 / 60) / 100
 
+  // Nesplněná směna: uzavřená směna s méně než 8h
+  if (co !== null && hours < 8) {
+    flags.incomplete = true
+  }
+
   return {
     checkIn: minToTime(adjCi),
     checkOut: minToTime(adjCo),
@@ -6518,11 +6523,12 @@ function applyAttendanceRules(record) {
 // Helper pro zobrazení s příznakem
 function flagBadge(flag, text) {
   const badges = {
-    lateIn:    { bg: '#fff3cd', color: '#856404', label: 'Pozdní příchod' },
-    lateBreak: { bg: '#fff3cd', color: '#856404', label: 'Pozdní návrat z přestávky' },
-    earlyOut:  { bg: '#cfe2ff', color: '#0a58ca', label: 'Brzy odešel' },
-    overtime:  { bg: '#d1e7dd', color: '#146c43', label: 'Přesčas' },
-    abnormal:  { bg: '#f8d7da', color: '#842029', label: 'Abnormální doba' }
+    lateIn:     { bg: '#fff3cd', color: '#856404', label: 'Pozdní příchod' },
+    lateBreak:  { bg: '#fff3cd', color: '#856404', label: 'Pozdní návrat z přestávky' },
+    earlyOut:   { bg: '#cfe2ff', color: '#0a58ca', label: 'Brzy odešel' },
+    overtime:   { bg: '#d1e7dd', color: '#146c43', label: 'Přesčas' },
+    abnormal:   { bg: '#f8d7da', color: '#842029', label: 'Abnormální doba' },
+    incomplete: { bg: '#f8d7da', color: '#842029', label: 'Nesplněná směna (< 8h)' }
   }
   const b = badges[flag]
   if (!b) return text
@@ -6563,7 +6569,7 @@ async function loadWdAttendance() {
       <td>${adj.flags.lateIn ? flagBadge('lateIn', adj.checkIn||'—') : (adj.checkIn||'—')}</td>
       <td>${adj.flags.earlyOut ? flagBadge('earlyOut', adj.checkOut||'—') : adj.flags.abnormal ? flagBadge('abnormal', adj.checkOut||'—') : (adj.checkOut||'—')}</td>
       <td style="font-size:11px">${adj.flags.lateBreak ? flagBadge('lateBreak', breakStr) : breakStr}</td>
-      <td>${hoursDisplay}${adj.flags.overtime > 0 ? `<span style="font-size:10px;color:var(--green);margin-left:3px">+${Math.round(adj.flags.overtime/60*100)/100}h přesčas</span>` : ''}</td>
+      <td>${hoursDisplay}${adj.flags.overtime > 0 ? `<span style="font-size:10px;color:var(--green);margin-left:3px">+${Math.round(adj.flags.overtime/60*100)/100}h přesčas</span>` : ''}${adj.flags.incomplete ? `<div style="font-size:10px;color:#842029;font-weight:700;margin-top:2px">⚠️ Nesplněná směna</div>` : ''}</td>
       <td style="font-size:11px">${r.location_address||'—'}</td>
       <td><button class="att-edit-btn" data-id="${r.id}" data-date="${r.work_date}" data-ci="${r.check_in||''}" data-co="${r.check_out||''}" data-bs="${r.break_start||''}" data-be="${r.break_end||''}" style="padding:3px 8px;font-size:11px;border:1px solid var(--brd);border-radius:6px;cursor:pointer;background:var(--bg);font-family:inherit">✏️</button></td>
     </tr>`
