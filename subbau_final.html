@@ -401,6 +401,8 @@ tr:hover td{background:#fafbfc}
 
         <!-- DASHBOARD -->
         <div id="v-dashboard" class="view on">
+          <!-- Čekající registrace -->
+          <div id="dash-pending-registrations" style="display:none;margin-bottom:16px"></div>
           <div class="stats">
             <div class="sc b"><div class="sc-lbl">Aktivní pracovníci</div><div class="sc-val" style="color:var(--blue)" id="stat-workers">—</div><div class="sc-sub">z databáze</div></div>
             <div class="sc g"><div class="sc-lbl">Hodiny tento týden</div><div class="sc-val" style="color:var(--green)" id="stat-hours">—</div><div class="sc-sub">z evidence</div></div>
@@ -2711,9 +2713,51 @@ async function sendPasswordReset(email, name) {
 }
 
 // ============ DASHBOARD ============
+
+async function approveWorkerRegistration(workerId, workerName) {
+  if (!confirm('Schválit přístup pro ' + workerName + '?')) return
+  const { error } = await sb.from('profiles').update({ is_active: true }).eq('id', workerId)
+  if (error) { showToast('Chyba: ' + error.message); return }
+  showToast('✅ Přístup schválen: ' + workerName)
+  loadDashboard()
+}
+
 async function loadDashboard() {
   const { data: workers } = await sb.from('profiles').select('id').in('role',['osvec','partak']).eq('is_active',true)
   document.getElementById('stat-workers').textContent = workers?.length || 0
+
+  // Pending registrace (is_active = false)
+  const { data: pendingWorkers } = await sb.from('profiles')
+    .select('id, full_name, email, created_at')
+    .in('role', ['osvec', 'partak'])
+    .eq('is_active', false)
+    .order('created_at', { ascending: false })
+
+  const pendingDiv = document.getElementById('dash-pending-registrations')
+  if (pendingDiv) {
+    if (pendingWorkers?.length) {
+      pendingDiv.style.display = 'block'
+      pendingDiv.innerHTML = `
+        <div style="background:var(--amber-l);border-left:4px solid var(--amber);border-radius:8px;padding:12px 16px;margin-bottom:16px">
+          <div style="font-size:13px;font-weight:700;color:var(--amber);margin-bottom:8px">
+            🔔 ${pendingWorkers.length} čekající ${pendingWorkers.length === 1 ? 'registrace' : 'registrace'} ke schválení
+          </div>
+          ${pendingWorkers.map(w => `
+            <div style="display:flex;justify-content:space-between;align-items:center;padding:6px 0;border-bottom:1px solid rgba(0,0,0,0.08)">
+              <div>
+                <div style="font-size:13px;font-weight:600">${w.full_name}</div>
+                <div style="font-size:11px;color:var(--text3)">${w.email}</div>
+              </div>
+              <button onclick="approveWorkerRegistration('${w.id}','${w.full_name}')"
+                style="padding:5px 12px;background:#1a1a1a;color:#FFCD00;border:none;border-radius:6px;cursor:pointer;font-size:12px;font-weight:700;font-family:inherit">
+                ✅ Schválit
+              </button>
+            </div>`).join('')}
+        </div>`
+    } else {
+      pendingDiv.style.display = 'none'
+    }
+  }
 
   const { data: teams } = await sb.from('teams').select('id').eq('is_active',true)
   document.getElementById('stat-teams').textContent = teams?.length || 0
@@ -4865,82 +4909,87 @@ async function saveWorkerInvoiceCustomer() {
 
 // -- PRINT BEZ POPUP - funguje v Safari anonymním okně --
 function printInPage(html) {
-  // Spolehlivý iframe tisk - funguje v Safari i anonymním okně
-  const existingFrame = document.getElementById('__print_frame__')
-  if (existingFrame) existingFrame.remove()
-
-  const iframe = document.createElement('iframe')
-  iframe.id = '__print_frame__'
-  iframe.style.cssText = 'position:fixed;top:-9999px;left:-9999px;width:210mm;height:297mm;border:none;visibility:hidden'
-  document.body.appendChild(iframe)
-
-  // Počkej na načtení iframe
-  iframe.onload = () => {
-    try {
-      const iframeDoc = iframe.contentDocument || iframe.contentWindow.document
-      iframeDoc.open()
-      iframeDoc.write(html)
-      iframeDoc.close()
-
-      // Počkej na vykreslení obsahu
-      setTimeout(() => {
-        try {
-          iframe.contentWindow.focus()
-          iframe.contentWindow.print()
-        } catch(e) {
-          // Fallback na overlay pokud iframe selže
-          printViaOverlay(html)
-        }
-        // Vymaž iframe po tisku
-        setTimeout(() => { if (iframe.parentNode) iframe.remove() }, 3000)
-      }, 800)
-    } catch(e) {
-      printViaOverlay(html)
-    }
-  }
-
-  // Spusť onload
-  iframe.src = 'about:blank'
-}
-
-function printViaOverlay(html) {
-  // Záložní metoda - overlay v aktuální stránce
+  // Safari-kompatibilní tisk: overlay přes celou stránku
   const overlay = document.getElementById('print-overlay')
   const printContent = document.getElementById('print-content')
-  if (!overlay || !printContent) { showToast('⚠️ Tisk selhal — povolte vyskakovací okna'); return }
 
+  if (!overlay || !printContent) {
+    showToast('⚠️ Chyba tisku — zkuste znovu')
+    return
+  }
+
+  // Vlož obsah
   const parser = new DOMParser()
   const doc = parser.parseFromString(html, 'text/html')
   printContent.innerHTML = ''
 
-  const style = doc.querySelector('style')
-  if (style) {
-    const s = document.createElement('style')
-    s.textContent = style.textContent
-    printContent.appendChild(s)
-  }
+  // Přidej styly z dokumentu
+  doc.querySelectorAll('style').forEach(s => {
+    const ns = document.createElement('style')
+    ns.textContent = s.textContent
+    printContent.appendChild(ns)
+  })
 
-  const body = doc.createElement ? document.createElement('div') : document.createElement('div')
-  body.innerHTML = doc.body.innerHTML
-  printContent.appendChild(body)
+  // Přidej obsah těla
+  const bodyDiv = document.createElement('div')
+  bodyDiv.innerHTML = doc.body.innerHTML
+  printContent.appendChild(bodyDiv)
 
+  // Zobraz overlay
   overlay.style.display = 'block'
   document.body.style.overflow = 'hidden'
+
+  // Tlačítka
+  const existingBtns = overlay.querySelectorAll('button')
+  existingBtns.forEach(b => b.remove())
 
   const closeBtn = document.createElement('button')
   closeBtn.innerHTML = '✕ Zavřít'
   closeBtn.style.cssText = 'position:fixed;top:16px;right:16px;z-index:10000;padding:8px 16px;background:#1a1a1a;color:#FFCD00;border:none;border-radius:8px;cursor:pointer;font-size:14px;font-weight:700;font-family:inherit'
-  closeBtn.onclick = () => { overlay.style.display='none'; document.body.style.overflow=''; closeBtn.remove(); printBtn.remove() }
+  closeBtn.onclick = () => {
+    overlay.style.display = 'none'
+    document.body.style.overflow = ''
+    closeBtn.remove()
+    printBtn.remove()
+  }
   overlay.appendChild(closeBtn)
 
   const printBtn = document.createElement('button')
-  printBtn.innerHTML = '🖨 Tisk / PDF'
-  printBtn.style.cssText = 'position:fixed;top:16px;right:140px;z-index:10000;padding:8px 16px;background:#FFCD00;color:#1a1a1a;border:none;border-radius:8px;cursor:pointer;font-size:14px;font-weight:700;font-family:inherit'
-  printBtn.onclick = () => window.print()
+  printBtn.innerHTML = '🖨 Tisk / Uložit PDF'
+  printBtn.style.cssText = 'position:fixed;top:16px;right:160px;z-index:10000;padding:8px 16px;background:#FFCD00;color:#1a1a1a;border:none;border-radius:8px;cursor:pointer;font-size:14px;font-weight:700;font-family:inherit'
+  printBtn.onclick = () => {
+    // Dočasně skryj tlačítka při tisku
+    closeBtn.style.display = 'none'
+    printBtn.style.display = 'none'
+    setTimeout(() => {
+      window.print()
+      setTimeout(() => {
+        closeBtn.style.display = ''
+        printBtn.style.display = ''
+      }, 500)
+    }, 100)
+  }
   overlay.appendChild(printBtn)
 
-  setTimeout(() => window.print(), 800)
+  // Auto-tisk po renderování (2 animační snímky = DOM je hotový)
+  requestAnimationFrame(() => {
+    requestAnimationFrame(() => {
+      setTimeout(() => {
+        closeBtn.style.display = 'none'
+        printBtn.style.display = 'none'
+        window.print()
+        setTimeout(() => {
+          closeBtn.style.display = ''
+          printBtn.style.display = ''
+        }, 500)
+      }, 300)
+    })
+  })
 }
+
+function printViaOverlay(html) { printInPage(html) }
+
+
 
 // -- EXPORT HODIN PRACOVNÍKA --
 async function exportWorkerKW(workerId, workerName, week, year) {
