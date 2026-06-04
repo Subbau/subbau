@@ -2102,11 +2102,27 @@ async function initApp(user) {
   console.log('[initApp] role ze Supabase:', JSON.stringify(profile.role))
   const role = (profile.role || '').trim().toLowerCase()
 
-  // Zaloguj přihlášení (async, neblokuj)
-  sb.from('profiles').update({
-    last_login_at: new Date().toISOString(),
-    login_count: (profile.login_count || 0) + 1
-  }).eq('id', user.id).then(() => {})
+  // Zaloguj přihlášení jen pro pracovníky (ne adminy) - rolling 3 záznamy
+  if (role !== 'admin') {
+    ;(async () => {
+      try {
+        // 1. Ulož nové přihlášení
+        await sb.from('login_history').insert({ worker_id: user.id })
+        // 2. Smaž záznamy starší než 3 dny (zachovej všechna přihlášení za posledních 3 dny)
+        const cutoff = new Date()
+        cutoff.setDate(cutoff.getDate() - 3)
+        await sb.from('login_history')
+          .delete()
+          .eq('worker_id', user.id)
+          .lt('logged_at', cutoff.toISOString())
+        // 3. Aktualizuj last_login_at a count v profiles
+        await sb.from('profiles').update({
+          last_login_at: new Date().toISOString(),
+          login_count: (profile.login_count || 0) + 1
+        }).eq('id', user.id)
+      } catch(e) { console.warn('Login log error:', e) }
+    })()
+  }
 
   // Čeká na schválení
   if (!profile.is_active && role !== 'admin') {
@@ -2606,6 +2622,31 @@ async function loadAccess() {
 
   const roleLabels = { osvec: 'OSVČ', partak: 'Parťák' }
 
+  // Načti login historii pro všechny pracovníky
+  const workerIds = data.map(w => w.id)
+  let loginHistMap = {}
+  if (workerIds.length) {
+    const cutoffDate = new Date()
+    cutoffDate.setDate(cutoffDate.getDate() - 3)
+    const { data: hist } = await sb.from('login_history')
+      .select('worker_id, logged_at')
+      .in('worker_id', workerIds)
+      .gte('logged_at', cutoffDate.toISOString())
+      .order('logged_at', { ascending: false })
+      .limit(200)
+    if (hist) {
+      hist.forEach(h => {
+        if (!loginHistMap[h.worker_id]) loginHistMap[h.worker_id] = []
+        loginHistMap[h.worker_id].push(h.logged_at)  // všechna přihlášení za 3 dny
+      })
+    }
+  }
+
+  function fmtLogin(ts) {
+    const d = new Date(ts)
+    return d.toLocaleDateString('cs-CZ') + ' ' + d.toLocaleTimeString('cs-CZ', {hour:'2-digit',minute:'2-digit'})
+  }
+
   tbody.innerHTML = data.map(w => `
     <tr>
       <td><b>${w.full_name}</b></td>
@@ -2613,8 +2654,27 @@ async function loadAccess() {
       <td><span class="pill pb">${roleLabels[w.role] || w.role}</span></td>
       <td>
         <span class="pill ${w.is_active ? 'pg' : 'pr'}">${w.is_active ? 'Aktivní' : 'Neaktivní'}</span>
-        ${w.last_login_at ? `<div style="font-size:10px;color:var(--text3);margin-top:2px">Přihlášen: ${new Date(w.last_login_at).toLocaleDateString('cs-CZ')} ${new Date(w.last_login_at).toLocaleTimeString('cs-CZ',{hour:'2-digit',minute:'2-digit'})}</div>` : '<div style="font-size:10px;color:var(--text3)">Nikdy</div>'}
-        ${w.login_count ? `<div style="font-size:10px;color:var(--text3)">${w.login_count}× přihlášení</div>` : ''}
+        <div style="margin-top:4px">
+          ${(loginHistMap[w.id]||[]).length === 0
+            ? '<div style="font-size:10px;color:var(--text3)">Nikdy se nepřihlásil</div>'
+            : (() => {
+                const logins = loginHistMap[w.id] || []
+                const byDay = {}
+                logins.forEach(ts => {
+                  const day = new Date(ts).toLocaleDateString('cs-CZ')
+                  if (!byDay[day]) byDay[day] = []
+                  byDay[day].push(ts)
+                })
+                return Object.entries(byDay).map(([day, times], di) =>
+                  '<div style="margin-bottom:3px">' +
+                  '<div style="font-size:10px;font-weight:700;color:var(--text2)">' + day + ' (' + times.length + '×)</div>' +
+                  times.map((ts,i) => '<div style="font-size:10px;color:' + (di===0&&i===0?'var(--blue)':'var(--text3)') + ';padding-left:8px">' + (di===0&&i===0?'🟢 ':'') + new Date(ts).toLocaleTimeString('cs-CZ',{hour:'2-digit',minute:'2-digit'}) + '</div>').join('') +
+                  '</div>'
+                ).join('')
+              })()
+          }
+          ${w.login_count ? '<div style="font-size:10px;color:var(--text3);margin-top:2px">Celkem ' + w.login_count + '× přihlášení</div>' : ''}
+        </div>
       </td>
       <td style="text-align:center">
         <button onclick="sendPasswordReset('${w.email}','${w.full_name}')"
