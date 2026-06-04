@@ -1428,6 +1428,7 @@ tr:hover td{background:#fafbfc}
 
 <script>
 
+
 // ============ OSVČ PDF SIGNING S UMÍSTĚNÍM ============
 let workerPdfState = {
   contractId: null, fileUrl: null,
@@ -4341,86 +4342,29 @@ function closeUploadForm() {
 }
 
 async function checkDocumentReadability(file, docType) {
-  // PDF soubory přeskočíme — důvěřujeme jim
-  if (!file.type.startsWith('image/')) return { readable: true, reason: 'PDF soubor' }
-
+  // Základní kontrola souboru bez AI (API není dostupné v produkci)
   const status = document.getElementById('upload-check-status')
+  if (!file) return { readable: false, reason: 'Žádný soubor' }
+
+  // Zkontroluj velikost (max 20 MB)
+  if (file.size > 20 * 1024 * 1024) {
+    return { readable: false, reason: 'Soubor je příliš velký (max 20 MB)' }
+  }
+
+  // Zkontroluj typ
+  const validTypes = ['image/jpeg','image/jpg','image/png','image/webp','image/heic','image/heif','application/pdf']
+  if (!validTypes.includes(file.type) && !file.name.match(/\.(jpg|jpeg|png|pdf|webp|heic|heif)$/i)) {
+    return { readable: false, reason: 'Nepodporovaný typ souboru — použijte JPG, PNG nebo PDF' }
+  }
+
   if (status) {
     status.style.display = 'block'
-    status.style.background = '#fff8cc'
-    status.style.color = '#1a1a1a'
-    status.textContent = '🔍 Kontroluji dokument pomocí AI...'
+    status.style.background = 'var(--green-l)'
+    status.style.color = 'var(--green)'
+    status.textContent = '✅ Soubor je v pořádku — nahrávám...'
   }
 
-  // Popis co očekáváme pro každý typ dokumentu
-  const docExpectations = {
-    op: 'občanský průkaz, cestovní pas nebo jiný průkaz totožnosti s fotografií, jménem a datem narození',
-    zivnost: 'živnostenský list nebo výpis ze živnostenského rejstříku s názvem podnikání a IČO',
-    gewerbeschein: 'německý Gewerbeschein nebo živnostenský list s textem v němčině',
-    a1: 'formulář A1 nebo potvrzení o sociálním pojištění pro práci v EU',
-    freistellung: 'Freistellungsbescheinigung nebo potvrzení o osvobození od daně',
-    other: 'pracovní doklad, certifikát nebo jiný úřední dokument'
-  }
-  const expected = docExpectations[docType] || 'úřední dokument nebo průkaz'
-
-  try {
-    const base64 = await new Promise((resolve, reject) => {
-      const reader = new FileReader()
-      reader.onload = e => resolve(e.target.result.split(',')[1])
-      reader.onerror = reject
-      reader.readAsDataURL(file)
-    })
-
-    const response = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        model: 'claude-sonnet-4-20250514',
-        max_tokens: 300,
-        messages: [{
-          role: 'user',
-          content: [
-            { type: 'image', source: { type: 'base64', media_type: file.type, data: base64 } },
-            {
-              type: 'text',
-              text: `Zkontroluj tento obrázek jako systém pro ověření dokumentů.
-
-Očekávaný typ dokumentu: ${expected}
-
-Odpověz PŘESNĚ v tomto formátu (bez dalšího textu):
-VÝSLEDEK: OK nebo ZAMÍTNUTO
-DŮVOD: [jedna věta]
-
-Zamítni pokud:
-- Obrázek NENÍ dokument (fotka osoby, krajiny, jídla, selfie, prázdná plocha, screenshot, atd.)
-- Dokument je rozmazaný nebo nečitelný
-- Dokument neodpovídá očekávanému typu
-- Není vidět žádný text, datum ani jméno
-
-Schval pokud:
-- Jde o správný typ dokumentu
-- Text je čitelný
-- Jsou viditelné základní údaje (jméno, datum, číslo nebo razítko)`
-            }
-          ]
-        }]
-      })
-    })
-
-    const data = await response.json()
-    const answer = data.content?.[0]?.text?.trim() || ''
-    console.log('[checkDocument] AI odpověď:', answer)
-
-    const isOk = answer.includes('VÝSLEDEK: OK')
-    const duvodMatch = answer.match(/DŮVOD: (.+)/)
-    const duvod = duvodMatch ? duvodMatch[1] : answer
-
-    return { readable: isOk, reason: duvod }
-
-  } catch (e) {
-    console.error('[checkDocument] chyba:', e)
-    return { readable: true, reason: 'kontrola nedostupná' }
-  }
+  return { readable: true, reason: 'OK' }
 }
 
 async function uploadDocument() {
@@ -4435,7 +4379,7 @@ async function uploadDocument() {
   const status = document.getElementById('upload-check-status')
 
   btn.disabled = true
-  btn.textContent = '🔍 Kontroluji...'
+  btn.textContent = '⏳ Nahrávám...'
   if (status) status.style.display = 'none'
 
   // 1. Zkontroluj přední stranu
@@ -4478,7 +4422,15 @@ async function uploadDocument() {
     .upload(filePath, selectedFile, { upsert: true })
 
   if (storageErr) {
-    showToast('❌ Chyba nahrávání: ' + storageErr.message)
+    let sMsg = storageErr.message
+    console.error('[uploadDocument] storage error:', storageErr)
+    if (sMsg.includes('security') || sMsg.includes('policy') || sMsg.includes('403') || sMsg.includes('Unauthorized')) {
+      sMsg = 'Chyba oprávnění — kontaktujte admina (RLS storage.objects)'
+    } else if (sMsg.includes('not found') || sMsg.includes('does not exist')) {
+      sMsg = 'Storage bucket "documents" neexistuje — vytvořte ho v Supabase'
+    }
+    showToast('❌ Nahrávání: ' + sMsg)
+    if (status) { status.style.display='block'; status.style.background='var(--red-l)'; status.style.color='var(--red)'; status.textContent='❌ '+sMsg }
     btn.disabled = false
     btn.textContent = '📤 Nahrát'
     progress.style.display = 'none'
@@ -4494,6 +4446,7 @@ async function uploadDocument() {
     worker_id: currentUser.id,
     doc_type: docType,
     file_name: selectedFile.name + ' (strana 1)',
+    file_path: filePath,
     file_url: fileUrl,
     valid_until: validUntil || null,
     status: 'pending',
@@ -4521,6 +4474,7 @@ async function uploadDocument() {
         worker_id: currentUser.id,
         doc_type: docType,
         file_name: selectedFile2.name + ' (strana 2)',
+        file_path: filePath2,
         file_url: urlData2?.publicUrl,
         valid_until: validUntil || null,
         status: 'pending',
@@ -5754,8 +5708,14 @@ async function uploadContract() {
   progress.style.display = 'block'
   progress.textContent = '⏳ Nahrávám PDF...'
 
-  // Upload PDF do storage
-  const filePath = `${workerId}/${Date.now()}_${contractFile.name}`
+  // Upload PDF do storage - sanitizuj název (Supabase nepovoluje mezery/diakritiku)
+  const safeName = contractFile.name
+    .normalize('NFD').replace(/[\u0300-\u036f]/g, '')  // odstraň diakritiku
+    .replace(/[^a-zA-Z0-9._-]/g, '_')                    // nahraď spec. znaky
+    .replace(/_+/g, '_')                                  // odstraň více podtržítek
+    .toLowerCase()
+  const filePath = `${workerId}/${Date.now()}_${safeName}`
+  console.log('[uploadContract] filePath:', filePath)
   const { data: storageData, error: storageErr } = await sb.storage.from('contracts').upload(filePath, contractFile, {upsert: false})
   if (storageErr) {
     let msg = storageErr.message
@@ -5820,6 +5780,34 @@ function openPdfUrl(url) {
   }
 }
 
+
+async function deleteContract(contractId, title, fileUrl, adminSigUrl, workerSigUrl) {
+  if (!confirm('Smazat smlouvu "' + title + '"?\nTato akce je nevratná.')) return
+
+  // Smaž soubory ze storage (ignoruj chyby - soubory možná neexistují)
+  const paths = [fileUrl, adminSigUrl, workerSigUrl]
+    .filter(Boolean)
+    .map(url => {
+      // Extrahuj cestu ze Supabase public URL
+      const match = url.match(/\/storage\/v1\/object\/public\/contracts\/(.+)/)
+      return match ? match[1] : null
+    })
+    .filter(Boolean)
+
+  for (const path of paths) {
+    try {
+      await sb.storage.from('contracts').remove([path])
+    } catch(e) { console.warn('Storage delete:', e) }
+  }
+
+  // Smaž záznam z DB
+  const { error } = await sb.from('contracts').delete().eq('id', contractId)
+  if (error) { showToast('❌ Chyba: ' + error.message); return }
+
+  showToast('🗑 Smlouva smazána: ' + title)
+  loadAdminContracts()
+}
+
 async function loadAdminContracts() {
   const { data, error: cErr } = await sb.from('contracts').select('id,title,status,file_url,signature_url,admin_signature_url,signed_at,admin_signed_at,created_at, worker:profiles!worker_id(full_name)').order('created_at',{ascending:false})
   const div = document.getElementById('contracts-list')
@@ -5842,6 +5830,7 @@ async function loadAdminContracts() {
           ${c.admin_signature_url?`<button onclick="openPdfUrl('${c.admin_signature_url}')" style="font-size:11px;color:var(--amber);display:block;margin-top:2px;background:none;border:none;cursor:pointer;padding:0;font-family:inherit;text-decoration:underline">✍️ Podpis admina</button>`:''}
           ${c.signature_url?`<button onclick="openPdfUrl('${c.signature_url}')" style="font-size:11px;color:var(--green);display:block;margin-top:2px;background:none;border:none;cursor:pointer;padding:0;font-family:inherit;text-decoration:underline">✍️ Podpis OSVČ</button>`:''}
           ${c.status==='admin_pending'?`<button onclick="openAdminSignModal('${c.id}','${(c.title||'').replace(/'/g,"\'")}','${c.file_url||''}')" style="margin-top:6px;width:100%;padding:5px 8px;background:#1a1a1a;color:#FFCD00;border:none;border-radius:6px;cursor:pointer;font-size:11px;font-weight:700">✍️ Podepsat jako admin</button>`:''}
+          <button onclick="deleteContract('${c.id}','${(c.title||'').replace(/'/g,"\'")}','${c.file_url||''}','${c.admin_signature_url||''}','${c.signature_url||''}')" style="margin-top:4px;width:100%;padding:4px 8px;background:none;border:1px solid var(--red);color:var(--red);border-radius:6px;cursor:pointer;font-size:10px;font-family:inherit">🗑 Smazat smlouvu</button>
         </div>
       </div>
     </div>`).join('')
