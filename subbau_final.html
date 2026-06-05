@@ -3007,13 +3007,18 @@ async function doRegister() {
   })
 
   if (authErr) {
-    let msg = authErr.message
-    if (msg.includes('already registered') || msg.includes('already exists')) {
-      msg = 'Tento email je již registrován. Přihlaste se nebo kontaktujte admina.'
-    } else if (msg.includes('invalid email')) {
-      msg = 'Neplatný emailový formát.'
-    } else if (msg.includes('password')) {
-      msg = 'Heslo musí mít alespoň 6 znaků.'
+    let msg = authErr.message || ''
+    const status = authErr.status || authErr.code || ''
+    if (msg.includes('already registered') || msg.includes('already exists') || msg.includes('email_exists') || status == 422 || String(status) === '422') {
+      msg = '⚠️ Tento email je již registrován. Zkuste se přihlásit nebo kontaktujte admina.'
+    } else if (msg.includes('invalid email') || msg.includes('valid email')) {
+      msg = '⚠️ Neplatný emailový formát.'
+    } else if (msg.includes('password') || msg.includes('least 6')) {
+      msg = '⚠️ Heslo musí mít alespoň 6 znaků.'
+    } else if (msg.includes('rate limit') || msg.includes('too many')) {
+      msg = '⚠️ Příliš mnoho pokusů. Počkejte chvíli a zkuste znovu.'
+    } else {
+      msg = '⚠️ Chyba registrace: ' + (msg || JSON.stringify(authErr))
     }
     err.textContent = msg
     err.style.display = 'block'
@@ -3055,7 +3060,14 @@ async function doRegister() {
     })
     if (profileErr) {
       console.error('Profile insert error:', profileErr)
-      err.textContent = 'Chyba profilu: ' + (profileErr.message || profileErr.code || JSON.stringify(profileErr))
+      const pCode = profileErr.code || profileErr.status || ''
+      let pMsg = 'Chyba profilu: ' + (profileErr.message || JSON.stringify(profileErr))
+      if (String(pCode) === '401' || profileErr.message?.includes('JWT')) {
+        pMsg = '⚠️ Chyba autorizace. Zkuste registraci znovu.'
+      } else if (profileErr.code === '23505') {
+        pMsg = '⚠️ Profil s tímto emailem již existuje. Kontaktujte admina.'
+      }
+      err.textContent = pMsg
       err.style.display = 'block'
       btn.textContent = 'Odeslat registraci →'
       btn.disabled = false
