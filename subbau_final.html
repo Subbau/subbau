@@ -6126,7 +6126,7 @@ async function generateInvoiceMob(lang = 'en') {
 
   // Data faktury
   const today = new Date()
-  const dueDate = new Date(today.getTime() + 14 * 86400000)
+  const dueDate = new Date(today.getTime() + dueDays * 86400000)
   const fmt = d => d.toLocaleDateString('en-GB').replace(/\//g, '.')
   const invoiceNum = `${year}${week.toString().padStart(2,'0')}`
 
@@ -6187,6 +6187,8 @@ async function generateInvoiceMob(lang = 'en') {
   renderInvoice({
     invoiceNum, today: fmt(today), dueDate: fmt(dueDate),
     workerName, workerAddr, workerIC,
+    workerEmail: currentProfile.email || null,
+    workerPhone: currentProfile.phone || null,
     iban: iban.replace(/\s+/g,'').replace(/(.{4})/g,'$1 ').trim(),
     swift, dueDays,
     serviceDesc, totalHours, rate, totalAmount, week, year,
@@ -6195,153 +6197,191 @@ async function generateInvoiceMob(lang = 'en') {
 }
 
 function renderInvoice(d, lang = 'en') {
-  const t = lang === 'cz' ? {
-    supplier:'Dodavatel', customer:'Odběratel', invoice:'FAKTURA',
-    invoiceNo:'č. faktury', dateIssue:'Datum vystavení', dueDate:'Datum splatnosti',
-    bankTitle:'Platební informace', iban:'IBAN', swift:'SWIFT / BIC',
-    service:'Popis služby', hours:'Hodiny', rate:'Sazba/hod', total:'Celkem',
-    vatNote:'Neplátce DPH', signTitle:'Razítko a podpis:',
-    totalAmt:'Celková částka:', daysNote:'Splatnost {d} dní',
-    weekLabel:'Týden č.',
-  } : {
-    supplier:'Supplier', customer:'Customer', invoice:'INVOICE',
-    invoiceNo:'No.', dateIssue:'Date of issue', dueDate:'Due date',
-    bankTitle:'Payment details', iban:'IBAN', swift:'SWIFT / BIC',
-    service:'Service description', hours:'Hours', rate:'Rate/h', total:'Total',
-    vatNote:'Not a VAT-payer', signTitle:'Stamp and signature:',
-    totalAmt:'Total amount:', daysNote:'Due in {d} days',
-    weekLabel:'Week no.',
-  }
   const overlay = document.getElementById('invoice-overlay')
   const content = document.getElementById('invoice-content')
   if (!overlay || !content) return
 
   const cust = d.customer || {
     name: 'Treskower Zimmermann und Dachdecker GmbH',
-    address: 'Ahornallee 9, 16818 Märkisch Linden/ OT Werder, Germany',
+    address: 'Ahornallee 9\n16818 Märkisch Linden/ OT Werder\nGermany',
     id: '198456703', vatId: 'DE198456703'
   }
 
+  // CZK prepočet (fixed EUR/CZK kurz alebo z profilu)
+  const eurCzkRate = 24.21
+  const totalCZK = (d.totalAmount * eurCzkRate).toFixed(2).replace('.', ',')
+  const rateStr = `${eurCzkRate.toFixed(2)} CZK / 1 EUR`
+
+  // Variabilný symbol = číslo faktúry
+  const varSymbol = d.invoiceNum
+  const constSymbol = '0308'
+
+  // CZ vs EN labely
+  const isCz = lang === 'cz'
+  const L = {
+    title: isCz ? 'FAKTURA' : 'INVOICE',
+    invoiceNo: isCz ? 'Číslo faktury' : 'Invoice No.',
+    supplier: isCz ? 'Dodavatel' : 'Supplier',
+    customer: isCz ? 'Odběratel' : 'Customer',
+    contactInfo: isCz ? 'Kontaktní údaje' : 'Contact Information',
+    dateIssue: isCz ? 'Datum vystavení' : 'Date of issue',
+    dueDate: isCz ? 'Datum splatnosti' : 'Due date',
+    paymentInfo: isCz ? 'Platební informace' : 'Payment Information',
+    paymentMethod: isCz ? 'Způsob platby' : 'Payment method',
+    bankTransfer: isCz ? 'Bankovním převodem' : 'Bank transfer',
+    variable: isCz ? 'Variabilní symbol' : 'Variable symbol',
+    constant: isCz ? 'Konstantní symbol' : 'Constant symbol',
+    forPayment: isCz ? 'K úhradě' : 'For payment',
+    reverseCharge: 'REVERSE CHARGE',
+    deliveryName: isCz ? 'Popis plnění' : 'Delivery name',
+    qty: isCz ? 'Množství' : 'Quantity',
+    unit: 'Unit',
+    unitPrice: isCz ? 'Jedn. cena' : 'Unit price',
+    total: 'Total',
+    vatNote: isCz ? 'Neplátce DPH' : 'Not a VAT-payer',
+    stampSign: isCz ? 'Razítko a podpis:' : 'Stamp and signature:',
+    totalAmount: isCz ? 'Celková částka:' : 'Total amount:',
+    exchangeRate: isCz ? 'Kurz:' : 'Exchange rate:',
+    dueDays: isCz ? `Splatnost ${d.dueDays||14} dní` : `Due in ${d.dueDays||14} days`,
+    email: 'Email', phone: 'Phone',
+    id: 'ID', vatId: 'VAT ID',
+    iban: 'IBAN', swift: 'SWIFT',
+    symbol: 'Symbol'
+  }
+
   content.innerHTML = `
-  <div style="font-family:Arial,sans-serif;font-size:10.5pt;color:#000;max-width:100%;padding:0">
+  <div style="font-family:Arial,Helvetica,sans-serif;font-size:9.5pt;color:#000;max-width:100%;padding:0;line-height:1.4">
 
-    <!-- HEADER -->
-    <table style="width:100%;border-collapse:collapse">
+    <!-- HEADER ROW: Supplier | Invoice title+No. | Customer -->
+    <table style="width:100%;border-collapse:collapse;border-bottom:2px solid #000">
       <tr>
-        <td style="width:55%;vertical-align:top;padding:16px;border-right:1px solid #000">
-          <div style="font-size:8pt;color:#888;font-weight:700;text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px">${t.supplier}</div>
-          <div style="font-size:13pt;font-weight:800;margin-bottom:4px">${d.workerName}</div>
-          <div style="font-size:9pt;color:#444">${d.workerAddr || ''}</div>
-          ${d.workerIC ? `<div style="font-size:9pt;color:#444">IČO / ID: <b>${d.workerIC}</b></div>` : ''}
-          <div style="font-size:9pt;color:#888;margin-top:4px">${t.vatNote}</div>
+        <!-- SUPPLIER -->
+        <td style="width:33%;vertical-align:top;padding:12px 10px 12px 14px;border-right:1px solid #ccc">
+          <div style="font-size:7pt;font-weight:700;text-transform:uppercase;color:#666;letter-spacing:.5px;margin-bottom:6px">${L.supplier}</div>
+          <div style="font-size:11pt;font-weight:700;margin-bottom:3px">${d.workerName}</div>
+          ${d.workerAddr ? `<div style="font-size:8.5pt;color:#444;margin-bottom:2px">${d.workerAddr}</div>` : ''}
+          ${d.workerIC ? `<div style="font-size:8.5pt;color:#444">ID: <b>${d.workerIC}</b></div>` : ''}
+          <div style="font-size:8pt;color:#888;margin-top:4px;font-style:italic">${L.vatNote}</div>
         </td>
-        <td style="width:45%;vertical-align:top;padding:16px">
-          <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:12px">
-            <div>
-              <div style="font-size:16pt;font-weight:800">${t.invoice}</div>
-            </div>
-            <div style="text-align:right;background:#1a1a1a;color:#FFCD00;padding:8px 14px;border-radius:8px">
-              <div style="font-size:13pt;font-weight:800">${d.invoiceNum}</div>
-              <div style="font-size:8pt;opacity:.8">${t.invoiceNo}</div>
-            </div>
+        <!-- INVOICE TITLE -->
+        <td style="width:33%;vertical-align:top;padding:12px 10px;border-right:1px solid #ccc;text-align:center">
+          <div style="font-size:20pt;font-weight:900;letter-spacing:-1px;margin-bottom:6px">${L.title}</div>
+          <div style="background:#1a1a1a;color:#FFCD00;padding:8px 12px;border-radius:6px;display:inline-block;text-align:center">
+            <div style="font-size:13pt;font-weight:800">${d.invoiceNum}</div>
+            <div style="font-size:7pt;opacity:.7">${L.invoiceNo}</div>
           </div>
-          <div style="font-size:8pt;color:#888;font-weight:700;text-transform:uppercase;margin-bottom:4px">${t.customer}</div>
-          <div style="font-size:10pt;font-weight:700">${cust.name}</div>
-          <div style="font-size:9pt;color:#444;white-space:pre-line">${cust.address}</div>
-          ${cust.id ? `<div style="font-size:9pt;color:#888;margin-top:4px">ID: ${cust.id} &nbsp; VAT ID: ${cust.vatId||''}</div>` : ''}
+        </td>
+        <!-- CUSTOMER -->
+        <td style="width:34%;vertical-align:top;padding:12px 14px 12px 10px">
+          <div style="font-size:7pt;font-weight:700;text-transform:uppercase;color:#666;letter-spacing:.5px;margin-bottom:6px">${L.customer}</div>
+          <div style="font-size:10pt;font-weight:700;margin-bottom:3px">${cust.name}</div>
+          <div style="font-size:8.5pt;color:#444;white-space:pre-line">${cust.address}</div>
+          ${cust.id ? `<div style="font-size:8pt;color:#888;margin-top:4px">${L.id}: ${cust.id} &nbsp; ${L.vatId}: ${cust.vatId||''}</div>` : ''}
         </td>
       </tr>
     </table>
 
-    <!-- DATES -->
-    <table style="width:100%;border-collapse:collapse;border-top:2px solid #1a1a1a;background:#f5f5f5">
+    <!-- CONTACT + DATES ROW -->
+    <table style="width:100%;border-collapse:collapse;border-bottom:2px solid #000;background:#f9f9f9">
       <tr>
-        <td style="padding:10px 16px">
-          <div style="font-size:8pt;color:#888">${t.dateIssue}</div>
-          <div style="font-weight:700">${d.today}</div>
+        <td style="width:40%;padding:8px 10px 8px 14px;border-right:1px solid #ccc;vertical-align:top">
+          <div style="font-size:7pt;font-weight:700;text-transform:uppercase;color:#666;margin-bottom:4px">${L.contactInfo}</div>
+          <div style="font-size:8.5pt">${L.email}: <span style="color:#444">${d.workerEmail || '—'}</span></div>
+          <div style="font-size:8.5pt">${L.phone}: <span style="color:#444">${d.workerPhone || '—'}</span></div>
         </td>
-        <td style="padding:10px 16px">
-          <div style="font-size:8pt;color:#888">${t.dueDate} (${d.dueDays||14} days)</div>
-          <div style="font-weight:700">${d.dueDate}</div>
+        <td style="width:30%;padding:8px 10px;border-right:1px solid #ccc;vertical-align:top">
+          <div style="font-size:7pt;color:#888;margin-bottom:2px">${L.dateIssue}</div>
+          <div style="font-weight:700;font-size:9.5pt">${d.today}</div>
         </td>
-        <td style="padding:10px 16px;text-align:right">
-          <div style="font-size:8pt;color:#888">Způsob platby / Payment method</div>
-          <div style="font-weight:700">Bankovní převod / Bank transfer</div>
+        <td style="width:30%;padding:8px 14px 8px 10px;vertical-align:top">
+          <div style="font-size:7pt;color:#888;margin-bottom:2px">${L.dueDate} (${d.dueDays||14} days)</div>
+          <div style="font-weight:700;font-size:9.5pt">${d.dueDate}</div>
         </td>
       </tr>
     </table>
 
-    <!-- PAYMENT -->
-    <table style="width:100%;border-collapse:collapse;border-top:1px solid #ddd">
+    <!-- PAYMENT DATA -->
+    <table style="width:100%;border-collapse:collapse;border-bottom:2px solid #000;background:#1a1a1a">
       <tr>
-        <td style="padding:12px 16px;width:50%;border-right:1px solid #ddd;vertical-align:top">
-          <div style="font-size:8pt;color:#888;font-weight:700;text-transform:uppercase;margin-bottom:6px">Platební údaje / Payment Details</div>
-          <table style="width:100%;font-size:9.5pt">
-            <tr><td style="color:#888;padding:2px 8px 2px 0;width:50px">IBAN</td><td style="font-weight:700;font-family:monospace">${d.iban}</td></tr>
-            <tr><td style="color:#888;padding:2px 8px 2px 0">SWIFT</td><td>${d.swift||'—'}</td></tr>
-            <tr><td style="color:#888;padding:2px 8px 2px 0">VS</td><td>${d.invoiceNum}</td></tr>
-            <tr><td style="color:#888;padding:2px 8px 2px 0">KS</td><td>0308</td></tr>
+        <td style="padding:10px 14px;vertical-align:top;color:#fff">
+          <div style="font-size:7pt;font-weight:700;text-transform:uppercase;color:#FFCD00;margin-bottom:6px">${L.paymentInfo}</div>
+          <table style="width:100%;border-collapse:collapse">
+            <tr>
+              <td style="padding:1px 20px 1px 0;font-size:8.5pt;color:#ccc">${L.iban}</td>
+              <td style="font-size:8.5pt;font-weight:700;color:#fff">${d.iban}</td>
+              <td style="padding-left:20px;font-size:8.5pt;color:#ccc">${L.symbol}</td>
+              <td style="font-size:8.5pt;color:#fff">/</td>
+            </tr>
+            <tr>
+              <td style="padding:1px 20px 1px 0;font-size:8.5pt;color:#ccc">${L.swift}</td>
+              <td style="font-size:8.5pt;font-weight:700;color:#fff">${d.swift}</td>
+              <td style="padding-left:20px;font-size:8.5pt;color:#ccc">Variable</td>
+              <td style="font-size:8.5pt;color:#fff">${varSymbol}</td>
+            </tr>
+            <tr>
+              <td></td><td></td>
+              <td style="padding-left:20px;font-size:8.5pt;color:#ccc">Constant</td>
+              <td style="font-size:8.5pt;color:#fff">${constSymbol}</td>
+            </tr>
           </table>
         </td>
-        <td style="padding:12px 16px;width:50%;vertical-align:middle;text-align:right">
-          <div style="font-size:8pt;color:#888">K úhradě / For payment</div>
-          <div style="font-size:22pt;font-weight:800;color:#1a1a1a">${d.totalAmount.toFixed(2)} EUR</div>
+        <td style="padding:10px 14px;vertical-align:middle;text-align:right;white-space:nowrap;color:#fff">
+          <div style="font-size:7pt;color:#FFCD00;font-weight:700;text-transform:uppercase;margin-bottom:4px">${L.paymentMethod}</div>
+          <div style="font-size:8pt;color:#ccc;margin-bottom:8px">${L.bankTransfer}</div>
+          <div style="font-size:8pt;color:#FFCD00;margin-bottom:2px">${L.forPayment}</div>
+          <div style="font-size:16pt;font-weight:900;color:#fff">${d.totalAmount.toFixed(2)} EUR</div>
         </td>
       </tr>
     </table>
 
-    <!-- POLOŽKY / ITEMS -->
-    <table style="width:100%;border-collapse:collapse;border-top:2px solid #1a1a1a">
+    <!-- WE INVOICE YOU -->
+    <table style="width:100%;border-collapse:collapse;border-bottom:2px solid #000">
       <thead>
-        <tr style="background:#1a1a1a;color:#FFCD00">
-          <td style="padding:8px 16px;font-size:9pt;font-weight:700">${t.service}</td>
-          <td style="padding:8px 8px;font-size:9pt;font-weight:700;text-align:center">Množství / Qty</td>
-          <td style="padding:8px 8px;font-size:9pt;font-weight:700;text-align:center">J. / Unit</td>
-          <td style="padding:8px 8px;font-size:9pt;font-weight:700;text-align:right">Cena / Price</td>
-          <td style="padding:8px 16px;font-size:9pt;font-weight:700;text-align:right">${t.total}</td>
+        <tr style="background:#e8e8e8;border-bottom:1px solid #000">
+          <td style="padding:6px 14px;font-size:7pt;font-weight:700;text-transform:uppercase;color:#555;width:45%">${L.deliveryName}</td>
+          <td style="padding:6px 8px;font-size:7pt;font-weight:700;text-transform:uppercase;color:#555;text-align:center">${L.qty}</td>
+          <td style="padding:6px 8px;font-size:7pt;font-weight:700;text-transform:uppercase;color:#555;text-align:center">${L.unit}</td>
+          <td style="padding:6px 8px;font-size:7pt;font-weight:700;text-transform:uppercase;color:#555;text-align:right">${L.unitPrice}</td>
+          <td style="padding:6px 14px;font-size:7pt;font-weight:700;text-transform:uppercase;color:#555;text-align:right;background:#c8c8c8">${L.total}</td>
         </tr>
       </thead>
       <tbody>
         <tr>
-          <td style="padding:12px 16px;font-size:10pt">${d.serviceDesc}</td>
-          <td style="padding:12px 8px;text-align:center">${d.totalHours.toFixed(2)}</td>
-          <td style="padding:12px 8px;text-align:center">h</td>
-          <td style="padding:12px 8px;text-align:right">${d.rate.toFixed(2)} EUR</td>
-          <td style="padding:12px 16px;text-align:right;font-weight:700">${d.totalAmount.toFixed(2)} EUR</td>
-        </tr>
-        <tr style="background:#f5f5f5">
-          <td colspan="3"></td>
-          <td style="padding:6px 8px;font-size:9pt;color:#888;text-align:right;border-top:1px solid #ddd">DPH / VAT (0%)</td>
-          <td style="padding:6px 16px;text-align:right;border-top:1px solid #ddd">0.00 EUR</td>
+          <td style="padding:10px 14px;font-size:9.5pt;font-weight:600">${d.serviceDesc}</td>
+          <td style="padding:10px 8px;text-align:center;font-size:9pt">${d.totalHours.toFixed(2)}</td>
+          <td style="padding:10px 8px;text-align:center;font-size:9pt">h</td>
+          <td style="padding:10px 8px;text-align:right;font-size:9pt">${d.rate.toFixed(2)}</td>
+          <td style="padding:10px 14px;text-align:right;font-size:9.5pt;font-weight:700;background:#f0f0f0">${d.totalAmount.toFixed(2)}</td>
         </tr>
         <tr>
-          <td colspan="3"></td>
-          <td style="padding:8px 8px;font-weight:700;text-align:right;border-top:2px solid #1a1a1a">CELKEM / TOTAL</td>
-          <td style="padding:8px 16px;font-weight:800;font-size:12pt;text-align:right;border-top:2px solid #1a1a1a">${d.totalAmount.toFixed(2)} EUR</td>
+          <td colspan="5" style="padding:4px 14px">
+            <span style="font-size:8pt;font-weight:700;background:#e8e8e8;padding:2px 8px;border-radius:3px">${L.reverseCharge}</span>
+          </td>
         </tr>
       </tbody>
     </table>
 
-    <!-- SUMMARY / PODPIS -->
-    <table style="width:100%;border-collapse:collapse;border-top:1px solid #ddd;margin-top:8px">
+    <!-- SUMMARY -->
+    <table style="width:100%;border-collapse:collapse">
       <tr>
-        <td style="padding:16px;vertical-align:top;width:60%">
-          <div style="font-size:8pt;color:#888;margin-bottom:8px">REVERSE CHARGE — DPH přiznává odběratel / VAT accounted by customer</div>
-          <div style="font-size:9pt;color:#888;margin-bottom:24px">${t.signTitle}</div>
-          <div style="border-bottom:1px solid #999;width:220px;margin-bottom:4px"></div>
-          <div style="font-size:9pt;color:#666">${d.workerName}</div>
+        <td style="width:40%;padding:14px 14px;vertical-align:top;border-right:1px solid #ddd">
+          <div style="font-size:8pt;color:#888;margin-bottom:8px">${L.stampSign}</div>
+          <div style="border-bottom:1px solid #999;width:200px;height:50px;margin-bottom:6px"></div>
+          <div style="font-size:8.5pt;color:#555">${d.workerName}</div>
         </td>
-        <td style="padding:16px;text-align:right;vertical-align:middle">
-          <div style="font-size:9pt;color:#888;margin-bottom:6px">${t.totalAmt}</div>
-          <div style="font-size:24pt;font-weight:800;border-bottom:3px solid #1a1a1a;padding-bottom:8px;margin-bottom:4px">${d.totalAmount.toFixed(2)} EUR</div>
-          <div style="font-size:8pt;color:#888">${t.daysNote.replace('{d}', d.dueDays||14)}</div>
+        <td style="padding:14px 14px;vertical-align:middle;text-align:right">
+          <div style="font-size:8.5pt;color:#888;margin-bottom:4px">${L.totalAmount}</div>
+          <div style="font-size:22pt;font-weight:900;border-bottom:3px solid #000;padding-bottom:8px;margin-bottom:6px">${d.totalAmount.toFixed(2)} EUR</div>
+          <div style="font-size:9.5pt;color:#555">${totalCZK} CZK</div>
+          <div style="font-size:7.5pt;color:#999;margin-top:2px">${L.exchangeRate} ${rateStr}</div>
+          <div style="font-size:8pt;color:#888;margin-top:8px">${L.dueDays}</div>
         </td>
       </tr>
     </table>
 
     <!-- FOOTER -->
-    <div style="border-top:1px solid #ddd;padding:8px 16px;text-align:center;font-size:8pt;color:#aaa;background:#f8f8f8">
-      SubBau s.r.o. Invoice Generator &nbsp;|&nbsp; Page 1/1
+    <div style="border-top:1px solid #ddd;padding:6px 14px;font-size:7pt;color:#bbb;text-align:center;background:#f8f8f8">
+      SubBau s.r.o. Invoice System &nbsp;|&nbsp; Page 1/1
     </div>
   </div>`
 
