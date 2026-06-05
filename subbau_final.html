@@ -1592,11 +1592,23 @@ function setupWorkerSignCanvas() {
     return { x: src.clientX - r.left, y: src.clientY - r.top }
   }
   c.onmousedown = e => { workerDrawing=true; const p=getPos(e); ctx.beginPath(); ctx.moveTo(p.x,p.y) }
-  c.onmousemove = e => { if(!workerDrawing) return; const p=getPos(e); ctx.lineTo(p.x,p.y); ctx.stroke() }
-  c.onmouseup = () => workerDrawing=false; c.onmouseleave = () => workerDrawing=false
-  c.ontouchstart = e => { e.preventDefault(); workerDrawing=true; const p=getPos(e); ctx.beginPath(); ctx.moveTo(p.x,p.y) }
-  c.ontouchmove = e => { e.preventDefault(); if(!workerDrawing) return; const p=getPos(e); ctx.lineTo(p.x,p.y); ctx.stroke() }
-  c.ontouchend = () => workerDrawing=false
+  // Pointer Events - pero/stylus/dotyk/myš
+  c.style.touchAction = 'none'
+  c.style.userSelect = 'none'
+  function getPPos(e) { const r=c.getBoundingClientRect(); return {x:e.clientX-r.left,y:e.clientY-r.top} }
+  c.addEventListener('pointerdown', e => {
+    c.setPointerCapture(e.pointerId); workerDrawing=true
+    const p=getPPos(e); ctx.beginPath(); ctx.moveTo(p.x,p.y)
+    ctx.lineWidth = Math.max(1, 2.5*(e.pressure||0.5))
+  })
+  c.addEventListener('pointermove', e => {
+    if(!workerDrawing) return
+    const p=getPPos(e); ctx.lineWidth=Math.max(1,2.5*(e.pressure||0.5))
+    ctx.lineTo(p.x,p.y); ctx.stroke(); ctx.beginPath(); ctx.moveTo(p.x,p.y)
+  })
+  c.addEventListener('pointerup', ()=>{workerDrawing=false; ctx.lineWidth=2})
+  c.addEventListener('pointercancel', ()=>workerDrawing=false)
+  c.addEventListener('pointerleave', ()=>workerDrawing=false)
 }
 
 function clearWorkerSignCanvas() {
@@ -1677,6 +1689,37 @@ let pdfSignState = {
   pdfDoc: null, currentPage: 1, totalPages: 1,
   sigX: null, sigY: null, sigPage: 1,
   scale: 1.0
+}
+
+
+// Admin podepíše smlouvu ZA pracovníka
+async function openSignForWorker(contractId, title, fileUrl) {
+  // Reuse openAdminSignModal ale ulozí jako podpis pracovníka
+  adminSignContractId = contractId
+  pdfSignState.contractId = contractId
+  pdfSignState.title = title
+  pdfSignState.fileUrl = fileUrl
+  pdfSignState.signMode = 'for_worker'  // flag - ukladá ako worker podpis
+
+  const modal = document.getElementById('admin-sign-modal')
+  if (!modal) return
+  const titleEl = document.getElementById('admin-sign-title')
+  if (titleEl) titleEl.textContent = 'Podpis za pracovnika: ' + title
+  const hint = document.getElementById('pdf-sign-hint')
+  if (hint) hint.textContent = 'Kliknete kde chcete umistit podpis pracovnika, pak ho nakreslete'
+
+  modal.style.display = 'flex'
+  setupAdminSignCanvas()
+
+  if (fileUrl) {
+    if (typeof pdfjsLib === 'undefined') {
+      let w2 = 0
+      while (typeof pdfjsLib === 'undefined' && w2 < 3000) {
+        await new Promise(r => setTimeout(r, 200)); w2 += 200
+      }
+    }
+    await loadPDFForSigning(fileUrl)
+  }
 }
 
 async function openAdminSignModal(contractId, title, fileUrl) {
@@ -1843,18 +1886,36 @@ function setupAdminSignCanvas() {
   ctx.lineCap = 'round'
   ctx.lineJoin = 'round'
   let drawing = false
-  function getPos(e) {
+  // Pointer Events - funguje pro myš, dotyk i pero/stylus na tabletu
+  canvas.style.touchAction = 'none'
+  canvas.style.userSelect = 'none'
+  function getPointerPos(e) {
     const r = canvas.getBoundingClientRect()
-    const src = e.touches ? e.touches[0] : e
-    return { x: src.clientX - r.left, y: src.clientY - r.top }
+    return { x: e.clientX - r.left, y: e.clientY - r.top }
   }
-  canvas.onmousedown = e => { drawing=true; const p=getPos(e); ctx.beginPath(); ctx.moveTo(p.x,p.y) }
-  canvas.onmousemove = e => { if(!drawing) return; const p=getPos(e); ctx.lineTo(p.x,p.y); ctx.stroke() }
-  canvas.onmouseup = () => drawing=false
-  canvas.onmouseleave = () => drawing=false
-  canvas.ontouchstart = e => { e.preventDefault(); drawing=true; const p=getPos(e); ctx.beginPath(); ctx.moveTo(p.x,p.y) }
-  canvas.ontouchmove = e => { e.preventDefault(); if(!drawing) return; const p=getPos(e); ctx.lineTo(p.x,p.y); ctx.stroke() }
-  canvas.ontouchend = () => drawing=false
+  canvas.addEventListener('pointerdown', e => {
+    canvas.setPointerCapture(e.pointerId)
+    drawing = true
+    const p = getPointerPos(e)
+    ctx.beginPath()
+    ctx.moveTo(p.x, p.y)
+    // Pero/stylus - silnější tah podle tlaku
+    const pressure = e.pressure > 0 ? e.pressure : 0.5
+    ctx.lineWidth = Math.max(1, 2.5 * pressure)
+  })
+  canvas.addEventListener('pointermove', e => {
+    if (!drawing) return
+    const p = getPointerPos(e)
+    const pressure = e.pressure > 0 ? e.pressure : 0.5
+    ctx.lineWidth = Math.max(1, 2.5 * pressure)
+    ctx.lineTo(p.x, p.y)
+    ctx.stroke()
+    ctx.beginPath()
+    ctx.moveTo(p.x, p.y)
+  })
+  canvas.addEventListener('pointerup', () => { drawing = false; ctx.lineWidth = 2 })
+  canvas.addEventListener('pointercancel', () => { drawing = false })
+  canvas.addEventListener('pointerleave', () => { drawing = false })
 }
 
 function clearAdminSignCanvas() {
@@ -1959,12 +2020,11 @@ async function submitAdminSignatureWithPlacement() {
     const signedUrl = urlData?.publicUrl
 
     // 6. Aktualizuj DB
-    const { error: dbErr } = await sb.from('contracts').update({
-      file_url: signedUrl,
-      admin_signature_url: signedUrl,
-      admin_signed_at: new Date().toISOString(),
-      status: 'pending'
-    }).eq('id', pdfSignState.contractId)
+    const isForWorker = pdfSignState.signMode === 'for_worker'
+    const updateData = isForWorker
+      ? { file_url: signedUrl, signature_url: signedUrl, signed_at: new Date().toISOString(), status: 'signed_electronic' }
+      : { file_url: signedUrl, admin_signature_url: signedUrl, admin_signed_at: new Date().toISOString(), status: 'pending' }
+    const { error: dbErr } = await sb.from('contracts').update(updateData).eq('id', pdfSignState.contractId)
     if (dbErr) throw new Error('DB error: ' + dbErr.message)
 
     // 7. Notifikace pracovníkovi
@@ -5843,6 +5903,9 @@ function _markReadIfChatOpen() {
 // ============ PRŮVODCE / TUTORIAL ============
 // ============ SMLOUVY ============
 let contractFile = null
+let uploadingForWorkerId = null
+let adminUploadFile1 = null
+let adminUploadFile2 = null
 let signContractId = null
 let signCanvas = null
 let signCtx = null
@@ -6830,12 +6893,137 @@ async function loadWdAttendance() {
   }
 }
 
+
+function openUploadForWorker() {
+  if (!currentWorkerId) { showToast('Vyberte pracovnika'); return }
+  // Pouzij existujuci upload form ale nastav worker_id na currentWorkerId
+  uploadingForWorkerId = currentWorkerId
+  resetUploadForm()
+  // Otvor upload formu v modali - zobraz overlay
+  const overlay = document.getElementById('upload-for-worker-overlay')
+  if (overlay) { overlay.style.display = 'flex'; return }
+  // Ak overlay neexistuje, vytvor ho dynamicky
+  const div = document.createElement('div')
+  div.id = 'upload-for-worker-overlay'
+  div.style.cssText = 'position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,.5);z-index:9999;display:flex;align-items:center;justify-content:center;padding:16px'
+  div.innerHTML = `
+    <div style="background:#fff;border-radius:16px;padding:20px;width:100%;max-width:480px;max-height:90vh;overflow-y:auto">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
+        <h3 style="font-size:15px;font-weight:700;margin:0">Nahrat dokument za pracovnika</h3>
+        <button onclick="closeUploadForWorker()" style="background:none;border:none;font-size:18px;cursor:pointer">x</button>
+      </div>
+      <div class="fg" style="margin-bottom:12px">
+        <label style="font-size:12px;color:var(--text3)">Typ dokumentu</label>
+        <select id="admin-upload-doc-type" style="width:100%;padding:10px;border:1.5px solid var(--brd);border-radius:8px;font-size:14px" onchange="adminDocTypeChange()">
+          <option value="op">Obcansky prukaz / Pas</option>
+          <option value="zivnost">Zivnostenske opravneni (CZ)</option>
+          <option value="gewerbeschein">Zivnostensky list (DE)</option>
+          <option value="a1">Potvrzeni A1</option>
+          <option value="freistellung">Potvrzeni o osvobozen (DE)</option>
+          <option value="other">Jiny dokument</option>
+        </select>
+      </div>
+      <div id="admin-upload-side1" class="fg" style="margin-bottom:10px">
+        <label style="font-size:12px;color:var(--text3)">Dokument (predni strana)</label>
+        <input type="file" id="admin-upload-file1" accept="image/*,application/pdf" style="width:100%;padding:8px;border:1.5px solid var(--brd);border-radius:8px;font-size:13px" onchange="adminFileSelect(this,1)">
+        <div id="admin-upload-preview1" style="margin-top:6px;display:none"><img style="max-width:100%;max-height:150px;border-radius:8px;object-fit:contain"></div>
+      </div>
+      <div id="admin-upload-side2" class="fg" style="margin-bottom:10px">
+        <label style="font-size:12px;color:var(--text3)">Zadni strana (nepovinne)</label>
+        <input type="file" id="admin-upload-file2" accept="image/*,application/pdf" style="width:100%;padding:8px;border:1.5px solid var(--brd);border-radius:8px;font-size:13px" onchange="adminFileSelect(this,2)">
+        <div id="admin-upload-preview2" style="margin-top:6px;display:none"><img style="max-width:100%;max-height:150px;border-radius:8px;object-fit:contain"></div>
+      </div>
+      <div id="admin-upload-status" style="display:none;padding:10px;border-radius:8px;text-align:center;font-size:13px;font-weight:600;margin-bottom:10px"></div>
+      <div style="display:flex;gap:8px">
+        <button onclick="uploadDocumentForWorker()" style="flex:1;padding:11px;background:var(--blue);color:#FFCD00;border:none;border-radius:8px;font-size:13px;font-weight:700;cursor:pointer;font-family:inherit">Nahrat</button>
+        <button onclick="closeUploadForWorker()" style="padding:11px 18px;background:none;border:1.5px solid var(--brd);border-radius:8px;font-size:13px;cursor:pointer;font-family:inherit">Zrusit</button>
+      </div>
+    </div>`
+  document.body.appendChild(div)
+}
+
+function closeUploadForWorker() {
+  const ov = document.getElementById('upload-for-worker-overlay')
+  if (ov) ov.remove()
+  uploadingForWorkerId = null
+  adminUploadFile1 = null; adminUploadFile2 = null
+}
+
+function adminDocTypeChange() {
+  const t = document.getElementById('admin-upload-doc-type')?.value
+  const multiside = ['op','zivnost','gewerbeschein']
+  document.getElementById('admin-upload-side2').style.display = multiside.includes(t) ? 'block' : 'none'
+  adminUploadFile1 = null; adminUploadFile2 = null
+  const p1 = document.getElementById('admin-upload-preview1'); if(p1) p1.style.display='none'
+  const p2 = document.getElementById('admin-upload-preview2'); if(p2) p2.style.display='none'
+}
+
+function adminFileSelect(input, side) {
+  const file = input.files[0]; if (!file) return
+  if (side === 1) adminUploadFile1 = file
+  else adminUploadFile2 = file
+  const prev = document.getElementById('admin-upload-preview' + side)
+  if (prev && file.type.startsWith('image/')) {
+    const img = prev.querySelector('img')
+    img.src = URL.createObjectURL(file)
+    prev.style.display = 'block'
+  }
+}
+
+async function uploadDocumentForWorker() {
+  if (!uploadingForWorkerId) { showToast('Chyba: zadny pracovnik'); return }
+  if (!adminUploadFile1) { showToast('Vyberte soubor'); return }
+  const st = document.getElementById('admin-upload-status')
+  if (st) { st.style.display='block'; st.style.background='#e8f5e9'; st.style.color='#2e7d32'; st.textContent='Nahravam...' }
+
+  const docType = document.getElementById('admin-upload-doc-type')?.value || 'other'
+  const MULTI = ['op','zivnost','gewerbeschein']
+  const safeName1 = adminUploadFile1.name.normalize('NFD').replace(/[̀-ͯ]/g,'').replace(/[^a-zA-Z0-9._-]/g,'_').toLowerCase()
+  const fp1 = uploadingForWorkerId + '/' + Date.now() + '_' + safeName1
+
+  const { error: e1 } = await sb.storage.from('documents').upload(fp1, adminUploadFile1, {upsert:true})
+  if (e1) { if(st){st.style.background='#ffebee';st.style.color='#c62828';st.textContent='Chyba: '+e1.message}; return }
+
+  const { data: url1 } = sb.storage.from('documents').getPublicUrl(fp1)
+  const { error: db1 } = await sb.from('documents').insert({
+    worker_id: uploadingForWorkerId,
+    doc_type: docType,
+    file_name: adminUploadFile1.name + ' (strana 1)',
+    file_path: fp1,
+    file_url: url1?.publicUrl,
+    status: 'ok',  // Admin nahrava = hned OK
+    uploaded_by: currentUser?.id,
+    uploaded_at: new Date().toISOString()
+  })
+  if (db1) { if(st){st.style.background='#ffebee';st.style.color='#c62828';st.textContent='DB chyba: '+db1.message}; return }
+
+  // Zadna strana
+  if (adminUploadFile2 && MULTI.includes(docType)) {
+    const safeName2 = adminUploadFile2.name.normalize('NFD').replace(/[̀-ͯ]/g,'').replace(/[^a-zA-Z0-9._-]/g,'_').toLowerCase()
+    const fp2 = uploadingForWorkerId + '/' + (Date.now()+1) + '_' + safeName2
+    const { error: e2 } = await sb.storage.from('documents').upload(fp2, adminUploadFile2, {upsert:true})
+    if (!e2) {
+      const { data: url2 } = sb.storage.from('documents').getPublicUrl(fp2)
+      await sb.from('documents').insert({
+        worker_id: uploadingForWorkerId, doc_type: docType,
+        file_name: adminUploadFile2.name + ' (strana 2)',
+        file_path: fp2, file_url: url2?.publicUrl,
+        status: 'ok', uploaded_by: currentUser?.id, uploaded_at: new Date().toISOString()
+      })
+    }
+  }
+
+  if(st){st.textContent='Dokument nahran!'}
+  setTimeout(() => { closeUploadForWorker(); loadWdDocs(uploadingForWorkerId || currentWorkerId) }, 1200)
+}
+
 async function loadWdDocs(id) {
   const { data } = await sb.from('documents').select('*').eq('worker_id', id||currentWorkerId)
   const div = document.getElementById('wd-docs-list')
   const types = {op:'Občanský průkaz / Pas',zivnost:'Živnostenské oprávnění (CZ)',gewerbeschein:'Živnostenský list (DE)',a1:'Potvrzení A1',freistellung:'Potvrzení o osvobození (DE)',other:'Jiný dokument'}
   if(!data?.length){div.innerHTML='<div style="color:var(--text3);text-align:center;padding:20px">Žádné dokumenty</div>';return}
-  div.innerHTML = data.map(d=>`<div style="display:flex;justify-content:space-between;align-items:center;padding:10px 0;border-bottom:1px solid var(--brd);gap:8px">
+  div.innerHTML = '<div style="text-align:right;margin-bottom:10px"><button onclick="openUploadForWorker()" style="font-size:12px;padding:6px 14px;background:var(--blue);color:#FFCD00;border:none;border-radius:7px;cursor:pointer;font-family:inherit;font-weight:700">+ Nahrat dokument</button></div>' +
+  data.map(d=>`<div style="display:flex;justify-content:space-between;align-items:center;padding:10px 0;border-bottom:1px solid var(--brd);gap:8px">
     <div style="flex:1;min-width:0">
       <div style="font-size:13px;font-weight:600">${types[d.doc_type]||d.doc_type}</div>
       <div style="font-size:11px;color:var(--text3)">${d.file_name||'—'} · platnost: ${d.valid_until||'—'}</div>
@@ -6877,6 +7065,7 @@ async function loadWdContracts(id) {
       ${c.admin_signature_url?`<button onclick="openPdfUrl('${c.admin_signature_url}')" style="font-size:11px;padding:3px 10px;border:1px solid var(--amber);border-radius:6px;cursor:pointer;background:none;color:var(--amber);font-family:inherit">Podpis admina</button>`:''}
       ${c.signature_url?`<button onclick="openPdfUrl('${c.signature_url}')" style="font-size:11px;padding:3px 10px;border:1px solid var(--green);border-radius:6px;cursor:pointer;background:none;color:var(--green);font-family:inherit">Podpis OSVC</button>`:''}
       ${c.status==='admin_pending'?`<button onclick="openAdminSignModal('${c.id}','${(c.title||'').replace(/'/g,String.fromCharCode(39))}','${c.file_url||''}')" style="font-size:11px;padding:3px 10px;border:none;border-radius:6px;cursor:pointer;background:var(--blue);color:#fff;font-family:inherit;font-weight:700">Podepsat jako admin</button>`:''}
+      ${c.status==='pending'?`<button onclick="openSignForWorker('${c.id}','${(c.title||'').replace(/'/g,String.fromCharCode(39))}','${c.file_url||''}')" style="font-size:11px;padding:3px 10px;border:none;border-radius:6px;cursor:pointer;background:var(--green);color:#fff;font-family:inherit;font-weight:700">Podepsat za OSVC</button>`:''}
       <button onclick="deleteContract('${c.id}','${(c.title||'').replace(/'/g,String.fromCharCode(39))}','${c.file_url||''}','${c.admin_signature_url||''}','${c.signature_url||''}')" style="font-size:11px;padding:3px 10px;border:1px solid var(--red);border-radius:6px;cursor:pointer;background:none;color:var(--red);font-family:inherit">Smazat</button>
     </div>
   </div>`).join('')
