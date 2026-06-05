@@ -1259,7 +1259,7 @@ tr:hover td{background:#fafbfc}
       <button class="wd-tab" onclick="wdTab('dochazka',this)">⏱ Docházka</button>
       <button class="wd-tab" onclick="wdTab('dokumenty',this)">📄 Dokumenty</button>
       <button class="wd-tab" onclick="wdTab('smlouvy',this)">✍️ Smlouvy</button>
-      <button class="wd-tab" onclick="wdTab('finance',this)">💰 Finance</button>
+      <button class="wd-tab" onclick="wdTab('finance',this)">💰 Fakturace</button>
       <button class="wd-tab" onclick="wdTab('dovolena',this)">🏖 Dovolená</button>
       <button class="wd-tab" onclick="wdTab('poznamky',this)">📝 Poznámky</button>
     </div>
@@ -1278,9 +1278,19 @@ tr:hover td{background:#fafbfc}
             <input type="number" id="wd-rate" placeholder="0" style="width:120px;padding:6px 10px;border:1.5px solid var(--brd);border-radius:7px;font-size:13px">
           </div>
         </div>
+        <div class="g2" style="gap:8px;margin-top:12px">
+          <div class="fg" style="margin-bottom:0">
+            <label style="font-size:11px;color:var(--text3)">Spolupráce od</label>
+            <input type="date" id="wd-coop-start" style="width:100%;padding:6px 10px;border:1.5px solid var(--brd);border-radius:7px;font-size:13px">
+          </div>
+          <div class="fg" style="margin-bottom:0">
+            <label style="font-size:11px;color:var(--text3)">Spolupráce do</label>
+            <input type="date" id="wd-coop-end" style="width:100%;padding:6px 10px;border:1.5px solid var(--brd);border-radius:7px;font-size:13px">
+          </div>
+        </div>
         <div style="margin-top:16px;display:flex;gap:8px">
-          <button class="btn-pri" onclick="saveWorkerProfile()">💾 Uložit změny</button>
-          <button class="btn-sec" onclick="toggleAccessFromModal()">🔒 Změnit přístup</button>
+          <button class="btn-pri" onclick="saveWorkerProfile()">Ulozit zmeny</button>
+          <button class="btn-sec" onclick="toggleAccessFromModal()">Zmenit pristup</button>
         </div>
 
         <!-- UBYTOVÁNÍ -->
@@ -1304,6 +1314,24 @@ tr:hover td{background:#fafbfc}
           <div class="fg" style="margin-bottom:8px;margin-top:8px">
             <label style="font-size:11px">📝 Poznámka k ubytování</label>
             <textarea id="wd-acc-notes" rows="2" placeholder="Libovolné poznámky..." style="width:100%;font-size:12px;padding:6px;border:1px solid var(--brd);border-radius:6px;font-family:inherit;resize:vertical"></textarea>
+          </div>
+                    <div class="g2" style="gap:8px;margin-top:8px">
+            <div class="fg" style="margin-bottom:0">
+              <label style="font-size:11px;color:var(--text3)">Telefon kontaktu</label>
+              <input type="tel" id="wd-acc-phone" placeholder="+420..." style="width:100%;padding:7px;border:1px solid var(--brd);border-radius:6px;font-size:13px">
+            </div>
+            <div class="fg" style="margin-bottom:0">
+              <label style="font-size:11px;color:var(--text3)">Email kontaktu</label>
+              <input type="email" id="wd-acc-email" placeholder="kontakt@..." style="width:100%;padding:7px;border:1px solid var(--brd);border-radius:6px;font-size:13px">
+            </div>
+          </div>
+          <div class="fg" style="margin-top:8px;margin-bottom:4px">
+            <label style="font-size:11px;color:var(--text3)">Zpusob uhrady</label>
+            <select id="wd-acc-payment" style="width:100%;padding:7px;border:1px solid var(--brd);border-radius:6px;font-size:13px">
+              <option value="hotove">Hotove</option>
+              <option value="prevod">Bankovni prevod</option>
+              <option value="srazka">Srazka z vyplaty</option>
+            </select>
           </div>
           <button onclick="saveWorkerAccommodation()" style="margin-top:4px;width:100%;padding:8px;background:#1a1a1a;color:#FFCD00;border:none;border-radius:8px;cursor:pointer;font-family:inherit;font-weight:700;font-size:12px">💾 Uložit ubytování</button>
         </div>
@@ -2633,6 +2661,83 @@ async function toggleWorkerActiveFromAccess(workerId, workerName, isActive) {
   loadAccess()
 }
 
+
+async function showWorkerActivity(workerId, workerName) {
+  // Načti login historiu - posledných 30 dní
+  const cutoff = new Date()
+  cutoff.setDate(cutoff.getDate() - 30)
+  const { data: hist } = await sb.from('login_history')
+    .select('logged_at')
+    .eq('worker_id', workerId)
+    .gte('logged_at', cutoff.toISOString())
+    .order('logged_at', { ascending: false })
+    .limit(500)
+
+  const logins = hist || []
+
+  // Zoskup po dňoch
+  const byDay = {}
+  logins.forEach(h => {
+    const d = new Date(h.logged_at)
+    const day = d.toLocaleDateString('cs-CZ', {weekday:'long',year:'numeric',month:'long',day:'numeric'})
+    if (!byDay[day]) byDay[day] = []
+    byDay[day].push(d)
+  })
+
+  // Generuj HTML stránku
+  const rows = Object.entries(byDay).map(([day, times]) => `
+    <div class="day-block">
+      <div class="day-header">${day} — ${times.length} přihlášení</div>
+      <div class="times">
+        ${times.map((d,i) => `
+          <span class="time-pill ${i===0?'first':''}">
+            ${d.toLocaleTimeString('cs-CZ',{hour:'2-digit',minute:'2-digit',second:'2-digit'})}
+          </span>`).join('')}
+      </div>
+    </div>`).join('')
+
+  const html = `<!DOCTYPE html>
+<html lang="cs">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Aktivita — ${workerName}</title>
+<style>
+  * { box-sizing:border-box; margin:0; padding:0 }
+  body { font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif; background:#f5f5f5; color:#1a1a1a; padding:24px }
+  h1 { font-size:22px; font-weight:800; margin-bottom:4px }
+  .sub { font-size:13px; color:#666; margin-bottom:24px }
+  .day-block { background:#fff; border-radius:12px; padding:16px; margin-bottom:12px; box-shadow:0 1px 4px rgba(0,0,0,.08) }
+  .day-header { font-size:13px; font-weight:700; color:#1a1a1a; margin-bottom:10px; text-transform:capitalize }
+  .times { display:flex; flex-wrap:wrap; gap:6px }
+  .time-pill { background:#f0f0f0; border-radius:6px; padding:4px 10px; font-size:12px; font-family:monospace; color:#333 }
+  .time-pill.first { background:#1a1a1a; color:#FFCD00; font-weight:700 }
+  .empty { text-align:center; padding:40px; color:#999; font-size:14px }
+  .stats { display:flex; gap:12px; margin-bottom:20px; flex-wrap:wrap }
+  .stat { background:#1a1a1a; color:#fff; border-radius:10px; padding:12px 20px; min-width:120px }
+  .stat-val { font-size:24px; font-weight:800; color:#FFCD00}
+  .stat-lbl { font-size:11px; color:#aaa; margin-top:2px }
+  @media print { body { padding:12px } .day-block { break-inside:avoid } }
+</style>
+</head>
+<body>
+<h1>Aktivita — ${workerName}</h1>
+<div class="sub">Přihlášení za posledních 30 dní · Vygenerováno ${new Date().toLocaleString('cs-CZ')}</div>
+<div class="stats">
+  <div class="stat"><div class="stat-val">${logins.length}</div><div class="stat-lbl">Celkem přihlášení</div></div>
+  <div class="stat"><div class="stat-val">${Object.keys(byDay).length}</div><div class="stat-lbl">Aktivních dní</div></div>
+  <div class="stat"><div class="stat-val">${logins.length ? new Date(logins[0].logged_at || logins[0]).toLocaleDateString('cs-CZ') : '—'}</div><div class="stat-lbl">Poslední přihlášení</div></div>
+</div>
+${rows || '<div class="empty">Žádná přihlášení za posledních 30 dní</div>'}
+</body></html>`
+
+  const blob = new Blob([html], {type:'text/html;charset=utf-8'})
+  const url = URL.createObjectURL(blob)
+  const w2 = window.open(url, '_blank', 'noopener,noreferrer')
+  if (!w2) { showToast('⚠️ Povolte vyskakovací okna v prohlížeči'); return }
+  setTimeout(() => URL.revokeObjectURL(url), 60000)
+}
+
 async function loadAccess() {
   const tbody = document.getElementById('access-table')
   if (!tbody) return
@@ -2675,46 +2780,36 @@ async function loadAccess() {
     return d.toLocaleDateString('cs-CZ') + ' ' + d.toLocaleTimeString('cs-CZ', {hour:'2-digit',minute:'2-digit'})
   }
 
-  tbody.innerHTML = data.map(w => `
+  tbody.innerHTML = data.map(w => {
+    const logins = loginHistMap[w.id] || []
+    const lastLogin = logins.length ? fmtLogin(logins[0]) : 'Nikdy'
+    return `
     <tr>
-      <td><b>${w.full_name}</b></td>
-      <td style="font-size:12px;color:var(--text2)">${w.email}</td>
+      <td><b>${w.full_name}</b><br><span style="font-size:11px;color:var(--text2)">${w.email}</span></td>
       <td><span class="pill pb">${roleLabels[w.role] || w.role}</span></td>
       <td>
         <span class="pill ${w.is_active ? 'pg' : 'pr'}">${w.is_active ? 'Aktivní' : 'Neaktivní'}</span>
-        <div style="margin-top:4px">
-          ${(loginHistMap[w.id]||[]).length === 0
-            ? '<div style="font-size:10px;color:var(--text3)">Nikdy se nepřihlásil</div>'
-            : (() => {
-                const logins = loginHistMap[w.id] || []
-                const byDay = {}
-                logins.forEach(ts => {
-                  const day = new Date(ts).toLocaleDateString('cs-CZ')
-                  if (!byDay[day]) byDay[day] = []
-                  byDay[day].push(ts)
-                })
-                return Object.entries(byDay).map(([day, times], di) =>
-                  '<div style="margin-bottom:3px">' +
-                  '<div style="font-size:10px;font-weight:700;color:var(--text2)">' + day + ' (' + times.length + '×)</div>' +
-                  times.map((ts,i) => '<div style="font-size:10px;color:' + (di===0&&i===0?'var(--blue)':'var(--text3)') + ';padding-left:8px">' + (di===0&&i===0?'🟢 ':'') + new Date(ts).toLocaleTimeString('cs-CZ',{hour:'2-digit',minute:'2-digit'}) + '</div>').join('') +
-                  '</div>'
-                ).join('')
-              })()
-          }
-          ${w.login_count ? '<div style="font-size:10px;color:var(--text3);margin-top:2px">Celkem ' + w.login_count + '× přihlášení</div>' : ''}
+        <div style="font-size:11px;color:var(--text3);margin-top:3px">
+          Poslední: ${lastLogin}<br>
+          ${logins.length} přihlášení (3 dny)
         </div>
       </td>
-      <td style="text-align:center">
+      <td style="text-align:right">
+        <button onclick="showWorkerActivity('${w.id}','${w.full_name.replace(/'/g, String.fromCharCode(39))}')"
+          style="padding:5px 10px;font-size:11px;background:var(--blue);color:#FFCD00;border:none;border-radius:6px;cursor:pointer;font-family:inherit;font-weight:700;margin-bottom:4px;display:block;width:100%">
+          Detail aktivity
+        </button>
         <button onclick="sendPasswordReset('${w.email}','${w.full_name}')"
-          style="padding:5px 10px;font-size:11px;background:#1a1a1a;color:#FFCD00;border:none;border-radius:6px;cursor:pointer;font-family:inherit;font-weight:700;margin-bottom:4px">
-          📧 Reset hesla
-        </button><br>
+          style="padding:5px 10px;font-size:11px;background:none;border:1px solid var(--brd);color:var(--text);border-radius:6px;cursor:pointer;font-family:inherit;margin-bottom:4px;display:block;width:100%">
+          Reset hesla
+        </button>
         <button onclick="toggleWorkerActiveFromAccess('${w.id}','${w.full_name}',${w.is_active})"
-          style="padding:5px 10px;font-size:11px;background:${w.is_active ? '#dc3545' : '#198754'};color:#fff;border:none;border-radius:6px;cursor:pointer;font-family:inherit;font-weight:700">
-          ${w.is_active ? '🔒 Odebrat přístup' : '🔓 Obnovit přístup'}
+          style="padding:5px 10px;font-size:11px;background:${w.is_active ? '#dc3545' : '#198754'};color:#fff;border:none;border-radius:6px;cursor:pointer;font-family:inherit;font-weight:700;display:block;width:100%">
+          ${w.is_active ? 'Odebrat pristup' : 'Obnovit pristup'}
         </button>
       </td>
-    </tr>`).join('')
+    </tr>`
+  }).join('')
 }
 
 async function sendPasswordReset(email, name) {
@@ -3200,7 +3295,7 @@ async function loadAdminChatList() {
   const { data: workers } = await sb.from('profiles')
     .select('id, full_name, profession')
     .in('role', ['osvec', 'partak'])
-    .eq('is_active', true)
+    
     .order('full_name')
 
   if (!workers?.length) {
@@ -3768,13 +3863,13 @@ async function loadTeams() {
   div.innerHTML = '<div style="text-align:center;color:var(--text3);padding:20px">Načítám...</div>'
 
   // Načti týmy + jejich členy
-  const { data: teams, error: teamsErr } = await sb.from('teams').select('*').eq('is_active', true).order('name')
+  const { data: teams, error: teamsErr } = await sb.from('teams').select('*').order('name')
   if (teamsErr) { div.innerHTML = '<div style="color:var(--red);padding:12px">Chyba: '+teamsErr.message+'</div>'; return }
   // Načti všechny pracovníky s jejich team_id
   const { data: workers } = await sb.from('profiles')
     .select('id, full_name, profession, role, team_id')
     .in('role', ['osvec', 'partak'])
-    .eq('is_active', true)
+    
     .order('full_name')
 
   if (!teams?.length && !workers?.length) {
@@ -4562,8 +4657,14 @@ async function uploadDocument() {
 function loadMobProfil(profile) {
   document.getElementById('mob-profil-card').innerHTML=`
     <div style="text-align:center;margin-bottom:16px">
-      <div style="width:52px;height:52px;border-radius:50%;background:var(--blue-l);display:flex;align-items:center;justify-content:center;font-size:18px;font-weight:700;color:var(--blue);margin:0 auto 10px">${profile.full_name.split(' ').map(n=>n[0]).join('').slice(0,2)}</div>
-      <div style="font-size:15px;font-weight:700">${profile.full_name}</div>
+      <div styl${profile.avatar_url
+        ? `<img src="${profile.avatar_url}" style="width:72px;height:72px;border-radius:50%;object-fit:cover;border:3px solid var(--brd);margin:0 auto 10px;display:block" onerror="this.style.display='none'">`
+        : `<div style="width:72px;height:72px;border-radius:50%;background:var(--blue-l);display:flex;align-items:center;justify-content:center;font-size:24px;font-weight:700;color:var(--blue);margin:0 auto 10px">${profile.full_name.split(' ').map(n=>n[0]).join('').slice(0,2).toUpperCase()}</div>`
+      }
+      <label style="display:inline-block;margin-bottom:6px;cursor:pointer;font-size:12px;color:var(--blue);text-decoration:underline">
+        Zmenit foto
+        <input type="file" accept="image/*" style="display:none" onchange="uploadAvatar(this)">
+      </label>      <div style="font-size:15px;font-weight:700">${profile.full_name}</div>
       <div style="font-size:12px;color:var(--text2)">${profile.profession||''}</div>
     </div>
     <div style="border-top:0.5px solid var(--brd);padding-top:12px">
@@ -4910,11 +5011,14 @@ async function saveWorkerAccommodation() {
     accommodation_address: addr,
     accommodation_price_night: parseFloat(document.getElementById('wd-acc-night')?.value) || null,
     accommodation_parking_price: parseFloat(document.getElementById('wd-acc-parking')?.value) || null,
-    accommodation_notes: document.getElementById('wd-acc-notes')?.value.trim() || null
+    accommodation_notes: document.getElementById('wd-acc-notes')?.value.trim() || null,
+    accommodation_phone: document.getElementById('wd-acc-phone')?.value.trim() || null,
+    accommodation_email: document.getElementById('wd-acc-email')?.value.trim() || null,
+    accommodation_payment: document.getElementById('wd-acc-payment')?.value || 'hotove'
   }).eq('id', currentWorkerId).select()
   if (error) { showToast('Chyba: ' + error.message); return }
-  if (!updAcc?.length) { showToast('⚠️ Nepovedlo se uložit — zkontrolujte oprávnění k aktualizaci profilu'); return }
-  showToast('🏠 Ubytování uloženo!')
+  if (!updAcc?.length) { showToast('Nepovedlo se ulozit'); return }
+  showToast('Ubytovani ulozeno!')
 }
 
 // -- FAKTURACE ZÁKAZNÍK PER WORKER --
@@ -5351,7 +5455,7 @@ async function loadDocumentAlertsStat() {
   const { data: workers } = await sb.from('profiles')
     .select('id, full_name, profession')
     .in('role', ['osvec', 'partak'])
-    .eq('is_active', true)
+    
     .order('full_name')
 
   if (!workers?.length) {
@@ -5908,15 +6012,26 @@ async function loadMobContracts() {
     div.innerHTML='<div style="text-align:center;color:var(--text3);font-size:13px;padding:20px">Žádné smlouvy</div>'
     return
   }
-  div.innerHTML = data.map(c=>`
-    <div style="border:1.5px solid ${c.status==='pending'?'var(--amber)':c.status==='signed_electronic'?'var(--green)':'var(--brd)'};border-radius:10px;padding:12px;margin-bottom:8px;background:${c.status==='pending'?'var(--amber-l)':c.status==='signed_electronic'?'var(--green-l)':'var(--bg)'}">
+  const mobStatusInfo = {
+    admin_pending: { border:'var(--brd)', bg:'var(--bg)', label:'Ceka na podpis admina', color:'var(--text2)' },
+    pending:       { border:'var(--amber)', bg:'var(--amber-l)', label:'Potrebny Vas podpis', color:'var(--amber)' },
+    signed_electronic: { border:'var(--green)', bg:'var(--green-l)', label:'Podepsana elektronicky', color:'var(--green)' },
+    signed_scan:   { border:'var(--green)', bg:'var(--green-l)', label:'Podepsana (sken)', color:'var(--green)' },
+    rejected:      { border:'var(--red)', bg:'var(--red-l)', label:'Zamitnuta', color:'var(--red)' },
+  }
+  div.innerHTML = data.map(c=>{
+    const si = mobStatusInfo[c.status] || { border:'var(--brd)', bg:'var(--bg)', label:c.status, color:'var(--text2)' }
+    const isSigned = c.status==='signed_electronic'||c.status==='signed_scan'
+    const needsSign = c.status==='pending'
+    return `<div style="border:1.5px solid ${si.border};border-radius:10px;padding:12px;margin-bottom:8px;background:${si.bg}">
       <div style="font-size:13px;font-weight:700;margin-bottom:4px">${c.title}</div>
-      <div style="font-size:12px;color:var(--text2);margin-bottom:8px">${c.created_at?.slice(0,10)}</div>
-      ${c.status==='pending'
-        ? `<button onclick="openSignModal('${c.id}','${c.title}','${c.file_url||''}')" style="width:100%;padding:11px;background:var(--blue);color:#fff;border:none;border-radius:8px;font-size:13px;font-weight:700;cursor:pointer;font-family:inherit">✍️ Podepsat smlouvu</button>`
-        : `<div style="font-size:12px;font-weight:700;color:var(--green)">✅ Podepsána ${c.signed_at?.slice(0,10)||''}</div>`
-      }
-    </div>`).join('')
+      <div style="font-size:12px;color:var(--text2);margin-bottom:6px">${c.created_at?.slice(0,10)}</div>
+      <div style="font-size:12px;font-weight:700;color:${si.color};margin-bottom:8px">${si.label}</div>
+      ${needsSign ? `<button onclick="openSignModal('${c.id}','${(c.title||'').replace(/'/g,String.fromCharCode(39))}','${c.file_url||''}')" style="width:100%;padding:11px;background:var(--blue);color:#fff;border:none;border-radius:8px;font-size:13px;font-weight:700;cursor:pointer;font-family:inherit">Podepsat smlouvu</button>` : ''}
+      ${isSigned && c.signature_url ? `<button onclick="openPdfUrl('${c.signature_url}')" style="width:100%;padding:9px;background:none;border:1px solid var(--green);border-radius:8px;font-size:12px;font-weight:600;cursor:pointer;font-family:inherit;color:var(--green)">Zobrazit podepsanou smlouvu</button>` : ''}
+      ${isSigned && c.file_url && !c.signature_url ? `<button onclick="openPdfUrl('${c.file_url}')" style="width:100%;padding:9px;background:none;border:1px solid var(--green);border-radius:8px;font-size:12px;font-weight:600;cursor:pointer;font-family:inherit;color:var(--green)">Zobrazit smlouvu</button>` : ''}
+    </div>`
+  }).join('')
 }
 
 // Podpisový canvas
@@ -5966,7 +6081,7 @@ const annColors = {
 
 async function loadAnnouncement() {
   try {
-    const { data } = await sb.from('announcements').select('*').eq('is_active', true).order('created_at', {ascending: false}).limit(1)
+    const { data } = await sb.from('announcements').select('*').order('created_at', {ascending: false}).limit(1)
     if (!data?.length) { hideBanner(); return }
     const ann = data[0]
     // Zkontroluj jestli uživatel toto oznámení zavřel
@@ -6038,7 +6153,7 @@ async function publishAnnouncement() {
   const message = document.getElementById('ann-message')?.value?.trim()
   if (!message) { showToast('⚠️ Napište text oznámení'); return }
   // Deaktivuj stará oznámení
-  await sb.from('announcements').update({ is_active: false }).eq('is_active', true)
+  await sb.from('announcements').update({ is_active: false })
   // Vytvoř nové
   const { error } = await sb.from('announcements').insert({ message, type, is_active: true })
   if (error) { showToast('❌ Chyba: ' + error.message); return }
@@ -6050,7 +6165,7 @@ async function publishAnnouncement() {
 }
 
 async function clearAnnouncement() {
-  await sb.from('announcements').update({ is_active: false }).eq('is_active', true)
+  await sb.from('announcements').update({ is_active: false })
   showToast('🗑 Aktivní oznámení smazáno')
   loadActiveAnnouncements()
   hideBanner()
@@ -6458,6 +6573,8 @@ async function openWorkerModal(id) {
   document.getElementById('wd-role').textContent = {admin:'Admin',osvec:'OSVČ',partak:'Parťák',klient:'Klient'}[w.role] || w.role
   document.getElementById('wd-status').innerHTML = `<span class="pill ${w.is_active?'pg':'pr'}">${w.is_active?'Aktivní':'Neaktivní'}</span>`
   document.getElementById('wd-rate').value = w.hourly_rate_worker || ''
+  document.getElementById('wd-coop-start').value = w.cooperation_start || ''
+  document.getElementById('wd-coop-end').value = w.cooperation_end || ''
   document.getElementById('wd-notes').value = w.notes || ''
 
   // Fill KW selects
@@ -6735,13 +6852,33 @@ async function loadWdContracts(id) {
   const { data } = await sb.from('contracts').select('*').eq('worker_id', id||currentWorkerId)
   const div = document.getElementById('wd-contracts-list')
   if(!data?.length){div.innerHTML='<div style="color:var(--text3);text-align:center;padding:20px">Žádné smlouvy</div>';return}
-  const statusLabels={pending:'Čeká na podpis',signed_electronic:'Podepsána elektronicky',signed_scan:'Podepsána (sken)',rejected:'Zamítnuta'}
-  div.innerHTML = data.map(c=>`<div style="display:flex;justify-content:space-between;align-items:center;padding:10px 0;border-bottom:1px solid var(--brd)">
-    <div>
-      <div style="font-size:13px;font-weight:600">${c.title}</div>
-      <div style="font-size:11px;color:var(--text3)">${c.created_at?.slice(0,10)}</div>
+  const statusLabels={
+    admin_pending:'Ceka na podpis admina',
+    pending:'Ceka na podpis OSVC',
+    signed_electronic:'Podepsana elektronicky',
+    signed_scan:'Podepsana (sken)',
+    rejected:'Zamitnuta'
+  }
+  const statusPill={
+    admin_pending:'pa', pending:'pa',
+    signed_electronic:'pg', signed_scan:'pg',
+    rejected:'pr'
+  }
+  div.innerHTML = data.map(c=>`<div style="padding:10px 0;border-bottom:1px solid var(--brd)">
+    <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px;margin-bottom:6px">
+      <div>
+        <div style="font-size:13px;font-weight:600">${c.title}</div>
+        <div style="font-size:11px;color:var(--text3)">${c.created_at?.slice(0,10)}</div>
+      </div>
+      <span class="pill ${statusPill[c.status]||'pa'}">${statusLabels[c.status]||c.status}</span>
     </div>
-    <span class="pill ${c.status==='pending'?'pa':c.status?.includes('signed')?'pg':'pr'}">${statusLabels[c.status]||c.status}</span>
+    <div style="display:flex;gap:6px;flex-wrap:wrap">
+      ${c.file_url?`<button onclick="openPdfUrl('${c.file_url}')" style="font-size:11px;padding:3px 10px;border:1px solid var(--blue);border-radius:6px;cursor:pointer;background:var(--bg2);color:var(--blue);font-family:inherit">Zobrazit PDF</button>`:''}
+      ${c.admin_signature_url?`<button onclick="openPdfUrl('${c.admin_signature_url}')" style="font-size:11px;padding:3px 10px;border:1px solid var(--amber);border-radius:6px;cursor:pointer;background:none;color:var(--amber);font-family:inherit">Podpis admina</button>`:''}
+      ${c.signature_url?`<button onclick="openPdfUrl('${c.signature_url}')" style="font-size:11px;padding:3px 10px;border:1px solid var(--green);border-radius:6px;cursor:pointer;background:none;color:var(--green);font-family:inherit">Podpis OSVC</button>`:''}
+      ${c.status==='admin_pending'?`<button onclick="openAdminSignModal('${c.id}','${(c.title||'').replace(/'/g,String.fromCharCode(39))}','${c.file_url||''}')" style="font-size:11px;padding:3px 10px;border:none;border-radius:6px;cursor:pointer;background:var(--blue);color:#fff;font-family:inherit;font-weight:700">Podepsat jako admin</button>`:''}
+      <button onclick="deleteContract('${c.id}','${(c.title||'').replace(/'/g,String.fromCharCode(39))}','${c.file_url||''}','${c.admin_signature_url||''}','${c.signature_url||''}')" style="font-size:11px;padding:3px 10px;border:1px solid var(--red);border-radius:6px;cursor:pointer;background:none;color:var(--red);font-family:inherit">Smazat</button>
+    </div>
   </div>`).join('')
 }
 
@@ -6836,9 +6973,15 @@ async function saveFinance() {
 async function saveWorkerProfile() {
   if(!currentWorkerId) return
   const rate = parseFloat(document.getElementById('wd-rate').value)||0
-  const { error } = await sb.from('profiles').update({hourly_rate_worker:rate}).eq('id',currentWorkerId)
+  const coopStart = document.getElementById('wd-coop-start')?.value || null
+  const coopEnd = document.getElementById('wd-coop-end')?.value || null
+  const { error } = await sb.from('profiles').update({
+    hourly_rate_worker: rate,
+    cooperation_start: coopStart || null,
+    cooperation_end: coopEnd || null
+  }).eq('id',currentWorkerId)
   if(error){showToast('Chyba: '+error.message);return}
-  showToast('✅ Profil uložen')
+  showToast('Profil ulozen')
 }
 
 async function saveWorkerNotes() {
