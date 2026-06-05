@@ -1596,6 +1596,143 @@ let workerPdfState = {
 }
 let workerSignCanvas = null, workerSignCtx = null, workerDrawing = false
 
+
+// ===== PODPIS SAVE + PREVIEW =====
+let sigPreviewBlob = null
+let sigPreviewMode = null
+
+async function showSignaturePreview(mode) {
+  sigPreviewMode = mode
+  const overlay = document.getElementById('sig-preview-overlay')
+  const confirmBtn = document.getElementById('sig-preview-confirm-btn')
+  if (!overlay) return
+  try {
+    const { PDFDocument } = PDFLib
+    let fileUrl, sigX, sigY, sigPage, signCanvas
+    if (mode === 'admin') {
+      fileUrl = pdfSignState.fileUrl; sigX = pdfSignState.sigX; sigY = pdfSignState.sigY
+      sigPage = pdfSignState.sigPage || 1; signCanvas = document.getElementById('admin-sign-canvas')
+    } else {
+      fileUrl = workerPdfState.fileUrl; sigX = workerPdfState.sigX; sigY = workerPdfState.sigY
+      sigPage = workerPdfState.sigPage || 1; signCanvas = document.getElementById('sign-canvas')
+    }
+    if (!sigX && sigX !== 0) { showToast('Kliknete do PDF kde chcete podpis'); return }
+    if (!signCanvas) { showToast('Canvas nenalezen'); return }
+    // Recalc z markera
+    const markerEl = document.getElementById(mode === 'admin' ? 'sig-placement-marker' : 'worker-sig-marker')
+    const canvasEl = document.getElementById(mode === 'admin' ? 'pdf-render-canvas' : 'worker-pdf-render-canvas')
+    if (markerEl && canvasEl && markerEl.style.display !== 'none') {
+      const mL = parseFloat(markerEl.style.left)||0; const mT = parseFloat(markerEl.style.top)||0
+      const sc = (mode==='admin' ? pdfSignState.scale : workerPdfState.scale)||1
+      const cssH = canvasEl.clientHeight||800
+      sigX = mL/sc; sigY = (cssH/sc)-(mT/sc)
+    }
+    if (confirmBtn) { confirmBtn.textContent = 'Připravujem náhled...'; confirmBtn.disabled = true }
+    overlay.style.cssText = 'display:flex;position:fixed;inset:0;background:rgba(0,0,0,0.95);z-index:19999;flex-direction:column'
+    document.body.style.overflow = 'hidden'
+    document.getElementById('sig-preview-frame').src = ''
+    const pdfResp = await Promise.race([
+      fetch(fileUrl, {mode:'cors',credentials:'omit'}),
+      new Promise((_,rej) => setTimeout(()=>rej(new Error('Timeout')),15000))
+    ])
+    if (!pdfResp.ok) throw new Error('HTTP '+pdfResp.status)
+    const pdfBytesOrig = await pdfResp.arrayBuffer()
+    const pdfDoc = await PDFDocument.load(pdfBytesOrig)
+    const sigBlob = await new Promise(r => signCanvas.toBlob(r, 'image/png'))
+    const sigBytes = await sigBlob.arrayBuffer()
+    const sigImg = await pdfDoc.embedPng(sigBytes)
+    const page = pdfDoc.getPage((sigPage||1)-1)
+    const {width:pageW, height:pageH} = page.getSize()
+    const sw=120, sh=50
+    page.drawImage(sigImg, {
+      x: Math.max(5,Math.min(sigX-sw/2,pageW-sw-5)),
+      y: Math.max(5,Math.min(sigY-sh/2,pageH-sh-5)),
+      width:sw, height:sh
+    })
+    const signedBytes = await pdfDoc.save()
+    sigPreviewBlob = new Blob([signedBytes], {type:'application/pdf'})
+    const previewUrl = URL.createObjectURL(sigPreviewBlob)
+    document.getElementById('sig-preview-frame').src = previewUrl + '#toolbar=0'
+    if (confirmBtn) { confirmBtn.textContent = 'Uložit a odeslat ✓'; confirmBtn.disabled = false }
+  } catch(e) {
+    showToast('Chyba náhledu: ' + e.message)
+    overlay.style.display = 'none'
+    if (confirmBtn) { confirmBtn.textContent = 'Uložit a odeslat ✓'; confirmBtn.disabled = false }
+  }
+}
+
+function closeSigPreview() {
+  const overlay = document.getElementById('sig-preview-overlay')
+  if (overlay) overlay.style.display = 'none'
+  document.body.style.overflow = 'hidden'
+  sigPreviewBlob = null
+}
+
+function retrySigning() {
+  closeSigPreview()
+  const markerEl = document.getElementById(sigPreviewMode==='admin' ? 'sig-placement-marker' : 'worker-sig-marker')
+  if (markerEl) markerEl.style.display = 'none'
+  if (sigPreviewMode==='admin') {
+    pdfSignState.sigX = null; pdfSignState.sigY = null
+    clearAdminSignCanvas?.()
+  } else {
+    workerPdfState.sigX = null; workerPdfState.sigY = null
+    clearWorkerSignCanvas?.()
+  }
+  showToast('Nakreslete podpis znovu a vyberte místo')
+}
+
+async function confirmAndSaveSignature() {
+  if (!sigPreviewBlob) { showToast('Nejdříve zobrazte náhled'); return }
+  const btn = document.getElementById('sig-preview-confirm-btn')
+  if (btn) { btn.textContent = 'Ukládám...'; btn.disabled = true }
+  try {
+    if (sigPreviewMode === 'admin') await saveAdminSignedPDF(sigPreviewBlob)
+    else await saveWorkerSignedPDF(sigPreviewBlob)
+    closeSigPreview()
+  } catch(e) {
+    showToast('Chyba ukladani: ' + e.message)
+    if (btn) { btn.textContent = 'Uložit a odeslat ✓'; btn.disabled = false }
+  }
+}
+
+async function saveAdminSignedPDF(signedBlob) {
+  const contractId = pdfSignState.contractId || adminSignContractId
+  if (!contractId) throw new Error('Chybí contractId')
+  const isForWorker = pdfSignState.signMode === 'for_worker'
+  const suffix = isForWorker ? 'worker_signed' : 'admin_signed'
+  const filePath = 'signed/' + contractId + '_' + suffix + '.pdf'
+  const {error:upErr} = await sb.storage.from('contracts').upload(filePath, signedBlob, {contentType:'application/pdf',upsert:true})
+  if (upErr) throw new Error('Upload: ' + upErr.message)
+  const {data:urlData} = sb.storage.from('contracts').getPublicUrl(filePath)
+  const signedUrl = urlData?.publicUrl
+  const updateData = isForWorker
+    ? {file_url:signedUrl,signature_url:signedUrl,signed_at:new Date().toISOString(),status:'signed_electronic'}
+    : {file_url:signedUrl,admin_signature_url:signedUrl,admin_signed_at:new Date().toISOString(),status:'pending'}
+  const {error:dbErr} = await sb.from('contracts').update(updateData).eq('id',contractId)
+  if (dbErr) throw new Error('DB: ' + dbErr.message)
+  if (!isForWorker) {
+    const {data:cData} = await sb.from('contracts').select('worker_id,title').eq('id',contractId).single()
+    if (cData?.worker_id) {
+      await sb.from('notifications').insert({worker_id:cData.worker_id,title:'Smlouva čeká na váš podpis',message:'Smlouva "' + (cData.title||'') + '" čeká na váš podpis.',type:'smlouva',is_read:false})
+    }
+  }
+  closeAdminSignModal(); showToast('Smlouva podepsána! ✓'); loadAdminContracts()
+}
+
+async function saveWorkerSignedPDF(signedBlob) {
+  const contractId = workerPdfState.contractId || signContractId
+  if (!contractId) throw new Error('Chybí contractId')
+  const filePath = 'signed/' + contractId + '_worker_signed.pdf'
+  const {error:upErr} = await sb.storage.from('contracts').upload(filePath, signedBlob, {contentType:'application/pdf',upsert:true})
+  if (upErr) throw new Error('Upload: ' + upErr.message)
+  const {data:urlData} = sb.storage.from('contracts').getPublicUrl(filePath)
+  const signedUrl = urlData?.publicUrl
+  const {error:dbErr} = await sb.from('contracts').update({file_url:signedUrl,signature_url:signedUrl,signed_at:new Date().toISOString(),status:'signed_electronic'}).eq('id',contractId)
+  if (dbErr) throw new Error('DB: ' + dbErr.message)
+  closeSignModal(); showToast('Smlouva podepsána! ✓'); loadMobContracts()
+}
+
 async function openSignModal(contractId, title, fileUrl) {
   try {
   signContractId = contractId
@@ -3073,6 +3210,24 @@ ${rows || '<div class="empty">Žádná přihlášení za posledních 30 dní</di
         Zpět
       </button>
     </div>
+  </div>
+</div>
+
+<!-- Signature Preview Overlay -->
+<div id="sig-preview-overlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.95);z-index:19999;flex-direction:column">
+  <div style="background:#1a1a1a;padding:12px 16px;display:flex;justify-content:space-between;align-items:center;flex-shrink:0;border-bottom:2px solid #FFCD00">
+    <div>
+      <div style="color:#FFCD00;font-weight:800;font-size:15px">Náhled podepsané smlouvy</div>
+      <div style="color:#999;font-size:12px;margin-top:2px">Zkontrolujte umístění podpisu před uložením</div>
+    </div>
+    <button onclick="closeSigPreview()" style="background:rgba(255,255,255,.1);border:none;color:#fff;font-size:20px;cursor:pointer;padding:4px 10px;border-radius:6px">✕</button>
+  </div>
+  <div style="flex:1;overflow:auto;background:#555;display:flex;align-items:flex-start;justify-content:center;padding:16px">
+    <iframe id="sig-preview-frame" style="width:100%;max-width:800px;height:600px;min-height:400px;border:none;border-radius:8px;background:#fff"></iframe>
+  </div>
+  <div style="background:#1a1a1a;padding:14px 16px;display:flex;gap:10px;border-top:1px solid #333;flex-shrink:0">
+    <button onclick="retrySigning()" style="flex:1;padding:13px;background:#333;color:#fff;border:none;border-radius:12px;font-size:14px;font-weight:700;cursor:pointer;font-family:inherit">↩ Zkusit znovu</button>
+    <button onclick="confirmAndSaveSignature()" id="sig-preview-confirm-btn" style="flex:2;padding:13px;background:#FFCD00;color:#1a1a1a;border:none;border-radius:12px;font-size:15px;font-weight:800;cursor:pointer;font-family:inherit">Uložit a odeslat ✓</button>
   </div>
 </div>
 </body></html>`
@@ -5424,6 +5579,24 @@ async function exportKW() {
     </div>
   </div>
 </div>
+
+<!-- Signature Preview Overlay -->
+<div id="sig-preview-overlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.95);z-index:19999;flex-direction:column">
+  <div style="background:#1a1a1a;padding:12px 16px;display:flex;justify-content:space-between;align-items:center;flex-shrink:0;border-bottom:2px solid #FFCD00">
+    <div>
+      <div style="color:#FFCD00;font-weight:800;font-size:15px">Náhled podepsané smlouvy</div>
+      <div style="color:#999;font-size:12px;margin-top:2px">Zkontrolujte umístění podpisu před uložením</div>
+    </div>
+    <button onclick="closeSigPreview()" style="background:rgba(255,255,255,.1);border:none;color:#fff;font-size:20px;cursor:pointer;padding:4px 10px;border-radius:6px">✕</button>
+  </div>
+  <div style="flex:1;overflow:auto;background:#555;display:flex;align-items:flex-start;justify-content:center;padding:16px">
+    <iframe id="sig-preview-frame" style="width:100%;max-width:800px;height:600px;min-height:400px;border:none;border-radius:8px;background:#fff"></iframe>
+  </div>
+  <div style="background:#1a1a1a;padding:14px 16px;display:flex;gap:10px;border-top:1px solid #333;flex-shrink:0">
+    <button onclick="retrySigning()" style="flex:1;padding:13px;background:#333;color:#fff;border:none;border-radius:12px;font-size:14px;font-weight:700;cursor:pointer;font-family:inherit">↩ Zkusit znovu</button>
+    <button onclick="confirmAndSaveSignature()" id="sig-preview-confirm-btn" style="flex:2;padding:13px;background:#FFCD00;color:#1a1a1a;border:none;border-radius:12px;font-size:15px;font-weight:800;cursor:pointer;font-family:inherit">Uložit a odeslat ✓</button>
+  </div>
+</div>
 </body></html>`
 
   // Otevři print okno
@@ -5722,6 +5895,24 @@ async function exportWorkerKW(workerId, workerName, week, year) {
         Zpět
       </button>
     </div>
+  </div>
+</div>
+
+<!-- Signature Preview Overlay -->
+<div id="sig-preview-overlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.95);z-index:19999;flex-direction:column">
+  <div style="background:#1a1a1a;padding:12px 16px;display:flex;justify-content:space-between;align-items:center;flex-shrink:0;border-bottom:2px solid #FFCD00">
+    <div>
+      <div style="color:#FFCD00;font-weight:800;font-size:15px">Náhled podepsané smlouvy</div>
+      <div style="color:#999;font-size:12px;margin-top:2px">Zkontrolujte umístění podpisu před uložením</div>
+    </div>
+    <button onclick="closeSigPreview()" style="background:rgba(255,255,255,.1);border:none;color:#fff;font-size:20px;cursor:pointer;padding:4px 10px;border-radius:6px">✕</button>
+  </div>
+  <div style="flex:1;overflow:auto;background:#555;display:flex;align-items:flex-start;justify-content:center;padding:16px">
+    <iframe id="sig-preview-frame" style="width:100%;max-width:800px;height:600px;min-height:400px;border:none;border-radius:8px;background:#fff"></iframe>
+  </div>
+  <div style="background:#1a1a1a;padding:14px 16px;display:flex;gap:10px;border-top:1px solid #333;flex-shrink:0">
+    <button onclick="retrySigning()" style="flex:1;padding:13px;background:#333;color:#fff;border:none;border-radius:12px;font-size:14px;font-weight:700;cursor:pointer;font-family:inherit">↩ Zkusit znovu</button>
+    <button onclick="confirmAndSaveSignature()" id="sig-preview-confirm-btn" style="flex:2;padding:13px;background:#FFCD00;color:#1a1a1a;border:none;border-radius:12px;font-size:15px;font-weight:800;cursor:pointer;font-family:inherit">Uložit a odeslat ✓</button>
   </div>
 </div>
 </body></html>`
@@ -6281,19 +6472,14 @@ function renderInvoice(d, lang = 'en') {
       </tr>
     </table>
 
-    <!-- CONTACT + DATES ROW -->
+    <!-- DATES ROW -->
     <table style="width:100%;border-collapse:collapse;border-bottom:2px solid #000;background:#f9f9f9">
       <tr>
-        <td style="width:40%;padding:8px 10px 8px 14px;border-right:1px solid #ccc;vertical-align:top">
-          <div style="font-size:7pt;font-weight:700;text-transform:uppercase;color:#666;margin-bottom:4px">${L.contactInfo}</div>
-          <div style="font-size:8.5pt">${L.email}: <span style="color:#444">${d.workerEmail || '—'}</span></div>
-          <div style="font-size:8.5pt">${L.phone}: <span style="color:#444">${d.workerPhone || '—'}</span></div>
-        </td>
-        <td style="width:30%;padding:8px 10px;border-right:1px solid #ccc;vertical-align:top">
+        <td style="width:50%;padding:8px 10px 8px 14px;border-right:1px solid #ccc;vertical-align:top">
           <div style="font-size:7pt;color:#888;margin-bottom:2px">${L.dateIssue}</div>
           <div style="font-weight:700;font-size:9.5pt">${d.today}</div>
         </td>
-        <td style="width:30%;padding:8px 14px 8px 10px;vertical-align:top">
+        <td style="width:50%;padding:8px 14px 8px 10px;vertical-align:top">
           <div style="font-size:7pt;color:#888;margin-bottom:2px">${L.dueDate} (${d.dueDays||14} days)</div>
           <div style="font-weight:700;font-size:9.5pt">${d.dueDate}</div>
         </td>
@@ -8116,6 +8302,24 @@ function compressImage(file, maxSize) {
         Zpět
       </button>
     </div>
+  </div>
+</div>
+
+<!-- Signature Preview Overlay -->
+<div id="sig-preview-overlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.95);z-index:19999;flex-direction:column">
+  <div style="background:#1a1a1a;padding:12px 16px;display:flex;justify-content:space-between;align-items:center;flex-shrink:0;border-bottom:2px solid #FFCD00">
+    <div>
+      <div style="color:#FFCD00;font-weight:800;font-size:15px">Náhled podepsané smlouvy</div>
+      <div style="color:#999;font-size:12px;margin-top:2px">Zkontrolujte umístění podpisu před uložením</div>
+    </div>
+    <button onclick="closeSigPreview()" style="background:rgba(255,255,255,.1);border:none;color:#fff;font-size:20px;cursor:pointer;padding:4px 10px;border-radius:6px">✕</button>
+  </div>
+  <div style="flex:1;overflow:auto;background:#555;display:flex;align-items:flex-start;justify-content:center;padding:16px">
+    <iframe id="sig-preview-frame" style="width:100%;max-width:800px;height:600px;min-height:400px;border:none;border-radius:8px;background:#fff"></iframe>
+  </div>
+  <div style="background:#1a1a1a;padding:14px 16px;display:flex;gap:10px;border-top:1px solid #333;flex-shrink:0">
+    <button onclick="retrySigning()" style="flex:1;padding:13px;background:#333;color:#fff;border:none;border-radius:12px;font-size:14px;font-weight:700;cursor:pointer;font-family:inherit">↩ Zkusit znovu</button>
+    <button onclick="confirmAndSaveSignature()" id="sig-preview-confirm-btn" style="flex:2;padding:13px;background:#FFCD00;color:#1a1a1a;border:none;border-radius:12px;font-size:15px;font-weight:800;cursor:pointer;font-family:inherit">Uložit a odeslat ✓</button>
   </div>
 </div>
 </body>
