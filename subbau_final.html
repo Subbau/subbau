@@ -4402,6 +4402,50 @@ async function mobCheckin(type) {
   }
 }
 
+
+async function editMobAttEntry(attId, currentSite, currentDesc) {
+  // Jednoduchý inline dialog pre OSVČ
+  const overlay = document.createElement('div')
+  overlay.id = 'mob-att-edit-overlay'
+  overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:9999;display:flex;align-items:flex-end;justify-content:center;padding:0'
+  overlay.innerHTML = `
+    <div style="background:#fff;border-radius:20px 20px 0 0;padding:24px;width:100%;max-width:500px">
+      <div style="width:40px;height:4px;background:var(--brd);border-radius:2px;margin:0 auto 16px"></div>
+      <div style="font-size:15px;font-weight:800;margin-bottom:16px">Upravit zaznam</div>
+      <div class="fg" style="margin-bottom:12px">
+        <label style="font-size:12px;font-weight:700">Stavba</label>
+        <input type="text" id="mob-edit-site" value="${currentSite}" placeholder="napr. Praha – Vinohrady..."
+          style="width:100%;padding:12px;border:2px solid var(--brd);border-radius:10px;font-size:14px;font-family:inherit;box-sizing:border-box">
+      </div>
+      <div class="fg" style="margin-bottom:20px">
+        <label style="font-size:12px;font-weight:700">Napl. prace</label>
+        <textarea id="mob-edit-desc" rows="3" placeholder="napr. betonaz, montaz..."
+          style="width:100%;padding:12px;border:2px solid var(--brd);border-radius:10px;font-size:14px;font-family:inherit;resize:none;box-sizing:border-box">${currentDesc}</textarea>
+      </div>
+      <div style="display:flex;gap:10px">
+        <button onclick="saveMobAttEntry('${attId}')"
+          style="flex:1;padding:14px;background:#1a1a1a;color:#FFCD00;border:none;border-radius:12px;font-size:14px;font-weight:800;cursor:pointer;font-family:inherit">Ulozit</button>
+        <button onclick="document.getElementById('mob-att-edit-overlay').remove()"
+          style="padding:14px 18px;background:none;border:2px solid var(--brd);border-radius:12px;font-size:14px;cursor:pointer;font-family:inherit">Zpet</button>
+      </div>
+    </div>`
+  document.body.appendChild(overlay)
+  setTimeout(() => document.getElementById('mob-edit-site')?.focus(), 100)
+}
+
+async function saveMobAttEntry(attId) {
+  const site = document.getElementById('mob-edit-site')?.value.trim() || null
+  const desc = document.getElementById('mob-edit-desc')?.value.trim() || null
+  const { error } = await sb.from('attendance').update({
+    construction_site: site,
+    work_description: desc
+  }).eq('id', attId).eq('worker_id', currentUser.id)  // bezpečnostní check
+  if (error) { showToast('Chyba: ' + error.message); return }
+  document.getElementById('mob-att-edit-overlay').remove()
+  showToast('Zaznam upraven!')
+  loadMobWeek()
+}
+
 async function loadMobWeek() {
   const kw = getKW()
   document.getElementById('mob-kw').textContent = 'Týden '+kw.week
@@ -4494,7 +4538,11 @@ async function loadMobWeek() {
           <span style="font-size:12px;font-weight:700;color:var(--text)">${dayName}</span>
           <span style="font-size:12px;color:var(--text2)">${ci} – ${co} &nbsp; <b style="color:var(--blue)">${h}</b></span>
         </div>
-        ${site ? `<div style="font-size:11px;color:var(--blue);font-weight:600;margin-top:2px">${site}</div>` : ''}
+        <div style="font-size:11px;margin-top:4px;display:flex;gap:4px;flex-wrap:wrap;align-items:center">
+          <span style="color:var(--blue);font-weight:600">${site || '—'}</span>
+          <button onclick="editMobAttEntry('${r.id}','${(r.construction_site||'').replace(/'/g,String.fromCharCode(39))}','${(r.work_description||'').replace(/'/g,String.fromCharCode(39))}')"
+            style="font-size:10px;padding:1px 7px;border:1px solid var(--brd);border-radius:5px;cursor:pointer;background:none;font-family:inherit;color:var(--text2)">upravit</button>
+        </div>
         ${desc ? `<div style="font-size:11px;color:var(--text3);margin-top:1px">${desc}</div>` : ''}
       </div>`
     }).join('')
@@ -5322,10 +5370,17 @@ async function exportWorkerKW(workerId, workerName, week, year) {
     const be = r.break_end?.slice(0,5) || '—'
     const site = r.construction_site || '—'
     const desc = r.work_description || '—'
+    const adj2 = (r.check_in && r.check_out) ? applyAttendanceRules(r) : null
+    const adjCiStr = adj2?.checkIn || ci
+    const adjCoStr = adj2?.checkOut || co
+    const realCi = r.check_in?.slice(0,5) || '—'
+    const realCo = r.check_out?.slice(0,5) || '—'
+    const ciCell = adjCiStr + (realCi !== adjCiStr ? `<br><span style="font-size:10px;color:#999">zaz. ${realCi}</span>` : '')
+    const coCell = adjCoStr + (realCo !== adjCoStr ? `<br><span style="font-size:10px;color:#999">zaz. ${realCo}</span>` : '')
     return `<tr>
       <td style="padding:8px 12px;border:1px solid #ddd;font-weight:600">${d}</td>
-      <td style="padding:8px 12px;border:1px solid #ddd;text-align:center">${ci}</td>
-      <td style="padding:8px 12px;border:1px solid #ddd;text-align:center">${co}</td>
+      <td style="padding:8px 12px;border:1px solid #ddd;text-align:center">${ciCell}</td>
+      <td style="padding:8px 12px;border:1px solid #ddd;text-align:center">${coCell}</td>
       <td style="padding:8px 12px;border:1px solid #ddd;text-align:center">${bs !== '—' ? bs+' – '+be : '—'}</td>
       <td style="padding:8px 12px;border:1px solid #ddd;text-align:center;font-weight:700;color:#1a1a1a">${h}h</td>
       <td style="padding:8px 12px;border:1px solid #ddd;font-size:12px;font-weight:600;color:#333">${site}</td>
@@ -5474,6 +5529,11 @@ function editAttRecord(id, date, ci, co, bs, be) {
   document.getElementById('edit-att-co').value = co ? co.slice(0,5) : ''
   document.getElementById('edit-att-bs').value = bs ? bs.slice(0,5) : ''
   document.getElementById('edit-att-be').value = be ? be.slice(0,5) : ''
+  // Načti stavbu + popis z DB
+  sb.from('attendance').select('construction_site,work_description').eq('id',id).single().then(({data:attData}) => {
+    document.getElementById('edit-att-site').value = attData?.construction_site || ''
+    document.getElementById('edit-att-desc').value = attData?.work_description || ''
+  })
   document.getElementById('edit-att-modal').style.display = 'flex'
   updateEditHoursPreview()
 }
@@ -5509,13 +5569,18 @@ async function saveEditAttRecord() {
 
   const hours = (ci && co) ? calcHours(ci+':00', co+':00', bs?bs+':00':null, be?be+':00':null) : null
 
+  const site = document.getElementById('edit-att-site')?.value.trim() || null
+  const desc = document.getElementById('edit-att-desc')?.value.trim() || null
+
   const { data: updData, error } = await sb.from('attendance').update({
     check_in: ci + ':00',
     check_out: co ? co + ':00' : null,
     break_start: bs ? bs + ':00' : null,
     break_end: be ? be + ':00' : null,
     total_hours: hours,
-    is_manual: true
+    is_manual: true,
+    construction_site: site || null,
+    work_description: desc || null
   }).eq('id', id).select()
 
   if (error) { showToast('❌ Chyba: ' + error.message); return }
@@ -7014,8 +7079,16 @@ async function loadWdAttendance() {
       : '—'
     return `<tr>
       <td style="font-size:12px;white-space:nowrap">${r.work_date}</td>
-      <td>${adj.flags.lateIn ? flagBadge('lateIn', adj.checkIn||'—') : (adj.checkIn||'—')}</td>
-      <td>${adj.flags.earlyOut ? flagBadge('earlyOut', adj.checkOut||'—') : adj.flags.abnormal ? flagBadge('abnormal', adj.checkOut||'—') : (adj.checkOut||'—')}</td>
+      <td>
+        ${adj.flags.lateIn ? flagBadge('lateIn', adj.checkIn||'—') : (adj.checkIn||'—')}
+        ${r.check_in && adj.checkIn && r.check_in.slice(0,5) !== adj.checkIn
+          ? `<div style="font-size:10px;color:var(--text3);margin-top:1px">zaz. ${r.check_in.slice(0,5)}</div>` : ''}
+      </td>
+      <td>
+        ${adj.flags.earlyOut ? flagBadge('earlyOut', adj.checkOut||'—') : adj.flags.abnormal ? flagBadge('abnormal', adj.checkOut||'—') : (adj.checkOut||'—')}
+        ${r.check_out && adj.checkOut && r.check_out.slice(0,5) !== adj.checkOut
+          ? `<div style="font-size:10px;color:var(--text3);margin-top:1px">zaz. ${r.check_out.slice(0,5)}</div>` : ''}
+      </td>
       <td style="font-size:11px">${adj.flags.lateBreak ? flagBadge('lateBreak', breakStr) : breakStr}</td>
       <td>${hoursDisplay}${adj.flags.overtime > 0 ? `<span style="font-size:10px;color:var(--green);margin-left:3px">+${Math.round(adj.flags.overtime/60*100)/100}h presčas</span>` : ''}${adj.flags.incomplete ? `<div style="font-size:10px;color:#842029;font-weight:700;margin-top:2px">Nesplnena smena</div>` : ''}</td>
       <td style="font-size:12px;font-weight:600;color:var(--blue)">${r.construction_site||'—'}</td>
