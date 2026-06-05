@@ -1810,11 +1810,30 @@ async function submitWorkerSignWithPlacement() {
     const pdfDoc = await PDFDocument.load(pdfBytes)
     const sigImg = await pdfDoc.embedPng(sigBytes)
     const page = pdfDoc.getPage(workerPdfState.sigPage - 1)
-    const { width, height } = page.getSize()
+    const { width: pageW, height: pageH } = page.getSize()
     const sw = 120, sh = 50
+
+    // Prepočet z markera - presnejší ako uložené koordináty
+    let finalX = workerPdfState.sigX
+    let finalY = workerPdfState.sigY
+
+    const wMarkerEl = document.getElementById('worker-sig-marker')
+    const wCanvasEl = document.getElementById('worker-pdf-render-canvas')
+    if (wMarkerEl && wCanvasEl && wMarkerEl.style.display !== 'none') {
+      const mLeft = parseFloat(wMarkerEl.style.left) || 0
+      const mTop  = parseFloat(wMarkerEl.style.top)  || 0
+      const sc = workerPdfState.scale || 1
+      const cssH = wCanvasEl.clientHeight || (pageH * sc)
+      finalX = mLeft / sc
+      finalY = (cssH / sc) - (mTop / sc)
+    }
+
+    // Debug toast - ukáže kde presne podpis ide
+    showToast('Podpis: X=' + Math.round(finalX) + ' Y=' + Math.round(finalY) + ' (strana/' + pageW.toFixed(0) + 'x' + pageH.toFixed(0) + ')')
+
     page.drawImage(sigImg, {
-      x: Math.max(0, Math.min(workerPdfState.sigX - sw/2, width - sw)),
-      y: Math.max(0, Math.min(workerPdfState.sigY - sh/2, height - sh)),
+      x: Math.max(5, Math.min(finalX - sw/2, pageW - sw - 5)),
+      y: Math.max(5, Math.min(finalY - sh/2, pageH - sh - 5)),
       width: sw, height: sh
     })
     const signDate = new Date().toLocaleDateString('cs-CZ')
@@ -6418,11 +6437,14 @@ async function uploadContract() {
 
   progress.style.display = 'none'
   contractFile = null
+  // KRITICKÉ: vymazať file input aby Safari nezachoval starý výber
+  const fileInput = document.getElementById('contract-file')
+  if (fileInput) fileInput.value = ''
   document.getElementById('contract-file-name').textContent = 'Žádný soubor'
   document.getElementById('contract-title').value = ''
   document.getElementById('contract-worker').value = ''
 
-  showToast('✅ Smlouva nahrána! Klikněte Podepsat v seznamu smluv.')
+  showToast('Smlouva nahrána! Klikněte Podepsat v seznamu smluv.')
   loadAdminContracts()
 }
 
