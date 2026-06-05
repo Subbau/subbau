@@ -1577,12 +1577,23 @@ async function openSignModal(contractId, title, fileUrl) {
   // Nastav signature canvas
   const area = document.getElementById('sign-canvas-area')
   if (area) {
-    const c = document.getElementById('sign-canvas')
-    if (c) { c.width = 400; c.height = 140 }
     workerSignCanvas = document.getElementById('sign-canvas')
+    if (workerSignCanvas) {
+      // Resize canvas na skutočnú CSS veľkosť pane (nie pevné 400×140)
+      const pane = workerSignCanvas.closest('.sign-canvas-pane') || area.parentElement
+      const paneW = pane ? Math.max(pane.clientWidth - 28, 150) : 220
+      const paneH = Math.max(area.clientHeight || 120, 120)
+      const cDpr = Math.min(window.devicePixelRatio || 1, 2)  // max DPR=2 pre sign canvas
+      workerSignCanvas.width = Math.floor(paneW * cDpr)
+      workerSignCanvas.height = Math.floor(paneH * cDpr)
+      workerSignCanvas.style.width = paneW + 'px'
+      workerSignCanvas.style.height = paneH + 'px'
+    }
     workerSignCtx = workerSignCanvas?.getContext('2d')
     if (workerSignCtx) {
-      workerSignCtx.strokeStyle = '#1a1a1a'; workerSignCtx.lineWidth = 2; workerSignCtx.lineCap = 'round'
+      const cDpr2 = Math.min(window.devicePixelRatio || 1, 2)
+      workerSignCtx.scale(cDpr2, cDpr2)
+      workerSignCtx.strokeStyle = '#1a1a1a'; workerSignCtx.lineWidth = 2.5; workerSignCtx.lineCap = 'round'; workerSignCtx.lineJoin = 'round'
     }
     setupWorkerSignCanvas()
   }
@@ -1607,21 +1618,28 @@ async function openSignModal(contractId, title, fileUrl) {
 
 async function loadWorkerPDF(url) {
   const loading = document.getElementById('worker-pdf-loading')
-  if (loading) loading.style.display = 'block'
+  if (loading) { loading.style.display = 'block'; loading.textContent = 'Nacitam smlouvu...' }
   try {
-    if (typeof pdfjsLib !== 'undefined') {
-      pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js'
-      const task = pdfjsLib.getDocument(url)
-      workerPdfState.pdfDoc = await task.promise
-      workerPdfState.totalPages = workerPdfState.pdfDoc.numPages
-      workerPdfState.currentPage = workerPdfState.totalPages
-      await renderWorkerPDFPage(workerPdfState.currentPage)
-      if (loading) loading.style.display = 'none'
-    } else {
-      if (loading) loading.textContent = '⚠️ PDF.js není načten'
+    if (typeof pdfjsLib === 'undefined') {
+      if (loading) loading.textContent = 'PDF.js neni nacten'
+      return
     }
+    pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js'
+    const task = pdfjsLib.getDocument({ url, withCredentials: true })
+    // Timeout 12s - ak sa PDF nenačíta (mobile network)
+    const timeoutP = new Promise((_, rej) => setTimeout(() => rej(new Error('Timeout – skontrolujte pripojeni')), 12000))
+    workerPdfState.pdfDoc = await Promise.race([task.promise, timeoutP])
+    workerPdfState.totalPages = workerPdfState.pdfDoc.numPages
+    workerPdfState.currentPage = workerPdfState.totalPages
+    await renderWorkerPDFPage(workerPdfState.currentPage)
+    if (loading) loading.style.display = 'none'
   } catch(e) {
-    if (loading) loading.textContent = '⚠️ Nelze načíst PDF: ' + e.message
+    if (loading) {
+      loading.style.display = 'block'
+      loading.textContent = 'Chyba: ' + e.message + ' — zkuste znovu'
+      loading.style.color = '#c62828'
+    }
+    console.error('loadWorkerPDF error:', e)
   }
 }
 
@@ -1649,8 +1667,8 @@ async function renderWorkerPDFPage(pageNum) {
   workerPdfState.scale = scale
   const scaledVp = page.getViewport({ scale })
   // Poznámka: fyzická velikost canvasu se nastavuje níže s DPR
-  const dpr2 = window.devicePixelRatio || 1
-  // HiDPI fix: ostrý render na Retina/mobilní displeji
+  const dpr2 = Math.min(window.devicePixelRatio || 1, 2)  // max DPR=2 – inak crashi pamet
+  // HiDPI fix: ostrý render na Retina/mobilním displeji
   canvas.width = Math.floor(scaledVp.width * dpr2)
   canvas.height = Math.floor(scaledVp.height * dpr2)
   canvas.style.width = scaledVp.width + 'px'
@@ -1940,7 +1958,7 @@ async function renderPDFPage(pageNum) {
   pdfSignState.scale = scale
 
   const scaledViewport = page.getViewport({ scale })
-  const dpr = window.devicePixelRatio || 1
+  const dpr = Math.min(window.devicePixelRatio || 1, 2)  // max DPR=2
   // HiDPI fix: canvas fyzická velikost = CSS velikost × devicePixelRatio
   canvas.width = Math.floor(scaledViewport.width * dpr)
   canvas.height = Math.floor(scaledViewport.height * dpr)
