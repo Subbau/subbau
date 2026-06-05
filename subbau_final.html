@@ -1633,10 +1633,18 @@ async function loadWorkerPDF(url) {
       return
     }
     pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js'
-    const task = pdfjsLib.getDocument({ url, withCredentials: true })
-    // Timeout 12s - ak sa PDF nenačíta (mobile network)
-    const timeoutP = new Promise((_, rej) => setTimeout(() => rej(new Error('Timeout – skontrolujte pripojeni')), 12000))
-    workerPdfState.pdfDoc = await Promise.race([task.promise, timeoutP])
+    // Fetch PDF jako ArrayBuffer - řeší CORS na mobile Safari
+    if (loading) loading.textContent = 'Stahuji smlouvu...'
+    const fetchResp = await Promise.race([
+      fetch(url, { mode: 'cors', credentials: 'omit' }),
+      new Promise((_, rej) => setTimeout(() => rej(new Error('Timeout – zkontrolujte pripojeni')), 15000))
+    ])
+    if (!fetchResp.ok) throw new Error('HTTP ' + fetchResp.status + ' – PDF nelze stáhnout')
+    if (loading) loading.textContent = 'Zpracovavam PDF...'
+    const pdfBytes = await fetchResp.arrayBuffer()
+    // Předej bytes (ne URL) – vyhne se CORS na pdf.js workeru
+    const task = pdfjsLib.getDocument({ data: pdfBytes })
+    workerPdfState.pdfDoc = await task.promise
     workerPdfState.totalPages = workerPdfState.pdfDoc.numPages
     workerPdfState.currentPage = workerPdfState.totalPages
     await renderWorkerPDFPage(workerPdfState.currentPage)
