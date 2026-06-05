@@ -6722,14 +6722,15 @@ function applyAttendanceRules(record) {
   let adjCi = ci
   const ciDiff = ci - SHIFT.start  // záporné = přišel dřív, kladné = přišel pozdě
   if (ciDiff < 0) {
-    // Přišel dřív
+    // Přišel dřív než 30 min před začátkem → zaokrouhlit na 7:00
     if (Math.abs(ciDiff) <= 30) {
-      adjCi = SHIFT.start  // zaokrouhlit na 7:00
+      adjCi = SHIFT.start  // max 30 min dřív → 7:00
     }
-    // jinak počítáme od skutečného příchodu
+    // přišel dřív než 30 min → počítáme od skutečného příchodu (noční směna apod.)
   } else if (ciDiff > 0) {
-    // Přišel pozdě
-    adjCi = ci  // počítáme od skutečného
+    // Přišel pozdě → VŽDY počítáme od 7:00 (plánovaný začátek)
+    // Pracovník dostane "pozdní příchod" flag ale hodiny jdou od 7:00
+    adjCi = SHIFT.start
     flags.lateIn = true
   }
 
@@ -6760,19 +6761,20 @@ function applyAttendanceRules(record) {
   const coDiff = co - SHIFT.end  // záporné = odešel dřív, kladné = odešel pozdě
 
   if (coDiff < 0) {
-    // Odešel dřív - vždy zvýrazni, zaokrouhli na 16:00
+    // Odešel dřív než 16:00 → earlyOut flag, zaokrouhli na 16:00
     adjCo = SHIFT.end
     flags.earlyOut = true
-  } else if (coDiff >= 0 && coDiff <= 30) {
-    // Přesčas do 30 min → zaokrouhli na 16:00, nepočítej
+  } else if (coDiff < 30) {
+    // Odešel 16:00–16:29 → tolerance 30 min, zaokrouhli na 16:00, BEZ přesčasu
     adjCo = SHIFT.end
-  } else if (coDiff > 30) {
-    // Přesčas nad 30 min → počítej od skutečného
+  } else if (co < SHIFT.abnormal) {
+    // Odešel 16:30–17:59 → přesčas, počítej od skutečného odchodu
     adjCo = co
     flags.overtime = coDiff
-  }
-
-  if (co >= SHIFT.abnormal) {
+  } else {
+    // Odešel 18:00 nebo po → abnormální + přesčas
+    adjCo = co
+    flags.overtime = coDiff
     flags.abnormal = true
   }
 
