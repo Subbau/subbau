@@ -1027,8 +1027,13 @@ tr:hover td{background:#fafbfc}
         </div>
         <div id="worker-pdf-canvas-container" style="position:relative;cursor:crosshair;border:2px solid #ddd;border-radius:6px;overflow:hidden;background:#fff;flex:1">
           <canvas id="worker-pdf-render-canvas" style="display:block;max-width:100%;height:auto"></canvas>
-          <div id="worker-sig-marker" style="display:none;position:absolute;pointer-events:none;transform:translate(-50%,-50%)">
-            <div style="background:rgba(255,205,0,0.9);border:2px solid #1a1a1a;border-radius:5px;padding:3px 7px;font-size:11px;font-weight:700">Vas podpis zde</div>
+          <div id="worker-sig-marker" style="display:none;position:absolute;pointer-events:auto;transform:translate(-50%,-50%);cursor:move;user-select:none;touch-action:none">
+            <div style="background:rgba(255,205,0,0.95);border:2px solid #1a1a1a;border-radius:8px;padding:6px 10px;font-size:11px;font-weight:700;white-space:nowrap;box-shadow:0 2px 8px rgba(0,0,0,0.3)">
+              ✍ Váš podpis zde — táhněte pro přesun
+            </div>
+            <div style="width:120px;height:40px;border:2px dashed #1a1a1a;border-radius:4px;margin-top:4px;background:rgba(255,205,0,0.2);display:flex;align-items:center;justify-content:center">
+              <span style="font-size:10px;color:#666;font-style:italic">oblast podpisu</span>
+            </div>
           </div>
         </div>
         <div id="worker-pdf-loading" style="text-align:center;padding:30px;color:#999;font-size:13px">Nacitam PDF...</div>
@@ -1537,6 +1542,18 @@ async function loadWorkerPDF(url) {
   }
 }
 
+
+function setWorkerSigPos(cx, cy, scaledVp) {
+  const sc = workerPdfState.scale || 1
+  workerPdfState.sigX = cx / sc
+  workerPdfState.sigY = scaledVp.height / sc - cy / sc
+  workerPdfState.sigPage = workerPdfState.currentPage
+  const marker = document.getElementById('worker-sig-marker')
+  if (marker) { marker.style.display = 'block'; marker.style.left = cx+'px'; marker.style.top = cy+'px' }
+  const info2 = document.getElementById('worker-sig-pos-info')
+  if (info2) { info2.textContent = 'Podpis umisten na strane ' + workerPdfState.currentPage + ' — tazenim upresni polohu'; info2.style.background='#e8f5e9'; info2.style.color='#2e7d32' }
+}
+
 async function renderWorkerPDFPage(pageNum) {
   if (!workerPdfState.pdfDoc) return
   const canvas = document.getElementById('worker-pdf-render-canvas')
@@ -1564,15 +1581,38 @@ async function renderWorkerPDFPage(pageNum) {
   canvas.onclick = (e) => {
     const rect = canvas.getBoundingClientRect()
     const cx = e.clientX - rect.left, cy = e.clientY - rect.top
-    const sc = workerPdfState.scale
-    workerPdfState.sigX = cx / sc
-    workerPdfState.sigY = scaledVp.height / sc - cy / sc
-    workerPdfState.sigPage = workerPdfState.currentPage
-    // Zobraz marker
-    const marker = document.getElementById('worker-sig-marker')
-    if (marker) { marker.style.display = 'block'; marker.style.left = cx+'px'; marker.style.top = cy+'px' }
-    const info2 = document.getElementById('worker-sig-pos-info')
-    if (info2) { info2.textContent = `✅ Podpis na straně ${workerPdfState.currentPage}`; info2.style.background='#e8f5e9'; info2.style.color='#2e7d32' }
+    setWorkerSigPos(cx, cy, scaledVp)
+  }
+
+  // Drag worker marker
+  const wMarker = document.getElementById('worker-sig-marker')
+  if (wMarker && !wMarker._dragSetup) {
+    wMarker._dragSetup = true
+    let wDragging = false, wSX, wSY, wOL, wOT
+    wMarker.addEventListener('pointerdown', (e) => {
+      wDragging = true
+      wMarker.setPointerCapture(e.pointerId)
+      wSX = e.clientX; wSY = e.clientY
+      wOL = parseFloat(wMarker.style.left) || 0
+      wOT = parseFloat(wMarker.style.top) || 0
+      e.stopPropagation()
+    })
+    wMarker.addEventListener('pointermove', (e) => {
+      if (!wDragging) return
+      const nL = wOL + (e.clientX - wSX)
+      const nT = wOT + (e.clientY - wSY)
+      wMarker.style.left = nL + 'px'
+      wMarker.style.top = nT + 'px'
+      const sc2 = workerPdfState.scale || 1
+      workerPdfState.sigX = nL / sc2
+      workerPdfState.sigY = scaledVp.height / sc2 - nT / sc2
+    })
+    wMarker.addEventListener('pointerup', () => {
+      if (!wDragging) return
+      wDragging = false
+      const info2 = document.getElementById('worker-sig-pos-info')
+      if (info2) { info2.textContent = 'Podpis umisten na strane ' + workerPdfState.currentPage; info2.style.background='#e8f5e9'; info2.style.color='#2e7d32' }
+    })
   }
 }
 
@@ -1846,28 +1886,63 @@ async function renderPDFPage(pageNum) {
 }
 
 function setupPDFClickHandler(canvas, viewport) {
+  // Klik na PDF → umiesti marker
   canvas.onclick = (e) => {
     const rect = canvas.getBoundingClientRect()
-    const canvasX = (e.clientX - rect.left)
-    const canvasY = (e.clientY - rect.top)
+    const canvasX = e.clientX - rect.left
+    const canvasY = e.clientY - rect.top
+    setAdminSigPos(canvasX, canvasY, viewport)
+  }
 
-    // Převeď na PDF koordináty (pdf-lib: origin vlevo dole)
-    const scale = pdfSignState.scale
-    const pdfX = canvasX / scale
-    const pdfY = viewport.height / scale - canvasY / scale
+  // Drag marker pre presné umiestnenie
+  const marker = document.getElementById('sig-placement-marker')
+  if (marker && !marker._dragSetup) {
+    marker._dragSetup = true
+    let dragging = false, startX, startY, origLeft, origTop
 
-    pdfSignState.sigX = pdfX
-    pdfSignState.sigY = pdfY
-    pdfSignState.sigPage = pdfSignState.currentPage
+    marker.addEventListener('pointerdown', (e) => {
+      dragging = true
+      marker.setPointerCapture(e.pointerId)
+      startX = e.clientX; startY = e.clientY
+      origLeft = parseFloat(marker.style.left) || 0
+      origTop = parseFloat(marker.style.top) || 0
+      e.stopPropagation()
+    })
+    marker.addEventListener('pointermove', (e) => {
+      if (!dragging) return
+      const dx = e.clientX - startX
+      const dy = e.clientY - startY
+      const newLeft = origLeft + dx
+      const newTop = origTop + dy
+      marker.style.left = newLeft + 'px'
+      marker.style.top = newTop + 'px'
+      // Aktualizuj PDF koordináty priebežne
+      const sc = pdfSignState.scale || 1
+      pdfSignState.sigX = newLeft / sc
+      pdfSignState.sigY = viewport.height / sc - newTop / sc
+    })
+    marker.addEventListener('pointerup', (e) => {
+      if (!dragging) return
+      dragging = false
+      const info = document.getElementById('sig-position-info')
+      if (info) {
+        info.textContent = 'Podpis umisten na strane ' + pdfSignState.currentPage
+        info.style.background = '#e8f5e9'; info.style.color = '#2e7d32'
+      }
+    })
+  }
+}
 
-    showSigMarker(canvasX, canvasY)
-
-    const info = document.getElementById('sig-position-info')
-    if (info) {
-      info.textContent = `✅ Podpis bude na straně ${pdfSignState.currentPage}, pozice X:${Math.round(pdfX)} Y:${Math.round(pdfY)}`
-      info.style.background = '#e8f5e9'
-      info.style.color = '#2e7d32'
-    }
+function setAdminSigPos(canvasX, canvasY, viewport) {
+  const scale = pdfSignState.scale || 1
+  pdfSignState.sigX = canvasX / scale
+  pdfSignState.sigY = viewport.height / scale - canvasY / scale
+  pdfSignState.sigPage = pdfSignState.currentPage
+  showSigMarker(canvasX, canvasY)
+  const info = document.getElementById('sig-position-info')
+  if (info) {
+    info.textContent = 'Podpis umisten na strane ' + pdfSignState.currentPage + ' — tazenim upresni polohu'
+    info.style.background = '#e8f5e9'; info.style.color = '#2e7d32'
   }
 }
 
@@ -7608,10 +7683,13 @@ document.getElementById('login-pwd').addEventListener('keydown', e=>{if(e.key===
         </div>
         <div id="pdf-canvas-container" style="position:relative;cursor:crosshair;border:2px solid #ddd;border-radius:8px;overflow:hidden;background:#fff">
           <canvas id="pdf-render-canvas" style="display:block;max-width:100%"></canvas>
-          <!-- Značka kde bude podpis -->
-          <div id="sig-placement-marker" style="display:none;position:absolute;pointer-events:none;transform:translate(-50%,-50%)">
-            <div style="background:rgba(255,205,0,0.85);border:2px solid #1a1a1a;border-radius:6px;padding:4px 8px;font-size:11px;font-weight:700;white-space:nowrap">
-              ✍️ Podpis admina bude zde
+          <!-- Značka kde bude podpis - DRAGGABLE -->
+          <div id="sig-placement-marker" style="display:none;position:absolute;pointer-events:auto;transform:translate(-50%,-50%);cursor:move;user-select:none;touch-action:none">
+            <div style="background:rgba(255,205,0,0.95);border:2px solid #1a1a1a;border-radius:8px;padding:6px 10px;font-size:11px;font-weight:700;white-space:nowrap;box-shadow:0 2px 8px rgba(0,0,0,0.3)">
+              ✍ Podpis zde — táhněte pro přesun
+            </div>
+            <div style="width:120px;height:40px;border:2px dashed #1a1a1a;border-radius:4px;margin-top:4px;background:rgba(255,205,0,0.2);display:flex;align-items:center;justify-content:center">
+              <span style="font-size:10px;color:#666;font-style:italic">oblast podpisu</span>
             </div>
           </div>
         </div>
