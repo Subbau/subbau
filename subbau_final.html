@@ -1344,8 +1344,8 @@ tr:hover td{background:#fafbfc}
           <select id="wd-kw-sel" onchange="loadWdAttendance()" style="padding:5px 10px;border:1px solid var(--brd);border-radius:7px;font-size:12px;width:auto"></select>
         </div>
         <table>
-          <thead><tr><th>Datum</th><th>Příchod</th><th>Odchod</th><th>Přestávka</th><th>Hodiny</th><th>Adresa</th></tr></thead>
-          <tbody id="wd-att-table"><tr><td colspan="6" style="text-align:center;color:var(--text3);padding:20px">Vyberte týden</td></tr></tbody>
+          <thead><tr><th>Datum</th><th>Příchod</th><th>Odchod</th><th>Přestávka</th><th>Hodiny</th><th>Stavba</th><th>Napl. prace</th><th></th></tr></thead>
+          <tbody id="wd-att-table"><tr><td colspan="8" style="text-align:center;color:var(--text3);padding:20px">Vyberte týden</td></tr></tbody>
         </table>
         <div style="margin-top:10px;padding:10px 14px;background:var(--blue-l);border-radius:8px;display:flex;justify-content:space-between">
           <span style="font-size:13px;color:var(--blue)">Celkem tento týden</span>
@@ -2789,6 +2789,36 @@ async function showWorkerActivity(workerId, workerName) {
   <div class="stat"><div class="stat-val">${logins.length ? new Date(logins[0].logged_at || logins[0]).toLocaleDateString('cs-CZ') : '—'}</div><div class="stat-lbl">Poslední přihlášení</div></div>
 </div>
 ${rows || '<div class="empty">Žádná přihlášení za posledních 30 dní</div>'}
+
+<!-- Checkout dialog - Co jste dnes dělali -->
+<div id="checkout-dialog" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:9999;align-items:center;justify-content:center;padding:16px">
+  <div style="background:#fff;border-radius:20px;padding:24px;width:100%;max-width:400px;box-shadow:0 8px 32px rgba(0,0,0,.3)">
+    <div style="font-size:17px;font-weight:800;margin-bottom:4px;color:#1a1a1a">Zaznamenat odchod</div>
+    <div id="checkout-time-label" style="font-size:13px;color:#666;margin-bottom:20px"></div>
+    <div style="margin-bottom:14px">
+      <label style="font-size:12px;font-weight:700;color:#1a1a1a;display:block;margin-bottom:6px">Na jaké stavbě jste pracoval? *</label>
+      <input type="text" id="checkout-site" placeholder="např. Praha - Vinohrady, Brno - centrum..." 
+        style="width:100%;padding:12px;border:2px solid #e0e0e0;border-radius:10px;font-size:14px;font-family:inherit;box-sizing:border-box"
+        onfocus="this.style.borderColor='#1a1a1a'" onblur="this.style.borderColor='#e0e0e0'">
+    </div>
+    <div style="margin-bottom:20px">
+      <label style="font-size:12px;font-weight:700;color:#1a1a1a;display:block;margin-bottom:6px">Co jste dnes dělal? *</label>
+      <textarea id="checkout-desc" rows="3" placeholder="např. Zednictví, betonáž základů, montáž lešení..."
+        style="width:100%;padding:12px;border:2px solid #e0e0e0;border-radius:10px;font-size:14px;font-family:inherit;resize:vertical;box-sizing:border-box"
+        onfocus="this.style.borderColor='#1a1a1a'" onblur="this.style.borderColor='#e0e0e0'"></textarea>
+    </div>
+    <div style="display:flex;gap:10px">
+      <button onclick="confirmCheckout()" 
+        style="flex:1;padding:14px;background:#1a1a1a;color:#FFCD00;border:none;border-radius:12px;font-size:14px;font-weight:800;cursor:pointer;font-family:inherit">
+        Zaznamenat odchod
+      </button>
+      <button onclick="cancelCheckout()"
+        style="padding:14px 18px;background:none;border:2px solid #e0e0e0;border-radius:12px;font-size:14px;cursor:pointer;font-family:inherit">
+        Zpět
+      </button>
+    </div>
+  </div>
+</div>
 </body></html>`
 
   const blob = new Blob([html], {type:'text/html;charset=utf-8'})
@@ -3041,8 +3071,10 @@ async function recordAttendance(type) {
   } else if (type === 'out' && todayAttId) {
     const { data: rec } = await sb.from('attendance').select('check_in,break_start,break_end').eq('id',todayAttId).single()
     const hours = calcHours(rec?.check_in, timeStr, rec?.break_start, rec?.break_end)
-    await sb.from('attendance').update({ check_out: timeStr, total_hours: hours }).eq('id', todayAttId)
-    showToast('🚪 Odchod zaznamenán — '+timeStr+' ('+hours+'h)')
+    // Zobraz dialog "Co jste dnes dělali?"
+    pendingCheckout = { timeStr, hours }
+    showCheckoutDialog()
+    return  // Pokračuje v showCheckoutDialog → confirmCheckout()
   } else if (type === 'break-start' && todayAttId) {
     await sb.from('attendance').update({ break_start: timeStr }).eq('id', todayAttId)
     showToast('☕ Přestávka začala')
@@ -4083,6 +4115,56 @@ async function assignToTeam(workerId, teamId) {
 }
 
 // ============ OSVČ MOBILE ============
+
+// Checkout dialog
+let pendingCheckout = null
+
+function showCheckoutDialog() {
+  const d = document.getElementById('checkout-dialog')
+  if (!d) return
+  const lbl = document.getElementById('checkout-time-label')
+  if (lbl && pendingCheckout) {
+    lbl.textContent = 'Čas odchodu: ' + pendingCheckout.timeStr + ' (' + pendingCheckout.hours + 'h)'
+  }
+  // Načti naposledy použitou stavbu
+  const lastSite = localStorage.getItem('lastConstructionSite') || ''
+  const siteEl = document.getElementById('checkout-site')
+  if (siteEl) siteEl.value = lastSite
+  const descEl = document.getElementById('checkout-desc')
+  if (descEl) descEl.value = ''
+  d.style.display = 'flex'
+  setTimeout(() => siteEl?.focus(), 100)
+}
+
+function cancelCheckout() {
+  document.getElementById('checkout-dialog').style.display = 'none'
+  pendingCheckout = null
+}
+
+async function confirmCheckout() {
+  if (!pendingCheckout || !todayAttId) return
+  const site = document.getElementById('checkout-site')?.value.trim()
+  const desc = document.getElementById('checkout-desc')?.value.trim()
+  if (!site) { document.getElementById('checkout-site').style.borderColor='#dc3545'; return }
+  if (!desc) { document.getElementById('checkout-desc').style.borderColor='#dc3545'; return }
+
+  // Ulož naposledy použitú stavbu
+  localStorage.setItem('lastConstructionSite', site)
+
+  const { timeStr, hours } = pendingCheckout
+  await sb.from('attendance').update({
+    check_out: timeStr,
+    total_hours: hours,
+    construction_site: site,
+    work_description: desc
+  }).eq('id', todayAttId)
+
+  document.getElementById('checkout-dialog').style.display = 'none'
+  pendingCheckout = null
+  showToast('Odchod zaznamenan — ' + timeStr + ' (' + hours + 'h)')
+  getTodayRecord()
+}
+
 async function getTodayRecord() {
   if (!currentUser) return
   const today = new Date().toISOString().split('T')[0]
@@ -4396,14 +4478,36 @@ async function loadMobWeek() {
     return
   }
 
-  div.innerHTML=`<div style="display:grid;grid-template-columns:repeat(7,1fr);gap:3px">${[1,2,3,4,5,6,0].map(d=>{
+  // Denní přehled se stavbou a popisem
+  const dayListHtml = data
+    .filter(r => r.check_in)
+    .sort((a,b) => a.work_date.localeCompare(b.work_date))
+    .map(r => {
+      const dayName = new Date(r.work_date).toLocaleDateString('cs-CZ', {weekday:'short', day:'2-digit', month:'2-digit'})
+      const ci = r.check_in?.slice(0,5) || '—'
+      const co = r.check_out?.slice(0,5) || '...'
+      const h = r.total_hours ? r.total_hours + 'h' : '...'
+      const site = r.construction_site || ''
+      const desc = r.work_description || ''
+      return `<div style="padding:8px 0;border-bottom:1px solid var(--brd)">
+        <div style="display:flex;justify-content:space-between;align-items:center">
+          <span style="font-size:12px;font-weight:700;color:var(--text)">${dayName}</span>
+          <span style="font-size:12px;color:var(--text2)">${ci} – ${co} &nbsp; <b style="color:var(--blue)">${h}</b></span>
+        </div>
+        ${site ? `<div style="font-size:11px;color:var(--blue);font-weight:600;margin-top:2px">${site}</div>` : ''}
+        ${desc ? `<div style="font-size:11px;color:var(--text3);margin-top:1px">${desc}</div>` : ''}
+      </div>`
+    }).join('')
+
+  div.innerHTML=`<div style="display:grid;grid-template-columns:repeat(7,1fr);gap:3px;margin-bottom:12px">${[1,2,3,4,5,6,0].map(d=>{
     const dayRecs = data.filter(a => new Date(a.work_date).getDay()===d)
     const st = getDayLabel(dayRecs)
     return `<div style="text-align:center">
       <div style="font-size:9px;color:var(--text3)">${days[d]}</div>
       <div style="border-radius:6px;padding:4px 2px;font-size:9px;font-weight:700;background:${st.bg};color:${st.color}" title="${st.title||''}">${st.label}</div>
     </div>`
-  }).join('')}</div>`
+  }).join('')}</div>
+  <div>${dayListHtml || '<div style="text-align:center;color:var(--text3);font-size:12px;padding:10px">Žádné záznamy</div>'}</div>`
 }
 
 async function loadMobDocs() {
@@ -4982,6 +5086,36 @@ async function exportKW() {
 }
 </style>
 
+
+<!-- Checkout dialog - Co jste dnes dělali -->
+<div id="checkout-dialog" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:9999;align-items:center;justify-content:center;padding:16px">
+  <div style="background:#fff;border-radius:20px;padding:24px;width:100%;max-width:400px;box-shadow:0 8px 32px rgba(0,0,0,.3)">
+    <div style="font-size:17px;font-weight:800;margin-bottom:4px;color:#1a1a1a">Zaznamenat odchod</div>
+    <div id="checkout-time-label" style="font-size:13px;color:#666;margin-bottom:20px"></div>
+    <div style="margin-bottom:14px">
+      <label style="font-size:12px;font-weight:700;color:#1a1a1a;display:block;margin-bottom:6px">Na jaké stavbě jste pracoval? *</label>
+      <input type="text" id="checkout-site" placeholder="např. Praha - Vinohrady, Brno - centrum..." 
+        style="width:100%;padding:12px;border:2px solid #e0e0e0;border-radius:10px;font-size:14px;font-family:inherit;box-sizing:border-box"
+        onfocus="this.style.borderColor='#1a1a1a'" onblur="this.style.borderColor='#e0e0e0'">
+    </div>
+    <div style="margin-bottom:20px">
+      <label style="font-size:12px;font-weight:700;color:#1a1a1a;display:block;margin-bottom:6px">Co jste dnes dělal? *</label>
+      <textarea id="checkout-desc" rows="3" placeholder="např. Zednictví, betonáž základů, montáž lešení..."
+        style="width:100%;padding:12px;border:2px solid #e0e0e0;border-radius:10px;font-size:14px;font-family:inherit;resize:vertical;box-sizing:border-box"
+        onfocus="this.style.borderColor='#1a1a1a'" onblur="this.style.borderColor='#e0e0e0'"></textarea>
+    </div>
+    <div style="display:flex;gap:10px">
+      <button onclick="confirmCheckout()" 
+        style="flex:1;padding:14px;background:#1a1a1a;color:#FFCD00;border:none;border-radius:12px;font-size:14px;font-weight:800;cursor:pointer;font-family:inherit">
+        Zaznamenat odchod
+      </button>
+      <button onclick="cancelCheckout()"
+        style="padding:14px 18px;background:none;border:2px solid #e0e0e0;border-radius:12px;font-size:14px;cursor:pointer;font-family:inherit">
+        Zpět
+      </button>
+    </div>
+  </div>
+</div>
 </body></html>`
 
   // Otevři print okno
@@ -5186,13 +5320,16 @@ async function exportWorkerKW(workerId, workerName, week, year) {
     const co = r.check_out?.slice(0,5) || '—'
     const bs = r.break_start?.slice(0,5) || '—'
     const be = r.break_end?.slice(0,5) || '—'
+    const site = r.construction_site || '—'
+    const desc = r.work_description || '—'
     return `<tr>
-      <td style="padding:8px 12px;border:1px solid #ddd">${d}</td>
+      <td style="padding:8px 12px;border:1px solid #ddd;font-weight:600">${d}</td>
       <td style="padding:8px 12px;border:1px solid #ddd;text-align:center">${ci}</td>
       <td style="padding:8px 12px;border:1px solid #ddd;text-align:center">${co}</td>
-      <td style="padding:8px 12px;border:1px solid #ddd;text-align:center">${bs} – ${be}</td>
-      <td style="padding:8px 12px;border:1px solid #ddd;text-align:center;font-weight:700">${h}h</td>
-      <td style="padding:8px 12px;border:1px solid #ddd;font-size:11px;color:#666">${r.location_address||'—'}</td>
+      <td style="padding:8px 12px;border:1px solid #ddd;text-align:center">${bs !== '—' ? bs+' – '+be : '—'}</td>
+      <td style="padding:8px 12px;border:1px solid #ddd;text-align:center;font-weight:700;color:#1a1a1a">${h}h</td>
+      <td style="padding:8px 12px;border:1px solid #ddd;font-size:12px;font-weight:600;color:#333">${site}</td>
+      <td style="padding:8px 12px;border:1px solid #ddd;font-size:12px;color:#555">${desc}</td>
     </tr>`
   }).join('')
 
@@ -5214,13 +5351,13 @@ async function exportWorkerKW(workerId, workerName, week, year) {
   <div class="sub">KW${week}/${year} &nbsp;|&nbsp; ${startDate.toLocaleDateString('cs-CZ')} – ${endDate.toLocaleDateString('cs-CZ')} &nbsp;|&nbsp; SubBau s.r.o.</div>
   <table>
     <thead><tr>
-      <th>Den</th><th style="text-align:center">Příchod</th><th style="text-align:center">Odchod</th><th style="text-align:center">Přestávka</th><th style="text-align:center">Hodiny</th><th>Adresa</th>
+      <th>Den</th><th style="text-align:center">Příchod</th><th style="text-align:center">Odchod</th><th style="text-align:center">Přestávka</th><th style="text-align:center">Hodiny</th><th>Stavba</th><th>Náplň práce</th>
     </tr></thead>
     <tbody>${rows.length ? rows : '<tr><td colspan="6" style="text-align:center;padding:20px;color:#999">Žádné záznamy</td></tr>'}</tbody>
     <tfoot><tr>
       <td colspan="4">Celkem KW${week}/${year}</td>
       <td style="text-align:center">${totalHours.toFixed(2)}h</td>
-      <td></td>
+      <td colspan="2"></td>
     </tr></tfoot>
   </table>
   <div style="margin-top:30px;font-size:11px;color:#999">Vygenerováno: ${new Date().toLocaleString('cs-CZ')} | SubBau Docházkový systém</div>
@@ -5236,6 +5373,36 @@ async function exportWorkerKW(workerId, workerName, week, year) {
 }
 </style>
 
+
+<!-- Checkout dialog - Co jste dnes dělali -->
+<div id="checkout-dialog" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:9999;align-items:center;justify-content:center;padding:16px">
+  <div style="background:#fff;border-radius:20px;padding:24px;width:100%;max-width:400px;box-shadow:0 8px 32px rgba(0,0,0,.3)">
+    <div style="font-size:17px;font-weight:800;margin-bottom:4px;color:#1a1a1a">Zaznamenat odchod</div>
+    <div id="checkout-time-label" style="font-size:13px;color:#666;margin-bottom:20px"></div>
+    <div style="margin-bottom:14px">
+      <label style="font-size:12px;font-weight:700;color:#1a1a1a;display:block;margin-bottom:6px">Na jaké stavbě jste pracoval? *</label>
+      <input type="text" id="checkout-site" placeholder="např. Praha - Vinohrady, Brno - centrum..." 
+        style="width:100%;padding:12px;border:2px solid #e0e0e0;border-radius:10px;font-size:14px;font-family:inherit;box-sizing:border-box"
+        onfocus="this.style.borderColor='#1a1a1a'" onblur="this.style.borderColor='#e0e0e0'">
+    </div>
+    <div style="margin-bottom:20px">
+      <label style="font-size:12px;font-weight:700;color:#1a1a1a;display:block;margin-bottom:6px">Co jste dnes dělal? *</label>
+      <textarea id="checkout-desc" rows="3" placeholder="např. Zednictví, betonáž základů, montáž lešení..."
+        style="width:100%;padding:12px;border:2px solid #e0e0e0;border-radius:10px;font-size:14px;font-family:inherit;resize:vertical;box-sizing:border-box"
+        onfocus="this.style.borderColor='#1a1a1a'" onblur="this.style.borderColor='#e0e0e0'"></textarea>
+    </div>
+    <div style="display:flex;gap:10px">
+      <button onclick="confirmCheckout()" 
+        style="flex:1;padding:14px;background:#1a1a1a;color:#FFCD00;border:none;border-radius:12px;font-size:14px;font-weight:800;cursor:pointer;font-family:inherit">
+        Zaznamenat odchod
+      </button>
+      <button onclick="cancelCheckout()"
+        style="padding:14px 18px;background:none;border:2px solid #e0e0e0;border-radius:12px;font-size:14px;cursor:pointer;font-family:inherit">
+        Zpět
+      </button>
+    </div>
+  </div>
+</div>
 </body></html>`
 
   printInPage(printHTML)
@@ -6823,7 +6990,7 @@ async function loadWdAttendance() {
   const { data } = await sb.from('attendance').select('*').eq('worker_id',currentWorkerId).eq('kw',week).eq('kw_year',year).order('work_date')
   const tbody = document.getElementById('wd-att-table')
   if(!data?.length){
-    tbody.innerHTML='<tr><td colspan="6" style="text-align:center;color:var(--text3);padding:16px">Žádné záznamy</td></tr>'
+    tbody.innerHTML='<tr><td colspan="8" style="text-align:center;color:var(--text3);padding:16px">Žádné záznamy</td></tr>'
     document.getElementById('wd-att-total').textContent='0h'
     return
   }
@@ -6846,12 +7013,13 @@ async function loadWdAttendance() {
       ? r.break_start.slice(0,5) + (r.break_end ? ' → ' + r.break_end.slice(0,5) : ' (probíhá)')
       : '—'
     return `<tr>
-      <td style="font-size:12px">${r.work_date}</td>
+      <td style="font-size:12px;white-space:nowrap">${r.work_date}</td>
       <td>${adj.flags.lateIn ? flagBadge('lateIn', adj.checkIn||'—') : (adj.checkIn||'—')}</td>
       <td>${adj.flags.earlyOut ? flagBadge('earlyOut', adj.checkOut||'—') : adj.flags.abnormal ? flagBadge('abnormal', adj.checkOut||'—') : (adj.checkOut||'—')}</td>
       <td style="font-size:11px">${adj.flags.lateBreak ? flagBadge('lateBreak', breakStr) : breakStr}</td>
-      <td>${hoursDisplay}${adj.flags.overtime > 0 ? `<span style="font-size:10px;color:var(--green);margin-left:3px">+${Math.round(adj.flags.overtime/60*100)/100}h přesčas</span>` : ''}${adj.flags.incomplete ? `<div style="font-size:10px;color:#842029;font-weight:700;margin-top:2px">⚠️ Nesplněná směna</div>` : ''}</td>
-      <td style="font-size:11px">${r.location_address||'—'}</td>
+      <td>${hoursDisplay}${adj.flags.overtime > 0 ? `<span style="font-size:10px;color:var(--green);margin-left:3px">+${Math.round(adj.flags.overtime/60*100)/100}h presčas</span>` : ''}${adj.flags.incomplete ? `<div style="font-size:10px;color:#842029;font-weight:700;margin-top:2px">Nesplnena smena</div>` : ''}</td>
+      <td style="font-size:12px;font-weight:600;color:var(--blue)">${r.construction_site||'—'}</td>
+      <td style="font-size:11px;color:var(--text2)">${r.work_description||'—'}</td>
       <td><button class="att-edit-btn" data-id="${r.id}" data-date="${r.work_date}" data-ci="${r.check_in||''}" data-co="${r.check_out||''}" data-bs="${r.break_start||''}" data-be="${r.break_end||''}" style="padding:3px 8px;font-size:11px;border:1px solid var(--brd);border-radius:6px;cursor:pointer;background:var(--bg);font-family:inherit">✏️</button></td>
     </tr>`
   }).join('')
@@ -7428,5 +7596,35 @@ document.getElementById('login-pwd').addEventListener('keydown', e=>{if(e.key===
   <!-- PDF libraries -->
   <script defer src="https://unpkg.com/pdf-lib@1.17.1/dist/pdf-lib.min.js"></script>
   <script defer src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+
+<!-- Checkout dialog - Co jste dnes dělali -->
+<div id="checkout-dialog" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:9999;align-items:center;justify-content:center;padding:16px">
+  <div style="background:#fff;border-radius:20px;padding:24px;width:100%;max-width:400px;box-shadow:0 8px 32px rgba(0,0,0,.3)">
+    <div style="font-size:17px;font-weight:800;margin-bottom:4px;color:#1a1a1a">Zaznamenat odchod</div>
+    <div id="checkout-time-label" style="font-size:13px;color:#666;margin-bottom:20px"></div>
+    <div style="margin-bottom:14px">
+      <label style="font-size:12px;font-weight:700;color:#1a1a1a;display:block;margin-bottom:6px">Na jaké stavbě jste pracoval? *</label>
+      <input type="text" id="checkout-site" placeholder="např. Praha - Vinohrady, Brno - centrum..." 
+        style="width:100%;padding:12px;border:2px solid #e0e0e0;border-radius:10px;font-size:14px;font-family:inherit;box-sizing:border-box"
+        onfocus="this.style.borderColor='#1a1a1a'" onblur="this.style.borderColor='#e0e0e0'">
+    </div>
+    <div style="margin-bottom:20px">
+      <label style="font-size:12px;font-weight:700;color:#1a1a1a;display:block;margin-bottom:6px">Co jste dnes dělal? *</label>
+      <textarea id="checkout-desc" rows="3" placeholder="např. Zednictví, betonáž základů, montáž lešení..."
+        style="width:100%;padding:12px;border:2px solid #e0e0e0;border-radius:10px;font-size:14px;font-family:inherit;resize:vertical;box-sizing:border-box"
+        onfocus="this.style.borderColor='#1a1a1a'" onblur="this.style.borderColor='#e0e0e0'"></textarea>
+    </div>
+    <div style="display:flex;gap:10px">
+      <button onclick="confirmCheckout()" 
+        style="flex:1;padding:14px;background:#1a1a1a;color:#FFCD00;border:none;border-radius:12px;font-size:14px;font-weight:800;cursor:pointer;font-family:inherit">
+        Zaznamenat odchod
+      </button>
+      <button onclick="cancelCheckout()"
+        style="padding:14px 18px;background:none;border:2px solid #e0e0e0;border-radius:12px;font-size:14px;cursor:pointer;font-family:inherit">
+        Zpět
+      </button>
+    </div>
+  </div>
+</div>
 </body>
 </html>
