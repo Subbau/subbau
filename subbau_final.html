@@ -2463,7 +2463,15 @@ const SUPABASE_URL = 'https://ceefzlkjnrclfpmhgdmr.supabase.co'
 const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImNlZWZ6bGtqbnJjbGZwbWhnZG1yIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzY3MTkxODYsImV4cCI6MjA5MjI5NTE4Nn0.fIewYds5zd3AICHWSpbcfOKk_SfGHuP1I-YR1yKW4NI'
 
 const { createClient } = supabase
-const sb = createClient(SUPABASE_URL, SUPABASE_ANON_KEY)
+const sb = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
+  auth: {
+    persistSession: true,
+    autoRefreshToken: true,
+    detectSessionInUrl: true,
+    flowType: 'pkce',
+    storageKey: 'subbau-auth'
+  }
+})
 
 // Detekuj recovery link z URL PŘED auth eventy (SIGNED_IN přijde před PASSWORD_RECOVERY)
 let isRecoveryMode = window.location.hash.includes('type=recovery') ||
@@ -2509,6 +2517,26 @@ window.addEventListener('load', async () => {
   setKWChip()
   fillKWSelect()
   getGPS()
+
+  // Ověř uloženou session — na Androidu/Chrome může být poškozená a blokovat přihlášení.
+  // Pokud je session přítomná, ale neplatná, vyčisti ji a ukaž čistý login.
+  try {
+    const { data: { session } } = await sb.auth.getSession()
+    if (session) {
+      const { error: userErr } = await sb.auth.getUser()
+      if (userErr) {
+        console.warn('[startup] poškozená session — čistím:', userErr.message)
+        try { await sb.auth.signOut() } catch(e) {}
+        appInitialized = false
+        authHandling = false
+        showLogin()
+      }
+    }
+  } catch(e) {
+    console.warn('[startup] kontrola session selhala:', e)
+    try { await sb.auth.signOut() } catch(err) {}
+    showLogin()
+  }
 })
 
 // Globální fallback — pokud app neodpoví za 15s, zobraz login
@@ -5179,23 +5207,42 @@ async function loadMobWeek() {
 
   const days=['Ne','Po','Út','St','Čt','Pá','So']
   const div = document.getElementById('mob-week')
-  if (!data.length) {
-    div.innerHTML='<div style="color:var(--text3);font-size:12px;text-align:center">Žádné záznamy tento týden</div>'
-    return
-  }
+  if (!div) return
 
-  // Denní přehled — rozklikávací detail (časy, pauza, odchod, stavba, popis)
+  // Denní přehled — VŠECH 7 dní týdne (Po–Ne), i dny bez práce
   const todayStrList = new Date().toISOString().split('T')[0]
-  const dayListHtml = data
-    .filter(r => r.check_in)
-    .sort((a,b) => b.work_date.localeCompare(a.work_date) || (a.check_in||'').localeCompare(b.check_in||''))
-    .map(r => {
-      const dayName = new Date(r.work_date).toLocaleDateString('cs-CZ', {weekday:'long', day:'2-digit', month:'2-digit'})
+  const weekStartDate = getWeekStartDate(kw.week, kw.year)  // pondělí daného KW
+  const fmtDate = dt => dt.toISOString().split('T')[0]
+
+  // záznamy seskupené podle data
+  const byDate = {}
+  data.filter(r => r.check_in).forEach(r => {
+    (byDate[r.work_date] = byDate[r.work_date] || []).push(r)
+  })
+
+  const dayListHtml = [0,1,2,3,4,5,6].map(offset => {
+    const dt = new Date(weekStartDate); dt.setDate(weekStartDate.getDate() + offset)
+    const dStr = fmtDate(dt)
+    const dayName = dt.toLocaleDateString('cs-CZ', {weekday:'long', day:'2-digit', month:'2-digit'})
+    const isToday = dStr === todayStrList
+    const recs = (byDate[dStr] || []).sort((a,b) => (a.check_in||'').localeCompare(b.check_in||''))
+
+    // Den bez záznamu → "volno"
+    if (!recs.length) {
+      return `<div style="border-bottom:1px solid var(--brd)">
+        <div style="padding:10px 2px;display:flex;justify-content:space-between;align-items:center;opacity:.55">
+          <div style="font-size:13px;font-weight:600;color:var(--text2);text-transform:capitalize">${dayName}${isToday?' · dnes':''}</div>
+          <div style="font-size:12px;color:var(--text3)">volno</div>
+        </div>
+      </div>`
+    }
+
+    // Den se záznamy (může jich být víc)
+    return recs.map(r => {
       const ci = r.check_in?.slice(0,5) || '—'
       const co = r.check_out?.slice(0,5) || '...'
       const bs = r.break_start?.slice(0,5) || null
       const be = r.break_end?.slice(0,5) || null
-      const isToday = r.work_date === todayStrList
       const hVal = getHours(r)
       const hLabel = r.check_out ? (r.total_hours != null ? r.total_hours : hVal.toFixed(1)) + 'h'
         : (isToday ? hVal.toFixed(1) + 'h ▶' : 'nezavřeno')
@@ -5227,6 +5274,7 @@ async function loadMobWeek() {
         </div>
       </div>`
     }).join('')
+  }).join('')
 
   div.innerHTML=`<div style="display:grid;grid-template-columns:repeat(7,1fr);gap:3px;margin-bottom:12px">${[1,2,3,4,5,6,0].map(d=>{
     const dayRecs = data.filter(a => new Date(a.work_date).getDay()===d)
@@ -8293,12 +8341,12 @@ function applyAttendanceRules(record) {
   }
 
   // --- 1. PŘÍCHOD ---
-  // Pravidlo: příchod před 7:00 => počítá se 7:00. V 7:00 a později => skutečný čas zaokrouhlený DOLŮ na 30 min.
+  // Pravidlo: příchod před 7:00 => počítá se 7:00. V 7:00 a později => skutečný čas zaokrouhlený DOLŮ na 15 min.
   let adjCi
   if (ci <= SHIFT.start) {
     adjCi = SHIFT.start
   } else {
-    adjCi = Math.floor(ci / 30) * 30
+    adjCi = Math.floor(ci / 15) * 15
     flags.lateIn = true
   }
 
@@ -8325,8 +8373,8 @@ function applyAttendanceRules(record) {
   }
 
   // --- 3. ODCHOD ---
-  // Pravidlo: odchod se zaokrouhlí DOLŮ na celou půlhodinu (skutečný čas, žádná pevná směna).
-  let adjCo = Math.floor(co / 30) * 30
+  // Pravidlo: odchod se zaokrouhlí DOLŮ na 15 minut (skutečný čas, žádná pevná směna).
+  let adjCo = Math.floor(co / 15) * 15
   if (co < SHIFT.end) flags.earlyOut = true
   else {
     const ot = adjCo - SHIFT.end
