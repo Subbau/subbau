@@ -3233,11 +3233,15 @@ async function toggleWorkerActiveFromAccess(workerId, workerName, isActive) {
 
 async function showWorkerActivity(workerId, workerName) {
   // Načti online stav pracovníka
-  const { data: prof } = await sb.from('profiles').select('last_seen_at').eq('id', workerId).maybeSingle()
+  const { data: prof } = await sb.from('profiles').select('last_seen_at, last_login_at').eq('id', workerId).maybeSingle()
   const online = isOnline(prof?.last_seen_at)
-  const lastSeenStr = prof?.last_seen_at
-    ? new Date(prof.last_seen_at).toLocaleString('cs-CZ')
-    : 'nikdy'
+  // Poslední aktivita: nejnovější z heartbeatu, přihlášení do profilu, příp. historie loginů (doplníme níže)
+  let lastActivity = null
+  if (prof?.last_seen_at) lastActivity = new Date(prof.last_seen_at)
+  if (prof?.last_login_at) {
+    const li = new Date(prof.last_login_at)
+    if (!lastActivity || li > lastActivity) lastActivity = li
+  }
   // Načti login historiu - posledných 30 dní
   const cutoff = new Date()
   cutoff.setDate(cutoff.getDate() - 30)
@@ -3249,6 +3253,12 @@ async function showWorkerActivity(workerId, workerName) {
     .limit(500)
 
   const logins = hist || []
+
+  // Fallback: pokud profil nemá žádný čas, vezmi nejnovější přihlášení z historie
+  if (!lastActivity && logins.length) {
+    lastActivity = new Date(logins[0].logged_at)
+  }
+  const lastSeenStr = lastActivity ? lastActivity.toLocaleString('cs-CZ') : 'nikdy'
 
   // Zoskup po dňoch
   const byDay = {}
