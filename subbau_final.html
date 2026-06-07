@@ -2513,17 +2513,20 @@ window.addEventListener('load', async () => {
 
 // Globální fallback — pokud app neodpoví za 15s, zobraz login
 let authTimeoutId = null
+let initAppDone = false
 function startAuthTimeout() {
   if (authTimeoutId) clearTimeout(authTimeoutId)
-  authTimeoutId = setTimeout(() => {
-    if (!appInitialized) {
-      console.warn('[auth] timeout — zobrazuji login')
+  authTimeoutId = setTimeout(async () => {
+    if (!initAppDone) {
+      console.warn('[auth] timeout — initApp nedokončen, čistím stav a zobrazuji login')
       appInitialized = false
       authHandling = false
       loginInProgress = false
+      // Pravděpodobně poškozená/viselá session z normálního prohlížeče → odhlas a ukaž čistý login
+      try { await sb.auth.signOut() } catch(e) {}
       showLogin()
     }
-  }, 15000)
+  }, 12000)
 }
 function clearAuthTimeout() {
   if (authTimeoutId) { clearTimeout(authTimeoutId); authTimeoutId = null }
@@ -2580,6 +2583,7 @@ sb.auth.onAuthStateChange(async (event, session) => {
 
 async function initApp(user) {
   // Nastav currentUser IHNED — před jakýmkoliv síťovým voláním
+  initAppDone = false
   currentUser = user
   console.log('[initApp] currentUser nastaven:', user.email)
 
@@ -2613,6 +2617,8 @@ async function initApp(user) {
   currentProfile = profile
 
   if (!profile) {
+    initAppDone = true
+    clearAuthTimeout()
     showToast('⚠️ Profil nenalezen — kontaktujte admina')
     // NERESETUJ appInitialized — jinak by double SIGNED_IN spustil initApp znovu
     authHandling = false
@@ -2623,6 +2629,8 @@ async function initApp(user) {
   }
 
   loadAnnouncement()
+  initAppDone = true  // profil načten, dál už nic neblokuje → zruš nouzový timeout
+  clearAuthTimeout()
   console.log('[initApp] role ze Supabase:', JSON.stringify(profile.role))
   const role = (profile.role || '').trim().toLowerCase()
 
@@ -5786,6 +5794,35 @@ function loadMobProfil(profile) {
       ${[['Email',profile.email],['Telefon',profile.phone||'—'],['Tým',profile.team?.name||'—'],['Lokace',profile.team?.location||'—']].map(([l,v])=>`
       <div style="display:flex;justify-content:space-between;padding:7px 0;border-bottom:0.5px solid var(--bg)"><span style="font-size:12px;color:var(--text3)">${l}</span><span style="font-size:13px;font-weight:600">${v}</span></div>`).join('')}
     </div>`
+
+  // Předvyplň hodinovou sazbu z hodnoty zadané adminem a zamkni pole (OSVČ ji nemění)
+  const rateEl = document.getElementById('inv-rate')
+  if (rateEl) {
+    const adminRate = profile.hourly_rate_worker
+    if (adminRate != null && adminRate !== '' && Number(adminRate) > 0) {
+      rateEl.value = adminRate
+      rateEl.readOnly = true
+      rateEl.style.background = '#f1efe9'
+      rateEl.style.color = '#555'
+      rateEl.title = 'Sazbu nastavuje SubBau'
+      // popisek pod polem
+      let note = document.getElementById('inv-rate-note')
+      if (!note) {
+        note = document.createElement('div')
+        note.id = 'inv-rate-note'
+        note.style.cssText = 'font-size:11px;color:var(--text3);margin-top:4px'
+        rateEl.parentElement.appendChild(note)
+      }
+      note.textContent = 'Sazbu nastavuje SubBau.'
+    } else {
+      // admin sazbu nezadal → necháme volné pole, ať faktura nezůstane bez sazby
+      rateEl.readOnly = false
+      rateEl.style.background = ''
+      rateEl.style.color = ''
+      const note = document.getElementById('inv-rate-note')
+      if (note) note.remove()
+    }
+  }
 }
 
 // Náhled profilové fotky (klik na fotku v profilu)
