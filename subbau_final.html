@@ -3907,23 +3907,27 @@ async function loadMobChat() {
       const div = document.getElementById('mob-chat-messages')
       if (!div) return
       const isMine = payload.new.sender_id === currentUser.id
+      // Vlastní zprávy už zobrazujeme hned po odeslání — přeskoč (jinak duplikace)
+      if (isMine) return
+      // Dedupe — kdyby realtime poslal totéž 2×
+      if (div.querySelector('[data-msgid="'+payload.new.id+'"]')) return
       let senderName = null
-      if (!isMine && payload.new.sender_id) {
+      if (payload.new.sender_id) {
         try {
           const { data } = await sb.from('profiles').select('full_name').eq('id', payload.new.sender_id).maybeSingle()
           senderName = data?.full_name || 'SubBau'
         } catch(e) { senderName = 'SubBau' }
       }
-      div.insertAdjacentHTML('beforeend', chatBubble(payload.new, isMine, senderName))
+      const empty = div.querySelector('[data-empty]')
+      if (empty) empty.remove()
+      div.insertAdjacentHTML('beforeend', chatBubble(payload.new, false, senderName).replace('<div ', '<div data-msgid="'+payload.new.id+'" '))
       scrollChatBottom('mob-chat-messages')
-      if (!isMine) {
-        // Označ jako přečtené pokud je chat otevřený
-        const chatView = document.getElementById('mob-v-chat')
-        if (chatView?.classList.contains('on')) {
-          await sb.from('chat_messages').update({is_read: true}).eq('id', payload.new.id)
-        } else {
-          updateChatBadge()
-        }
+      // Označ jako přečtené pokud je chat otevřený
+      const chatView = document.getElementById('mob-v-chat')
+      if (chatView?.classList.contains('on')) {
+        await sb.from('chat_messages').update({is_read: true}).eq('id', payload.new.id)
+      } else {
+        updateChatBadge()
       }
     })
     .subscribe()
@@ -3933,7 +3937,7 @@ async function renderMobChatMessages(messages) {
   const div = document.getElementById('mob-chat-messages')
   if (!div) return
   if (!messages.length) {
-    div.innerHTML = `<div style="text-align:center;padding:30px 20px">
+    div.innerHTML = `<div data-empty style="text-align:center;padding:30px 20px">
       <div style="font-size:48px;margin-bottom:12px">💬</div>
       <div style="color:#1a1a1a;font-size:15px;font-weight:700;margin-bottom:6px">Chat se SubBau</div>
       <div style="color:var(--text3);font-size:13px;line-height:1.6">Napište nám zprávu níže.<br>Odpovíme co nejdříve.</div>
@@ -3952,7 +3956,7 @@ async function renderMobChatMessages(messages) {
   div.innerHTML = messages.map(m => {
     const isMine = m.sender_id === currentUser.id
     const name = !isMine ? (adminNames[m.sender_id] || 'SubBau') : null
-    return chatBubble(m, isMine, name)
+    return chatBubble(m, isMine, name).replace('<div ', '<div data-msgid="'+m.id+'" ')
   }).join('')
 }
 
@@ -3967,13 +3971,13 @@ async function sendChatMessage() {
   input.value = ''
   input.style.height = 'auto'
 
-  const { error } = await sb.from('chat_messages').insert({
+  const { data: inserted, error } = await sb.from('chat_messages').insert({
     worker_id: currentUser.id,
     sender_id: currentUser.id,
     sender_role: currentProfile?.role || 'osvec',
     message: msg,
     is_read: false
-  })
+  }).select().single()
 
   if (btn) btn.disabled = false
 
@@ -3981,6 +3985,17 @@ async function sendChatMessage() {
     showToast('❌ Chyba odeslání: ' + error.message)
     input.value = msg
     console.error('[sendChatMessage]', error)
+    return
+  }
+
+  // Zobraz vlastní zprávu IHNED (nečekej na realtime)
+  const div = document.getElementById('mob-chat-messages')
+  if (div && inserted) {
+    // odstraň úvodní prázdný stav, pokud tam je
+    const empty = div.querySelector('[data-empty]')
+    if (empty) empty.remove()
+    div.insertAdjacentHTML('beforeend', chatBubble(inserted, true, null) .replace('<div ', '<div data-msgid="'+inserted.id+'" '))
+    scrollChatBottom('mob-chat-messages')
   }
 }
 
@@ -4108,13 +4123,13 @@ async function openAdminChat(workerId, workerName) {
   if (!div) return
 
   if (!data?.length) {
-    div.innerHTML = `<div style="text-align:center;padding:40px;color:var(--text3);font-size:13px">Začněte konverzaci s ${workerName}</div>`
+    div.innerHTML = `<div data-empty style="text-align:center;padding:40px;color:var(--text3);font-size:13px">Začněte konverzaci s ${workerName}</div>`
   } else {
     // Admin vidí jméno pracovníka u jeho zpráv
     div.innerHTML = data.map(m => {
       const isMine = m.sender_role === 'admin'
       const name = !isMine ? workerName : (currentProfile?.full_name || 'Admin')
-      return chatBubble(m, isMine, isMine ? null : name)
+      return chatBubble(m, isMine, isMine ? null : name).replace('<div ', '<div data-msgid="'+m.id+'" ')
     }).join('')
   }
 
@@ -4140,11 +4155,14 @@ async function openAdminChat(workerId, workerName) {
       const div = document.getElementById('admin-chat-messages')
       if (!div) return
       const isMine = payload.new.sender_role === 'admin'
-      const name = !isMine ? workerName : null
-      div.insertAdjacentHTML('beforeend', chatBubble(payload.new, isMine, name))
+      // Vlastní (admin) zprávy už zobrazujeme hned po odeslání
+      if (isMine) { loadAdminChatList(); return }
+      if (div.querySelector('[data-msgid="'+payload.new.id+'"]')) return
+      const empty = div.querySelector('[data-empty]')
+      if (empty) empty.remove()
+      div.insertAdjacentHTML('beforeend', chatBubble(payload.new, false, workerName).replace('<div ', '<div data-msgid="'+payload.new.id+'" '))
       scrollChatBottom('admin-chat-messages')
-      // Pokud je konverzace otevřená, označ zprávu jako přečtenou okamžitě
-      if (!isMine && activeChatWorkerId === workerId) {
+      if (activeChatWorkerId === workerId) {
         await sb.from('chat_messages').update({is_read: true}).eq('id', payload.new.id)
       }
       loadAdminChatList()
@@ -4162,15 +4180,25 @@ async function sendAdminChatMessage() {
   input.value = ''
   input.style.height = 'auto'
 
-  const { error } = await sb.from('chat_messages').insert({
+  const { data: inserted, error } = await sb.from('chat_messages').insert({
     worker_id: activeChatWorkerId,
     sender_id: currentUser.id,
     sender_role: 'admin',
     message: msg,
     is_read: false
-  })
+  }).select().single()
 
-  if (error) { showToast('❌ Chyba: ' + error.message); input.value = msg }
+  if (error) { showToast('❌ Chyba: ' + error.message); input.value = msg; return }
+
+  // Zobraz vlastní zprávu IHNED
+  const div = document.getElementById('admin-chat-messages')
+  if (div && inserted) {
+    const empty = div.querySelector('[data-empty]')
+    if (empty) empty.remove()
+    div.insertAdjacentHTML('beforeend', chatBubble(inserted, true, null).replace('<div ', '<div data-msgid="'+inserted.id+'" '))
+    scrollChatBottom('admin-chat-messages')
+  }
+  loadAdminChatList()
 
   // Notifikace pracovníkovi
   await sb.from('notifications').insert({
