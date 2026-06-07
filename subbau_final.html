@@ -2467,9 +2467,7 @@ const sb = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
   auth: {
     persistSession: true,
     autoRefreshToken: true,
-    detectSessionInUrl: true,
-    flowType: 'pkce',
-    storageKey: 'subbau-auth'
+    detectSessionInUrl: true
   }
 })
 
@@ -2604,9 +2602,12 @@ sb.auth.onAuthStateChange(async (event, session) => {
     appInitialized = true
     currentUser = session.user  // Nastav okamžitě před async
     startAuthTimeout()
-    await initApp(session.user)
-    clearAuthTimeout()
-    authHandling = false
+    // DŮLEŽITÉ: initApp NEVOLAT přímo v auth callbacku — Supabase drží interní zámek
+    // a jakýkoli DB dotaz uvnitř callbacku se zasekne (deadlock). Odložíme ho mimo callback.
+    const u = session.user
+    setTimeout(async () => {
+      try { await initApp(u) } finally { clearAuthTimeout(); authHandling = false }
+    }, 0)
   }
 })
 
@@ -2637,21 +2638,25 @@ async function _initAppInner(user) {
 
   // Načti profil BEZ joinu na tým (join je nejčastější příčina zaseknutí)
   try {
-    const { data: p1 } = await withTimeout(
+    console.log('[initApp] dotaz na profil id=', user.id)
+    const t0 = Date.now()
+    const r1 = await withTimeout(
       sb.from('profiles').select('*').eq('id', user.id).maybeSingle(), 8000)
-    profile = p1
+    console.log('[initApp] profil dotaz hotov za', Date.now()-t0, 'ms | error:', r1.error?.message || 'žádná', '| data:', !!r1.data)
+    if (r1.error) console.error('[initApp] profil error detail:', r1.error)
+    profile = r1.data
     if (!profile) {
-      const { data: p2 } = await withTimeout(
+      const r2 = await withTimeout(
         sb.from('profiles').select('*').eq('email', user.email).maybeSingle(), 8000)
-      profile = p2
+      console.log('[initApp] profil dle emailu | error:', r2.error?.message || 'žádná', '| data:', !!r2.data)
+      profile = r2.data
     }
   } catch(e) {
     console.error('[initApp] načítání profilu selhalo/timeout:', e)
-    // jeden opakovaný pokus
     try {
-      const { data: p3 } = await withTimeout(
+      const r3 = await withTimeout(
         sb.from('profiles').select('*').eq('id', user.id).maybeSingle(), 8000)
-      profile = p3
+      profile = r3.data
     } catch(e2) { console.error('[initApp] druhý pokus selhal:', e2) }
   }
 
@@ -2667,13 +2672,19 @@ async function _initAppInner(user) {
   currentProfile = profile
 
   if (!profile) {
+    // Profil se nepodařilo načíst (nejspíš RLS na profiles blokuje čtení).
+    // Nevyhazuj uživatele ven — zkus poslední čtení a jinak ukaž jasnou hlášku.
+    console.warn('[initApp] profil se nenačetl — pravděpodobně RLS na tabulce profiles')
     initAppDone = true
     clearAuthTimeout()
-    showToast('⚠️ Profil nenalezen — kontaktujte admina')
     authHandling = false
-    try { await sb.auth.signOut() } catch(e) { console.error('signOut failed:', e) }
-    appInitialized = false
+    // Ukáže srozumitelnou obrazovku místo nekonečného loginu
+    const loginErr = document.getElementById('login-err')
     showLogin()
+    if (loginErr) {
+      loginErr.style.display = 'block'
+      loginErr.textContent = 'Nepodařilo se načíst profil. Zkuste to prosím za chvíli znovu — pokud potíže trvají, kontaktujte správce.'
+    }
     return
   }
 
