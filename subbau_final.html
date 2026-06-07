@@ -1217,9 +1217,19 @@ tr:hover td{background:#fafbfc}
         </div>
         <button onclick="clearWorkerSignCanvas()" style="font-size:12px;padding:6px;border:1px solid #ddd;border-radius:6px;cursor:pointer;margin-bottom:10px">Vymazat podpis</button>
         <div id="worker-sig-pos-info" style="font-size:11px;color:#888;padding:7px 9px;background:#f0f0f0;border-radius:6px;margin-bottom:10px">Kliknete do PDF vlevo pro umisteni podpisu</div>
-        <button id="sign-submit-btn" onclick="submitWorkerSignWithPlacement()" style="width:100%;padding:13px;background:#1a1a1a;color:#FFCD00;border:none;border-radius:10px;font-size:14px;font-weight:700;cursor:pointer;font-family:inherit">
-          Ulozit podpis do smlouvy
+        <button id="sign-submit-btn" onclick="previewWorkerSignature()" style="width:100%;padding:13px;background:#1a1a1a;color:#FFCD00;border:none;border-radius:10px;font-size:14px;font-weight:700;cursor:pointer;font-family:inherit">
+          Náhled a uložit
         </button>
+        <div id="worker-sign-preview" style="display:none;position:fixed;inset:0;z-index:10001;background:rgba(0,0,0,.9);flex-direction:column;align-items:center;justify-content:center;padding:24px">
+          <div style="color:#fff;font-size:15px;font-weight:700;margin-bottom:14px">Takto bude podpis vypadat</div>
+          <div style="background:#fff;border-radius:10px;padding:14px;max-width:90vw">
+            <img id="worker-sign-preview-img" src="" style="max-width:80vw;max-height:45vh;display:block">
+          </div>
+          <div style="display:flex;gap:10px;margin-top:18px;width:100%;max-width:420px">
+            <button onclick="cancelWorkerSignPreview()" style="flex:1;padding:13px;background:#444;color:#fff;border:none;border-radius:10px;font-size:14px;font-weight:700;cursor:pointer;font-family:inherit">✏️ Podepsat znovu</button>
+            <button onclick="confirmWorkerSignature()" style="flex:1;padding:13px;background:#1d9e75;color:#fff;border:none;border-radius:10px;font-size:14px;font-weight:700;cursor:pointer;font-family:inherit">✅ Potvrdit a uložit</button>
+          </div>
+        </div>
       </div>
     </div>
   </div>
@@ -1831,26 +1841,9 @@ async function openSignModal(contractId, title, fileUrl) {
   // Počkaj 1 frame aby sa modal renderoval - potom meraj rozmery
   await new Promise(r => requestAnimationFrame(r))
 
-  // Nastav signature canvas PO renderovaní modalu
-  const area = document.getElementById('sign-canvas-area')
+  // Nastav signature canvas PO renderovaní modalu (initSignaturePad si poradí s rozměry i Retina scale)
   workerSignCanvas = document.getElementById('sign-canvas')
-  if (area && workerSignCanvas) {
-    const pane = workerSignCanvas.closest('.sign-canvas-pane') || area.parentElement
-    const paneW = pane ? Math.max(pane.clientWidth - 24, 120) : 200
-    const paneH = Math.max(area.clientHeight > 0 ? area.clientHeight : pane?.clientHeight ? pane.clientHeight - 160 : 120, 100)
-    const cDpr = Math.min(window.devicePixelRatio || 1, 2)
-    workerSignCanvas.width = Math.floor(paneW * cDpr)
-    workerSignCanvas.height = Math.floor(paneH * cDpr)
-    workerSignCanvas.style.width = paneW + 'px'
-    workerSignCanvas.style.height = paneH + 'px'
-    workerSignCtx = workerSignCanvas.getContext('2d')
-    if (workerSignCtx) {
-      workerSignCtx.scale(cDpr, cDpr)
-      workerSignCtx.strokeStyle = '#1a1a1a'
-      workerSignCtx.lineWidth = 2.5
-      workerSignCtx.lineCap = 'round'
-      workerSignCtx.lineJoin = 'round'
-    }
+  if (workerSignCanvas) {
     setupWorkerSignCanvas()
   }
 
@@ -2008,6 +2001,30 @@ function closeSignModal() {
   document.body.style.overflow = ''
   signContractId = null
   try { screen.orientation?.unlock?.() } catch(e) {}
+}
+
+// Náhled podpisu před uložením
+function previewWorkerSignature() {
+  if (!workerSignCanvas) { showToast('Chyba: canvas nenalezen'); return }
+  const pixels = workerSignCtx.getImageData(0,0,workerSignCanvas.width,workerSignCanvas.height).data
+  if (!pixels.some((v,i) => i%4===3 && v>0)) { showToast('⚠️ Nejprve nakreslete podpis'); return }
+  if (workerPdfState.sigX === null || workerPdfState.sigX === undefined) { showToast('⚠️ Klikněte v PDF kde chcete podpis'); return }
+  const img = document.getElementById('worker-sign-preview-img')
+  if (img) img.src = workerSignCanvas.toDataURL('image/png')
+  const ov = document.getElementById('worker-sign-preview')
+  if (ov) ov.style.display = 'flex'
+}
+function cancelWorkerSignPreview() {
+  const ov = document.getElementById('worker-sign-preview')
+  if (ov) ov.style.display = 'none'
+  // Vymaž plátno, ať může pracovník podepsat znovu od začátku
+  clearWorkerSignCanvas()
+  showToast('Podepište se prosím znovu')
+}
+async function confirmWorkerSignature() {
+  const ov = document.getElementById('worker-sign-preview')
+  if (ov) ov.style.display = 'none'
+  await submitWorkerSignWithPlacement()
 }
 
 async function submitWorkerSignWithPlacement() {
@@ -7512,12 +7529,21 @@ function initSignaturePad(canvas, opts = {}) {
 
   function resize() {
     const rect = canvas.getBoundingClientRect()
-    const w = Math.max(1, Math.round(rect.width))
-    const h = Math.max(1, Math.round(rect.height))
-    // zachovej obsah při resize
+    let w = Math.round(rect.width)
+    let h = Math.round(rect.height)
+    // Pojistka: když canvas ještě nemá rozměry (mobil, modal se rozkládá), vezmi rodiče
+    if (w < 2 || h < 2) {
+      const par = canvas.parentElement
+      if (par) {
+        const pr = par.getBoundingClientRect()
+        if (w < 2) w = Math.round(pr.width) || 300
+        if (h < 2) h = Math.round(pr.height) || 160
+      }
+    }
+    w = Math.max(2, w); h = Math.max(2, h)
     let prev = null
     try { prev = (canvas.width && canvas.height) ? ctx.getImageData(0,0,canvas.width,canvas.height) : null } catch(e){}
-    dpr = Math.max(1, window.devicePixelRatio || 1)
+    dpr = Math.max(1, Math.min(window.devicePixelRatio || 1, 2))
     canvas.width = w * dpr
     canvas.height = h * dpr
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
@@ -7545,6 +7571,7 @@ function initSignaturePad(canvas, opts = {}) {
 
   function start(e) {
     if (e.button != null && e.button !== 0 && e.pointerType === 'mouse') return
+    try { canvas.setPointerCapture(e.pointerId) } catch(err){}
     drawing = true
     const p = pos(e)
     pts = [p]
@@ -7593,7 +7620,6 @@ function initSignaturePad(canvas, opts = {}) {
   canvas.addEventListener('pointermove', move)
   canvas.addEventListener('pointerup', end)
   canvas.addEventListener('pointercancel', end)
-  canvas.addEventListener('pointerleave', end)
   window.addEventListener('resize', onResize)
   canvas.style.touchAction = 'none'
 
@@ -7607,7 +7633,6 @@ function initSignaturePad(canvas, opts = {}) {
       canvas.removeEventListener('pointermove', move)
       canvas.removeEventListener('pointerup', end)
       canvas.removeEventListener('pointercancel', end)
-      canvas.removeEventListener('pointerleave', end)
       window.removeEventListener('resize', onResize)
       canvas._sigPad = null
     }
