@@ -1993,41 +1993,12 @@ async function workerPdfPrevPage() {
 
 function setupWorkerSignCanvas() {
   const c = workerSignCanvas; if (!c) return
-  // HiDPI
-  const dpr = window.devicePixelRatio || 1
-  const r0 = c.getBoundingClientRect()
-  const dw = r0.width || 400, dh = r0.height || 140
-  c.width = Math.round(dw * dpr); c.height = Math.round(dh * dpr)
-  c.style.width = dw + 'px'; c.style.height = dh + 'px'
-  const ctx = c.getContext('2d')
-  ctx.scale(dpr, dpr)
-  ctx.strokeStyle = '#1a1a1a'; ctx.lineWidth = 1.5; ctx.lineCap = 'round'; ctx.lineJoin = 'round'
-  workerSignCtx = ctx
-  function getPos(e) {
-    const r = c.getBoundingClientRect(), src = e.touches ? e.touches[0] : e
-    return { x: src.clientX - r.left, y: src.clientY - r.top }
-  }
-  c.onmousedown = e => { workerDrawing=true; const p=getPos(e); ctx.beginPath(); ctx.moveTo(p.x,p.y) }
-  // Pointer Events - pero/stylus/dotyk/myš
-  c.style.touchAction = 'none'
-  c.style.userSelect = 'none'
-  function getPPos(e) { const r=c.getBoundingClientRect(); return {x:e.clientX-r.left,y:e.clientY-r.top} }
-  c.addEventListener('pointerdown', e => {
-    c.setPointerCapture(e.pointerId); workerDrawing=true
-    const p=getPPos(e); ctx.beginPath(); ctx.moveTo(p.x,p.y)
-    ctx.lineWidth = Math.max(1, 2.5*(e.pressure||0.5))
-  })
-  c.addEventListener('pointermove', e => {
-    if(!workerDrawing) return
-    const p=getPPos(e); ctx.lineWidth=Math.max(1,2.5*(e.pressure||0.5))
-    ctx.lineTo(p.x,p.y); ctx.stroke(); ctx.beginPath(); ctx.moveTo(p.x,p.y)
-  })
-  c.addEventListener('pointerup', ()=>{workerDrawing=false; ctx.lineWidth=2})
-  c.addEventListener('pointercancel', ()=>workerDrawing=false)
-  c.addEventListener('pointerleave', ()=>workerDrawing=false)
+  initSignaturePad(c, { width: 2.4 })
+  workerSignCtx = c.getContext('2d')
 }
 
 function clearWorkerSignCanvas() {
+  if (workerSignCanvas && workerSignCanvas._sigPad) { workerSignCanvas._sigPad.clear(); return }
   if (workerSignCtx && workerSignCanvas) workerSignCtx.clearRect(0,0,workerSignCanvas.width,workerSignCanvas.height)
 }
 
@@ -2342,57 +2313,13 @@ function showSigMarker(canvasX, canvasY) {
 function setupAdminSignCanvas() {
   const canvas = document.getElementById('admin-sign-canvas')
   if (!canvas) return
-  // Vysoké rozlišení pro ostrý podpis (Retina/HiDPI)
-  const dpr = window.devicePixelRatio || 1
-  const rect = canvas.getBoundingClientRect()
-  const displayW = rect.width || 320
-  const displayH = rect.height || 150
-  canvas.width = Math.round(displayW * dpr)
-  canvas.height = Math.round(displayH * dpr)
-  canvas.style.width = displayW + 'px'
-  canvas.style.height = displayH + 'px'
-  const ctx = canvas.getContext('2d')
-  ctx.scale(dpr, dpr)
-  ctx.strokeStyle = '#1a1a1a'
-  ctx.lineWidth = 1.5
-  ctx.lineCap = 'round'
-  ctx.lineJoin = 'round'
-  let drawing = false
-  // Pointer Events - funguje pro myš, dotyk i pero/stylus na tabletu
-  canvas.style.touchAction = 'none'
-  canvas.style.userSelect = 'none'
-  function getPointerPos(e) {
-    const r = canvas.getBoundingClientRect()
-    return { x: e.clientX - r.left, y: e.clientY - r.top }
-  }
-  canvas.addEventListener('pointerdown', e => {
-    canvas.setPointerCapture(e.pointerId)
-    drawing = true
-    const p = getPointerPos(e)
-    ctx.beginPath()
-    ctx.moveTo(p.x, p.y)
-    // Pero/stylus - silnější tah podle tlaku
-    const pressure = e.pressure > 0 ? e.pressure : 0.5
-    ctx.lineWidth = Math.max(1, 2.5 * pressure)
-  })
-  canvas.addEventListener('pointermove', e => {
-    if (!drawing) return
-    const p = getPointerPos(e)
-    const pressure = e.pressure > 0 ? e.pressure : 0.5
-    ctx.lineWidth = Math.max(1, 2.5 * pressure)
-    ctx.lineTo(p.x, p.y)
-    ctx.stroke()
-    ctx.beginPath()
-    ctx.moveTo(p.x, p.y)
-  })
-  canvas.addEventListener('pointerup', () => { drawing = false; ctx.lineWidth = 2 })
-  canvas.addEventListener('pointercancel', () => { drawing = false })
-  canvas.addEventListener('pointerleave', () => { drawing = false })
+  initSignaturePad(canvas, { width: 2.4 })
 }
 
 function clearAdminSignCanvas() {
   const canvas = document.getElementById('admin-sign-canvas')
   if (!canvas) return
+  if (canvas._sigPad) { canvas._sigPad.clear(); return }
   const dpr = window.devicePixelRatio || 1
   const ctx = canvas.getContext('2d')
   ctx.clearRect(0, 0, canvas.width / dpr, canvas.height / dpr)
@@ -5375,11 +5302,12 @@ async function loadMobDocs() {
     const isExpired = d.valid_until && new Date(d.valid_until) < today
     const daysLeft = d.valid_until ? Math.ceil((new Date(d.valid_until) - today) / 86400000) : null
     const isExpiring = daysLeft !== null && daysLeft >= 0 && daysLeft < 30
-    const isBad = d.status === 'unreadable' || d.status === 'expired' || isExpired
+    const isRejected = d.status === 'rejected' || d.status === 'unreadable'
+    const isBad = isRejected || d.status === 'expired' || isExpired
     const isOk = d.status === 'ok' && !isBad
 
     const statusText = isBad
-      ? (d.status === 'unreadable' ? '❌ Nečitelný — nahrajte znovu' : `❌ Expiroval ${d.valid_until}`)
+      ? (isRejected ? '❌ Odmítnuto — nahrajte prosím znovu' : `❌ Propadlo ${d.valid_until}`)
       : isExpiring ? `⚠️ Expiruje za ${daysLeft} dní`
       : isOk ? '✅ Schváleno'
       : '🕐 Čeká na schválení'
@@ -5393,7 +5321,9 @@ async function loadMobDocs() {
         ${d.file_url ? `<a href="${d.file_url}" target="_blank" style="font-size:11px;color:var(--blue);text-decoration:none">👁 Zobrazit</a>` : ''}
       </div>
       <div style="font-size:12px;color:${isBad?'var(--red)':isExpiring?'var(--amber)':isOk?'var(--green)':'var(--text2)'}">${statusText}</div>
+      ${isRejected && d.reject_reason ? `<div style="font-size:11px;color:var(--red);margin-top:3px">Důvod: ${d.reject_reason}</div>` : ''}
       <div style="font-size:11px;color:var(--text3);margin-top:3px">${d.file_name||''} · ${d.uploaded_at?.slice(0,10)||''}</div>
+      ${isRejected ? `<button onclick="openUploadForm('${d.doc_type}')" style="margin-top:8px;width:100%;padding:9px;background:#1a1a1a;color:#FFCD00;border:none;border-radius:8px;font-size:12px;font-weight:700;cursor:pointer;font-family:inherit">📤 Nahrát znovu</button>` : ''}
     </div>`
   }).join('')
 }
@@ -5504,6 +5434,11 @@ function fileToBase64(file) {
   })
 }
 
+// PŘEPÍNAČ AI KONTROLY DOKUMENTŮ
+// false = AI vypnutá (nahrávání funguje, ověří se jen typ/velikost souboru)
+// true  = AI zapnutá (vyžaduje běžící /api/check-document na serveru)
+const AI_DOC_CHECK_ENABLED = false
+
 async function checkDocumentReadability(file, docType) {
   const status = document.getElementById('upload-check-status')
   if (!file) return { readable: false, reason: 'Žádný soubor' }
@@ -5517,6 +5452,17 @@ async function checkDocumentReadability(file, docType) {
   const isImage = file.type.startsWith('image/') && file.type !== 'image/heic' && file.type !== 'image/heif'
   if (!validTypes.includes(file.type) && !file.name.match(/\.(jpg|jpeg|png|pdf|webp)$/i)) {
     return { readable: false, reason: 'Nepodporovaný typ — použijte JPG, PNG nebo PDF sken' }
+  }
+
+  // AI vypnutá → přijmi soubor po základní kontrole (žádné blokování)
+  if (!AI_DOC_CHECK_ENABLED) {
+    if (status) {
+      status.style.display = 'block'
+      status.style.background = 'var(--green-l)'
+      status.style.color = 'var(--green)'
+      status.innerHTML = '✅ Soubor přijat'
+    }
+    return { readable: true, reason: 'OK', validUntil: null, aiSkipped: true }
   }
 
   // AI kontrolu umíme jen u obrázků (JPG/PNG/WEBP). PDF a HEIC nelze poslat jako obraz → projde k revizi adminem.
@@ -5555,27 +5501,22 @@ Pravidla:
 - Při jakékoli pochybnosti dej příslušné pole false.`
 
   try {
-    const resp = await fetch('https://api.anthropic.com/v1/messages', {
+    const resp = await fetch('/api/check-document', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        model: 'claude-sonnet-4-20250514',
-        max_tokens: 1000,
-        messages: [{
-          role: 'user',
-          content: [
-            { type: 'image', source: { type: 'base64', media_type: mediaType, data: base64 } },
-            { type: 'text', text: prompt }
-          ]
-        }]
-      })
+      body: JSON.stringify({ image: base64, mediaType, prompt })
     })
+    if (!resp.ok) {
+      const errTxt = await resp.text().catch(()=> '')
+      console.warn('[AI doc check] server error:', resp.status, errTxt)
+      return { readable: false, reason: 'Kontrolu se nepodařilo provést — zkuste to prosím znovu' }
+    }
     const data = await resp.json()
     const text = (data.content || []).map(i => i.type === 'text' ? i.text : '').join('').trim()
     let parsed
     try { parsed = JSON.parse(text.replace(/```json|```/g,'').trim()) } catch(e) {
-      // AI nevrátila čistý JSON — z opatrnosti necháme projít k revizi adminem
-      return { readable: true, reason: 'Automatická kontrola selhala — zkontroluje admin', validUntil: null, aiSkipped: true }
+      // AI nevrátila čistý JSON — raději ODMÍTNI (nepouštět nezkontrolované)
+      return { readable: false, reason: 'Dokument se nepodařilo ověřit — nahrajte ostrý, rovný sken' }
     }
 
     if (!parsed.readable) {
@@ -5601,9 +5542,9 @@ Pravidla:
     }
     return { readable: true, reason: parsed.reason || 'OK', validUntil: parsed.validUntil || null, docNumber: parsed.docNumber || null, personName: parsed.personName || null }
   } catch(e) {
-    // Síťová chyba — necháme projít k revizi adminem, ať pracovník není zablokován
+    // Síťová chyba — ODMÍTNI (neobcházet kontrolu)
     console.warn('[AI doc check] error:', e)
-    return { readable: true, reason: 'Kontrolu nelze provést (offline) — zkontroluje admin', validUntil: null, aiSkipped: true }
+    return { readable: false, reason: 'Kontrola dokumentu se nezdařila (síť). Zkuste to prosím znovu.' }
   }
 }
 
@@ -7548,35 +7489,135 @@ async function loadMobContracts() {
 // Podpisový canvas
 
 
+// ===== Univerzální podpisový pad — hladké čáry, Retina, pointer/stylus =====
+// Použití: const pad = initSignaturePad(canvasEl); pad.clear(); pad.isEmpty(); pad.toDataURL()
+function initSignaturePad(canvas, opts = {}) {
+  if (!canvas) return null
+  // Zruš případný předchozí pad na stejném canvasu
+  if (canvas._sigPad && canvas._sigPad.destroy) canvas._sigPad.destroy()
+
+  const baseWidth = opts.width || 2.2
+  const color = opts.color || '#1a1a1a'
+  const ctx = canvas.getContext('2d')
+  let dpr = Math.max(1, window.devicePixelRatio || 1)
+
+  function resize() {
+    const rect = canvas.getBoundingClientRect()
+    const w = Math.max(1, Math.round(rect.width))
+    const h = Math.max(1, Math.round(rect.height))
+    // zachovej obsah při resize
+    let prev = null
+    try { prev = (canvas.width && canvas.height) ? ctx.getImageData(0,0,canvas.width,canvas.height) : null } catch(e){}
+    dpr = Math.max(1, window.devicePixelRatio || 1)
+    canvas.width = w * dpr
+    canvas.height = h * dpr
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
+    ctx.lineCap = 'round'
+    ctx.lineJoin = 'round'
+    ctx.strokeStyle = color
+    if (prev) { try { ctx.putImageData(prev, 0, 0) } catch(e){} }
+  }
+  resize()
+
+  let drawing = false
+  let empty = true
+  let pts = []          // poslední body pro vyhlazení
+  let lastWidth = baseWidth
+
+  function pos(e) {
+    const r = canvas.getBoundingClientRect()
+    return { x: e.clientX - r.left, y: e.clientY - r.top }
+  }
+  function widthFor(e) {
+    // tlak (Apple Pencil / stylus) → proměnná šířka; jinak konstantní
+    const pr = (e.pressure != null && e.pressure > 0 && e.pointerType !== 'mouse') ? e.pressure : 0.5
+    return Math.max(0.8, baseWidth * (0.6 + pr))
+  }
+
+  function start(e) {
+    if (e.button != null && e.button !== 0 && e.pointerType === 'mouse') return
+    drawing = true
+    const p = pos(e)
+    pts = [p]
+    lastWidth = widthFor(e)
+    // tečka pro klepnutí
+    ctx.beginPath()
+    ctx.arc(p.x, p.y, lastWidth/2, 0, Math.PI*2)
+    ctx.fillStyle = color
+    ctx.fill()
+    empty = false
+    e.preventDefault()
+  }
+  function move(e) {
+    if (!drawing) return
+    // koalescované události = plynulejší čára na perech
+    const evs = (e.getCoalescedEvents && e.getCoalescedEvents().length) ? e.getCoalescedEvents() : [e]
+    for (const ev of evs) {
+      const p = pos(ev)
+      pts.push(p)
+      if (pts.length > 3) pts.shift()
+      const w = (widthFor(ev) + lastWidth) / 2
+      lastWidth = w
+      ctx.lineWidth = w
+      if (pts.length >= 3) {
+        const [p0, p1, p2] = pts
+        const c1x = (p0.x + p1.x) / 2, c1y = (p0.y + p1.y) / 2
+        const c2x = (p1.x + p2.x) / 2, c2y = (p1.y + p2.y) / 2
+        ctx.beginPath()
+        ctx.moveTo(c1x, c1y)
+        ctx.quadraticCurveTo(p1.x, p1.y, c2x, c2y)
+        ctx.stroke()
+      } else if (pts.length === 2) {
+        ctx.beginPath()
+        ctx.moveTo(pts[0].x, pts[0].y)
+        ctx.lineTo(pts[1].x, pts[1].y)
+        ctx.stroke()
+      }
+    }
+    e.preventDefault()
+  }
+  function end(e) { drawing = false; pts = []; if (e) e.preventDefault() }
+
+  const onResize = () => resize()
+  // Pointer Events pokrývají myš, dotyk i Apple Pencil jednotně
+  canvas.addEventListener('pointerdown', start)
+  canvas.addEventListener('pointermove', move)
+  canvas.addEventListener('pointerup', end)
+  canvas.addEventListener('pointercancel', end)
+  canvas.addEventListener('pointerleave', end)
+  window.addEventListener('resize', onResize)
+  canvas.style.touchAction = 'none'
+
+  const pad = {
+    clear() { ctx.setTransform(dpr,0,0,dpr,0,0); ctx.clearRect(0,0,canvas.width,canvas.height); empty = true },
+    isEmpty() { return empty },
+    toDataURL(type) { return canvas.toDataURL(type || 'image/png') },
+    toBlob(cb, type) { return canvas.toBlob(cb, type || 'image/png') },
+    destroy() {
+      canvas.removeEventListener('pointerdown', start)
+      canvas.removeEventListener('pointermove', move)
+      canvas.removeEventListener('pointerup', end)
+      canvas.removeEventListener('pointercancel', end)
+      canvas.removeEventListener('pointerleave', end)
+      window.removeEventListener('resize', onResize)
+      canvas._sigPad = null
+    }
+  }
+  canvas._sigPad = pad
+  return pad
+}
+
 function setupCanvasEvents() {
-  const canvas = signCanvas
-  // Touch
-  canvas.addEventListener('touchstart', e=>{
-    e.preventDefault()
-    isDrawing=true
-    const t=e.touches[0]
-    const r=canvas.getBoundingClientRect()
-    lastX=t.clientX-r.left; lastY=t.clientY-r.top
-  },{passive:false})
-  canvas.addEventListener('touchmove', e=>{
-    e.preventDefault()
-    if(!isDrawing) return
-    const t=e.touches[0]
-    const r=canvas.getBoundingClientRect()
-    const x=t.clientX-r.left, y=t.clientY-r.top
-    signCtx.beginPath(); signCtx.moveTo(lastX,lastY); signCtx.lineTo(x,y); signCtx.stroke()
-    lastX=x; lastY=y
-  },{passive:false})
-  canvas.addEventListener('touchend', ()=>{ isDrawing=false })
-  // Mouse
-  canvas.addEventListener('mousedown', e=>{ isDrawing=true; const r=canvas.getBoundingClientRect(); lastX=e.clientX-r.left; lastY=e.clientY-r.top })
-  canvas.addEventListener('mousemove', e=>{ if(!isDrawing) return; const r=canvas.getBoundingClientRect(); const x=e.clientX-r.left,y=e.clientY-r.top; signCtx.beginPath(); signCtx.moveTo(lastX,lastY); signCtx.lineTo(x,y); signCtx.stroke(); lastX=x; lastY=y })
-  canvas.addEventListener('mouseup', ()=>{ isDrawing=false })
-  canvas.addEventListener('mouseleave', ()=>{ isDrawing=false })
+  // Mobilní OSVČ podpis — použij univerzální pad
+  if (!signCanvas) return
+  const pad = initSignaturePad(signCanvas, { width: 2.4 })
+  signCtx = signCanvas.getContext('2d')
+  signCanvas._sigPad = pad
 }
 
 function clearSignature() {
-  if (signCtx) signCtx.clearRect(0, 0, signCanvas.width, signCanvas.height)
+  if (signCanvas && signCanvas._sigPad) signCanvas._sigPad.clear()
+  else if (signCtx && signCanvas) signCtx.clearRect(0, 0, signCanvas.width, signCanvas.height)
 }
 
 
@@ -8577,12 +8618,49 @@ async function loadWdDocs(id) {
       <div style="font-size:11px;color:var(--text3)">${d.file_name||'—'}</div>
       <div style="font-size:11px;margin-top:2px">📅 Platnost: ${validHtml}</div>
     </div>
-    <div style="display:flex;align-items:center;gap:6px;flex-shrink:0">
+    <div style="display:flex;align-items:center;gap:6px;flex-shrink:0;flex-wrap:wrap;justify-content:flex-end">
       <span class="pill ${si.cls}">${si.label}</span>
       ${d.file_url?`<button onclick="openPdfUrl('${d.file_url}')" style="font-size:11px;padding:3px 8px;border:1px solid var(--blue);border-radius:6px;cursor:pointer;background:var(--bg2);color:var(--blue);font-family:inherit;white-space:nowrap">👁 Zobrazit</button>`:''}
+      ${d.status!=='ok'?`<button onclick="approveDocWd('${d.id}','${id||currentWorkerId}')" style="font-size:11px;padding:3px 8px;border:1px solid var(--green);border-radius:6px;cursor:pointer;background:var(--green-l);color:var(--green);font-family:inherit;white-space:nowrap;font-weight:700">✅ Schválit</button>`:''}
+      ${d.status!=='rejected'&&d.status!=='unreadable'?`<button onclick="rejectDocWd('${d.id}','${id||currentWorkerId}')" style="font-size:11px;padding:3px 8px;border:1px solid var(--red);border-radius:6px;cursor:pointer;background:var(--red-l);color:var(--red);font-family:inherit;white-space:nowrap;font-weight:700">✖ Odmítnout</button>`:''}
       <button onclick="deleteDocument('${d.id}')" style="font-size:11px;padding:3px 8px;border:1px solid var(--red);border-radius:6px;cursor:pointer;background:none;color:var(--red);font-family:inherit" title="Smazat dokument">🗑</button>
     </div>
-  </div>`}).join('')
+  </div>${d.reject_reason && (d.status==='rejected'||d.status==='unreadable') ? `<div style="font-size:11px;color:var(--red);padding:0 0 8px;margin-top:-4px">Důvod odmítnutí: ${d.reject_reason}</div>` : ''}`}).join('')
+}
+
+// Schválení dokumentu (admin, detail pracovníka)
+async function approveDocWd(id, workerId) {
+  const { error } = await sb.from('documents').update({ status:'ok', reviewed_at: new Date().toISOString(), reject_reason: null }).eq('id', id)
+  if (error) { showToast('❌ Chyba: ' + error.message); return }
+  showToast('✅ Dokument schválen')
+  loadWdDocs(workerId)
+}
+
+// Odmítnutí dokumentu s důvodem → OSVČ musí nahrát znovu
+async function rejectDocWd(id, workerId) {
+  const reason = prompt('Důvod odmítnutí (uvidí ho pracovník):', 'Nečitelný dokument — nahrajte prosím znovu')
+  if (reason === null) return  // zrušeno
+  const upd = { status:'rejected', reviewed_at: new Date().toISOString() }
+  // reject_reason ulož jen pokud sloupec existuje (jinak se update nepovede tiše)
+  upd.reject_reason = reason.trim() || 'Nahrajte prosím znovu'
+  let { error } = await sb.from('documents').update(upd).eq('id', id)
+  if (error) {
+    // fallback bez reject_reason (kdyby sloupec chyběl)
+    const r2 = await sb.from('documents').update({ status:'rejected', reviewed_at: new Date().toISOString() }).eq('id', id)
+    if (r2.error) { showToast('❌ Chyba: ' + r2.error.message); return }
+  }
+  // Pošli pracovníkovi oznámení
+  try {
+    await sb.from('notifications').insert({
+      worker_id: workerId,
+      title: '📄 Dokument odmítnut',
+      message: (upd.reject_reason || 'Nahrajte prosím znovu') + ' — nahrajte dokument znovu.',
+      type: 'document',
+      is_read: false
+    })
+  } catch(e) {}
+  showToast('✖ Dokument odmítnut — pracovník byl upozorněn')
+  loadWdDocs(workerId)
 }
 
 async function loadWdContracts(id) {
