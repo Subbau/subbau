@@ -4861,26 +4861,34 @@ function cancelCheckout() {
 
 async function confirmCheckout() {
   if (!pendingCheckout || !todayAttId) return
-  const site = document.getElementById('checkout-site')?.value.trim()
-  const desc = document.getElementById('checkout-desc')?.value.trim()
-  if (!site) { document.getElementById('checkout-site').style.borderColor='#dc3545'; return }
-  if (!desc) { document.getElementById('checkout-desc').style.borderColor='#dc3545'; return }
+  const siteEl = document.getElementById('checkout-site')
+  const descEl = document.getElementById('checkout-desc')
+  const site = siteEl?.value.trim()
+  const desc = descEl?.value.trim()
+  if (!site) { if(siteEl){siteEl.style.borderColor='#dc3545'; siteEl.focus()}; showToast('⚠️ Vyplňte stavbu'); return }
+  if (!desc) { if(descEl){descEl.style.borderColor='#dc3545'; descEl.focus()}; showToast('⚠️ Vyplňte co jste dělal'); return }
+  if(siteEl) siteEl.style.borderColor='#e0e0e0'
+  if(descEl) descEl.style.borderColor='#e0e0e0'
 
   // Ulož naposledy použitú stavbu
   localStorage.setItem('lastConstructionSite', site)
 
   const { timeStr, hours } = pendingCheckout
-  await sb.from('attendance').update({
+  const { error } = await sb.from('attendance').update({
     check_out: timeStr,
     total_hours: hours,
     construction_site: site,
     work_description: desc
   }).eq('id', todayAttId)
+  if (error) { showToast('❌ Chyba odchodu: ' + error.message); return }
 
   document.getElementById('checkout-dialog').style.display = 'none'
   pendingCheckout = null
-  showToast('Odchod zaznamenan — ' + timeStr + ' (' + hours + 'h)')
+  todayAttId = null
+  todayRecord = null
+  showToast('🚪 Odchod zaznamenán — ' + timeStr + ' (' + hours + 'h)')
   getTodayRecord()
+  loadMobWeek()
 }
 
 async function getTodayRecord() {
@@ -5086,16 +5094,12 @@ async function mobCheckin(type) {
           checkinInProgress = false
           return
         }
-        // Použij updated (má aktuální break_end) místo current (může být starý)
+        // Spočítej hodiny a otevři dialog "Co jsi dnes dělal?" — uloží se až po vyplnění
         const h = calcHours(updated.check_in, timeStr, updated.break_start, updated.break_end)
-        console.log('[mobCheckin out] check_in:', updated.check_in, 'break_start:', updated.break_start, 'break_end:', updated.break_end, 'hours:', h)
-        const { error } = await sb.from('attendance').update({ check_out: timeStr, total_hours: h }).eq('id', todayAttId)
-        if (error) { showToast('❌ Chyba odchodu: ' + error.message); checkinInProgress = false; return }
-        updated.check_out = timeStr
-        updated.total_hours = h
-        todayAttId = null   // Reset pro novou směnu
-        todayRecord = null  // Reset lokální kopie
-        showToast('🚪 Odchod ' + timeStr + ' · odpracováno ' + h + 'h')
+        pendingCheckout = { timeStr, hours: h }
+        showCheckoutDialog()
+        checkinInProgress = false
+        return  // uložení proběhne v confirmCheckout()
       }
 
       // Aktualizuj UI OKAMŽITĚ z lokální kopie — bez čekání na server
