@@ -1043,6 +1043,12 @@ tr:hover td{background:#fafbfc}
         <div class="mob-card-title">Zaznamenat docházku</div>
         <div style="padding:8px 10px;background:var(--blue-l);border-radius:8px;margin-bottom:12px;font-size:12px;color:var(--blue)">
           📍 <span id="mob-gps">Načítám polohu...</span>
+          <button type="button" onclick="showManualAddress()" style="float:right;background:none;border:none;color:var(--blue);font-size:11px;text-decoration:underline;cursor:pointer;font-family:inherit;padding:0">Zadat ručně</button>
+        </div>
+        <div id="mob-manual-addr" style="display:none;margin-bottom:12px;padding:10px;background:var(--bg);border:1.5px solid var(--brd);border-radius:8px">
+          <div id="mob-manual-addr-hint" style="font-size:11px;color:var(--text2);margin-bottom:6px">Zadejte přesnou adresu pracoviště</div>
+          <input type="text" id="mob-manual-addr-input" placeholder="Ulice a číslo, město, PSČ" style="width:100%;padding:11px;border:1.5px solid var(--brd);border-radius:8px;font-size:16px;font-family:inherit;box-sizing:border-box">
+          <button type="button" onclick="applyManualAddress()" style="margin-top:8px;width:100%;padding:10px;background:#1a1a1a;color:#FFCD00;border:none;border-radius:8px;font-size:13px;font-weight:700;cursor:pointer;font-family:inherit">✅ Použít tuto adresu</button>
         </div>
         <!-- Stav badge -->
         <div id="mob-state-badge" style="text-align:center;padding:10px 16px;border-radius:12px;margin-bottom:14px;font-size:13px;font-weight:700;background:var(--bg);color:var(--text2)">
@@ -5779,43 +5785,90 @@ function fillKWSelect(autoLoad) {
 }
 
 function getGPS() {
-  if (!navigator.geolocation) return
+  const g = document.getElementById('gps-txt')
+  const mg = document.getElementById('mob-gps')
+  if (!navigator.geolocation) {
+    if (g) g.textContent = 'GPS nedostupná'
+    if (mg) mg.textContent = 'GPS nedostupná'
+    showManualAddress('Poloha není dostupná — zadejte adresu ručně')
+    return
+  }
   navigator.geolocation.getCurrentPosition(async p => {
     gpsLat = p.coords.latitude
     gpsLng = p.coords.longitude
-    // Zobraz souřadnice okamžitě
-    gpsAddr = `${gpsLat.toFixed(4)}, ${gpsLng.toFixed(4)}`
-    const g = document.getElementById('gps-txt')
-    const mg = document.getElementById('mob-gps')
+    gpsAddr = `${gpsLat.toFixed(5)}, ${gpsLng.toFixed(5)}`
     if (g) g.textContent = '📍 Načítám adresu...'
     if (mg) mg.textContent = '📍 Načítám adresu...'
 
-    // Reverse geocoding - BigDataCloud (free, bez API klíče)
+    let resolved = ''
+    // 1) OpenStreetMap Nominatim — vrací ulici + číslo popisné + město
     try {
-      const res = await fetch(
-        `https://api.bigdatacloud.net/data/reverse-geocode-client?latitude=${gpsLat}&longitude=${gpsLng}&localityLanguage=cs`
+      const r = await fetch(
+        `https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${gpsLat}&lon=${gpsLng}&addressdetails=1&accept-language=cs&zoom=18`,
+        { headers: { 'Accept': 'application/json' } }
       )
-      const data = await res.json()
-      // Sestav adresu z dostupných dat
-      const parts = []
-      if (data.street) parts.push(data.street)
-      if (data.locality || data.city) parts.push(data.locality || data.city)
-      if (data.postcode) parts.push(data.postcode)
-      if (data.countryName) parts.push(data.countryName)
-      gpsAddr = parts.length > 0 ? parts.join(', ') : `${gpsLat.toFixed(4)}, ${gpsLng.toFixed(4)}`
-    } catch(e) {
-      // Fallback na souřadnice pokud API selže
-      gpsAddr = `${gpsLat.toFixed(4)}, ${gpsLng.toFixed(4)}`
+      if (r.ok) {
+        const j = await r.json()
+        const a = j.address || {}
+        const street = a.road || a.pedestrian || a.footway || a.path || ''
+        const num = a.house_number || ''
+        const city = a.city || a.town || a.village || a.municipality || a.suburb || ''
+        const psc = a.postcode || ''
+        const parts = []
+        if (street) parts.push(street + (num ? ' ' + num : ''))
+        if (city) parts.push(city)
+        if (psc) parts.push(psc)
+        if (a.country) parts.push(a.country)
+        if (parts.length) resolved = parts.join(', ')
+        else if (j.display_name) resolved = j.display_name
+      }
+    } catch(e) { /* zkusíme fallback */ }
+
+    // 2) Fallback: BigDataCloud
+    if (!resolved) {
+      try {
+        const res = await fetch(`https://api.bigdatacloud.net/data/reverse-geocode-client?latitude=${gpsLat}&longitude=${gpsLng}&localityLanguage=cs`)
+        const data = await res.json()
+        const parts = []
+        if (data.street) parts.push(data.street)
+        if (data.locality || data.city) parts.push(data.locality || data.city)
+        if (data.postcode) parts.push(data.postcode)
+        if (data.countryName) parts.push(data.countryName)
+        if (parts.length) resolved = parts.join(', ')
+      } catch(e) { /* zůstanou souřadnice */ }
     }
 
+    gpsAddr = resolved || `${gpsLat.toFixed(5)}, ${gpsLng.toFixed(5)}`
     if (g) g.textContent = '📍 ' + gpsAddr
     if (mg) mg.textContent = '📍 ' + gpsAddr
+
+    // Pokud se nepodařilo získat ulici/číslo (jen souřadnice), nabídni ruční doplnění
+    if (!resolved) {
+      showManualAddress('Přesnou adresu se nepodařilo zjistit — doplňte ulici, číslo a město')
+    }
   }, () => {
-    const g = document.getElementById('gps-txt')
-    const mg = document.getElementById('mob-gps')
     if (g) g.textContent = 'GPS nedostupná'
     if (mg) mg.textContent = 'GPS nedostupná'
+    showManualAddress('Polohu se nepodařilo načíst — zadejte adresu ručně')
   }, { enableHighAccuracy: true, timeout: 10000 })
+}
+
+// Ruční zadání adresy pracoviště (když GPS selže nebo je nepřesná)
+function showManualAddress(reasonText) {
+  const wrap = document.getElementById('mob-manual-addr')
+  if (!wrap) return
+  wrap.style.display = 'block'
+  const hint = document.getElementById('mob-manual-addr-hint')
+  if (hint && reasonText) hint.textContent = reasonText
+}
+function applyManualAddress() {
+  const inp = document.getElementById('mob-manual-addr-input')
+  const val = (inp?.value || '').trim()
+  if (!val) { showToast('Zadejte adresu (ulice, číslo, město)'); return }
+  gpsAddr = val
+  const mg = document.getElementById('mob-gps')
+  if (mg) mg.textContent = '📍 ' + val
+  showToast('✅ Adresa nastavena')
 }
 
 function startClock() {
