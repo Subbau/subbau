@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
 <title>SubBau – Docházkový systém</title>
 <script src="https://unpkg.com/@supabase/supabase-js@2/dist/umd/supabase.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
 <style>
 :root {
   --blue:#1a1a1a;--blue-l:#f5f0e0;--blue-m:#333333;
@@ -1206,7 +1207,7 @@ tr:hover td{background:#fafbfc}
             <div style="font-size:9px;color:#666;text-align:center;margin-top:3px;white-space:nowrap">← táhněte →</div>
           </div>
         </div>
-        <div id="worker-pdf-loading" style="text-align:center;padding:30px;color:#999;font-size:13px">Nacitam PDF...</div>
+        <div id="worker-pdf-loading" style="text-align:center;padding:30px;color:#999;font-size:13px">Načítám PDF...</div>
       </div>
       <!-- PRAVÁ ČÁST: Kreslení podpisu -->
       <div class="sign-canvas-pane">
@@ -1491,8 +1492,8 @@ tr:hover td{background:#fafbfc}
           </div>
         </div>
         <div style="margin-top:16px;display:flex;gap:8px">
-          <button class="btn-pri" onclick="saveWorkerProfile()">Ulozit zmeny</button>
-          <button class="btn-sec" onclick="toggleAccessFromModal()">Zmenit pristup</button>
+          <button class="btn-pri" onclick="saveWorkerProfile()">Uložit změny</button>
+          <button class="btn-sec" onclick="toggleAccessFromModal()">Změnit přístup</button>
         </div>
 
         <!-- UBYTOVÁNÍ -->
@@ -3591,7 +3592,7 @@ async function loadDashboard() {
   if (!recent?.length) { tbody.innerHTML='<tr><td colspan="6" style="text-align:center;color:var(--text3);padding:20px">Žádné záznamy</td></tr>'; return }
   tbody.innerHTML = recent.map(r=>`
     <tr>
-      <td><b>${r.worker?.full_name||'—'}</b><br><small style="color:var(--text3)">${r.worker?.profession||''}</small></td>
+      <td><b>${r.worker?.full_name||'—'}</b><br><small style="color:var(--text3)">${profLabel(r.worker?.profession)||''}</small></td>
       <td>${r.work_date}</td>
       <td>${r.check_in?.slice(0,5)||'—'}</td>
       <td>${r.check_out?.slice(0,5)||'—'}</td>
@@ -3607,9 +3608,9 @@ async function loadWorkers() {
   if (!data?.length) { tbody.innerHTML='<tr><td colspan="6" style="text-align:center;color:var(--text3);padding:20px">Žádní pracovníci</td></tr>'; return }
   tbody.innerHTML = data.map(w=>`
     <tr style="cursor:pointer" class="worker-row" data-id="${w.id}">
-      <td><b>${w.full_name}</b><br><small style="color:var(--text3)">${w.profession||''}</small></td>
+      <td><b>${w.full_name}</b><br><small style="color:var(--text3)">${profLabel(w.profession)||''}</small></td>
       <td style="font-size:12px">${w.email}</td>
-      <td>${w.profession||'—'}</td>
+      <td>${profLabel(w.profession)||'—'}</td>
       <td><span class="pill pb">${{admin:'Admin',osvec:'OSVČ',partak:'Parťák',klient:'Klient'}[w.role]||w.role}</span></td>
       <td><span class="pill ${w.is_active?'pg':'pr'}">${w.is_active?'Aktivní':'Neaktivní'}</span></td>
       <td onclick="event.stopPropagation()"><button onclick="toggleAccess('${w.id}',${w.is_active})" style="font-size:12px;padding:4px 10px;border:1px solid var(--brd);border-radius:6px;cursor:pointer;background:none;font-family:inherit">${w.is_active?'Odebrat':'Obnovit'}</button></td>
@@ -3820,8 +3821,8 @@ async function loadDocuments() {
       <td><b>${d.worker?.full_name||'—'}</b></td>
       <td>${docLabels[d.doc_type]||d.doc_type}</td>
       <td style="font-size:12px">${d.file_name}</td>
-      <td><span class="pill ${d.status==='ok'?'pg':d.status==='unreadable'||d.status==='expired'?'pr':'pa'}">${d.status}</span></td>
-      <td>${d.valid_until||'—'}</td>
+      <td><span class="pill ${d.status==='ok'?'pg':d.status==='unreadable'||d.status==='expired'||d.status==='rejected'?'pr':'pa'}">${({ok:'V pořádku',pending:'Čeká na kontrolu',unreadable:'Nečitelný',expired:'Propadlý',rejected:'Zamítnutý'})[d.status]||d.status}</span></td>
+      <td>${(()=>{ if(!d.valid_until) return '<span style="color:var(--text3)">—</span>'; const e=new Date(d.valid_until); e.setHours(0,0,0,0); const t=new Date(); t.setHours(0,0,0,0); const dd=Math.ceil((e-t)/86400000); if(dd<0) return '<span style="color:var(--red);font-weight:700">'+d.valid_until+'</span>'; if(dd<=30) return '<span style="color:var(--amber);font-weight:700">'+d.valid_until+'</span>'; return '<span style="color:var(--green)">'+d.valid_until+'</span>'; })()}</td>
       <td>
         <div style="display:flex;gap:4px;flex-wrap:wrap">
           ${d.file_url?`<button onclick="openPdfUrl('${d.file_url}')" style="font-size:11px;padding:3px 8px;border:1px solid var(--blue);border-radius:6px;cursor:pointer;background:var(--bg2);color:var(--blue);font-family:inherit">👁 Zobrazit</button>`:''}
@@ -4094,7 +4095,7 @@ async function loadAdminChatList() {
           ${u > 0 ? `<span style="background:var(--red);color:#fff;border-radius:10px;font-size:10px;padding:1px 7px">${u}</span>` : ''}
         </div>
         <div style="font-size:11px;color:var(--text3);margin-top:1px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">
-          ${last ? (last.sender_role==='admin'?'Vy: ':'')+last.message : w.profession||'—'}
+          ${last ? (last.sender_role==='admin'?'Vy: ':'')+last.message : profLabel(w.profession)||'—'}
         </div>
       </div>
     </div>`
@@ -4806,14 +4807,14 @@ async function loadUnassignedForModal() {
   list.innerHTML = data.map(w => `
     <div style="display:flex;justify-content:space-between;align-items:center;padding:8px 10px;border:1px solid var(--brd);border-radius:8px">
       <span style="font-size:13px">${w.full_name}</span>
-      <button onclick="addToTeam('${w.id}','${teamId}')" style="padding:4px 12px;font-size:12px;background:#1a1a1a;color:#FFCD00;border:none;border-radius:6px;cursor:pointer;font-family:inherit;font-weight:700">Pridat</button>
+      <button onclick="addToTeam('${w.id}','${teamId}')" style="padding:4px 12px;font-size:12px;background:#1a1a1a;color:#FFCD00;border:none;border-radius:6px;cursor:pointer;font-family:inherit;font-weight:700">Přidat</button>
     </div>`).join('')
 }
 
 async function addToTeam(workerId, teamId) {
   const { error } = await sb.from('profiles').update({ team_id: teamId }).eq('id', workerId)
   if (error) { showToast('Chyba: ' + error.message); return }
-  showToast('Pridano do skupiny!')
+  showToast('Přidáno do skupiny!')
   loadUnassignedForModal()
   loadTeams()
 }
@@ -5095,8 +5096,9 @@ async function mobCheckin(type) {
           checkinInProgress = false
           return
         }
-        // Spočítej hodiny a otevři dialog "Co jsi dnes dělal?" — uloží se až po vyplnění
-        const h = calcHours(updated.check_in, timeStr, updated.break_start, updated.break_end)
+        // Spočítej hodiny podle pravidel směny (7:00 start, odchod po 30 min, min 16:00)
+        const adjOut = applyAttendanceRules({ check_in: updated.check_in, check_out: timeStr, break_start: updated.break_start, break_end: updated.break_end })
+        const h = adjOut.hours
         pendingCheckout = { timeStr, hours: h }
         showCheckoutDialog()
         checkinInProgress = false
@@ -5134,7 +5136,7 @@ async function editMobAttEntry(attId, currentSite, currentDesc) {
   overlay.innerHTML = `
     <div style="background:#fff;border-radius:20px 20px 0 0;padding:24px;width:100%;max-width:500px">
       <div style="width:40px;height:4px;background:var(--brd);border-radius:2px;margin:0 auto 16px"></div>
-      <div style="font-size:15px;font-weight:800;margin-bottom:16px">Upravit zaznam</div>
+      <div style="font-size:15px;font-weight:800;margin-bottom:16px">Upravit záznam</div>
       <div class="fg" style="margin-bottom:12px">
         <label style="font-size:12px;font-weight:700">Stavba</label>
         <input type="text" id="mob-edit-site" value="${currentSite}" placeholder="napr. Praha – Vinohrady..."
@@ -5147,7 +5149,7 @@ async function editMobAttEntry(attId, currentSite, currentDesc) {
       </div>
       <div style="display:flex;gap:10px">
         <button onclick="saveMobAttEntry('${attId}')"
-          style="flex:1;padding:14px;background:#1a1a1a;color:#FFCD00;border:none;border-radius:12px;font-size:14px;font-weight:800;cursor:pointer;font-family:inherit">Ulozit</button>
+          style="flex:1;padding:14px;background:#1a1a1a;color:#FFCD00;border:none;border-radius:12px;font-size:14px;font-weight:800;cursor:pointer;font-family:inherit">Uložit</button>
         <button onclick="document.getElementById('mob-att-edit-overlay').remove()"
           style="padding:14px 18px;background:none;border:2px solid var(--brd);border-radius:12px;font-size:14px;cursor:pointer;font-family:inherit">Zpet</button>
       </div>
@@ -5198,15 +5200,9 @@ async function loadMobWeek() {
     return 0
   }
 
-  // Funkce pro zobrazení stavu dne
+  // Funkce pro zobrazení stavu dne (OSVČ NEVIDÍ poznámky pozdě/dřív — jen hodiny)
   function getDayLabel(dayRecs) {
     const h = dayRecs.reduce((s,r) => s + getHours(r), 0)
-    // Sbírej příznaky ze všech záznamů dne
-    const dayFlags = dayRecs.flatMap(r => {
-      if (!r.check_in || !r.check_out) return []
-      const adj = applyAttendanceRules(r)
-      return Object.entries(adj.flags).filter(([k,v]) => v && k !== 'overtime').map(([k]) => k)
-    })
     const hasWork = dayRecs.length > 0
     const activeToday = dayRecs.some(r => r.check_in && !r.check_out && r.work_date === todayStr)
     const unclosed = dayRecs.some(r => r.check_in && !r.check_out && r.work_date !== todayStr)
@@ -5214,16 +5210,7 @@ async function loadMobWeek() {
     if (activeToday) return { label: '▶', bg: 'var(--amber)', color: '#fff' }
     if (unclosed) return { label: '!', bg: 'var(--red)', color: '#fff', title: 'Nezavřená směna' }
     if (h > 0) {
-      const flagMap = {lateIn:'⚠️',lateBreak:'⏰',earlyOut:'🔵',abnormal:'🔴'}
-      const titleMap = {lateIn:'Pozdní příchod',lateBreak:'Pozdní návrat z přestávky',earlyOut:'Brzy odešel',abnormal:'Abnormální odchod'}
-      const flagIcons = dayFlags.map(f => flagMap[f]||'').filter(Boolean).join('')
-      const flagTitle = dayFlags.map(f => titleMap[f]||'').filter(Boolean).join(', ')
-      return {
-        label: h.toFixed(1)+'h' + (flagIcons ? ' '+flagIcons : ''),
-        bg: dayFlags.length ? 'var(--amber-l)' : 'var(--green)',
-        color: dayFlags.length ? 'var(--amber)' : '#fff',
-        title: flagTitle || ''
-      }
+      return { label: h.toFixed(1)+'h', bg: 'var(--green)', color: '#fff', title: '' }
     }
     if (hasWork) return { label: '—', bg: 'var(--bg)', color: 'var(--text3)' }
     return { label: '—', bg: 'var(--bg)', color: 'var(--text3)' }
@@ -5613,6 +5600,49 @@ Pravidla:
   }
 }
 
+// Převede jeden nebo více obrázkových souborů na jedno PDF (Blob).
+// Každý obrázek = jedna stránka, vejde se na A4 se zachováním poměru stran.
+async function imagesToPdfBlob(files) {
+  const list = Array.isArray(files) ? files.filter(Boolean) : [files]
+  if (!list.length) throw new Error('Žádný obrázek')
+  const JsPDF = (window.jspdf && window.jspdf.jsPDF) ? window.jspdf.jsPDF : (window.jsPDF || null)
+  if (!JsPDF) throw new Error('PDF knihovna se nenačetla')
+
+  const loadDataUrl = file => new Promise((res, rej) => {
+    const r = new FileReader(); r.onload = () => res(r.result); r.onerror = () => rej(new Error('Načtení selhalo')); r.readAsDataURL(file)
+  })
+  const loadImg = src => new Promise((res, rej) => {
+    const im = new Image(); im.onload = () => res(im); im.onerror = () => rej(new Error('Obrázek nelze načíst')); im.src = src
+  })
+
+  const pdf = new JsPDF({ unit: 'pt', format: 'a4' })
+  const pageW = pdf.internal.pageSize.getWidth()
+  const pageH = pdf.internal.pageSize.getHeight()
+  const margin = 24
+
+  for (let i = 0; i < list.length; i++) {
+    let dataUrl = await loadDataUrl(list[i])
+    // jsPDF umí JPEG/PNG; pokud je WEBP nebo jiné, překresli přes canvas na JPEG
+    let fmt = 'JPEG'
+    if (/^data:image\/png/i.test(dataUrl)) fmt = 'PNG'
+    if (!/^data:image\/(jpe?g|png)/i.test(dataUrl)) {
+      const tmp = await loadImg(dataUrl)
+      const c = document.createElement('canvas'); c.width = tmp.naturalWidth; c.height = tmp.naturalHeight
+      c.getContext('2d').drawImage(tmp, 0, 0)
+      dataUrl = c.toDataURL('image/jpeg', 0.92); fmt = 'JPEG'
+    }
+    const img = await loadImg(dataUrl)
+    const maxW = pageW - margin * 2, maxH = pageH - margin * 2
+    let w = img.naturalWidth, h = img.naturalHeight
+    const ratio = Math.min(maxW / w, maxH / h)
+    w = w * ratio; h = h * ratio
+    const x = (pageW - w) / 2, y = (pageH - h) / 2
+    if (i > 0) pdf.addPage()
+    pdf.addImage(dataUrl, fmt, x, y, w, h)
+  }
+  return pdf.output('blob')
+}
+
 async function uploadDocument() {
   if (!selectedFile) { showToast('⚠️ Vyberte přední stranu dokumentu'); return }
   if (!currentUser) return
@@ -5689,16 +5719,44 @@ async function uploadDocument() {
       + (validUntil ? `<br><span style="font-size:12px;font-weight:400">📅 Platnost do: ${validUntil}</span>` : '')
   }
 
-  btn.textContent = '⏳ Nahrávám...'
+  btn.textContent = '⏳ Připravuji PDF...'
   progress.style.display = 'block'
 
-  // 2. Upload do Supabase Storage
-  const ext = selectedFile.name.split('.').pop()
-  const filePath = `${currentUser.id}/${docType}_${Date.now()}.${ext}`
+  // 2. Sestav výsledný soubor — VŽDY PDF
+  // - obrázek(y) → převod na jedno PDF (přední + zadní strana = 2 stránky)
+  // - PDF na vstupu → nahraje se beze změny
+  let uploadBlob, uploadExt, uploadContentType
+  const frontIsPdf = selectedFile.type === 'application/pdf' || /\.pdf$/i.test(selectedFile.name)
+  try {
+    if (frontIsPdf) {
+      uploadBlob = selectedFile
+      uploadExt = 'pdf'
+      uploadContentType = 'application/pdf'
+      if (selectedFile2 && isMulti) {
+        showToast('ℹ️ Přední strana je PDF — nahrajte prosím obě strany jako obrázky, nebo jedno PDF s oběma stranami')
+      }
+    } else {
+      const imgs = [selectedFile]
+      if (selectedFile2 && isMulti && !(selectedFile2.type === 'application/pdf' || /\.pdf$/i.test(selectedFile2.name))) {
+        imgs.push(selectedFile2)
+      }
+      uploadBlob = await imagesToPdfBlob(imgs)
+      uploadExt = 'pdf'
+      uploadContentType = 'application/pdf'
+    }
+  } catch(e) {
+    console.error('[uploadDocument] PDF convert error:', e)
+    showToast('❌ Nepodařilo se vytvořit PDF: ' + e.message)
+    if (status) { status.style.display='block'; status.style.background='var(--red-l)'; status.style.color='var(--red)'; status.textContent='❌ Chyba při tvorbě PDF' }
+    btn.disabled = false; btn.textContent = '📤 Nahrát'; progress.style.display='none'
+    return
+  }
 
+  btn.textContent = '⏳ Nahrávám...'
+  const filePath = `${currentUser.id}/${docType}_${Date.now()}.${uploadExt}`
   const { error: storageErr } = await sb.storage
     .from('documents')
-    .upload(filePath, selectedFile, { upsert: true })
+    .upload(filePath, uploadBlob, { upsert: true, contentType: uploadContentType })
 
   if (storageErr) {
     let sMsg = storageErr.message
@@ -5710,21 +5768,20 @@ async function uploadDocument() {
     }
     showToast('❌ Nahrávání: ' + sMsg)
     if (status) { status.style.display='block'; status.style.background='var(--red-l)'; status.style.color='var(--red)'; status.textContent='❌ '+sMsg }
-    btn.disabled = false
-    btn.textContent = '📤 Nahrát'
-    progress.style.display = 'none'
+    btn.disabled = false; btn.textContent = '📤 Nahrát'; progress.style.display = 'none'
     return
   }
 
-  // 3. Získej URL
+  // 3. URL
   const { data: urlData } = sb.storage.from('documents').getPublicUrl(filePath)
   const fileUrl = urlData?.publicUrl
 
-  // 4. Ulož přední stranu do DB
+  // 4. Jeden DB záznam (PDF obsahuje obě strany)
+  const sidesNote = (!frontIsPdf && selectedFile2 && isMulti) ? ' (obě strany)' : ''
   const { error: dbErr } = await sb.from('documents').insert({
     worker_id: currentUser.id,
     doc_type: docType,
-    file_name: selectedFile.name + ' (strana 1)',
+    file_name: docType + '_' + new Date().toISOString().slice(0,10) + '.pdf' + sidesNote,
     file_path: filePath,
     file_url: fileUrl,
     valid_until: validUntil || null,
@@ -5735,35 +5792,11 @@ async function uploadDocument() {
 
   if (dbErr) {
     showToast('❌ Chyba záznamu: ' + dbErr.message)
-    btn.disabled = false
-    btn.textContent = '📤 Nahrát'
-    progress.style.display = 'none'
+    btn.disabled = false; btn.textContent = '📤 Nahrát'; progress.style.display = 'none'
     return
   }
 
-  // 5. Nahraj zadní stranu pokud existuje
-  if (selectedFile2 && isMulti) {
-    if (status) { status.textContent = '⏳ Nahrávám zadní stranu...'; status.style.background='var(--blue-l)'; status.style.color='var(--blue)' }
-    const ext2 = selectedFile2.name.split('.').pop()
-    const filePath2 = `${currentUser.id}/${docType}_${Date.now()}_back.${ext2}`
-    const { error: storageErr2 } = await sb.storage.from('documents').upload(filePath2, selectedFile2, { upsert: true })
-    if (!storageErr2) {
-      const { data: urlData2 } = sb.storage.from('documents').getPublicUrl(filePath2)
-      await sb.from('documents').insert({
-        worker_id: currentUser.id,
-        doc_type: docType,
-        file_name: selectedFile2.name + ' (strana 2)',
-        file_path: filePath2,
-        file_url: urlData2?.publicUrl,
-        valid_until: validUntil || null,
-        status: 'pending',
-        uploaded_by: currentUser.id,
-        uploaded_at: new Date().toISOString()
-      })
-    }
-  }
-
-  showToast(validUntil ? ('✅ Dokument nahrán! Platnost do ' + validUntil) : '✅ Dokument nahrán!')
+  showToast(validUntil ? ('✅ Dokument uložen jako PDF! Platnost do ' + validUntil) : '✅ Dokument uložen jako PDF!')
   closeUploadForm()
   loadMobDocs()
 
@@ -5936,17 +5969,24 @@ function getKW(date=new Date()) {
   return {week:Math.ceil(((d-y)/86400000+1)/7),year:d.getUTCFullYear()}
 }
 
+// Standardní směna
+const SHIFT_START_MIN = 7 * 60    // 7:00
+const SHIFT_END_MIN = 16 * 60     // 16:00
+
+function tmMin(t) {
+  if (!t) return null
+  const [h, m, s] = t.slice(0, 8).split(':').map(Number)
+  return h * 60 + m + (s || 0) / 60
+}
+
+// Jednoduchý průběžný výpočet (pro BĚŽÍCÍ směnu — od příchodu do teď).
+// Pravidla zaokrouhlení směny (7:00 start, odchod po 30 min, min 16:00) řeší applyAttendanceRules při uzavření.
 function calcHours(ci, co, bs, be) {
   if (!ci || !co) return 0
-  const tm = t => {
-    const [h, m, s] = t.slice(0, 8).split(':').map(Number)
-    return h * 60 + m + (s || 0) / 60
-  }
-  let total = tm(co) - tm(ci)
+  let total = tmMin(co) - tmMin(ci)
   if (total < 0) total += 24 * 60  // přes půlnoc
   if (total <= 0) return 0
-  // Odečti přestávku pouze pokud má začátek I konec
-  const brk = (bs && be) ? Math.max(0, tm(be) - tm(bs)) : 0
+  const brk = (bs && be) ? Math.max(0, tmMin(be) - tmMin(bs)) : 0
   const net = total - brk
   return Math.round(net / 60 * 100) / 100
 }
@@ -6341,8 +6381,8 @@ async function saveWorkerAccommodation() {
     accommodation_payment: document.getElementById('wd-acc-payment')?.value || 'hotove'
   }).eq('id', currentWorkerId).select()
   if (error) { showToast('Chyba: ' + error.message); return }
-  if (!updAcc?.length) { showToast('Nepovedlo se ulozit'); return }
-  showToast('Ubytovani ulozeno!')
+  if (!updAcc?.length) { showToast('Nepodařilo se uložit'); return }
+  showToast('Ubytování uloženo!')
 }
 
 // -- FAKTURACE ZÁKAZNÍK PER WORKER --
@@ -6650,7 +6690,8 @@ function updateEditHoursPreview() {
   const preview = document.getElementById('edit-hours-preview')
   const val = document.getElementById('edit-hours-val')
   if (ci && co) {
-    const h = calcHours(ci+':00', co+':00', bs?bs+':00':null, be?be+':00':null)
+    const adj = applyAttendanceRules({ check_in: ci+':00', check_out: co+':00', break_start: bs?bs+':00':null, break_end: be?be+':00':null })
+    const h = adj.hours
     if (preview) preview.style.display = 'block'
     if (val) val.textContent = h.toFixed(2) + 'h'
   } else {
@@ -6667,7 +6708,7 @@ async function saveEditAttRecord() {
 
   if (!ci) { showToast('⚠️ Zadejte příchod'); return }
 
-  const hours = (ci && co) ? calcHours(ci+':00', co+':00', bs?bs+':00':null, be?be+':00':null) : null
+  const hours = (ci && co) ? applyAttendanceRules({ check_in: ci+':00', check_out: co+':00', break_start: bs?bs+':00':null, break_end: be?be+':00':null }).hours : null
 
   const site = document.getElementById('edit-att-site')?.value.trim() || null
   const desc = document.getElementById('edit-att-desc')?.value.trim() || null
@@ -6745,7 +6786,8 @@ document.addEventListener('change', function(e) {
     const preview = document.getElementById('manual-hours-preview')
     const val = document.getElementById('manual-hours-val')
     if (ci && co) {
-      const h = calcHours(ci+':00', co+':00', bs?bs+':00':null, be?be+':00':null)
+      const adj = applyAttendanceRules({ check_in: ci+':00', check_out: co+':00', break_start: bs?bs+':00':null, break_end: be?be+':00':null })
+      const h = adj.hours
       if (preview) preview.style.display = 'block'
       if (val) val.textContent = h + 'h'
     }
@@ -6768,7 +6810,7 @@ async function saveManualAttendance() {
   if (!co) { showToast('⚠️ Zadejte odchod'); return }
   if (co <= ci) { showToast('⚠️ Odchod musí být po příchodu'); return }
 
-  const hours = calcHours(ci+':00', co+':00', bs?bs+':00':null, be?be+':00':null)
+  const hours = applyAttendanceRules({ check_in: ci+':00', check_out: co+':00', break_start: bs?bs+':00':null, break_end: be?be+':00':null }).hours
   const kw = getKW(new Date(date))
 
   // Zkontroluj jestli záznam pro tento den a pracovníka už existuje
@@ -7469,11 +7511,11 @@ async function loadMobContracts() {
     return
   }
   const mobStatusInfo = {
-    admin_pending: { border:'var(--brd)', bg:'var(--bg)', label:'Ceka na podpis admina', color:'var(--text2)' },
-    pending:       { border:'var(--amber)', bg:'var(--amber-l)', label:'Potrebny Vas podpis', color:'var(--amber)' },
-    signed_electronic: { border:'var(--green)', bg:'var(--green-l)', label:'Podepsana elektronicky', color:'var(--green)' },
-    signed_scan:   { border:'var(--green)', bg:'var(--green-l)', label:'Podepsana (sken)', color:'var(--green)' },
-    rejected:      { border:'var(--red)', bg:'var(--red-l)', label:'Zamitnuta', color:'var(--red)' },
+    admin_pending: { border:'var(--brd)', bg:'var(--bg)', label:'Čeká na podpis správce', color:'var(--text2)' },
+    pending:       { border:'var(--amber)', bg:'var(--amber-l)', label:'Potřebný váš podpis', color:'var(--amber)' },
+    signed_electronic: { border:'var(--green)', bg:'var(--green-l)', label:'Podepsaná elektronicky', color:'var(--green)' },
+    signed_scan:   { border:'var(--green)', bg:'var(--green-l)', label:'Podepsaná (sken)', color:'var(--green)' },
+    rejected:      { border:'var(--red)', bg:'var(--red-l)', label:'Zamítnutá', color:'var(--red)' },
   }
   div.innerHTML = data.map(c=>{
     const si = mobStatusInfo[c.status] || { border:'var(--brd)', bg:'var(--bg)', label:c.status, color:'var(--text2)' }
@@ -8049,7 +8091,7 @@ async function openWorkerModal(id) {
   currentWorkerProfile = w  // Ulož pro použití v dalších tabech
 
   document.getElementById('wd-name').textContent = w.full_name
-  document.getElementById('wd-sub').textContent = (w.profession||'') + ' · ' + ({admin:'Admin',osvec:'OSVČ',partak:'Parťák',klient:'Klient'}[w.role]||w.role)
+  document.getElementById('wd-sub').textContent = (profLabel(w.profession)||'') + ' · ' + ({admin:'Admin',osvec:'OSVČ',partak:'Parťák',klient:'Klient'}[w.role]||w.role)
   // Avatar v hlavičce
   const wdAvatarImg = document.getElementById('wd-avatar-img')
   const wdAvatarInit = document.getElementById('wd-avatar-init')
@@ -8067,7 +8109,7 @@ async function openWorkerModal(id) {
   document.getElementById('wd-fullname').textContent = w.full_name
   document.getElementById('wd-email').textContent = w.email
   document.getElementById('wd-phone').textContent = w.phone || '—'
-  document.getElementById('wd-profession').textContent = w.profession || '—'
+  document.getElementById('wd-profession').textContent = profLabel(w.profession) || '—'
   document.getElementById('wd-role').textContent = {admin:'Admin',osvec:'OSVČ',partak:'Parťák',klient:'Klient'}[w.role] || w.role
   document.getElementById('wd-status').innerHTML = `<span class="pill ${w.is_active?'pg':'pr'}">${w.is_active?'Aktivní':'Neaktivní'}</span>`
   document.getElementById('wd-rate').value = w.hourly_rate_worker || ''
@@ -8155,19 +8197,10 @@ function applyAttendanceRules(record) {
   }
 
   // --- 1. PŘÍCHOD ---
-  let adjCi = ci
-  const ciDiff = ci - SHIFT.start  // záporné = přišel dřív, kladné = přišel pozdě
-  if (ciDiff < 0) {
-    // Přišel dřív než 30 min před začátkem → zaokrouhlit na 7:00
-    if (Math.abs(ciDiff) <= 30) {
-      adjCi = SHIFT.start  // max 30 min dřív → 7:00
-    }
-    // přišel dřív než 30 min → počítáme od skutečného příchodu (noční směna apod.)
-  } else if (ciDiff > 0) {
-    // Přišel pozdě → VŽDY počítáme od 7:00 (plánovaný začátek)
-    // Pracovník dostane "pozdní příchod" flag ale hodiny jdou od 7:00
-    adjCi = SHIFT.start
-    flags.lateIn = true
+  // Pravidlo: příchod se VŽDY počítá od 7:00 (dřív i později). Pozdní příchod jen označíme.
+  let adjCi = SHIFT.start
+  if (ci > SHIFT.start) {
+    flags.lateIn = true   // přišel po 7:00
   }
 
   // --- 2. PŘESTÁVKA ---
@@ -8193,25 +8226,27 @@ function applyAttendanceRules(record) {
   }
 
   // --- 3. ODCHOD ---
+  // Pravidlo:
+  //  - 15:50–16:00 (do 10 min před koncem) => tolerance, počítá se 16:00
+  //  - dřív než 15:50 => zaokrouhlit DOLŮ po 30 min (odešel dříve)
+  //  - 16:00 a později => zaokrouhlit DOLŮ po 30 min
   let adjCo = co
-  const coDiff = co - SHIFT.end  // záporné = odešel dřív, kladné = odešel pozdě
-
-  if (coDiff < 0) {
-    // Odešel dřív než 16:00 → earlyOut flag, zaokrouhli na 16:00
-    adjCo = SHIFT.end
+  const EARLY_TOLERANCE = 10  // minut před 16:00
+  if (co < SHIFT.end) {
     flags.earlyOut = true
-  } else if (coDiff < 30) {
-    // Odešel 16:00–16:29 → tolerance 30 min, zaokrouhli na 16:00, BEZ přesčasu
-    adjCo = SHIFT.end
-  } else if (co < SHIFT.abnormal) {
-    // Odešel 16:30–17:59 → přesčas, počítej od skutečného odchodu
-    adjCo = co
-    flags.overtime = coDiff
+    if (co >= SHIFT.end - EARLY_TOLERANCE) {
+      // 15:50–15:59 → tolerance na 16:00
+      adjCo = SHIFT.end
+    } else {
+      // výrazně dřív → zaokrouhli dolů po 30 min
+      adjCo = Math.floor(co / 30) * 30
+    }
   } else {
-    // Odešel 18:00 nebo po → abnormální + přesčas
-    adjCo = co
-    flags.overtime = coDiff
-    flags.abnormal = true
+    // 16:00 a později → zaokrouhli DOLŮ na celou půlhodinu
+    adjCo = Math.floor(co / 30) * 30
+    const ot = adjCo - SHIFT.end
+    if (ot > 0) flags.overtime = ot
+    if (co >= SHIFT.abnormal) flags.abnormal = true
   }
 
   // --- 4. VÝPOČET HODIN ---
@@ -8413,7 +8448,7 @@ function openUploadForWorker() {
       <div id="admin-upload-status" style="display:none;padding:10px;border-radius:8px;text-align:center;font-size:13px;font-weight:600;margin-bottom:10px"></div>
       <div style="display:flex;gap:8px">
         <button onclick="uploadDocumentForWorker()" style="flex:1;padding:11px;background:var(--blue);color:#FFCD00;border:none;border-radius:8px;font-size:13px;font-weight:700;cursor:pointer;font-family:inherit">Nahrat</button>
-        <button onclick="closeUploadForWorker()" style="padding:11px 18px;background:none;border:1.5px solid var(--brd);border-radius:8px;font-size:13px;cursor:pointer;font-family:inherit">Zrusit</button>
+        <button onclick="closeUploadForWorker()" style="padding:11px 18px;background:none;border:1.5px solid var(--brd);border-radius:8px;font-size:13px;cursor:pointer;font-family:inherit">Zrušit</button>
       </div>
     </div>`
   document.body.appendChild(div)
@@ -8498,19 +8533,43 @@ async function loadWdDocs(id) {
   const { data } = await sb.from('documents').select('*').eq('worker_id', id||currentWorkerId)
   const div = document.getElementById('wd-docs-list')
   const types = {op:'Občanský průkaz / Pas',zivnost:'Živnostenské oprávnění (CZ)',gewerbeschein:'Živnostenský list (DE)',a1:'Potvrzení A1',freistellung:'Potvrzení o osvobození (DE)',other:'Jiný dokument'}
+  const statusInfo = {
+    ok: { label: 'V pořádku', cls: 'pg' },
+    pending: { label: 'Čeká na kontrolu', cls: 'pa' },
+    unreadable: { label: 'Nečitelný', cls: 'pr' },
+    expired: { label: 'Propadlý', cls: 'pr' },
+    rejected: { label: 'Zamítnutý', cls: 'pr' }
+  }
   if(!data?.length){div.innerHTML='<div style="color:var(--text3);text-align:center;padding:20px">Žádné dokumenty</div>';return}
-  div.innerHTML = '<div style="text-align:right;margin-bottom:10px"><button onclick="openUploadForWorker()" style="font-size:12px;padding:6px 14px;background:var(--blue);color:#FFCD00;border:none;border-radius:7px;cursor:pointer;font-family:inherit;font-weight:700">+ Nahrat dokument</button></div>' +
-  data.map(d=>`<div style="display:flex;justify-content:space-between;align-items:center;padding:10px 0;border-bottom:1px solid var(--brd);gap:8px">
+  const todayD = new Date(); todayD.setHours(0,0,0,0)
+  div.innerHTML = '<div style="text-align:right;margin-bottom:10px"><button onclick="openUploadForWorker()" style="font-size:12px;padding:6px 14px;background:var(--blue);color:#FFCD00;border:none;border-radius:7px;cursor:pointer;font-family:inherit;font-weight:700">+ Nahrát dokument</button></div>' +
+  data.map(d=>{
+    const si = statusInfo[d.status] || { label: d.status||'—', cls: 'pa' }
+    // Barevná platnost
+    let validHtml = '<span style="color:var(--text3)">bez data</span>'
+    if (d.valid_until) {
+      const exp = new Date(d.valid_until); exp.setHours(0,0,0,0)
+      const days = Math.ceil((exp - todayD) / 86400000)
+      if (days < 0) {
+        validHtml = `<span style="color:var(--red);font-weight:700">propadlo ${d.valid_until}</span>`
+      } else if (days <= 30) {
+        validHtml = `<span style="color:var(--amber);font-weight:700">do ${d.valid_until} (${days} dní)</span>`
+      } else {
+        validHtml = `<span style="color:var(--green);font-weight:600">do ${d.valid_until}</span>`
+      }
+    }
+    return `<div style="display:flex;justify-content:space-between;align-items:center;padding:10px 0;border-bottom:1px solid var(--brd);gap:8px">
     <div style="flex:1;min-width:0">
       <div style="font-size:13px;font-weight:600">${types[d.doc_type]||d.doc_type}</div>
-      <div style="font-size:11px;color:var(--text3)">${d.file_name||'—'} · platnost: ${d.valid_until||'—'}</div>
+      <div style="font-size:11px;color:var(--text3)">${d.file_name||'—'}</div>
+      <div style="font-size:11px;margin-top:2px">📅 Platnost: ${validHtml}</div>
     </div>
     <div style="display:flex;align-items:center;gap:6px;flex-shrink:0">
-      <span class="pill ${d.status==='ok'?'pg':d.status==='unreadable'||d.status==='expired'?'pr':'pa'}">${d.status}</span>
+      <span class="pill ${si.cls}">${si.label}</span>
       ${d.file_url?`<button onclick="openPdfUrl('${d.file_url}')" style="font-size:11px;padding:3px 8px;border:1px solid var(--blue);border-radius:6px;cursor:pointer;background:var(--bg2);color:var(--blue);font-family:inherit;white-space:nowrap">👁 Zobrazit</button>`:''}
       <button onclick="deleteDocument('${d.id}')" style="font-size:11px;padding:3px 8px;border:1px solid var(--red);border-radius:6px;cursor:pointer;background:none;color:var(--red);font-family:inherit" title="Smazat dokument">🗑</button>
     </div>
-  </div>`).join('')
+  </div>`}).join('')
 }
 
 async function loadWdContracts(id) {
@@ -8637,7 +8696,7 @@ async function saveWorkerProfile() {
     cooperation_end: coopEnd || null
   }).eq('id',currentWorkerId)
   if(error){showToast('Chyba: '+error.message);return}
-  showToast('Profil ulozen')
+  showToast('Profil uložen')
 }
 
 async function saveWorkerNotes() {
@@ -8910,14 +8969,14 @@ function compressImage(file, maxSize) {
   <div style="background:#fff;border-radius:16px;padding:24px;width:100%;max-width:420px;box-shadow:0 8px 32px rgba(0,0,0,0.2)">
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
       <div>
-        <h3 style="margin:0;font-size:16px">Pridat do skupiny</h3>
+        <h3 style="margin:0;font-size:16px">Přidat do skupiny</h3>
         <div style="font-size:13px;color:var(--text2);margin-top:2px" id="add-member-team-name"></div>
       </div>
       <button onclick="closeAddMemberModal()" style="background:none;border:none;font-size:22px;cursor:pointer">&times;</button>
     </div>
     <input type="hidden" id="add-member-team-id">
     <div id="add-member-list" style="display:flex;flex-direction:column;gap:8px;max-height:400px;overflow-y:auto">
-      <div style="text-align:center;color:var(--text3);padding:20px">Nacitam...</div>
+      <div style="text-align:center;color:var(--text3);padding:20px">Načítám...</div>
     </div>
   </div>
 </div>
@@ -8933,8 +8992,8 @@ function compressImage(file, maxSize) {
     <div class="fg"><label>Nazev skupiny *</label><input type="text" id="new-team-name" placeholder="Stavba Praha..." style="width:100%" onkeydown="if(event.key==='Enter')submitNewTeam()"></div>
     <div class="fg"><label>Lokalita stavby</label><input type="text" id="new-team-location" placeholder="Praha, Andel..." style="width:100%" onkeydown="if(event.key==='Enter')submitNewTeam()"></div>
     <div style="display:flex;gap:8px;margin-top:8px">
-      <button onclick="closeNewTeamModal()" style="flex:1;padding:10px;border:1px solid var(--brd);border-radius:8px;cursor:pointer;font-family:inherit;background:var(--bg)">Zrusit</button>
-      <button onclick="submitNewTeam()" class="btn-pri" style="flex:2;padding:10px">Vytvorit skupinu</button>
+      <button onclick="closeNewTeamModal()" style="flex:1;padding:10px;border:1px solid var(--brd);border-radius:8px;cursor:pointer;font-family:inherit;background:var(--bg)">Zrušit</button>
+      <button onclick="submitNewTeam()" class="btn-pri" style="flex:2;padding:10px">Vytvořit skupinu</button>
     </div>
   </div>
 </div>
