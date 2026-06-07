@@ -2542,6 +2542,7 @@ window.addEventListener('load', async () => {
 // Globální fallback — pokud app neodpoví za 15s, zobraz login
 let authTimeoutId = null
 let initAppDone = false
+let initAppRunning = false
 function startAuthTimeout() {
   if (authTimeoutId) clearTimeout(authTimeoutId)
   authTimeoutId = setTimeout(async () => {
@@ -2610,36 +2611,57 @@ sb.auth.onAuthStateChange(async (event, session) => {
 })
 
 async function initApp(user) {
+  // Tvrdá pojistka proti dvojímu souběžnému běhu (dva SIGNED_IN eventy)
+  if (initAppRunning) { console.log('[initApp] už běží — přeskakuji druhý běh'); return }
+  initAppRunning = true
+  try {
+    await _initAppInner(user)
+  } finally {
+    initAppRunning = false
+  }
+}
+
+async function _initAppInner(user) {
   // Nastav currentUser IHNED — před jakýmkoliv síťovým voláním
   initAppDone = false
   currentUser = user
   console.log('[initApp] currentUser nastaven:', user.email)
 
   let profile = null
-  try {
-    const { data: p1 } = await sb.from('profiles')
-      .select('*, team:teams!profiles_team_id_fkey(name,location)')
-      .eq('id', user.id).maybeSingle()
-    profile = p1
 
+  // Pomocná: dotaz s časovým limitem, ať initApp nikdy nevisí donekonečna
+  const withTimeout = (promise, ms) => Promise.race([
+    promise,
+    new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), ms))
+  ])
+
+  // Načti profil BEZ joinu na tým (join je nejčastější příčina zaseknutí)
+  try {
+    const { data: p1 } = await withTimeout(
+      sb.from('profiles').select('*').eq('id', user.id).maybeSingle(), 8000)
+    profile = p1
     if (!profile) {
-      const { data: p2 } = await sb.from('profiles')
-        .select('*, team:teams!profiles_team_id_fkey(name,location)')
-        .eq('email', user.email).maybeSingle()
+      const { data: p2 } = await withTimeout(
+        sb.from('profiles').select('*').eq('email', user.email).maybeSingle(), 8000)
       profile = p2
     }
   } catch(e) {
-    console.error('[initApp] chyba načítání profilu:', e)
-    // Zkus znovu po 2 sekundách
-    await new Promise(r => setTimeout(r, 2000))
+    console.error('[initApp] načítání profilu selhalo/timeout:', e)
+    // jeden opakovaný pokus
     try {
-      const { data: p3 } = await sb.from('profiles')
-        .select('*, team:teams!profiles_team_id_fkey(name,location)')
-        .eq('id', user.id).maybeSingle()
+      const { data: p3 } = await withTimeout(
+        sb.from('profiles').select('*').eq('id', user.id).maybeSingle(), 8000)
       profile = p3
-    } catch(e2) {
-      console.error('[initApp] druhý pokus selhal:', e2)
-    }
+    } catch(e2) { console.error('[initApp] druhý pokus selhal:', e2) }
+  }
+
+  // Tým doplň zvlášť (když selže, profil i tak funguje)
+  if (profile && profile.team_id) {
+    try {
+      const { data: team } = await withTimeout(
+        sb.from('teams').select('name,location').eq('id', profile.team_id).maybeSingle(), 5000)
+      if (team) profile.team = team
+    } catch(e) { console.warn('[initApp] tým se nenačetl:', e) }
   }
 
   currentProfile = profile
@@ -2648,10 +2670,9 @@ async function initApp(user) {
     initAppDone = true
     clearAuthTimeout()
     showToast('⚠️ Profil nenalezen — kontaktujte admina')
-    // NERESETUJ appInitialized — jinak by double SIGNED_IN spustil initApp znovu
     authHandling = false
     try { await sb.auth.signOut() } catch(e) { console.error('signOut failed:', e) }
-    appInitialized = false  // Reset až po signOut
+    appInitialized = false
     showLogin()
     return
   }
