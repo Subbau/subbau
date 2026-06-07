@@ -2694,6 +2694,8 @@ async function initApp(user) {
         }).eq('id', user.id)
       } catch(e) { console.warn('Login log error:', e) }
     })()
+    // Spusť heartbeat — značí pracovníka jako "online" (každých 5 min)
+    startHeartbeat(user.id)
   }
 
   // Čeká na schválení
@@ -3202,6 +3204,7 @@ function closeAdminDrawer() {
 
 async function doLogout() {
   console.log('[doLogout] called')
+  stopHeartbeat()
   appInitialized = false
   authHandling = false
   loginInProgress = false
@@ -3229,6 +3232,12 @@ async function toggleWorkerActiveFromAccess(workerId, workerName, isActive) {
 
 
 async function showWorkerActivity(workerId, workerName) {
+  // Načti online stav pracovníka
+  const { data: prof } = await sb.from('profiles').select('last_seen_at').eq('id', workerId).maybeSingle()
+  const online = isOnline(prof?.last_seen_at)
+  const lastSeenStr = prof?.last_seen_at
+    ? new Date(prof.last_seen_at).toLocaleString('cs-CZ')
+    : 'nikdy'
   // Načti login historiu - posledných 30 dní
   const cutoff = new Date()
   cutoff.setDate(cutoff.getDate() - 30)
@@ -3289,6 +3298,11 @@ async function showWorkerActivity(workerId, workerName) {
 <body>
 <h1>Aktivita — ${workerName}</h1>
 <div class="sub">Přihlášení za posledních 30 dní · Vygenerováno ${new Date().toLocaleString('cs-CZ')}</div>
+<div style="display:inline-flex;align-items:center;gap:9px;padding:8px 16px;border-radius:10px;margin-bottom:20px;background:${online ? '#e1f5ee' : '#fdf0ee'};border:1.5px solid ${online ? '#1d9e75' : '#c0392b'}">
+  <span style="display:inline-block;width:11px;height:11px;border-radius:50%;background:${online ? '#1d9e75' : '#c0392b'};box-shadow:0 0 0 3px ${online ? 'rgba(29,158,117,.2)' : 'rgba(192,57,43,.15)'}"></span>
+  <span style="font-size:13px;font-weight:800;color:${online ? '#1d9e75' : '#c0392b'}">${online ? 'Aktivní v aplikaci' : 'Offline'}</span>
+  <span style="font-size:12px;color:#888">· naposledy aktivní: ${lastSeenStr}</span>
+</div>
 <div class="stats">
   <div class="stat"><div class="stat-val">${logins.length}</div><div class="stat-lbl">Celkem přihlášení</div></div>
   <div class="stat"><div class="stat-val">${Object.keys(byDay).length}</div><div class="stat-lbl">Aktivních dní</div></div>
@@ -3358,7 +3372,7 @@ async function loadAccess() {
   tbody.innerHTML = '<tr><td colspan="5" style="text-align:center;padding:20px;color:var(--text3)">Načítám...</td></tr>'
 
   const { data } = await sb.from('profiles')
-    .select('id, full_name, email, role, is_active, last_login_at, login_count')
+    .select('id, full_name, email, role, is_active, last_login_at, login_count, last_seen_at')
     .in('role', ['osvec', 'partak'])
     .order('full_name')
 
@@ -3397,9 +3411,11 @@ async function loadAccess() {
   tbody.innerHTML = data.map(w => {
     const logins = loginHistMap[w.id] || []
     const lastLogin = logins.length ? fmtLogin(logins[0]) : 'Nikdy'
+    const online = isOnline(w.last_seen_at)
+    const dot = `<span title="${online ? 'Online' : 'Offline'}" style="display:inline-block;width:9px;height:9px;border-radius:50%;background:${online ? '#1d9e75' : '#c0392b'};margin-right:7px;flex-shrink:0;box-shadow:0 0 0 2px ${online ? 'rgba(29,158,117,.2)' : 'rgba(192,57,43,.15)'}"></span>`
     return `
     <tr>
-      <td><b>${w.full_name}</b><br><span style="font-size:11px;color:var(--text2)">${w.email}</span></td>
+      <td><span style="display:flex;align-items:center"><b>${dot}${w.full_name}</b></span><span style="font-size:11px;color:var(--text2);margin-left:16px">${w.email}</span></td>
       <td><span class="pill pb">${roleLabels[w.role] || w.role}</span></td>
       <td>
         <span class="pill ${w.is_active ? 'pg' : 'pr'}">${w.is_active ? 'Aktivní' : 'Neaktivní'}</span>
@@ -3424,7 +3440,19 @@ async function loadAccess() {
       </td>
     </tr>`
   }).join('')
+
+  // Auto-refresh online stavu každých 5 minut (jen když je sekce Přístupy otevřená)
+  if (accessRefreshInt) clearInterval(accessRefreshInt)
+  accessRefreshInt = setInterval(() => {
+    const view = document.getElementById('v-pristupy')
+    if (view && view.classList.contains('on')) {
+      loadAccess()
+    } else {
+      clearInterval(accessRefreshInt); accessRefreshInt = null
+    }
+  }, 5 * 60 * 1000)
 }
+let accessRefreshInt = null
 
 async function sendPasswordReset(email, name) {
   if (!confirm('Odeslat reset hesla pro ' + name + ' (' + email + ')?')) return
@@ -5583,6 +5611,35 @@ function startClock() {
   tick(); clockInt=setInterval(tick,1000)
 }
 function stopClock(){if(clockInt)clearInterval(clockInt)}
+
+// ===== HEARTBEAT — "online" stav pracovníka =====
+let heartbeatInt = null
+async function pingPresence(userId) {
+  if (!userId || !navigator.onLine) return
+  try {
+    await sb.from('profiles').update({ last_seen_at: new Date().toISOString() }).eq('id', userId)
+  } catch(e) { /* sloupec last_seen_at musí existovat v profiles */ }
+}
+function startHeartbeat(userId) {
+  stopHeartbeat()
+  pingPresence(userId)  // hned po přihlášení
+  // každých 5 minut
+  heartbeatInt = setInterval(() => pingPresence(userId), 5 * 60 * 1000)
+  // ping i při návratu do aplikace (přepnutí záložky)
+  document.addEventListener('visibilitychange', heartbeatVisibility)
+}
+function heartbeatVisibility() {
+  if (!document.hidden && currentUser) pingPresence(currentUser.id)
+}
+function stopHeartbeat() {
+  if (heartbeatInt) { clearInterval(heartbeatInt); heartbeatInt = null }
+  document.removeEventListener('visibilitychange', heartbeatVisibility)
+}
+// Online = aktivita za posledních 10 minut
+function isOnline(lastSeen) {
+  if (!lastSeen) return false
+  return (Date.now() - new Date(lastSeen).getTime()) < 10 * 60 * 1000
+}
 
 async function exportKW() {
   const kwEl = document.getElementById('kw-select') || document.getElementById('kw-sel')
