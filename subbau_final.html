@@ -868,6 +868,10 @@ tr:hover td{background:#fafbfc}
                 <h4>Skupiny / Týmy</h4>
                 <button class="btn-pri" style="font-size:12px;padding:5px 12px" onclick="openNewTeamModal()">+ Nová skupina</button>
               </div>
+              <div style="padding:10px 16px 0;display:flex;flex-direction:column;gap:8px">
+                <input type="text" id="team-search" placeholder="🔍 Hledat skupinu podle názvu..." oninput="filterTeams()" style="width:100%;padding:9px 12px;border:1.5px solid var(--brd);border-radius:8px;font-size:13px;font-family:inherit">
+                <input type="text" id="team-worker-search" placeholder="👷 Hledat pracovníka (zobrazí jeho skupinu)..." oninput="filterTeams()" style="width:100%;padding:9px 12px;border:1.5px solid var(--brd);border-radius:8px;font-size:13px;font-family:inherit">
+              </div>
               <div id="teams-list" style="display:flex;flex-direction:column;gap:12px;margin-top:8px">
                 <div style="text-align:center;color:var(--text3);padding:20px">Načítám skupiny...</div>
               </div>
@@ -4553,33 +4557,64 @@ async function generateInvoice() {
 }
 
 // ============ TÝMY ============
+let _teamsCache = []
+let _workersCache = []
+
 async function loadTeams() {
   const div = document.getElementById('teams-list')
   const unassignedDiv = document.getElementById('unassigned-workers')
   if (!div) return
   div.innerHTML = '<div style="text-align:center;color:var(--text3);padding:20px">Načítám...</div>'
 
-  // Načti týmy + jejich členy
-  const { data: teams, error: teamsErr } = await sb.from('teams').select('*').order('name')
+  // Načti aktivní týmy + jejich členy
+  const { data: teams, error: teamsErr } = await sb.from('teams').select('*').eq('is_active', true).order('name')
   if (teamsErr) { div.innerHTML = '<div style="color:var(--red);padding:12px">Chyba: '+teamsErr.message+'</div>'; return }
   // Načti všechny pracovníky s jejich team_id
   const { data: workers } = await sb.from('profiles')
     .select('id, full_name, profession, role, team_id')
     .in('role', ['osvec', 'partak'])
-    
     .order('full_name')
 
-  if (!teams?.length && !workers?.length) {
+  _teamsCache = teams || []
+  _workersCache = workers || []
+  renderTeams()
+}
+
+function filterTeams() { renderTeams() }
+
+function renderTeams() {
+  const div = document.getElementById('teams-list')
+  const unassignedDiv = document.getElementById('unassigned-workers')
+  if (!div) return
+
+  const teams = _teamsCache
+  const workers = _workersCache
+  const profLabels = {osvec:'OSVČ', partak:'Parťák'}
+
+  const qTeam = (document.getElementById('team-search')?.value || '').trim().toLowerCase()
+  const qWorker = (document.getElementById('team-worker-search')?.value || '').trim().toLowerCase()
+
+  if (!teams.length && !workers.length) {
     div.innerHTML = '<div style="text-align:center;color:var(--text3);padding:20px">Žádné skupiny</div>'
     return
   }
 
-  const profLabels = {osvec:'OSVČ', partak:'Parťák'}
+  // Filtrování skupin
+  let shownTeams = teams
+  if (qTeam) {
+    shownTeams = shownTeams.filter(t => (t.name||'').toLowerCase().includes(qTeam) || (t.location||'').toLowerCase().includes(qTeam))
+  }
+  if (qWorker) {
+    // ponech jen skupiny, které mají člena odpovídajícího hledání
+    shownTeams = shownTeams.filter(t =>
+      workers.some(w => w.team_id === t.id && (w.full_name||'').toLowerCase().includes(qWorker))
+    )
+  }
 
-  // Zobraz skupiny s členy
-  if (teams?.length) {
-    div.innerHTML = teams.map(t => {
-      const members = (workers||[]).filter(w => w.team_id === t.id)
+  if (teams.length && shownTeams.length) {
+    div.innerHTML = shownTeams.map(t => {
+      let members = workers.filter(w => w.team_id === t.id)
+      // při hledání pracovníka zvýrazni/ukaž shodu, ale stejně ukaž všechny členy skupiny
       return `<div style="border:1.5px solid var(--brd);border-radius:12px;padding:14px">
         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
           <div>
@@ -4587,40 +4622,45 @@ async function loadTeams() {
             ${t.location ? `<div style="font-size:12px;color:var(--text2)">📍 ${t.location}</div>` : ''}
           </div>
           <div style="display:flex;gap:6px">
-            <button onclick="openAddMemberModal('${t.id}','${t.name.replace(/'/g,'')}')" style="padding:4px 10px;font-size:12px;border:1px solid var(--brd);border-radius:6px;cursor:pointer;background:var(--bg);font-family:inherit">+ Přidat</button>
-            <button onclick="deleteTeam('${t.id}')" style="padding:4px 8px;font-size:12px;border:1px solid var(--red);border-radius:6px;cursor:pointer;background:none;color:var(--red);font-family:inherit">🗑</button>
+            <button onclick="openAddMemberModal('${t.id}','${(t.name||'').replace(/'/g,String.fromCharCode(39))}')" style="padding:4px 10px;font-size:12px;border:1px solid var(--brd);border-radius:6px;cursor:pointer;background:var(--bg);font-family:inherit">+ Přidat</button>
+            <button onclick="deleteTeam('${t.id}','${(t.name||'').replace(/'/g,String.fromCharCode(39))}')" style="padding:4px 8px;font-size:12px;border:1px solid var(--red);border-radius:6px;cursor:pointer;background:none;color:var(--red);font-family:inherit">🗑</button>
           </div>
         </div>
         <div style="display:flex;flex-direction:column;gap:6px">
-          ${members.length ? members.map(m => `
-            <div style="display:flex;justify-content:space-between;align-items:center;padding:8px 10px;background:var(--bg);border-radius:8px">
+          ${members.length ? members.map(m => {
+            const match = qWorker && (m.full_name||'').toLowerCase().includes(qWorker)
+            return `
+            <div style="display:flex;justify-content:space-between;align-items:center;padding:8px 10px;background:${match?'#fff8cc':'var(--bg)'};border-radius:8px">
               <div>
-                <span style="font-size:13px;font-weight:600">${m.full_name}</span>
+                <span style="font-size:13px;font-weight:${match?'800':'600'}">${m.full_name}</span>
                 <span style="font-size:11px;color:var(--text3);margin-left:6px">${profLabels[m.role]||''}</span>
               </div>
               <button onclick="removeFromTeam('${m.id}')" style="padding:2px 8px;font-size:11px;border:1px solid var(--brd);border-radius:6px;cursor:pointer;background:none;font-family:inherit">✕</button>
-            </div>`).join('') : '<div style="font-size:12px;color:var(--text3);text-align:center;padding:8px">Žádní členové</div>'}
+            </div>`}).join('') : '<div style="font-size:12px;color:var(--text3);text-align:center;padding:8px">Žádní členové</div>'}
         </div>
         <div style="font-size:11px;color:var(--text3);margin-top:8px;text-align:right">${members.length} ${members.length===1?'člen':'členů'}</div>
       </div>`
     }).join('')
+  } else if (teams.length && !shownTeams.length) {
+    div.innerHTML = '<div style="text-align:center;color:var(--text3);padding:20px">Žádná skupina neodpovídá hledání</div>'
   } else {
     div.innerHTML = '<div style="text-align:center;color:var(--text3);padding:20px">Žádné skupiny — vytvořte první</div>'
   }
 
-  // Zobraz nepřiřazené pracovníky
-  const unassigned = (workers||[]).filter(w => !w.team_id)
+  // Zobraz nepřiřazené pracovníky (s filtrem podle hledání pracovníka)
+  let unassigned = workers.filter(w => !w.team_id)
+  if (qWorker) unassigned = unassigned.filter(w => (w.full_name||'').toLowerCase().includes(qWorker))
   if (unassignedDiv) {
     unassignedDiv.innerHTML = unassigned.length
       ? unassigned.map(w => `
         <div style="display:flex;justify-content:space-between;align-items:center;padding:8px 10px;background:var(--bg);border-radius:8px">
           <span style="font-size:13px">${w.full_name}</span>
-          ${teams?.length ? `<select onchange="assignToTeam('${w.id}',this.value)" style="font-size:11px;padding:3px 6px;border:1px solid var(--brd);border-radius:6px;font-family:inherit">
+          ${teams.length ? `<select onchange="assignToTeam('${w.id}',this.value)" style="font-size:11px;padding:3px 6px;border:1px solid var(--brd);border-radius:6px;font-family:inherit">
             <option value="">Přiřadit do...</option>
             ${teams.map(t=>`<option value="${t.id}">${t.name}</option>`).join('')}
           </select>` : ''}
         </div>`).join('')
-      : '<div style="font-size:12px;color:var(--text3);text-align:center;padding:12px">Všichni pracovníci jsou ve skupinách</div>'
+      : '<div style="font-size:12px;color:var(--text3);text-align:center;padding:12px">' + (qWorker ? 'Žádný nepřiřazený pracovník neodpovídá hledání' : 'Všichni pracovníci jsou ve skupinách') + '</div>'
   }
 }
 
@@ -4658,13 +4698,20 @@ async function createTeam(name, location) {
   setTimeout(() => loadTeams(), 500)
 }
 
-async function deleteTeam(teamId) {
-  if (!confirm('Smazat skupinu? Pracovnici budou odprirazen.')) return
-  // Odpřiraď pracovníky
-  await sb.from('profiles').update({ team_id: null }).eq('team_id', teamId)
-  const { error } = await sb.from('teams').update({ is_active: false }).eq('id', teamId)
-  if (error) { showToast('Chyba: ' + error.message); return }
-  showToast('Skupina smazana')
+async function deleteTeam(teamId, teamName) {
+  if (!confirm('Smazat skupinu "' + (teamName||'') + '"?\nPracovníci budou odřazeni (zůstanou v systému).')) return
+  // 1. Odřaď všechny pracovníky z této skupiny
+  const { error: upErr } = await sb.from('profiles').update({ team_id: null }).eq('team_id', teamId)
+  if (upErr) { showToast('Chyba při odřazení: ' + upErr.message); return }
+  // 2. Zkus tvrdě smazat řádek
+  const { error: delErr } = await sb.from('teams').delete().eq('id', teamId)
+  if (delErr) {
+    // Fallback: pokud brání FK/oprávnění, použij soft-delete (is_active=false)
+    console.warn('[deleteTeam] hard delete failed, fallback to soft:', delErr.message)
+    const { error: softErr } = await sb.from('teams').update({ is_active: false }).eq('id', teamId)
+    if (softErr) { showToast('Chyba: ' + softErr.message); return }
+  }
+  showToast('🗑 Skupina smazána')
   loadTeams()
 }
 
