@@ -1076,6 +1076,8 @@ tr:hover td{background:#fafbfc}
             🚪 Zaznamenat odchod
           </button>
         </div>
+        <button id="att-btn-worklog" onclick="openDayWorkLog()" style="display:none;width:100%;margin-top:10px;padding:13px;background:#fff;color:#1a1a1a;border:2px solid #1a1a1a;border-radius:14px;font-size:14px;font-weight:700;cursor:pointer;font-family:inherit">📝 Zapsat co jsem dnes dělal</button>
+        <div id="att-worklog-done" style="display:none;margin-top:8px;font-size:12px;color:var(--green);text-align:center;font-weight:600"></div>
       </div>
       <div class="mob-card">
         <div class="mob-card-title">Tento týden č. <span id="mob-kw">—</span></div>
@@ -1094,10 +1096,9 @@ tr:hover td{background:#fafbfc}
           <label>Typ dokumentu</label>
           <select id="upload-doc-type" style="width:100%;padding:10px;border:1.5px solid var(--brd);border-radius:8px;font-size:14px">
             <option value="op">🪪 Občanský průkaz / Pas</option>
-            <option value="zivnost">🏢 Živnostenské oprávnění (CZ)</option>
-            <option value="gewerbeschein">📋 Živnostenský list (DE)</option>
+            <option value="zivnost">🏢 Živnostenský list</option>
             <option value="a1">🇪🇺 Potvrzení A1</option>
-            <option value="freistellung">📄 Potvrzení o osvobození (DE)</option>
+            <option value="freistellung">📄 Freistellung</option>
             <option value="other">📎 Jiný dokument</option>
           </select>
         </div>
@@ -2471,6 +2472,15 @@ const sb = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
   }
 })
 
+// Vrátí datum v MÍSTNÍM čase jako YYYY-MM-DD (ne UTC — jinak se večer den posune)
+function localDateStr(d) {
+  const dt = d ? new Date(d) : new Date()
+  const y = dt.getFullYear()
+  const m = String(dt.getMonth() + 1).padStart(2, '0')
+  const day = String(dt.getDate()).padStart(2, '0')
+  return `${y}-${m}-${day}`
+}
+
 // Detekuj recovery link z URL PŘED auth eventy (SIGNED_IN přijde před PASSWORD_RECOVERY)
 let isRecoveryMode = window.location.hash.includes('type=recovery') ||
                      new URLSearchParams(window.location.hash.slice(1)).get('type') === 'recovery'
@@ -3059,7 +3069,7 @@ async function doRegister() {
   const prof = document.getElementById('reg-prof').value
   const locality = document.getElementById('reg-locality').value.trim()
   const german = document.getElementById('reg-german').value
-  const startDate = new Date().toISOString().split('T')[0]  // den spolupráce = den registrace
+  const startDate = localDateStr()  // den spolupráce = den registrace
   const hasCar = document.getElementById('reg-car').checked
   const isOsvec = document.getElementById('reg-osvec').checked
 
@@ -3671,7 +3681,7 @@ async function recordAttendance(type) {
 
   if (type === 'in') {
     const { data, error } = await sb.from('attendance').insert({
-      worker_id: workerId, work_date: now.toISOString().split('T')[0],
+      worker_id: workerId, work_date: localDateStr(now),
       check_in: timeStr, location_address: site,
       location_lat: gpsLat, location_lng: gpsLng,
       kw: kw.week, kw_year: kw.year,
@@ -3698,7 +3708,7 @@ async function recordAttendance(type) {
 }
 
 async function loadTodayTimeline() {
-  const today = new Date().toISOString().split('T')[0]
+  const today = localDateStr()
   const workerId = document.getElementById('att-worker')?.value
   if (!workerId) return
   const { data } = await sb.from('attendance').select('*').eq('worker_id', workerId).eq('work_date', today)
@@ -3734,7 +3744,7 @@ async function loadKWData() {
 
   const nowAdmin = new Date()
   const nowStrAdmin = nowAdmin.toTimeString().slice(0,8)
-  const todayStrAdmin = nowAdmin.toISOString().split('T')[0]
+  const todayStrAdmin = localDateStr(nowAdmin)
 
   // Inicializuj všechny pracovníky (i s 0h)
   const workers = {}
@@ -3765,7 +3775,7 @@ async function loadKWData() {
     // dayIdx: 1=Po ... 6=So
     const d = new Date(weekStart)
     d.setDate(weekStart.getDate() + (dayIdx - 1))
-    return d.toISOString().split('T')[0]
+    return localDateStr(d)
   }
   // buňka pro den: červená pokud 0h a den už nastal (minulost/dnešek)
   function dayCell(w, dayIdx) {
@@ -3824,7 +3834,7 @@ async function deleteDocument(docId) {
 async function loadDocuments() {
   const { data } = await sb.from('documents').select('*, worker:profiles!worker_id(full_name)').order('uploaded_at',{ascending:false})
   const tbody = document.getElementById('docs-table')
-  const docLabels = {op:'Občanský průkaz / Pas',zivnost:'Živnostenské oprávnění (CZ)',gewerbeschein:'Živnostenský list (DE)',a1:'Potvrzení A1',freistellung:'Potvrzení o osvobození (DE)',other:'Jiný dokument'}
+  const docLabels = {op:'Občanský průkaz / Pas',zivnost:'Živnostenský list',gewerbeschein:'Živnostenský list',a1:'Potvrzení A1',freistellung:'Freistellung',other:'Jiný dokument'}
   if (!data?.length) { tbody.innerHTML='<tr><td colspan="6" style="text-align:center;color:var(--text3);padding:20px">Žádné dokumenty</td></tr>'; return }
   tbody.innerHTML = data.map(d=>`
     <tr>
@@ -4259,7 +4269,7 @@ const tutorialSteps = [
       <div class="tut-doc-card" style="border-color:#e6a800">
         <div style="font-size:22px">📄</div>
         <div>
-          <div class="tut-doc-title">Potvrzení o osvobození</div>
+          <div class="tut-doc-title">Freistellung</div>
           <div class="tut-doc-desc">Freistellungsbescheinigung (pokud máte)</div>
         </div>
         <span class="tut-badge orange">Pokud máte</span>
@@ -4844,16 +4854,24 @@ let pendingCheckout = null
 function showCheckoutDialog() {
   const d = document.getElementById('checkout-dialog')
   if (!d) return
+  // Nadpis: odchod je už uložen, dialog jen doplní stavbu/popis
+  const titleEl = d.querySelector('div[style*="font-weight:800"]')
+  if (titleEl) titleEl.textContent = 'Doplňte stavbu a co jste dělal'
+  const confirmBtn = d.querySelector('button[onclick="saveDayWorkLog()"]') || d.querySelector('button[onclick="confirmCheckout()"]')
+  if (confirmBtn) { confirmBtn.textContent = 'Uložit'; confirmBtn.setAttribute('onclick', 'confirmCheckout()') }
   const lbl = document.getElementById('checkout-time-label')
   if (lbl && pendingCheckout) {
-    lbl.textContent = 'Čas odchodu: ' + pendingCheckout.timeStr + ' (' + pendingCheckout.hours + 'h)'
+    lbl.textContent = 'Odchod ' + pendingCheckout.timeStr + ' (' + pendingCheckout.hours + 'h) je uložen — doplňte prosím detaily.'
   }
-  // Načti naposledy použitou stavbu
+  // Předvyplň stavbu: 1) GPS adresa (když povolena poloha), 2) dnešní záznam, 3) naposledy použitá
+  const fromRecord = todayRecord?.construction_site || todayRecord?.location_address || ''
+  const fromGps = gpsAddr || ''
   const lastSite = localStorage.getItem('lastConstructionSite') || ''
   const siteEl = document.getElementById('checkout-site')
-  if (siteEl) siteEl.value = lastSite
+  if (siteEl) siteEl.value = fromRecord || fromGps || lastSite
   const descEl = document.getElementById('checkout-desc')
-  if (descEl) descEl.value = ''
+  // Předvyplň popis, pokud už byl během dne zapsán
+  if (descEl) descEl.value = todayRecord?.work_description || ''
   d.style.display = 'flex'
   setTimeout(() => siteEl?.focus(), 100)
 }
@@ -4861,10 +4879,14 @@ function showCheckoutDialog() {
 function cancelCheckout() {
   document.getElementById('checkout-dialog').style.display = 'none'
   pendingCheckout = null
+  resetCheckoutDialogToDefault()
+  dayWorkLogMode = false
 }
 
 async function confirmCheckout() {
-  if (!pendingCheckout || !todayAttId) return
+  if (!pendingCheckout) return
+  const attId = pendingCheckout.attId || todayAttId
+  if (!attId) return
   const siteEl = document.getElementById('checkout-site')
   const descEl = document.getElementById('checkout-desc')
   const site = siteEl?.value.trim()
@@ -4874,22 +4896,18 @@ async function confirmCheckout() {
   if(siteEl) siteEl.style.borderColor='#e0e0e0'
   if(descEl) descEl.style.borderColor='#e0e0e0'
 
-  // Ulož naposledy použitú stavbu
   localStorage.setItem('lastConstructionSite', site)
 
-  const { timeStr, hours } = pendingCheckout
+  // Odchod (check_out + hodiny) už je uložen — teď jen DOPLNÍME stavbu a popis
   const { data: savedRows, error } = await sb.from('attendance').update({
-    check_out: timeStr,
-    total_hours: hours,
     construction_site: site,
     work_description: desc
-  }).eq('id', todayAttId).select()
+  }).eq('id', attId).select()
   if (error) {
     console.error('[checkout] update error:', error)
-    showToast('❌ Chyba odchodu: ' + error.message)
+    showToast('❌ Chyba uložení popisu: ' + error.message)
     return
   }
-  // Ověř, že se popis opravdu uložil (kdyby sloupec chyběl)
   const saved = savedRows && savedRows[0]
   if (saved && (saved.work_description == null || saved.work_description === '') && desc) {
     console.warn('[checkout] work_description se neuložil — chybí sloupec v tabulce attendance?')
@@ -4900,14 +4918,75 @@ async function confirmCheckout() {
   pendingCheckout = null
   todayAttId = null
   todayRecord = null
-  showToast('🚪 Odchod zaznamenán — ' + timeStr + ' (' + hours + 'h)')
+  showToast('✅ Zapsáno')
   getTodayRecord()
   loadMobWeek()
 }
 
+// Denní zápis "co/kde jsem dělal" — kdykoli během dne (i o pauze)
+let dayWorkLogMode = false
+function openDayWorkLog() {
+  if (!todayAttId) { showToast('⚠️ Nejprve zaznamenejte příchod'); return }
+  dayWorkLogMode = true
+  const d = document.getElementById('checkout-dialog')
+  if (!d) return
+  // Přepiš nadpis a tlačítko na "průběžný zápis"
+  const titleEl = d.querySelector('div[style*="font-weight:800"]')
+  if (titleEl) titleEl.textContent = 'Co jsem dnes dělal'
+  const lbl = document.getElementById('checkout-time-label')
+  if (lbl) lbl.textContent = 'Můžete zapsat kdykoli během dne (i o pauze).'
+  const confirmBtn = d.querySelector('button[onclick="confirmCheckout()"]')
+  if (confirmBtn) { confirmBtn.textContent = 'Uložit'; confirmBtn.setAttribute('onclick', 'saveDayWorkLog()') }
+  // Předvyplň
+  const fromRecord = todayRecord?.construction_site || todayRecord?.location_address || ''
+  const fromGps = gpsAddr || ''
+  const siteEl = document.getElementById('checkout-site')
+  if (siteEl) siteEl.value = fromRecord || fromGps || (localStorage.getItem('lastConstructionSite') || '')
+  const descEl = document.getElementById('checkout-desc')
+  if (descEl) descEl.value = todayRecord?.work_description || ''
+  d.style.display = 'flex'
+  setTimeout(() => descEl?.focus(), 100)
+}
+
+async function saveDayWorkLog() {
+  if (!todayAttId) return
+  const siteEl = document.getElementById('checkout-site')
+  const descEl = document.getElementById('checkout-desc')
+  const site = siteEl?.value.trim()
+  const desc = descEl?.value.trim()
+  if (!site) { if(siteEl){siteEl.style.borderColor='#dc3545'; siteEl.focus()}; showToast('⚠️ Vyplňte stavbu'); return }
+  if (!desc) { if(descEl){descEl.style.borderColor='#dc3545'; descEl.focus()}; showToast('⚠️ Vyplňte co jste dělal'); return }
+  if(siteEl) siteEl.style.borderColor='#e0e0e0'
+  if(descEl) descEl.style.borderColor='#e0e0e0'
+  localStorage.setItem('lastConstructionSite', site)
+  const { error } = await sb.from('attendance').update({
+    construction_site: site,
+    work_description: desc
+  }).eq('id', todayAttId)
+  if (error) { showToast('❌ Chyba: ' + error.message); return }
+  // Aktualizuj lokální kopii
+  if (todayRecord) { todayRecord.construction_site = site; todayRecord.work_description = desc }
+  // Vrať dialog do původního stavu (checkout)
+  resetCheckoutDialogToDefault()
+  document.getElementById('checkout-dialog').style.display = 'none'
+  dayWorkLogMode = false
+  showToast('✅ Zapsáno')
+  getTodayRecord()
+}
+
+// Vrátí dialog do výchozího (odchodového) režimu
+function resetCheckoutDialogToDefault() {
+  const d = document.getElementById('checkout-dialog')
+  if (!d) return
+  const titleEl = d.querySelector('div[style*="font-weight:800"]')
+  if (titleEl) titleEl.textContent = 'Zaznamenat odchod'
+  const confirmBtn = d.querySelector('button[onclick="saveDayWorkLog()"]')
+  if (confirmBtn) { confirmBtn.textContent = 'Zaznamenat odchod'; confirmBtn.setAttribute('onclick', 'confirmCheckout()') }
+}
+
 async function getTodayRecord() {
   if (!currentUser) return
-  const today = new Date().toISOString().split('T')[0]
+  const today = localDateStr()
   // Načti VŠECHNY záznamy pro dnešek (může být více směn)
   const { data, error } = await sb.from('attendance').select('*')
     .eq('worker_id', currentUser.id)
@@ -4995,6 +5074,21 @@ function updateMobStav(rec, allToday) {
     setBtn('att-btn-break-end',  false, '', '', '')
     setBtn('att-btn-out',        true,  '#fdf0ee', '#c0392b', '#c0392b')
   }
+
+  // Tlačítko "Zapsat co jsem dělal" — jen při aktivní směně (rec existuje a není ukončená)
+  const wlBtn = document.getElementById('att-btn-worklog')
+  const wlDone = document.getElementById('att-worklog-done')
+  const activeShift = rec && rec.check_in && !rec.check_out
+  if (wlBtn) wlBtn.style.display = activeShift ? 'block' : 'none'
+  if (wlDone) {
+    const filled = activeShift && (rec.construction_site||'').trim() && (rec.work_description||'').trim()
+    if (filled) {
+      wlDone.style.display = 'block'
+      wlDone.textContent = '✅ Dnešní práce zapsána — při odchodu se už ptát nebudu'
+    } else {
+      wlDone.style.display = 'none'
+    }
+  }
 }
 
 let checkinInProgress = false
@@ -5008,7 +5102,7 @@ async function mobCheckin(type) {
   checkinInProgress = true
   const now = new Date()
   const timeStr = now.toTimeString().slice(0,8)
-  const today = now.toISOString().split('T')[0]
+  const today = localDateStr(now)
   const kw = getKW()
 
   try {
@@ -5108,13 +5202,42 @@ async function mobCheckin(type) {
           checkinInProgress = false
           return
         }
-        // Spočítej hodiny podle pravidel směny (7:00 start, odchod po 30 min, min 16:00)
+        // Spočítej hodiny podle pravidel směny
         const adjOut = applyAttendanceRules({ check_in: updated.check_in, check_out: timeStr, break_start: updated.break_start, break_end: updated.break_end })
         const h = adjOut.hours
-        pendingCheckout = { timeStr, hours: h }
+
+        // ČAS ODCHODU ULOŽ HNED (než pracovník dopíše dialog — jinak by se ukrojily minuty)
+        const { error: outErr } = await sb.from('attendance').update({
+          check_out: timeStr, total_hours: h
+        }).eq('id', todayAttId)
+        if (outErr) { showToast('❌ Chyba odchodu: ' + outErr.message); checkinInProgress = false; return }
+        updated.check_out = timeStr
+        updated.total_hours = h
+        todayRecord = { ...updated }
+
+        const hasSite = (current.construction_site || '').trim()
+        const hasDesc = (current.work_description || '').trim()
+
+        if (hasSite && hasDesc) {
+          // Stavba i popis už vyplněny během dne → hotovo, žádný dialog
+          todayAttId = null
+          todayRecord = null
+          showToast('🚪 Odchod zaznamenán — ' + timeStr + ' (' + h + 'h)')
+          updateMobStav(null, [updated])
+          getTodayRecord()
+          loadMobWeek()
+          checkinInProgress = false
+          return
+        }
+
+        // Odchod je uložen — dialog teď jen DOPLNÍ stavbu a popis (čas se už nemění)
+        showToast('🚪 Odchod zaznamenán — ' + timeStr + ' (' + h + 'h)')
+        pendingCheckout = { timeStr, hours: h, attId: todayAttId }
         showCheckoutDialog()
+        updateMobStav(null, [updated])
+        loadMobWeek()
         checkinInProgress = false
-        return  // uložení proběhne v confirmCheckout()
+        return
       }
 
       // Aktualizuj UI OKAMŽITĚ z lokální kopie — bez čekání na server
@@ -5191,7 +5314,7 @@ async function loadMobWeek() {
 
   const now = new Date()
   const nowStr = now.toTimeString().slice(0,8)
-  const todayStr = now.toISOString().split('T')[0]
+  const todayStr = localDateStr(now)
 
   // Spočítej hodiny pro každý záznam — správně dle data
   function getHours(r) {
@@ -5242,9 +5365,9 @@ async function loadMobWeek() {
   if (!div) return
 
   // Denní přehled — VŠECH 7 dní týdne (Po–Ne), i dny bez práce
-  const todayStrList = new Date().toISOString().split('T')[0]
+  const todayStrList = localDateStr()
   const weekStartDate = getWeekStartDate(kw.week, kw.year)  // pondělí daného KW
-  const fmtDate = dt => dt.toISOString().split('T')[0]
+  const fmtDate = dt => localDateStr(dt)
 
   // záznamy seskupené podle data
   const byDate = {}
@@ -5327,10 +5450,10 @@ async function loadMobDocs() {
 
   const typeLabels = {
     op: '🪪 Občanský průkaz / Pas',
-    zivnost: '🏢 Živnostenské oprávnění (CZ)',
-    gewerbeschein: '📋 Živnostenský list (DE)',
+    zivnost: '🏢 Živnostenský list',
+    gewerbeschein: '🏢 Živnostenský list',
     a1: '🇪🇺 Potvrzení A1',
-    freistellung: '📄 Potvrzení o osvobození (DE)',
+    freistellung: '📄 Freistellung',
     other: '📎 Jiný dokument'
   }
 
@@ -5577,7 +5700,7 @@ async function checkDocumentReadability(file, docType) {
   // Typy, u kterých MUSÍ být datum platnosti (jinak doklad neprojde)
   const VALIDITY_REQUIRED = ['op', 'pas', 'ridicak']
   const needsValidity = VALIDITY_REQUIRED.includes(docType)
-  const today = new Date().toISOString().split('T')[0]
+  const today = localDateStr()
   const prompt = `Jsi přísný kontrolor dokumentů pro stavební firmu. Na obrázku má být: ${expectedName}.
 Dnešní datum je ${today}.
 Posuď obrázek a vrať POUZE čistý JSON (bez markdownu, bez textu navíc) v tomto formátu:
@@ -6228,7 +6351,7 @@ async function exportKW() {
   // Načti data
   const startDate = getWeekStartDate(week, year)
   const endDate = new Date(startDate); endDate.setDate(endDate.getDate() + 6)
-  const fmt = d => d.toISOString().split('T')[0]
+  const fmt = d => localDateStr(d)
 
   const { data: att } = await sb.from('attendance')
     .select('*, worker:profiles!worker_id(full_name, profession)')
@@ -6547,7 +6670,7 @@ async function exportWorkerKW(workerId, workerName, week, year) {
 
   const startDate = getWeekStartDate(week, year)
   const endDate = new Date(startDate); endDate.setDate(endDate.getDate() + 6)
-  const fmt = d => d.toISOString().split('T')[0]
+  const fmt = d => localDateStr(d)
 
   const { data: att } = await sb.from('attendance')
     .select('*')
@@ -6838,7 +6961,7 @@ function toggleManualForm() {
   if (icon) icon.textContent = isOpen ? '＋' : '－'
   if (!isOpen) {
     // Nastav dnešní datum
-    document.getElementById('manual-date').value = new Date().toISOString().split('T')[0]
+    document.getElementById('manual-date').value = localDateStr()
     loadManualWorkers()
   }
 }
@@ -6946,17 +7069,17 @@ async function saveManualAttendance() {
 // ============ DOCUMENT ALERTS ADMIN ============
 async function loadDocumentAlertsStat() {
   const today = new Date()
-  const todayStr = today.toISOString().split('T')[0]
-  const in30days = new Date(today.getTime() + 30*86400000).toISOString().split('T')[0]
+  const todayStr = localDateStr(today)
+  const in30days = localDateStr(new Date(today.getTime()+30*86400000))
 
   // Povinné typy dokumentů
   const REQUIRED_TYPES = ['op', 'zivnost', 'a1']
   const typeLabels = {
     op: 'Občanský průkaz / Pas',
     zivnost: 'Živnostenský list',
-    gewerbeschein: 'Živnostenský list (DE)',
+    gewerbeschein: 'Živnostenský list',
     a1: 'Potvrzení A1',
-    freistellung: 'Potvrzení o osvobození',
+    freistellung: 'Freistellung',
     other: 'Dokument'
   }
 
@@ -8050,14 +8173,14 @@ async function checkUnreadNotifications() {
 // ============ DOCUMENT ALERTS ============
 async function checkDocumentAlerts() {
   const today = new Date()
-  const in30days = new Date(today.getTime() + 30 * 86400000).toISOString().split('T')[0]
-  const todayStr = today.toISOString().split('T')[0]
+  const in30days = localDateStr(new Date(today.getTime()+30*86400000))
+  const todayStr = localDateStr(today)
 
   const typeLabels = {
     op: 'Občanský průkaz',
     zivnost: 'Živnostenský list',
     a1: 'Potvrzení A1',
-    freistellung: 'Potvrzení o osvobození',
+    freistellung: 'Freistellung',
     other: 'Dokument'
   }
 
@@ -8158,7 +8281,7 @@ function toggleVacForm() {
   const btn = document.getElementById('vac-add-btn')
   if (isHidden) {
     // Nastav dnešní datum jako default
-    const today = new Date().toISOString().split('T')[0]
+    const today = localDateStr()
     document.getElementById('vac-from').value = today
     document.getElementById('vac-to').value = today
     if (btn) btn.textContent = '✕ Zrušit'
@@ -8199,7 +8322,7 @@ async function loadMobVacations() {
     div.innerHTML = '<div style="text-align:center;padding:20px;color:var(--text3);font-size:13px">Žádná dovolená naplánována</div>'
     return
   }
-  const today = new Date().toISOString().split('T')[0]
+  const today = localDateStr()
   div.innerHTML = data.map(v => {
     const isPast = v.date_to < today
     const isNow = v.date_from <= today && v.date_to >= today
@@ -8236,7 +8359,7 @@ async function loadWdVacations() {
     .order('date_from', { ascending: false })
   const div = document.getElementById('wdt-dovolena')
   if (!div) return
-  const today = new Date().toISOString().split('T')[0]
+  const today = localDateStr()
   if (!data?.length) {
     div.innerHTML = '<div style="text-align:center;padding:20px;color:var(--text3)">Žádná dovolená naplánována</div>'
     return
@@ -8461,7 +8584,7 @@ async function loadWdAttendance() {
   const { data } = await sb.from('attendance').select('*').eq('worker_id',currentWorkerId).eq('kw',week).eq('kw_year',year).order('work_date')
   const tbody = document.getElementById('wd-att-table')
   const nowForAtt = new Date().toTimeString().slice(0,8)
-  const todayStrWd = new Date().toISOString().split('T')[0]
+  const todayStrWd = localDateStr()
 
   // Mini-přehled dnů Po–Ne: součet hodin za den, 0h (uplynulý den) = červeně
   const dayHours = {1:0,2:0,3:0,4:0,5:0,6:0,7:0}
@@ -8473,7 +8596,7 @@ async function loadWdAttendance() {
     if (dayHours[dIdx] !== undefined) dayHours[dIdx] += h
   })
   const wdWeekStart = getWeekStartDate(week, year)
-  function wdDateOfDay(i){ const d=new Date(wdWeekStart); d.setDate(wdWeekStart.getDate()+(i-1)); return d.toISOString().split('T')[0] }
+  function wdDateOfDay(i){ const d=new Date(wdWeekStart); d.setDate(wdWeekStart.getDate()+(i-1)); return localDateStr(d) }
   const dNames = {1:'Po',2:'Út',3:'St',4:'Čt',5:'Pá',6:'So',7:'Ne'}
   const summaryCells = [1,2,3,4,5,6,7].map(i => {
     const h = dayHours[i]
@@ -8502,7 +8625,7 @@ async function loadWdAttendance() {
     if (r.total_hours) {
       hoursDisplay = `<b style="color:var(--blue)">${r.total_hours}h</b>`
     } else if (r.check_in && !r.check_out) {
-      const isToday = r.work_date === new Date().toISOString().split('T')[0]
+      const isToday = r.work_date === localDateStr()
       if (isToday) {
         const running = calcHours(r.check_in, nowForAtt, r.break_start, r.break_end)
         hoursDisplay = `<b style="color:var(--amber)">${running.toFixed(1)}h ▶</b>`
@@ -8535,7 +8658,7 @@ async function loadWdAttendance() {
     </tr>`
   }).join('')
   const nowStr2 = new Date().toTimeString().slice(0,8)
-  const todayDateStr = new Date().toISOString().split('T')[0]
+  const todayDateStr = localDateStr()
   const total = data.reduce((s,r) => {
     if (r.total_hours) return s + r.total_hours
     if (r.check_in && !r.check_out && r.work_date === todayDateStr) {
@@ -8701,7 +8824,7 @@ async function uploadDocumentForWorker() {
 async function loadWdDocs(id) {
   const { data } = await sb.from('documents').select('*').eq('worker_id', id||currentWorkerId)
   const div = document.getElementById('wd-docs-list')
-  const types = {op:'Občanský průkaz / Pas',zivnost:'Živnostenské oprávnění (CZ)',gewerbeschein:'Živnostenský list (DE)',a1:'Potvrzení A1',freistellung:'Potvrzení o osvobození (DE)',other:'Jiný dokument'}
+  const types = {op:'Občanský průkaz / Pas',zivnost:'Živnostenský list',gewerbeschein:'Živnostenský list',a1:'Potvrzení A1',freistellung:'Freistellung',other:'Jiný dokument'}
   const statusInfo = {
     ok: { label: 'V pořádku', cls: 'pg' },
     pending: { label: 'Čeká na kontrolu', cls: 'pa' },
