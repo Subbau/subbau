@@ -1094,7 +1094,7 @@ tr:hover td{background:#fafbfc}
         <div class="mob-card-title">📤 Nahrát dokument</div>
         <div class="fg" style="margin-bottom:10px">
           <label>Typ dokumentu</label>
-          <select id="upload-doc-type" style="width:100%;padding:10px;border:1.5px solid var(--brd);border-radius:8px;font-size:14px">
+          <select id="upload-doc-type" onchange="onDocTypeChange()" style="width:100%;padding:10px;border:1.5px solid var(--brd);border-radius:8px;font-size:14px">
             <option value="op">🪪 Občanský průkaz / Pas</option>
             <option value="zivnost">🏢 Živnostenský list</option>
             <option value="a1">🇪🇺 Potvrzení A1</option>
@@ -5550,7 +5550,7 @@ function handleFileSelect(input, side) {
   if (!isPdf && !(imageAllowed && isImage)) {
     showToast(imageAllowed
       ? '⚠️ Nahrajte PDF nebo fotku/sken dokladu.'
-      : '⚠️ Nahrávejte pouze PDF. Naskenujte dokument do PDF a vyberte ho.')
+      : '⚠️ Tento dokument nahrajte jako PDF nebo sken.')
     input.value = ''
     return
   }
@@ -5602,10 +5602,10 @@ function onDocTypeChange() {
   if (warn1) {
     warn1.innerHTML = imageAllowed
       ? '📷 U dokladu můžete nahrát <b>PDF, nebo vyfotit/naskenovat</b>. Foťte za dobrého světla, celý doklad ostře a bez zakrytí.'
-      : '⚠️ Nahrávejte <b>pouze PDF</b>. Na telefonu dokument <b>naskenujte do PDF</b> (Soubory: ⋯ → Naskenovat dokumenty, nebo Poznámky). <b>Žádné fotky.</b>'
-    warn1.style.background = imageAllowed ? '#e8f0fb' : '#fdf0ee'
-    warn1.style.borderColor = imageAllowed ? '#3b7dd8' : '#e8b5ae'
-    warn1.style.color = imageAllowed ? '#1a56a0' : '#c0392b'
+      : '📄 Nahrajte <b>PDF nebo sken</b>. Sken uděláte v telefonu: appka <b>Soubory</b> → ⋯ → Naskenovat dokumenty (uloží PDF), nebo <b>Poznámky</b>. Fotka z fotoaparátu zde neprojde.'
+    warn1.style.background = '#e8f0fb'
+    warn1.style.borderColor = '#3b7dd8'
+    warn1.style.color = '#1a56a0'
   }
   const warn2 = document.getElementById('upload-warn-2')
   if (warn2) {
@@ -5825,17 +5825,30 @@ async function imagesToPdfBlob(files) {
   const margin = 24
 
   for (let i = 0; i < list.length; i++) {
-    let dataUrl = await loadDataUrl(list[i])
-    // jsPDF umí JPEG/PNG; pokud je WEBP nebo jiné, překresli přes canvas na JPEG
+    let dataUrl
+    try {
+      dataUrl = await loadDataUrl(list[i])
+    } catch(e) { throw new Error('Soubor se nepodařilo načíst') }
+    // jsPDF umí JPEG/PNG; pokud je WEBP/HEIC nebo jiné, překresli přes canvas na JPEG
     let fmt = 'JPEG'
     if (/^data:image\/png/i.test(dataUrl)) fmt = 'PNG'
     if (!/^data:image\/(jpe?g|png)/i.test(dataUrl)) {
-      const tmp = await loadImg(dataUrl)
+      let tmp
+      try {
+        tmp = await loadImg(dataUrl)
+      } catch(e) {
+        throw new Error('Tento formát fotky telefon neumí převést. Vyfoťte přes „Skenovat dokument" nebo nahrajte PDF.')
+      }
       const c = document.createElement('canvas'); c.width = tmp.naturalWidth; c.height = tmp.naturalHeight
       c.getContext('2d').drawImage(tmp, 0, 0)
       dataUrl = c.toDataURL('image/jpeg', 0.92); fmt = 'JPEG'
     }
-    const img = await loadImg(dataUrl)
+    let img
+    try {
+      img = await loadImg(dataUrl)
+    } catch(e) {
+      throw new Error('Fotku nelze zpracovat. Zkuste PDF nebo sken dokumentu.')
+    }
     const maxW = pageW - margin * 2, maxH = pageH - margin * 2
     let w = img.naturalWidth, h = img.naturalHeight
     const ratio = Math.min(maxW / w, maxH / h)
