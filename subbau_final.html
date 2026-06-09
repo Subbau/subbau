@@ -1113,7 +1113,7 @@ tr:hover td{background:#fafbfc}
               <input type="file" id="upload-file" accept="application/pdf,.pdf" style="display:none" onchange="handleFileSelect(this, 1)">
             </label>
           </div>
-          <div style="font-size:11px;color:#c0392b;background:#fdf0ee;border:1px solid #e8b5ae;border-radius:8px;padding:8px 10px;margin-bottom:8px">⚠️ Nahrávejte <b>pouze PDF</b>. Na telefonu dokument <b>naskenujte do PDF</b> (appka Soubory: ⋯ → Naskenovat dokumenty → uložit jako PDF, nebo Poznámky) a tady ho vyberte. <b>Žádné fotky.</b></div>
+          <div id="upload-warn-1" style="font-size:11px;color:#c0392b;background:#fdf0ee;border:1px solid #e8b5ae;border-radius:8px;padding:8px 10px;margin-bottom:8px">⚠️ Nahrávejte <b>pouze PDF</b>. Na telefonu dokument <b>naskenujte do PDF</b> (appka Soubory: ⋯ → Naskenovat dokumenty → uložit jako PDF, nebo Poznámky) a tady ho vyberte. <b>Žádné fotky.</b></div>
           <div id="upload-preview-1" style="display:none;margin-bottom:8px;text-align:center">
             <img id="upload-img-1" style="max-width:100%;max-height:150px;border-radius:8px;border:2px solid var(--green)" src="">
             <div style="font-size:11px;color:var(--green);margin-top:4px">✅ Přední strana nahrána</div>
@@ -1131,7 +1131,7 @@ tr:hover td{background:#fafbfc}
               <input type="file" id="upload-file-2" accept="application/pdf,.pdf" style="display:none" onchange="handleFileSelect(this, 2)">
             </label>
           </div>
-          <div style="font-size:11px;color:#c0392b;background:#fdf0ee;border:1px solid #e8b5ae;border-radius:8px;padding:8px 10px;margin-bottom:8px">⚠️ Nahrávejte <b>pouze PDF</b> — žádné fotky.</div>
+          <div id="upload-warn-2" style="font-size:11px;color:#c0392b;background:#fdf0ee;border:1px solid #e8b5ae;border-radius:8px;padding:8px 10px;margin-bottom:8px">⚠️ Nahrávejte <b>pouze PDF</b> — žádné fotky.</div>
           <div id="upload-preview-2" style="display:none;margin-bottom:8px;text-align:center">
             <img id="upload-img-2" style="max-width:100%;max-height:150px;border-radius:8px;border:2px solid var(--green)" src="">
             <div style="font-size:11px;color:var(--green);margin-top:4px">✅ Zadní strana nahrána</div>
@@ -5542,10 +5542,15 @@ const MULTISIDE_TYPES = ['op', 'zivnost', 'gewerbeschein', 'a1', 'freistellung']
 function handleFileSelect(input, side) {
   const file = input.files[0]
   if (!file) return
-  // Jen PDF
+  const docType = document.getElementById('upload-doc-type')?.value || 'op'
   const isPdf = file.type === 'application/pdf' || /\.pdf$/i.test(file.name)
-  if (!isPdf) {
-    showToast('⚠️ Nahrávejte pouze PDF. Naskenujte dokument do PDF a vyberte ho.')
+  const isImage = file.type.startsWith('image/') || /\.(jpe?g|png|heic|webp)$/i.test(file.name)
+  // U OP/Pasu povolíme PDF i obrázek (fotka/sken), jinde jen PDF
+  const imageAllowed = (docType === 'op')
+  if (!isPdf && !(imageAllowed && isImage)) {
+    showToast(imageAllowed
+      ? '⚠️ Nahrajte PDF nebo fotku/sken dokladu.'
+      : '⚠️ Nahrávejte pouze PDF. Naskenujte dokument do PDF a vyberte ho.')
     input.value = ''
     return
   }
@@ -5575,6 +5580,43 @@ function onDocTypeChange() {
     else if (isMulti) side1label.textContent = '📄 Přední strana / strana 1'
     else side1label.textContent = '📄 Vyberte soubor'
   }
+
+  // U OP/Pasu povolíme i fotku/sken (obrázek), jinde jen PDF
+  const imageAllowed = (docType === 'op')
+  const acceptVal = imageAllowed ? 'application/pdf,.pdf,image/*' : 'application/pdf,.pdf'
+  ;['upload-file', 'upload-file-2'].forEach(id => {
+    const el = document.getElementById(id)
+    if (el) {
+      el.setAttribute('accept', acceptVal)
+      if (imageAllowed) el.setAttribute('capture', 'environment')  // na mobilu nabídne fotoaparát
+      else el.removeAttribute('capture')
+    }
+  })
+  // Texty na dlaždici a hlášky
+  const picksText = imageAllowed ? 'Vybrat PDF nebo fotku' : 'Vybrat PDF'
+  const subText = imageAllowed ? 'PDF nebo fotka/sken dokladu' : 'Pouze PDF dokument'
+  document.querySelectorAll('#upload-side1-section label span:nth-child(2), #upload-side2-section label span:nth-child(2)').forEach(s => s.textContent = picksText)
+  document.querySelectorAll('#upload-side1-section label span:nth-child(3), #upload-side2-section label span:nth-child(3)').forEach(s => s.textContent = subText)
+  // Varovná hláška
+  const warn1 = document.getElementById('upload-warn-1')
+  if (warn1) {
+    warn1.innerHTML = imageAllowed
+      ? '📷 U dokladu můžete nahrát <b>PDF, nebo vyfotit/naskenovat</b>. Foťte za dobrého světla, celý doklad ostře a bez zakrytí.'
+      : '⚠️ Nahrávejte <b>pouze PDF</b>. Na telefonu dokument <b>naskenujte do PDF</b> (Soubory: ⋯ → Naskenovat dokumenty, nebo Poznámky). <b>Žádné fotky.</b>'
+    warn1.style.background = imageAllowed ? '#e8f0fb' : '#fdf0ee'
+    warn1.style.borderColor = imageAllowed ? '#3b7dd8' : '#e8b5ae'
+    warn1.style.color = imageAllowed ? '#1a56a0' : '#c0392b'
+  }
+  const warn2 = document.getElementById('upload-warn-2')
+  if (warn2) {
+    warn2.innerHTML = imageAllowed
+      ? '📷 Druhá strana — PDF nebo fotka/sken.'
+      : '⚠️ Nahrávejte <b>pouze PDF</b> — žádné fotky.'
+    warn2.style.background = imageAllowed ? '#e8f0fb' : '#fdf0ee'
+    warn2.style.borderColor = imageAllowed ? '#3b7dd8' : '#e8b5ae'
+    warn2.style.color = imageAllowed ? '#1a56a0' : '#c0392b'
+  }
+
   // RESET souborů při změně typu
   resetUploadForm()
 }
@@ -5885,13 +5927,31 @@ async function uploadDocument() {
   progress.style.display = 'block'
 
   // 2. Sestav výsledný soubor — VŽDY PDF
-  // - obrázek(y) → převod na jedno PDF (přední + zadní strana = 2 stránky)
   // - PDF na vstupu → nahraje se beze změny
+  // - obrázek (fotka/sken, povoleno u OP) → převod na PDF (přední + zadní = stránky)
   let uploadBlob, uploadExt, uploadContentType
-  // Vstup je vždy PDF (focení vypnuto, accept jen PDF)
-  uploadBlob = selectedFile
-  uploadExt = 'pdf'
-  uploadContentType = 'application/pdf'
+  const frontIsImage = selectedFile && (selectedFile.type?.startsWith('image/') || /\.(jpe?g|png|heic|webp)$/i.test(selectedFile.name))
+  if (frontIsImage) {
+    try {
+      const imgs = [selectedFile]
+      if (selectedFile2 && (selectedFile2.type?.startsWith('image/') || /\.(jpe?g|png|heic|webp)$/i.test(selectedFile2.name))) {
+        imgs.push(selectedFile2)
+      }
+      uploadBlob = await imagesToPdfBlob(imgs)
+      uploadExt = 'pdf'
+      uploadContentType = 'application/pdf'
+      // Obě strany sloučeny do jednoho PDF → druhý soubor už zvlášť nenahrávat
+      if (imgs.length > 1) selectedFile2 = null
+    } catch(e) {
+      showToast('❌ Převod fotky na PDF selhal: ' + e.message)
+      btn.disabled = false; btn.textContent = '📤 Nahrát'; progress.style.display = 'none'
+      return
+    }
+  } else {
+    uploadBlob = selectedFile
+    uploadExt = 'pdf'
+    uploadContentType = 'application/pdf'
+  }
 
   btn.textContent = '⏳ Nahrávám...'
   const filePath = `${currentUser.id}/${docType}_${Date.now()}.${uploadExt}`
