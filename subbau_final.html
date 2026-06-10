@@ -2708,16 +2708,11 @@ function startAuthTimeout() {
       appInitialized = false
       authHandling = false
       loginInProgress = false
-      initAppRunning = false
+      // Pravděpodobně poškozená/viselá session z normálního prohlížeče → odhlas a ukaž čistý login
       try { await sb.auth.signOut() } catch(e) {}
       showLogin()
-      const loginErr = document.getElementById('login-err')
-      if (loginErr) {
-        loginErr.style.display = 'block'
-        loginErr.textContent = 'Přihlášení trvalo příliš dlouho (pomalé připojení). Zkuste to prosím znovu.'
-      }
     }
-  }, 9000)
+  }, 12000)
 }
 function clearAuthTimeout() {
   if (authTimeoutId) { clearTimeout(authTimeoutId); authTimeoutId = null }
@@ -3091,58 +3086,26 @@ async function doLogin() {
   appInitialized = false
   authHandling = false
 
-  let result
-  try {
-    result = await sb.auth.signInWithPassword({ email, password: pwd })
-  } catch(e) {
-    result = { error: { message: e.message || 'Síťová chyba' } }
-  }
-
-  const { data, error } = result
+  const { error } = await sb.auth.signInWithPassword({ email, password: pwd })
 
   if (error) {
-    err.textContent = /Invalid|credentials/i.test(error.message) ? 'Nesprávný email nebo heslo.' : 'Chyba přihlášení: ' + error.message
+    err.textContent = error.message.includes('Invalid') ? 'Nesprávný email nebo heslo.' : 'Chyba: ' + error.message
     err.style.display = 'block'
     btn.textContent = 'Přihlásit se →'
     btn.disabled = false
     loginInProgress = false
     appInitialized = false
     authHandling = false
-    return
   }
-
-  // ÚSPĚCH: spusť initApp PŘÍMO z výsledku (nečekej jen na onAuthStateChange event,
-  // který může přijít se zpožděním nebo se prolnout s INITIAL_SESSION → nestabilita).
-  const user = data?.user || data?.session?.user
-  if (user) {
-    appInitialized = true
-    authHandling = true
-    currentUser = user
-    clearAuthTimeout()
-    startAuthTimeout()  // pojistka, kdyby initApp uvázl
-    try {
-      await initApp(user)
-    } catch(e) {
-      console.error('[doLogin] initApp selhal:', e)
-      err.textContent = 'Přihlášení proběhlo, ale načtení selhalo. Zkuste to prosím znovu.'
-      err.style.display = 'block'
-    } finally {
-      clearAuthTimeout()
-      authHandling = false
-      loginInProgress = false
+  // Pri uspechu - onAuthStateChange prevezme rizeni
+  // Reset tlacitka pro jistotu
+  setTimeout(() => {
+    if (loginInProgress) {
       btn.textContent = 'Přihlásit se →'
       btn.disabled = false
+      loginInProgress = false
     }
-  } else {
-    // Fallback: kdyby session nepřišla v datech, počká na event
-    setTimeout(() => {
-      if (loginInProgress) {
-        btn.textContent = 'Přihlásit se →'
-        btn.disabled = false
-        loginInProgress = false
-      }
-    }, 5000)
-  }
+  }, 5000)
 }
 
 
