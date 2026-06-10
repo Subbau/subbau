@@ -790,7 +790,11 @@ tr:hover td{background:#fafbfc}
           <div class="card">
             <div class="card-h" style="flex-wrap:wrap;gap:8px">
               <h4 id="cal-title">Kalendář</h4>
-              <div style="display:flex;gap:6px;align-items:center">
+              <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
+                <select id="cal-worker" onchange="renderCalendar()" style="padding:5px 10px;border:1px solid var(--brd);border-radius:6px;font-size:12px;font-family:inherit;max-width:180px">
+                  <option value="">Všichni pracovníci</option>
+                </select>
+                <span style="width:8px"></span>
                 <button onclick="calPrev()" style="padding:5px 10px;border:1px solid var(--brd);border-radius:6px;cursor:pointer;background:none;font-family:inherit">◀</button>
                 <button onclick="calToday()" style="padding:5px 10px;border:1px solid var(--brd);border-radius:6px;cursor:pointer;background:none;font-family:inherit;font-size:12px">Dnes</button>
                 <button onclick="calNext()" style="padding:5px 10px;border:1px solid var(--brd);border-radius:6px;cursor:pointer;background:none;font-family:inherit">▶</button>
@@ -1668,6 +1672,25 @@ tr:hover td{background:#fafbfc}
 
       <!-- DOCHÁZKA -->
       <div id="wdt-dochazka" class="wdt">
+        <div style="background:var(--bg);border-radius:10px;padding:12px;margin-bottom:14px">
+          <div style="font-size:13px;font-weight:700;margin-bottom:8px">🔄 Turnus (pracovní cyklus)</div>
+          <div id="wd-turnus-info" style="font-size:12px;color:var(--text2);margin-bottom:10px">—</div>
+          <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end">
+            <div class="fg" style="margin-bottom:0">
+              <label style="font-size:11px;color:var(--text3)">Týdnů práce</label>
+              <input type="number" id="wd-turnus-work" min="1" max="8" style="width:90px;padding:7px;border:1px solid var(--brd);border-radius:6px;font-size:13px">
+            </div>
+            <div class="fg" style="margin-bottom:0">
+              <label style="font-size:11px;color:var(--text3)">Týdnů volno</label>
+              <input type="number" id="wd-turnus-off" min="1" max="6" style="width:90px;padding:7px;border:1px solid var(--brd);border-radius:6px;font-size:13px">
+            </div>
+            <div class="fg" style="margin-bottom:0">
+              <label style="font-size:11px;color:var(--text3)">Začátek cyklu</label>
+              <input type="date" id="wd-turnus-start" style="padding:7px;border:1px solid var(--brd);border-radius:6px;font-size:13px">
+            </div>
+            <button onclick="saveWorkerTurnus()" style="padding:8px 14px;background:#1a1a1a;color:#FFCD00;border:none;border-radius:8px;cursor:pointer;font-family:inherit;font-weight:700;font-size:12px">💾 Uložit</button>
+          </div>
+        </div>
         <div style="display:flex;gap:8px;margin-bottom:12px;align-items:center">
           <label style="font-size:12px;color:var(--text2)">Týden:</label>
           <select id="wd-kw-sel" onchange="loadWdAttendance()" style="padding:5px 10px;border:1px solid var(--brd);border-radius:7px;font-size:12px;width:auto"></select>
@@ -4116,9 +4139,18 @@ async function renderCalendar() {
   content.innerHTML = '<div style="text-align:center;color:var(--text3);padding:20px">Načítám…</div>'
 
   // Pracovníci + jejich turnus
-  const { data: workers } = await sb.from('profiles')
+  const { data: allWorkers } = await sb.from('profiles')
     .select('id, full_name, profession, turnus_work_weeks, turnus_off_weeks, turnus_start')
     .in('role', ['osvec','partak']).eq('is_active', true).order('full_name')
+
+  // Naplň filtr pracovníků (jen jednou)
+  const selEl = document.getElementById('cal-worker')
+  if (selEl && selEl.options.length <= 1 && allWorkers?.length) {
+    selEl.innerHTML = '<option value="">Všichni pracovníci</option>' +
+      allWorkers.map(w => `<option value="${w.id}">${w.full_name}</option>`).join('')
+  }
+  const filterId = selEl?.value || ''
+  const workers = filterId ? (allWorkers||[]).filter(w => w.id === filterId) : (allWorkers||[])
 
   // Rozsah období
   let start, end
@@ -4193,6 +4225,15 @@ async function renderCalendar() {
       const ds = localDateStr(d)
       const inMonth = d.getMonth() === calAnchor.getMonth()
       const isT = ds===todayStr
+      if (filterId && workers.length === 1) {
+        // Jeden pracovník → ukaž přímo jeho status
+        const st = dayStatusFor(workers[0], ds, attSet, vacList)
+        const lbl = st==='work'?'<span style="color:var(--green);font-weight:700">🟢</span>':st==='vac'?'<span style="color:var(--blue);font-weight:700">🔵</span>':st==='off'?'<span style="color:#999">⚪</span>':''
+        html += `<td style="border:1px solid var(--brd);vertical-align:top;padding:4px;height:62px;${!inMonth?'background:#fafafa;color:#ccc':''};${isT?'outline:2px solid var(--amber)':''}">
+          <div style="font-weight:700;margin-bottom:3px;${!inMonth?'color:#ccc':''}">${d.getDate()}</div>
+          <div style="font-size:14px">${inMonth?lbl:''}</div>
+        </td>`
+      } else {
       let nWork=0,nVac=0,nOff=0
       workers.forEach(w=>{ const st=dayStatusFor(w,ds,attSet,vacList); if(st==='work')nWork++; else if(st==='vac')nVac++; else if(st==='off')nOff++ })
       html += `<td style="border:1px solid var(--brd);vertical-align:top;padding:4px;height:62px;${!inMonth?'background:#fafafa;color:#ccc':''};${isT?'outline:2px solid var(--amber)':''}">
@@ -4201,8 +4242,9 @@ async function renderCalendar() {
         ${nVac?`<div style="font-size:10px;color:var(--blue);font-weight:700">🔵 ${nVac}</div>`:''}
         ${nOff?`<div style="font-size:10px;color:#999">⚪ ${nOff}</div>`:''}
       </td>`
+      }
     })
-    html += '</tr></tbody></table><div style="font-size:11px;color:var(--text3);margin-top:8px">Čísla = počet pracovníků: 🟢 v práci · 🔵 dovolená · ⚪ volno</div>'
+    html += '</tr></tbody></table><div style="font-size:11px;color:var(--text3);margin-top:8px">' + (filterId ? 'Status pracovníka: 🟢 v práci · 🔵 dovolená · ⚪ volno' : 'Čísla = počet pracovníků: 🟢 v práci · 🔵 dovolená · ⚪ volno') + '</div>'
     content.innerHTML = html
   }
 }
@@ -9150,6 +9192,31 @@ async function deleteVacation(id) {
   loadMobVacations()
 }
 
+// Admin — uložení turnusu pracovníka
+async function saveWorkerTurnus() {
+  if (!currentWorkerId) return
+  const work = parseInt(document.getElementById('wd-turnus-work')?.value) || null
+  const off = parseInt(document.getElementById('wd-turnus-off')?.value) || null
+  const start = document.getElementById('wd-turnus-start')?.value || null
+  if ((work || off || start) && !(work && off && start)) {
+    showToast('⚠️ Vyplňte týdny práce, volno i začátek cyklu')
+    return
+  }
+  const { error } = await sb.from('profiles').update({
+    turnus_work_weeks: work, turnus_off_weeks: off, turnus_start: start
+  }).eq('id', currentWorkerId)
+  if (error) { showToast('❌ Chyba: ' + error.message); return }
+  showToast('✅ Turnus uložen')
+  if (currentWorkerProfile) { currentWorkerProfile.turnus_work_weeks = work; currentWorkerProfile.turnus_off_weeks = off; currentWorkerProfile.turnus_start = start }
+  const ti = document.getElementById('wd-turnus-info')
+  if (ti) {
+    if (work && off && start) {
+      const working = isWorkingDayByTurnus({ turnus_work_weeks: work, turnus_off_weeks: off, turnus_start: start }, localDateStr())
+      ti.innerHTML = `Cyklus <b>${work} prac. / ${off} volno</b>, od ${new Date(start).toLocaleDateString('cs-CZ')}. Dnes: <b>${working ? '🟢 v práci' : '⚪ volno'}</b>`
+    } else { ti.textContent = 'Turnus zatím nenastaven.' }
+  }
+}
+
 // Admin — načtení dovolených pracovníka v detailu
 async function loadWdVacations() {
   if (!currentWorkerId) return
@@ -9215,6 +9282,19 @@ async function openWorkerModal(id) {
   document.getElementById('wd-coop-start').value = w.cooperation_start || w.start_date || ''
   document.getElementById('wd-coop-end').value = w.cooperation_end || ''
   document.getElementById('wd-notes').value = w.notes || ''
+  // Turnus pracovníka
+  const tw = document.getElementById('wd-turnus-work'); if (tw) tw.value = w.turnus_work_weeks || ''
+  const to = document.getElementById('wd-turnus-off'); if (to) to.value = w.turnus_off_weeks || ''
+  const ts = document.getElementById('wd-turnus-start'); if (ts) ts.value = w.turnus_start || ''
+  const ti = document.getElementById('wd-turnus-info')
+  if (ti) {
+    if (w.turnus_work_weeks && w.turnus_off_weeks && w.turnus_start) {
+      const working = isWorkingDayByTurnus(w, localDateStr())
+      ti.innerHTML = `Cyklus <b>${w.turnus_work_weeks} prac. / ${w.turnus_off_weeks} volno</b>, od ${new Date(w.turnus_start).toLocaleDateString('cs-CZ')}. Dnes: <b>${working ? '🟢 v práci' : '⚪ volno'}</b>`
+    } else {
+      ti.textContent = 'Turnus zatím nenastaven.'
+    }
+  }
 
   // Fill KW selects
   const kwOpts = buildKWOptions()
