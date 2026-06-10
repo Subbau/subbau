@@ -2722,6 +2722,16 @@ sb.auth.onAuthStateChange(async (event, session) => {
   console.log('[auth] event:', event, '| session:', !!session)
 
   if (event === 'SIGNED_OUT') {
+    // Chrome občas pošle SIGNED_OUT i když session pořád platí (falešný poplach
+    // při obnově tokenu / dočasné ztrátě storage). Ověř, že opravdu není session.
+    try {
+      const { data: chk } = await sb.auth.getSession()
+      if (chk?.session?.user) {
+        console.warn('[auth] SIGNED_OUT ignorován — session stále platí')
+        currentUser = chk.session.user
+        return
+      }
+    } catch(e) {}
     appInitialized = false
     authHandling = false
     currentUser = null
@@ -5710,18 +5720,29 @@ let checkinInProgress = false
 async function mobCheckin(type) {
   console.log('[mobCheckin] called with type:', type, '| checkinInProgress:', checkinInProgress, '| currentUser:', !!currentUser)
   if (checkinInProgress) { showToast('⏳ Počkejte...'); return }
-  // Když currentUser chybí (např. po obnovení/přepnutí karty), zkus ho obnovit ze session
+  // Když currentUser chybí (Chrome občas ztratí proměnnou) — zkus ho dotáhnout ze session
   if (!currentUser) {
+    // 1) aktivní session
     try {
-      const { data } = await sb.auth.getUser()
-      if (data?.user) currentUser = data.user
-    } catch(e) {}
-    if (!currentUser) {
       const { data: sess } = await sb.auth.getSession()
       if (sess?.session?.user) currentUser = sess.session.user
+    } catch(e) { console.warn('[mobCheckin] getSession selhal:', e) }
+    // 2) getUser (ověří token na serveru)
+    if (!currentUser) {
+      try {
+        const { data } = await sb.auth.getUser()
+        if (data?.user) currentUser = data.user
+      } catch(e) { console.warn('[mobCheckin] getUser selhal:', e) }
+    }
+    // 3) zkus obnovit (refresh) session — Chrome může mít prošlý access token
+    if (!currentUser) {
+      try {
+        const { data: ref } = await sb.auth.refreshSession()
+        if (ref?.session?.user) currentUser = ref.session.user
+      } catch(e) { console.warn('[mobCheckin] refreshSession selhal:', e) }
     }
   }
-  if (!currentUser) { showToast('❌ Nejste přihlášeni — obnovte stránku'); return }
+  if (!currentUser) { showToast('❌ Relace vypršela — přihlaste se prosím znovu'); return }
   if (!navigator.onLine) { showToast('❌ Žádné připojení k internetu'); return }
 
   checkinInProgress = true
