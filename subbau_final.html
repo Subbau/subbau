@@ -703,6 +703,53 @@ tr:hover td{background:#fafbfc}
               </div>
             </div>
           </div>
+          <!-- EXPORT PDF -->
+          <div class="card" style="border-left:4px solid var(--blue)">
+            <div class="card-h" style="cursor:pointer" onclick="toggleExportForm()">
+              <h4>📥 Export docházky do PDF</h4>
+              <span id="export-toggle-icon" style="color:var(--text3);font-size:18px">＋</span>
+            </div>
+            <div id="export-att-form" style="display:none;padding:16px">
+              <div class="g2">
+                <div class="fg">
+                  <label>Období</label>
+                  <select id="export-period" onchange="onExportPeriodChange()" style="width:100%;padding:9px;border:1.5px solid var(--brd);border-radius:8px;font-size:14px">
+                    <option value="day">Jeden den</option>
+                    <option value="week" selected>Týden (KW)</option>
+                  </select>
+                </div>
+                <div class="fg" id="export-day-wrap" style="display:none">
+                  <label>Datum</label>
+                  <input type="date" id="export-date" style="width:100%;padding:9px;border:1.5px solid var(--brd);border-radius:8px;font-size:14px">
+                </div>
+                <div class="fg" id="export-week-wrap">
+                  <label>Týden</label>
+                  <select id="export-kw" style="width:100%;padding:9px;border:1.5px solid var(--brd);border-radius:8px;font-size:14px"></select>
+                </div>
+                <div class="fg">
+                  <label>Jazyk PDF</label>
+                  <select id="export-lang" style="width:100%;padding:9px;border:1.5px solid var(--brd);border-radius:8px;font-size:14px">
+                    <option value="cs">Čeština</option>
+                    <option value="en">Angličtina</option>
+                  </select>
+                </div>
+              </div>
+              <div class="fg">
+                <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+                  <label style="margin-bottom:0">Pracovníci</label>
+                  <div style="display:flex;gap:8px">
+                    <button onclick="exportSelectAll(true)" style="font-size:11px;padding:3px 8px;border:1px solid var(--brd);border-radius:6px;background:none;cursor:pointer;font-family:inherit">Vybrat vše</button>
+                    <button onclick="exportSelectAll(false)" style="font-size:11px;padding:3px 8px;border:1px solid var(--brd);border-radius:6px;background:none;cursor:pointer;font-family:inherit">Zrušit</button>
+                  </div>
+                </div>
+                <div id="export-worker-list" style="max-height:200px;overflow-y:auto;border:1px solid var(--brd);border-radius:8px;padding:8px">
+                  <div style="text-align:center;color:var(--text3);font-size:13px;padding:10px">Načítám pracovníky...</div>
+                </div>
+              </div>
+              <button class="btn-pri" onclick="generateAttendanceExport()" style="width:100%;padding:12px">📥 Vygenerovat PDF</button>
+            </div>
+          </div>
+
           <!-- RUČNÍ ZÁPIS ZPĚTNĚ -->
           <div class="card" style="border-left:4px solid var(--amber)">
             <div class="card-h" style="cursor:pointer" onclick="toggleManualForm()">
@@ -1348,6 +1395,7 @@ tr:hover td{background:#fafbfc}
           <label>Týdnů volno</label>
           <select id="turnus-off" style="width:100%;padding:10px;border:1.5px solid var(--brd);border-radius:8px;font-size:14px">
             <option value="">— nenastaveno —</option>
+            <option value="0">0 — bez volna (každý týden)</option>
             <option value="1">1 týden</option><option value="2">2 týdny</option>
             <option value="3">3 týdny</option><option value="4">4 týdny</option>
           </select>
@@ -1663,7 +1711,7 @@ tr:hover td{background:#fafbfc}
             </div>
             <div class="fg" style="margin-bottom:0">
               <label style="font-size:11px;color:var(--text3)">Týdnů volno</label>
-              <input type="number" id="wd-turnus-off" min="1" max="6" style="width:90px;padding:7px;border:1px solid var(--brd);border-radius:6px;font-size:13px">
+              <input type="number" id="wd-turnus-off" min="0" max="6" style="width:90px;padding:7px;border:1px solid var(--brd);border-radius:6px;font-size:13px">
             </div>
             <div class="fg" style="margin-bottom:0">
               <label style="font-size:11px;color:var(--text3)">Začátek cyklu</label>
@@ -3428,7 +3476,12 @@ async function toggleWorkerActiveFromAccess(workerId, workerName, isActive) {
   const action = isActive ? 'odebrat přístup' : 'obnovit přístup'
   if (!confirm(`${action.charAt(0).toUpperCase() + action.slice(1)} pro ${workerName}?`)) return
 
-  const { data, error } = await sb.from('profiles').update({ is_active: !isActive }).eq('id', workerId).select('id,is_active')
+  // Při odebrání přístupu nastav i registration_status='removed' (ať nesvítí jako čekající registrace).
+  // Při obnovení vrať 'approved'.
+  const upd = isActive
+    ? { is_active: false, registration_status: 'removed' }
+    : { is_active: true, registration_status: 'approved' }
+  const { data, error } = await sb.from('profiles').update(upd).eq('id', workerId).select('id,is_active')
   if (error) { showToast('❌ Chyba: ' + error.message); return }
   if (!data || !data.length) { showToast('❌ Změna se neuložila (zkontrolujte oprávnění)'); return }
   showToast(`✅ Přístup ${isActive ? 'odebrán' : 'obnoven'}: ${workerName}`)
@@ -3694,7 +3747,7 @@ async function sendPasswordReset(email, name) {
 
 async function approveWorkerRegistration(workerId, workerName) {
   if (!confirm('Schválit přístup pro ' + workerName + '?')) return
-  const { error } = await sb.from('profiles').update({ is_active: true }).eq('id', workerId)
+  const { error } = await sb.from('profiles').update({ is_active: true, registration_status: 'approved' }).eq('id', workerId)
   if (error) { showToast('Chyba: ' + error.message); return }
   showToast('✅ Přístup schválen: ' + workerName)
   loadDashboard()
@@ -3712,11 +3765,13 @@ async function loadDashboard() {
   const { data: workers } = await sb.from('profiles').select('id').in('role',['osvec','partak']).eq('is_active',true)
   document.getElementById('stat-workers').textContent = workers?.length || 0
 
-  // Pending registrace (is_active = false)
+  // Pending registrace = nově registrovaní čekající na schválení (registration_status='pending').
+  // Odebraní pracovníci (is_active=false, ale registration_status≠'pending') sem NEPATŘÍ.
   const { data: pendingWorkers } = await sb.from('profiles')
     .select('id, full_name, email, created_at')
     .in('role', ['osvec', 'partak'])
     .eq('is_active', false)
+    .eq('registration_status', 'pending')
     .order('created_at', { ascending: false })
 
   const pendingDiv = document.getElementById('dash-pending-registrations')
@@ -3891,7 +3946,10 @@ async function addWorker() {
 }
 
 async function toggleAccess(id, current) {
-  const { data, error } = await sb.from('profiles').update({ is_active: !current }).eq('id', id).select('id,is_active')
+  const upd = current
+    ? { is_active: false, registration_status: 'removed' }
+    : { is_active: true, registration_status: 'approved' }
+  const { data, error } = await sb.from('profiles').update(upd).eq('id', id).select('id,is_active')
   if (error) { showToast('❌ Chyba: ' + error.message); return }
   if (!data || !data.length) { showToast('❌ Změna se neuložila (zkontrolujte oprávnění)'); return }
   showToast(current ? '🔒 Přístup odebrán' : '✅ Přístup obnoven')
@@ -3969,6 +4027,7 @@ async function loadTodayTimeline() {
           <th style="padding:6px 8px">Přestávka</th>
           <th style="padding:6px 8px">Odchod</th>
           <th style="padding:6px 8px;text-align:right">Hodiny</th>
+          <th style="padding:6px 8px"></th>
         </tr>
       </thead>
       <tbody>
@@ -3980,23 +4039,40 @@ async function loadTodayTimeline() {
           const hours = r.check_out
             ? (r.total_hours || 0) + 'h'
             : (active ? '<span style="color:var(--amber);font-weight:700">probíhá ▶</span>' : '—')
+          const safeName = (r.worker?.full_name||'pracovníka').replace(/'/g,"\\'")
           return `
-            <tr class="today-row" data-id="${r.worker_id||''}" style="cursor:pointer;border-top:0.5px solid var(--brd)">
-              <td style="padding:8px"><b>${r.worker?.full_name||'—'}</b><br><small style="color:var(--text3)">${profLabel(r.worker?.profession)||''}</small></td>
-              <td style="padding:8px;font-weight:700;color:var(--green)">${fmt(r.check_in)}</td>
-              <td style="padding:8px;color:var(--text2)">${pauza}</td>
-              <td style="padding:8px;font-weight:700;color:${r.check_out?'var(--red)':'var(--text3)'}">${fmt(r.check_out)}</td>
-              <td style="padding:8px;text-align:right;font-weight:700;color:var(--blue)">${hours}</td>
+            <tr class="today-row" data-id="${r.worker_id||''}" style="border-top:0.5px solid var(--brd)">
+              <td class="td-open" style="padding:8px;cursor:pointer"><b>${r.worker?.full_name||'—'}</b><br><small style="color:var(--text3)">${profLabel(r.worker?.profession)||''}</small></td>
+              <td class="td-open" style="padding:8px;font-weight:700;color:var(--green);cursor:pointer">${fmt(r.check_in)}</td>
+              <td class="td-open" style="padding:8px;color:var(--text2);cursor:pointer">${pauza}</td>
+              <td class="td-open" style="padding:8px;font-weight:700;color:${r.check_out?'var(--red)':'var(--text3)'};cursor:pointer">${fmt(r.check_out)}</td>
+              <td class="td-open" style="padding:8px;text-align:right;font-weight:700;color:var(--blue);cursor:pointer">${hours}</td>
+              <td style="padding:8px;text-align:center">
+                <button onclick="deleteTodayRecord('${r.id}','${safeName}')" title="Smazat dnešní záznam" style="background:none;border:1px solid var(--brd);border-radius:6px;padding:4px 8px;cursor:pointer;color:var(--red);font-family:inherit">🗑</button>
+              </td>
             </tr>`
         }).join('')}
       </tbody>
     </table>`
 
-  // Klik na řádek → detail pracovníka
+  // Klik na řádek (mimo tlačítko smazat) → detail pracovníka
   div.querySelector('tbody').onclick = function(e) {
+    if (e.target.closest('button')) return
+    const cell = e.target.closest('.td-open')
+    if (!cell) return
     const row = e.target.closest('.today-row')
     if (row && row.dataset.id) openWorkerModal(row.dataset.id)
   }
+}
+
+// Admin — smazání dnešního docházkového záznamu (s potvrzením)
+async function deleteTodayRecord(id, name) {
+  if (!id) return
+  if (!confirm('Opravdu smazat dnešní záznam docházky pro ' + (name || 'tohoto pracovníka') + '?\n\nTato akce je nevratná.')) return
+  const { error } = await sb.from('attendance').delete().eq('id', id)
+  if (error) { showToast('❌ Chyba mazání: ' + error.message); return }
+  showToast('🗑 Záznam smazán')
+  loadTodayTimeline()
 }
 
 async function loadKWData() {
@@ -7313,6 +7389,145 @@ async function exportKW() {
   printInPage(printHTML)
 }
 
+// ============ FLEXIBILNÍ EXPORT DOCHÁZKY ============
+function toggleExportForm() {
+  const f = document.getElementById('export-att-form')
+  const ic = document.getElementById('export-toggle-icon')
+  if (!f) return
+  const show = f.style.display === 'none'
+  f.style.display = show ? 'block' : 'none'
+  if (ic) ic.textContent = show ? '－' : '＋'
+  if (show) initExportForm()
+}
+
+function onExportPeriodChange() {
+  const p = document.getElementById('export-period')?.value
+  document.getElementById('export-day-wrap').style.display = p === 'day' ? 'block' : 'none'
+  document.getElementById('export-week-wrap').style.display = p === 'week' ? 'block' : 'none'
+}
+
+async function initExportForm() {
+  const kwSel = document.getElementById('export-kw')
+  if (kwSel && !kwSel.options.length) kwSel.innerHTML = buildKWOptions()
+  const dEl = document.getElementById('export-date')
+  if (dEl && !dEl.value) dEl.value = localDateStr()
+  const list = document.getElementById('export-worker-list')
+  if (!list) return
+  const { data: workers } = await sb.from('profiles')
+    .select('id, full_name, profession').in('role',['osvec','partak']).eq('is_active',true).order('full_name')
+  if (!workers?.length) { list.innerHTML = '<div style="text-align:center;color:var(--text3);font-size:13px;padding:10px">Žádní pracovníci</div>'; return }
+  list.innerHTML = workers.map(w => `
+    <label style="display:flex;align-items:center;gap:8px;padding:6px 4px;cursor:pointer;font-size:13px;border-bottom:1px solid var(--brd)">
+      <input type="checkbox" class="export-wcheck" value="${w.id}" checked>
+      <span><b>${w.full_name}</b> <small style="color:var(--text3)">${profLabel(w.profession)||''}</small></span>
+    </label>`).join('')
+}
+
+function exportSelectAll(state) {
+  document.querySelectorAll('.export-wcheck').forEach(c => c.checked = state)
+}
+
+async function generateAttendanceExport() {
+  const period = document.getElementById('export-period')?.value || 'week'
+  const lang = document.getElementById('export-lang')?.value || 'cs'
+  const checked = [...document.querySelectorAll('.export-wcheck:checked')]
+  if (!checked.length) { showToast('⚠️ Vyberte aspoň jednoho pracovníka'); return }
+  const ids = checked.map(c => c.value)
+
+  let startStr, endStr, periodLabel
+  if (period === 'day') {
+    const d = document.getElementById('export-date')?.value
+    if (!d) { showToast('⚠️ Vyberte datum'); return }
+    startStr = endStr = d
+    periodLabel = new Date(d).toLocaleDateString(lang==='en'?'en-GB':'cs-CZ', {weekday:'long', day:'2-digit', month:'2-digit', year:'numeric'})
+  } else {
+    const kw = document.getElementById('export-kw')?.value
+    if (!kw) { showToast('⚠️ Vyberte týden'); return }
+    const [week, year] = kw.split('-').map(Number)
+    const sd = getWeekStartDate(week, year); const ed = new Date(sd); ed.setDate(ed.getDate()+6)
+    startStr = localDateStr(sd); endStr = localDateStr(ed)
+    periodLabel = `KW${week}/${year} (${sd.toLocaleDateString('cs-CZ')} – ${ed.toLocaleDateString('cs-CZ')})`
+  }
+
+  showToast('⏳ Generuji PDF...')
+
+  const { data: att } = await sb.from('attendance')
+    .select('*, worker:profiles!worker_id(full_name, profession)')
+    .in('worker_id', ids)
+    .gte('work_date', startStr).lte('work_date', endStr)
+    .order('work_date').order('check_in')
+
+  if (!att?.length) { showToast('❌ Žádná data pro zvolené období a pracovníky'); return }
+
+  const T = lang === 'en'
+    ? { title:'Attendance Report', date:'Date', in:'Start', out:'End', brk:'Break', hrs:'Hours', site:'Site', total:'Total', gen:'Generated', locale:'en-GB' }
+    : { title:'Přehled docházky', date:'Datum', in:'Příchod', out:'Odchod', brk:'Přestávka', hrs:'Hodiny', site:'Stavba', total:'Celkem', gen:'Vygenerováno', locale:'cs-CZ' }
+
+  const byWorker = {}
+  att.forEach(r => {
+    const wid = r.worker_id
+    if (!byWorker[wid]) byWorker[wid] = { name: r.worker?.full_name || '—', prof: r.worker?.profession || '', rows: [], total: 0 }
+    byWorker[wid].rows.push(r)
+    byWorker[wid].total += (r.total_hours || 0)
+  })
+
+  const fmt = t => t ? t.slice(0,5) : '—'
+  let grandTotal = 0
+  const sections = Object.values(byWorker).map(w => {
+    grandTotal += w.total
+    const rows = w.rows.map(r => {
+      const adj = (r.check_in && r.check_out) ? applyAttendanceRules(r) : null
+      const ci = adj?.checkIn || fmt(r.check_in)
+      const co = adj?.checkOut || fmt(r.check_out)
+      const brk = (r.break_start || r.break_end) ? `${fmt(r.break_start)}–${fmt(r.break_end)}` : '—'
+      const dstr = new Date(r.work_date).toLocaleDateString(T.locale, {weekday:'short', day:'2-digit', month:'2-digit'})
+      return `<tr>
+        <td style="padding:7px 10px;border:1px solid #ddd">${dstr}</td>
+        <td style="padding:7px 10px;border:1px solid #ddd;text-align:center">${ci}</td>
+        <td style="padding:7px 10px;border:1px solid #ddd;text-align:center">${co}</td>
+        <td style="padding:7px 10px;border:1px solid #ddd;text-align:center">${brk}</td>
+        <td style="padding:7px 10px;border:1px solid #ddd;text-align:center;font-weight:700">${(r.total_hours||0).toFixed(2)}h</td>
+        <td style="padding:7px 10px;border:1px solid #ddd;font-size:12px">${r.construction_site || r.location_address || '—'}</td>
+      </tr>`
+    }).join('')
+    return `
+      <div style="margin-bottom:24px">
+        <h2 style="font-size:15px;margin:0 0 8px;padding-bottom:4px;border-bottom:2px solid #1a1a1a">${w.name} <span style="font-size:12px;font-weight:400;color:#666">· ${profLabel(w.prof)||''}</span></h2>
+        <table style="width:100%;border-collapse:collapse;font-size:13px">
+          <thead><tr style="background:#1a1a1a;color:#fff">
+            <th style="padding:8px 10px;text-align:left;border:1px solid #333">${T.date}</th>
+            <th style="padding:8px 10px;border:1px solid #333">${T.in}</th>
+            <th style="padding:8px 10px;border:1px solid #333">${T.out}</th>
+            <th style="padding:8px 10px;border:1px solid #333">${T.brk}</th>
+            <th style="padding:8px 10px;border:1px solid #333">${T.hrs}</th>
+            <th style="padding:8px 10px;text-align:left;border:1px solid #333">${T.site}</th>
+          </tr></thead>
+          <tbody>${rows}</tbody>
+          <tfoot><tr style="background:#f0f0f0;font-weight:700">
+            <td colspan="4" style="padding:7px 10px;border:1px solid #ddd;text-align:right">${T.total}</td>
+            <td style="padding:7px 10px;border:1px solid #ddd;text-align:center">${w.total.toFixed(2)}h</td>
+            <td style="border:1px solid #ddd"></td>
+          </tr></tfoot>
+        </table>
+      </div>`
+  }).join('')
+
+  const printHTML = `<!DOCTYPE html><html><head><meta charset="UTF-8"><title>${T.title} ${periodLabel}</title>
+  <style>
+    body{font-family:Arial,sans-serif;font-size:13px;color:#000;margin:20px}
+    h1{font-size:19px;margin-bottom:4px}
+    .sub{color:#666;font-size:12px;margin-bottom:24px}
+    @media print{@page{size:A4;margin:14mm}}
+  </style></head><body>
+  <h1>${T.title}</h1>
+  <div class="sub">${periodLabel} &nbsp;|&nbsp; ${checked.length} ${lang==='en'?'worker(s)':'pracovníků'} &nbsp;|&nbsp; ${T.total}: ${grandTotal.toFixed(2)}h</div>
+  ${sections}
+  <div style="margin-top:20px;font-size:11px;color:#999">${T.gen}: ${new Date().toLocaleString(T.locale)}</div>
+  </body></html>`
+
+  printInPage(printHTML)
+}
+
 function getWeekStartDate(week, year) {
   const jan4 = new Date(year, 0, 4)
   const startOfWeek1 = new Date(jan4)
@@ -9118,10 +9333,15 @@ async function doChangePassword() {
 // ============ TURNUS (pracovní cyklus) ============
 async function saveTurnus() {
   if (!currentUser) return
-  const work = parseInt(document.getElementById('turnus-work')?.value) || null
-  const off = parseInt(document.getElementById('turnus-off')?.value) || null
+  const workRaw = document.getElementById('turnus-work')?.value
+  const offRaw = document.getElementById('turnus-off')?.value
   const start = document.getElementById('turnus-start')?.value || null
-  if ((work || off || start) && !(work && off && start)) {
+  // off může být 0; rozliš "nevyplněno" (prázdný string) od 0
+  const work = workRaw !== '' && workRaw != null ? parseInt(workRaw) : null
+  const off = offRaw !== '' && offRaw != null ? parseInt(offRaw) : null
+  const anyFilled = work != null || off != null || start
+  const allFilled = work != null && off != null && !!start
+  if (anyFilled && !allFilled) {
     showToast('⚠️ Vyplňte týdny v práci, volno i začátek cyklu')
     return
   }
@@ -9141,8 +9361,8 @@ function loadTurnus(profile) {
   const w = document.getElementById('turnus-work')
   const o = document.getElementById('turnus-off')
   const s = document.getElementById('turnus-start')
-  if (w) w.value = profile.turnus_work_weeks || ''
-  if (o) o.value = profile.turnus_off_weeks || ''
+  if (w) w.value = (profile.turnus_work_weeks != null) ? profile.turnus_work_weeks : ''
+  if (o) o.value = (profile.turnus_off_weeks != null) ? profile.turnus_off_weeks : ''
   if (s) s.value = profile.turnus_start || ''
   loadTurnusInfo(profile.turnus_work_weeks, profile.turnus_off_weeks, profile.turnus_start)
 }
@@ -9150,11 +9370,12 @@ function loadTurnus(profile) {
 function loadTurnusInfo(work, off, start) {
   const box = document.getElementById('turnus-info')
   if (!box) return
-  if (work && off && start) {
+  if (work != null && off != null && start) {
     const today = localDateStr()
     const working = isWorkingDayByTurnus({ turnus_work_weeks: work, turnus_off_weeks: off, turnus_start: start }, today)
+    const offTxt = off === 0 ? 'bez volna (každý týden)' : `${off} ${off===1?'týden':'týdny'} volno`
     box.style.display = 'block'
-    box.innerHTML = `Cyklus: <b>${work} ${work===1?'týden':'týdny'} práce / ${off} ${off===1?'týden':'týdny'} volno</b>.<br>Dnes podle turnusu: <b>${working ? '🟢 pracovní den' : '⚪ volno'}</b>`
+    box.innerHTML = `Cyklus: <b>${work} ${work===1?'týden':'týdny'} práce / ${offTxt}</b>.<br>Dnes podle turnusu: <b>${working ? '🟢 pracovní den' : '⚪ volno'}</b>`
   } else {
     box.style.display = 'none'
   }
@@ -9163,14 +9384,17 @@ function loadTurnusInfo(work, off, start) {
 // Vrátí true, pokud má pracovník podle turnusu daný den pracovat
 function isWorkingDayByTurnus(profile, dateStr) {
   const work = profile.turnus_work_weeks, off = profile.turnus_off_weeks, start = profile.turnus_start
-  if (!work || !off || !start) return null  // turnus nenastaven
+  // off může být 0 (bez volna) — kontroluj jen že hodnoty existují a work ≥ 1
+  if (!work || off == null || off === '' || !start) return null  // turnus nenastaven
   const [Y, M, D] = dateStr.split('-').map(Number)
   const [sy, sm, sd] = start.split('-').map(Number)
   const day = new Date(Y, M - 1, D)
   const startD = new Date(sy, sm - 1, sd)
   if (day < startD) return null  // před začátkem cyklu
-  const diffDays = Math.floor((day - startD) / 86400000)
   const cycleWeeks = work + off
+  if (cycleWeeks <= 0) return null
+  if (off === 0) return true  // bez volna → pracuje každý týden
+  const diffDays = Math.floor((day - startD) / 86400000)
   const weekIndex = Math.floor(diffDays / 7) % cycleWeeks
   return weekIndex < work
 }
@@ -9254,10 +9478,14 @@ async function deleteVacation(id) {
 // Admin — uložení turnusu pracovníka
 async function saveWorkerTurnus() {
   if (!currentWorkerId) return
-  const work = parseInt(document.getElementById('wd-turnus-work')?.value) || null
-  const off = parseInt(document.getElementById('wd-turnus-off')?.value) || null
+  const workRaw = document.getElementById('wd-turnus-work')?.value
+  const offRaw = document.getElementById('wd-turnus-off')?.value
   const start = document.getElementById('wd-turnus-start')?.value || null
-  if ((work || off || start) && !(work && off && start)) {
+  const work = workRaw !== '' && workRaw != null ? parseInt(workRaw) : null
+  const off = offRaw !== '' && offRaw != null ? parseInt(offRaw) : null
+  const anyFilled = work != null || off != null || start
+  const allFilled = work != null && off != null && !!start
+  if (anyFilled && !allFilled) {
     showToast('⚠️ Vyplňte týdny práce, volno i začátek cyklu')
     return
   }
@@ -9269,9 +9497,10 @@ async function saveWorkerTurnus() {
   if (currentWorkerProfile) { currentWorkerProfile.turnus_work_weeks = work; currentWorkerProfile.turnus_off_weeks = off; currentWorkerProfile.turnus_start = start }
   const ti = document.getElementById('wd-turnus-info')
   if (ti) {
-    if (work && off && start) {
+    if (work != null && off != null && start) {
       const working = isWorkingDayByTurnus({ turnus_work_weeks: work, turnus_off_weeks: off, turnus_start: start }, localDateStr())
-      ti.innerHTML = `Cyklus <b>${work} prac. / ${off} volno</b>, od ${new Date(start).toLocaleDateString('cs-CZ')}. Dnes: <b>${working ? '🟢 v práci' : '⚪ volno'}</b>`
+      const offTxt = off === 0 ? 'bez volna' : off + ' volno'
+      ti.innerHTML = `Cyklus <b>${work} prac. / ${offTxt}</b>, od ${new Date(start).toLocaleDateString('cs-CZ')}. Dnes: <b>${working ? '🟢 v práci' : '⚪ volno'}</b>`
     } else { ti.textContent = 'Turnus zatím nenastaven.' }
   }
 }
@@ -9342,14 +9571,15 @@ async function openWorkerModal(id) {
   document.getElementById('wd-coop-end').value = w.cooperation_end || ''
   document.getElementById('wd-notes').value = w.notes || ''
   // Turnus pracovníka
-  const tw = document.getElementById('wd-turnus-work'); if (tw) tw.value = w.turnus_work_weeks || ''
-  const to = document.getElementById('wd-turnus-off'); if (to) to.value = w.turnus_off_weeks || ''
+  const tw = document.getElementById('wd-turnus-work'); if (tw) tw.value = (w.turnus_work_weeks != null) ? w.turnus_work_weeks : ''
+  const to = document.getElementById('wd-turnus-off'); if (to) to.value = (w.turnus_off_weeks != null) ? w.turnus_off_weeks : ''
   const ts = document.getElementById('wd-turnus-start'); if (ts) ts.value = w.turnus_start || ''
   const ti = document.getElementById('wd-turnus-info')
   if (ti) {
-    if (w.turnus_work_weeks && w.turnus_off_weeks && w.turnus_start) {
+    if (w.turnus_work_weeks != null && w.turnus_off_weeks != null && w.turnus_start) {
       const working = isWorkingDayByTurnus(w, localDateStr())
-      ti.innerHTML = `Cyklus <b>${w.turnus_work_weeks} prac. / ${w.turnus_off_weeks} volno</b>, od ${new Date(w.turnus_start).toLocaleDateString('cs-CZ')}. Dnes: <b>${working ? '🟢 v práci' : '⚪ volno'}</b>`
+      const offTxt = w.turnus_off_weeks === 0 ? 'bez volna' : w.turnus_off_weeks + ' volno'
+      ti.innerHTML = `Cyklus <b>${w.turnus_work_weeks} prac. / ${offTxt}</b>, od ${new Date(w.turnus_start).toLocaleDateString('cs-CZ')}. Dnes: <b>${working ? '🟢 v práci' : '⚪ volno'}</b>`
     } else {
       ti.textContent = 'Turnus zatím nenastaven.'
     }
