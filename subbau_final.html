@@ -367,6 +367,17 @@ tr:hover td{background:#fafbfc}
   <button onclick="dismissAnnouncement()" style="background:none;border:none;font-size:22px;cursor:pointer;opacity:.7;flex-shrink:0;padding:0 4px;line-height:1" title="Zavřít">✕</button>
 </div>
 
+<!-- VEŘEJNÁ PODPISOVÁ STRÁNKA PRO FIRMU (přes odkaz, bez přihlášení) -->
+<div id="company-sign-page" style="display:none;min-height:100vh;background:var(--bg);padding:0">
+  <div style="background:#1A1714;padding:18px 20px;color:#FFCD00;display:flex;align-items:center;gap:10px">
+    <div style="width:32px;height:32px;border:2px solid #FFCD00;border-radius:8px;display:flex;align-items:center;justify-content:center;font-size:15px;font-weight:800">S</div>
+    <div style="font-size:15px;font-weight:800">SubBau s.r.o.<div style="font-size:9px;font-weight:600;color:rgba(250,247,242,.5);letter-spacing:2px;text-transform:uppercase">Podpis smlouvy</div></div>
+  </div>
+  <div id="company-sign-body" style="max-width:560px;margin:0 auto;padding:20px">
+    <div style="text-align:center;color:var(--text3);padding:40px">Načítám smlouvu…</div>
+  </div>
+</div>
+
 <!-- LOGIN -->
 <div id="login">
   <div class="ll">
@@ -2691,6 +2702,13 @@ if (isRecoveryMode) {
   console.log('[recovery] Recovery mode detekován z URL')
 }
 
+// Detekuj veřejný podpisový odkaz pro firmu (?sign=TOKEN) — má přednost před přihlášením
+const _signToken = new URLSearchParams(window.location.search).get('sign')
+if (_signToken) {
+  console.log('[company-sign] token detekován')
+  // Spustí se po načtení DOM (níže voláme initCompanySignPage)
+}
+
 // ============ STATE ============
 let currentUser = null
 let currentProfile = null
@@ -2714,6 +2732,15 @@ window.addEventListener('offline', () => {
 })
 
 window.addEventListener('load', async () => {
+  // Veřejný podpisový odkaz pro firmu — má přednost, přeskoč přihlášení
+  if (_signToken) {
+    document.getElementById('login').style.display = 'none'
+    document.getElementById('app').style.display = 'none'
+    const csp = document.getElementById('company-sign-page')
+    if (csp) csp.style.display = 'block'
+    initCompanySignPage(_signToken)
+    return
+  }
   // Resetuj jen "action" zámky, NE auth flow zámky
   checkinInProgress = false
   loginInProgress = false
@@ -8853,8 +8880,197 @@ async function deleteContract(contractId, title, fileUrl, adminSigUrl, workerSig
   loadAdminContracts()
 }
 
+// ===== ODKAZ PRO FIRMU NA PODPIS =====
+let _companyLinkContractId = null
+function openCompanyLinkModal(contractId, title) {
+  _companyLinkContractId = contractId
+  const m = document.getElementById('company-link-modal')
+  if (!m) return
+  document.getElementById('company-link-title').textContent = title || ''
+  document.getElementById('company-link-result').style.display = 'none'
+  document.getElementById('company-link-gen-area').style.display = 'block'
+  document.getElementById('company-link-expiry').value = '3'
+  m.style.display = 'flex'
+}
+function closeCompanyLinkModal() {
+  const m = document.getElementById('company-link-modal')
+  if (m) m.style.display = 'none'
+  _companyLinkContractId = null
+}
+async function generateCompanyLink() {
+  if (!_companyLinkContractId) return
+  const days = parseInt(document.getElementById('company-link-expiry')?.value || '3')
+  // Token = náhodný řetězec
+  const token = 'sb_' + Math.random().toString(36).slice(2) + Math.random().toString(36).slice(2) + Date.now().toString(36)
+  const expires = new Date(); expires.setDate(expires.getDate() + days)
+  const { error } = await sb.from('contracts').update({
+    sign_token: token,
+    sign_token_expires: expires.toISOString()
+  }).eq('id', _companyLinkContractId)
+  if (error) { showToast('❌ Chyba: ' + error.message); return }
+  const url = window.location.origin + window.location.pathname + '?sign=' + token
+  document.getElementById('company-link-url').value = url
+  document.getElementById('company-link-expiry-info').textContent =
+    'Platnost do ' + expires.toLocaleDateString('cs-CZ') + ' ' + expires.toLocaleTimeString('cs-CZ',{hour:'2-digit',minute:'2-digit'})
+  document.getElementById('company-link-gen-area').style.display = 'none'
+  document.getElementById('company-link-result').style.display = 'block'
+}
+function copyCompanyLink() {
+  const inp = document.getElementById('company-link-url')
+  if (!inp) return
+  inp.select(); inp.setSelectionRange(0, 99999)
+  try {
+    navigator.clipboard.writeText(inp.value)
+    showToast('📋 Odkaz zkopírován')
+  } catch(e) {
+    document.execCommand('copy')
+    showToast('📋 Odkaz zkopírován')
+  }
+}
+async function revokeCompanyLink() {
+  if (!_companyLinkContractId) return
+  if (!confirm('Zneplatnit tento odkaz? Firma už přes něj nepodepíše.')) return
+  const { error } = await sb.from('contracts').update({ sign_token: null, sign_token_expires: null }).eq('id', _companyLinkContractId)
+  if (error) { showToast('❌ Chyba: ' + error.message); return }
+  showToast('🔒 Odkaz zneplatněn')
+  closeCompanyLinkModal()
+}
+
+// ===== VEŘEJNÁ PODPISOVÁ STRÁNKA (firma, bez přihlášení) =====
+let _companySignContract = null
+let _companySignPad = null
+
+async function initCompanySignPage(token) {
+  const body = document.getElementById('company-sign-body')
+  if (!body) return
+  // Najdi smlouvu podle tokenu
+  const { data, error } = await sb.from('contracts')
+    .select('id,title,file_url,sign_token_expires,company_signed_at,company_signature_url,company_signer_name, worker:profiles!worker_id(full_name)')
+    .eq('sign_token', token).maybeSingle()
+
+  if (error || !data) {
+    body.innerHTML = csErrorBox('Odkaz je neplatný', 'Tento podpisový odkaz neexistuje nebo byl zneplatněn. Požádejte prosím o nový odkaz.')
+    return
+  }
+  // Platnost
+  if (data.sign_token_expires && new Date(data.sign_token_expires) < new Date()) {
+    body.innerHTML = csErrorBox('Odkaz vypršel', 'Platnost tohoto odkazu skončila. Požádejte prosím o nový odkaz.')
+    return
+  }
+  _companySignContract = data
+
+  // Už podepsáno → jen zobrazení
+  if (data.company_signed_at) {
+    body.innerHTML = `
+      <div style="background:var(--green-l);border:1px solid var(--green);border-radius:12px;padding:18px;text-align:center;margin-bottom:16px">
+        <div style="font-size:32px;margin-bottom:6px">✅</div>
+        <div style="font-size:15px;font-weight:800;color:var(--green)">Smlouva už byla podepsána</div>
+        <div style="font-size:13px;color:var(--text2);margin-top:4px">${data.company_signer_name ? 'Podepsal: ' + data.company_signer_name + ' · ' : ''}${new Date(data.company_signed_at).toLocaleDateString('cs-CZ')}</div>
+      </div>
+      <div style="background:#fff;border:1px solid var(--brd);border-radius:12px;padding:16px">
+        <div style="font-size:14px;font-weight:700;margin-bottom:10px">${data.title || 'Smlouva'}</div>
+        ${data.file_url ? `<button onclick="openPdfUrl('${data.file_url}')" style="width:100%;padding:12px;background:var(--blue);color:#fff;border:none;border-radius:10px;font-size:14px;font-weight:700;cursor:pointer;font-family:inherit">📄 Zobrazit / stáhnout smlouvu</button>` : ''}
+      </div>`
+    return
+  }
+
+  // K podpisu
+  body.innerHTML = `
+    <div style="background:#fff;border:1px solid var(--brd);border-radius:12px;padding:18px;margin-bottom:16px">
+      <div style="font-size:11px;color:var(--text3);text-transform:uppercase;letter-spacing:1px;margin-bottom:4px">Smlouva k podpisu</div>
+      <div style="font-size:16px;font-weight:800;margin-bottom:4px">${data.title || 'Smlouva'}</div>
+      ${data.worker?.full_name ? `<div style="font-size:13px;color:var(--text2)">Pracovník: ${data.worker.full_name}</div>` : ''}
+    </div>
+
+    ${data.file_url ? `
+    <div style="background:#fff;border:1px solid var(--brd);border-radius:12px;padding:16px;margin-bottom:16px">
+      <div style="font-size:13px;font-weight:700;margin-bottom:8px">1. Přečtěte si smlouvu</div>
+      <button onclick="openPdfUrl('${data.file_url}')" style="width:100%;padding:12px;background:var(--blue);color:#fff;border:none;border-radius:10px;font-size:14px;font-weight:700;cursor:pointer;font-family:inherit">📄 Zobrazit / stáhnout smlouvu (PDF)</button>
+    </div>` : ''}
+
+    <div style="background:#fff;border:1px solid var(--brd);border-radius:12px;padding:16px">
+      <div style="font-size:13px;font-weight:700;margin-bottom:10px">2. Podepište smlouvu</div>
+      <input type="text" id="cs-signer-name" placeholder="Jméno podepisující osoby *" style="width:100%;padding:11px;border:1.5px solid var(--brd);border-radius:10px;font-size:15px;font-family:inherit;box-sizing:border-box;margin-bottom:10px">
+      <div style="border:2px dashed #cbd5e0;border-radius:12px;background:#f8fafc;position:relative;height:200px;margin-bottom:10px">
+        <canvas id="cs-sign-canvas" style="width:100%;height:100%;display:block;touch-action:none;border-radius:12px"></canvas>
+        <div id="cs-sign-hint" style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:#aaa;font-size:14px;pointer-events:none">Podpis sem ✍️</div>
+      </div>
+      <div style="display:flex;gap:8px">
+        <button onclick="clearCompanySign()" style="padding:12px 16px;background:none;border:2px solid #e0e0e0;border-radius:10px;font-size:14px;cursor:pointer;font-family:inherit">Vymazat</button>
+        <button onclick="submitCompanySign()" style="flex:1;padding:12px;background:#1a1a1a;color:#FFCD00;border:none;border-radius:10px;font-size:15px;font-weight:800;cursor:pointer;font-family:inherit">✅ Podepsat smlouvu</button>
+      </div>
+    </div>`
+
+  setTimeout(() => {
+    const canvas = document.getElementById('cs-sign-canvas')
+    if (canvas && typeof initSignaturePad === 'function') {
+      _companySignPad = initSignaturePad(canvas, {})
+      const hide = () => { const h = document.getElementById('cs-sign-hint'); if (h) h.style.display = 'none' }
+      canvas.addEventListener('pointerdown', hide)
+      canvas.addEventListener('mousedown', hide)
+      canvas.addEventListener('touchstart', hide)
+    }
+  }, 100)
+}
+
+function csErrorBox(title, msg) {
+  return `<div style="background:var(--red-l);border:1px solid var(--red);border-radius:12px;padding:24px;text-align:center;margin-top:20px">
+    <div style="font-size:34px;margin-bottom:8px">⚠️</div>
+    <div style="font-size:16px;font-weight:800;color:var(--red);margin-bottom:6px">${title}</div>
+    <div style="font-size:13px;color:var(--text2)">${msg}</div>
+  </div>`
+}
+
+function clearCompanySign() {
+  if (_companySignPad && _companySignPad.clear) _companySignPad.clear()
+  const h = document.getElementById('cs-sign-hint'); if (h) h.style.display = 'flex'
+}
+
+async function submitCompanySign() {
+  if (!_companySignContract) return
+  const name = document.getElementById('cs-signer-name')?.value.trim()
+  if (!name) { showToast('⚠️ Zadejte jméno podepisující osoby'); return }
+  const canvas = document.getElementById('cs-sign-canvas')
+  if (!canvas) return
+  const isEmpty = _companySignPad && typeof _companySignPad.isEmpty === 'function' ? _companySignPad.isEmpty() : false
+  if (isEmpty) { showToast('⚠️ Chybí podpis'); return }
+
+  showToast('⏳ Ukládám podpis...')
+  const dataUrl = canvas.toDataURL('image/png')
+
+  // Nahraj podpis do storage
+  let sigUrl = null
+  try {
+    const blob = await (await fetch(dataUrl)).blob()
+    const path = `company-signatures/${_companySignContract.id}_${Date.now()}.png`
+    const { error: upErr } = await sb.storage.from('contracts').upload(path, blob, { contentType: 'image/png', upsert: true })
+    if (!upErr) {
+      const { data: pub } = sb.storage.from('contracts').getPublicUrl(path)
+      sigUrl = pub?.publicUrl || null
+    }
+  } catch(e) { console.warn('Upload podpisu firmy selhal, ukládám jen časové razítko:', e) }
+
+  const upd = {
+    company_signed_at: new Date().toISOString(),
+    company_signer_name: name
+  }
+  if (sigUrl) upd.company_signature_url = sigUrl
+  // Po podpisu zneplatni token (odkaz už nepůjde znovu podepsat)
+  upd.sign_token = null
+
+  const { error } = await sb.from('contracts').update(upd).eq('id', _companySignContract.id)
+  if (error) { showToast('❌ Chyba uložení: ' + error.message); return }
+
+  document.getElementById('company-sign-body').innerHTML = `
+    <div style="background:var(--green-l);border:1px solid var(--green);border-radius:12px;padding:30px;text-align:center;margin-top:20px">
+      <div style="font-size:44px;margin-bottom:10px">✅</div>
+      <div style="font-size:17px;font-weight:800;color:var(--green);margin-bottom:6px">Smlouva podepsána</div>
+      <div style="font-size:13px;color:var(--text2)">Děkujeme. Podpis byl uložen a odeslán do systému SubBau.</div>
+    </div>`
+}
+
 async function loadAdminContracts() {
-  const { data, error: cErr } = await sb.from('contracts').select('id,title,status,file_url,signature_url,admin_signature_url,signed_at,admin_signed_at,created_at, worker:profiles!worker_id(full_name)').order('created_at',{ascending:false})
+  const { data, error: cErr } = await sb.from('contracts').select('id,title,status,file_url,signature_url,admin_signature_url,signed_at,admin_signed_at,created_at,company_signed_at,company_signature_url,company_signer_name, worker:profiles!worker_id(full_name)').order('created_at',{ascending:false})
   const div = document.getElementById('contracts-list')
   if (!div) return
   if (cErr) { div.innerHTML=`<div style="color:red;padding:10px;font-size:12px">Chyba: ${cErr.message}</div>`; return }
@@ -8875,6 +9091,9 @@ async function loadAdminContracts() {
           ${c.admin_signature_url?`<button onclick="openPdfUrl('${c.admin_signature_url}')" style="font-size:11px;color:var(--amber);display:block;margin-top:2px;background:none;border:none;cursor:pointer;padding:0;font-family:inherit;text-decoration:underline">✍️ Podpis admina</button>`:''}
           ${c.signature_url?`<button onclick="openPdfUrl('${c.signature_url}')" style="font-size:11px;color:var(--green);display:block;margin-top:2px;background:none;border:none;cursor:pointer;padding:0;font-family:inherit;text-decoration:underline">✍️ Podpis OSVČ</button>`:''}
           ${c.status==='admin_pending'?`<button onclick="openAdminSignModal('${c.id}','${(c.title||'').replace(/'/g,"\'")}','${c.file_url||''}')" style="margin-top:6px;width:100%;padding:5px 8px;background:#1a1a1a;color:#FFCD00;border:none;border-radius:6px;cursor:pointer;font-size:11px;font-weight:700">✍️ Podepsat jako admin</button>`:''}
+          ${c.company_signed_at?`<div style="font-size:10px;color:var(--green);margin-top:3px">🏢 Firma podepsala: ${c.company_signed_at.slice(0,10)}${c.company_signer_name?' ('+c.company_signer_name+')':''}</div>`:''}
+          ${c.company_signature_url?`<button onclick="openPdfUrl('${c.company_signature_url}')" style="font-size:11px;color:var(--blue);display:block;margin-top:2px;background:none;border:none;cursor:pointer;padding:0;font-family:inherit;text-decoration:underline">🏢 Podpis firmy</button>`:''}
+          <button onclick="openCompanyLinkModal('${c.id}','${(c.title||'').replace(/'/g,"\'")}')" style="margin-top:4px;width:100%;padding:5px 8px;background:none;border:1px solid var(--blue);color:var(--blue);border-radius:6px;cursor:pointer;font-size:11px;font-weight:700;font-family:inherit">🔗 Odkaz pro firmu</button>
           <button onclick="deleteContract('${c.id}','${(c.title||'').replace(/'/g,"\'")}','${c.file_url||''}','${c.admin_signature_url||''}','${c.signature_url||''}')" style="margin-top:4px;width:100%;padding:4px 8px;background:none;border:1px solid var(--red);color:var(--red);border-radius:6px;cursor:pointer;font-size:10px;font-family:inherit">🗑 Smazat smlouvu</button>
         </div>
       </div>
@@ -10617,6 +10836,41 @@ function compressImage(file, maxSize) {
   </div>
 </div>
 
+
+<!-- ODKAZ PRO FIRMU NA PODPIS -->
+<div id="company-link-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.6);z-index:320;align-items:center;justify-content:center;padding:20px">
+  <div style="background:#fff;border-radius:16px;padding:24px;width:100%;max-width:440px;box-shadow:0 8px 32px rgba(0,0,0,0.2)">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px">
+      <h3 style="margin:0;font-size:16px">🔗 Odkaz pro firmu na podpis</h3>
+      <button onclick="closeCompanyLinkModal()" style="background:none;border:none;font-size:22px;cursor:pointer">&times;</button>
+    </div>
+    <div style="font-size:13px;color:var(--text2);margin-bottom:4px">Smlouva:</div>
+    <div id="company-link-title" style="font-size:14px;font-weight:700;margin-bottom:16px"></div>
+
+    <div id="company-link-gen-area">
+      <div class="fg">
+        <label>Platnost odkazu</label>
+        <select id="company-link-expiry" style="width:100%;padding:10px;border:1.5px solid var(--brd);border-radius:8px;font-size:14px;font-family:inherit">
+          <option value="1">24 hodin</option>
+          <option value="3" selected>3 dny</option>
+          <option value="7">7 dní</option>
+        </select>
+      </div>
+      <p style="font-size:12px;color:var(--text3);margin:8px 0 14px">Firma odkaz otevře bez přihlášení, zobrazí si smlouvu, stáhne PDF a podepíše prstem/myší. Po vypršení odkaz přestane fungovat.</p>
+      <button onclick="generateCompanyLink()" class="btn-pri" style="width:100%;padding:12px">Vygenerovat odkaz</button>
+    </div>
+
+    <div id="company-link-result" style="display:none">
+      <div class="fg">
+        <label>Odkaz pro firmu</label>
+        <input type="text" id="company-link-url" readonly onclick="this.select()" style="width:100%;padding:10px;border:1.5px solid var(--blue);border-radius:8px;font-size:12px;font-family:monospace;background:var(--blue-l)">
+        <div id="company-link-expiry-info" style="font-size:11px;color:var(--text3);margin-top:4px"></div>
+      </div>
+      <button onclick="copyCompanyLink()" class="btn-pri" style="width:100%;padding:12px;margin-bottom:8px">📋 Zkopírovat odkaz</button>
+      <button onclick="revokeCompanyLink()" style="width:100%;padding:10px;background:none;border:1px solid var(--red);color:var(--red);border-radius:8px;cursor:pointer;font-family:inherit;font-weight:700">🔒 Zneplatnit odkaz</button>
+    </div>
+  </div>
+</div>
 
 <!-- NOVA SKUPINA MODAL -->
 <div id="new-team-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.6);z-index:300;align-items:center;justify-content:center;padding:20px">
