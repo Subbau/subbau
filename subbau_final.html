@@ -7991,15 +7991,24 @@ function downloadAsHtml(html, filename) {
     overlay.querySelectorAll('button').forEach(b => b.remove())
     const closeBtn = document.createElement('button')
     closeBtn.innerHTML = '✕ Zavřít'
+    closeBtn.className = 'no-print'
     closeBtn.style.cssText = 'position:fixed;top:16px;right:16px;z-index:10000;padding:8px 16px;background:#1a1a1a;color:#FFCD00;border:none;border-radius:8px;cursor:pointer;font-size:14px;font-weight:700;font-family:inherit'
-    closeBtn.onclick = () => { overlay.style.display='none'; document.body.style.overflow=''; closeBtn.remove(); dlBtn.remove() }
+    closeBtn.onclick = () => { overlay.style.display='none'; document.body.style.overflow=''; overlay.querySelectorAll('button').forEach(b=>b.remove()) }
     overlay.appendChild(closeBtn)
+
+    const printBtn = document.createElement('button')
+    printBtn.innerHTML = '🖨️ Vytisknout / Uložit PDF'
+    printBtn.className = 'no-print'
+    printBtn.style.cssText = 'position:fixed;top:16px;right:120px;z-index:10000;padding:8px 16px;background:#FFCD00;color:#1a1a1a;border:none;border-radius:8px;cursor:pointer;font-size:14px;font-weight:700;font-family:inherit'
+    printBtn.onclick = () => { window.print() }
+    overlay.appendChild(printBtn)
+
     const dlBtn = document.createElement('button')
-    dlBtn.innerHTML = '📥 Stáhnout PDF/HTML'
-    dlBtn.style.cssText = 'position:fixed;top:16px;right:180px;z-index:10000;padding:8px 16px;background:#FFCD00;color:#1a1a1a;border:none;border-radius:8px;cursor:pointer;font-size:14px;font-weight:700;font-family:inherit'
+    dlBtn.innerHTML = '📥 Stáhnout HTML'
+    dlBtn.className = 'no-print'
+    dlBtn.style.cssText = 'position:fixed;top:16px;right:330px;z-index:10000;padding:8px 16px;background:#fff;color:#1a1a1a;border:1px solid #ccc;border-radius:8px;cursor:pointer;font-size:14px;font-weight:700;font-family:inherit'
     dlBtn.onclick = () => triggerHtmlDownload(html, filename)
     overlay.appendChild(dlBtn)
-    triggerHtmlDownload(html, filename)
   } else {
     triggerHtmlDownload(html, filename)
   }
@@ -8054,8 +8063,15 @@ async function exportWorkerKW(workerId, workerName, week, year, lang, foreman) {
 
   const totalHours = (att||[]).reduce((s,r) => s + (r.total_hours||0), 0)
 
+  const dayNames = {
+    'cs-CZ': ['Neděle','Pondělí','Úterý','Středa','Čtvrtek','Pátek','Sobota'],
+    'en-GB': ['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday']
+  }[T.locale] || ['Sun','Mon','Tue','Wed','Thu','Fri','Sat']
+
   const rows = (att||[]).map(r => {
-    const d = new Date(r.work_date).toLocaleDateString(T.locale, {weekday:'long',day:'2-digit',month:'2-digit'})
+    const dt = new Date(r.work_date + 'T00:00:00')
+    const dayName = dayNames[dt.getDay()]
+    const dateFull = dt.toLocaleDateString(T.locale, { day:'2-digit', month:'2-digit', year:'numeric' })
     const h = (r.total_hours||0).toFixed(2)
     const ci = r.check_in?.slice(0,5) || '—'
     const co = r.check_out?.slice(0,5) || '—'
@@ -8066,122 +8082,77 @@ async function exportWorkerKW(workerId, workerName, week, year, lang, foreman) {
     const adj2 = (r.check_in && r.check_out) ? applyAttendanceRules(r) : null
     const ciCell = adj2?.checkIn || ci
     const coCell = adj2?.checkOut || co
-    return `<tr>
-      <td style="padding:8px 12px;border:1px solid #ddd;font-weight:600">${d}</td>
-      <td style="padding:8px 12px;border:1px solid #ddd;text-align:center">${ciCell}</td>
-      <td style="padding:8px 12px;border:1px solid #ddd;text-align:center">${coCell}</td>
-      <td style="padding:8px 12px;border:1px solid #ddd;text-align:center">${bs !== '—' ? bs+' – '+be : '—'}</td>
-      <td style="padding:8px 12px;border:1px solid #ddd;text-align:center;font-weight:700;color:#1a1a1a">${h}h</td>
-      <td style="padding:8px 12px;border:1px solid #ddd;font-size:12px;font-weight:600;color:#333">${site}</td>
-      <td style="padding:8px 12px;border:1px solid #ddd;font-size:12px;color:#555">${desc}</td>
+    return `<tr style="page-break-inside:avoid">
+      <td style="padding:9px 10px;border:1px solid #ccc;vertical-align:top;width:115px">
+        <div style="font-weight:700;font-size:13px">${dayName}</div>
+        <div style="font-size:11px;color:#666">${dateFull}</div>
+      </td>
+      <td style="padding:9px 10px;border:1px solid #ccc;vertical-align:top;width:150px;font-size:12px">
+        <div>${T.in}: <b>${ciCell}</b> – ${T.out}: <b>${coCell}</b></div>
+        <div style="color:#777;font-size:11px;margin-top:2px">${T.brk}: ${bs !== '—' ? bs+'–'+be : '—'}</div>
+        <div style="margin-top:3px;font-weight:700;color:#1a1a1a">${h} h</div>
+      </td>
+      <td style="padding:9px 10px;border:1px solid #ccc;vertical-align:top">
+        <div style="font-size:12px;font-weight:600;color:#333">📍 ${site}</div>
+        <div style="font-size:12px;color:#444;margin-top:3px;line-height:1.4">${desc}</div>
+      </td>
     </tr>`
   }).join('')
 
   const printHTML = `<!DOCTYPE html><html><head><meta charset="UTF-8">
   <title>${T.wTitle} ${workerName} KW${week}/${year}</title>
   <style>
-    body{font-family:Arial,sans-serif;font-size:13px;margin:20px}
-    h1{font-size:18px;margin-bottom:4px}
-    .sub{color:#666;font-size:12px;margin-bottom:20px}
-    table{width:100%;border-collapse:collapse}
+    body{font-family:Arial,sans-serif;font-size:13px;margin:0;padding:24px;color:#1a1a1a}
+    h1{font-size:19px;margin:0 0 4px}
+    .sub{color:#666;font-size:12px;margin-bottom:18px}
+    table{width:100%;border-collapse:collapse;table-layout:fixed}
     thead tr{background:#1a1a1a;color:#fff}
-    thead th{padding:10px 12px;text-align:left;border:1px solid #333}
+    thead th{padding:9px 10px;text-align:left;border:1px solid #333;font-size:12px}
     tfoot tr{background:#f0f0f0;font-weight:700}
-    tfoot td{padding:8px 12px;border:1px solid #ddd}
-    @media print{@page{size:A4;margin:15mm}}
+    tfoot td{padding:10px;border:1px solid #ccc;font-size:14px}
+    @page{size:A4 portrait;margin:14mm}
+    @media print{body{padding:0}.no-print{display:none!important}}
   </style>
 </head><body>
-  <h1>${T.title} — ${workerName}</h1>
-  <div class="sub">KW${week}/${year} &nbsp;|&nbsp; ${startDate.toLocaleDateString(T.locale)} – ${endDate.toLocaleDateString(T.locale)}</div>
+  <div style="display:flex;justify-content:space-between;align-items:flex-start;border-bottom:3px solid #1a1a1a;padding-bottom:10px;margin-bottom:16px">
+    <div>
+      <h1>${T.title}</h1>
+      <div style="font-size:15px;font-weight:700">${workerName}</div>
+    </div>
+    <div style="text-align:right;font-size:12px;color:#555">
+      <div style="font-size:15px;font-weight:800;color:#1a1a1a">KW ${week}/${year}</div>
+      <div>${startDate.toLocaleDateString(T.locale)} – ${endDate.toLocaleDateString(T.locale)}</div>
+    </div>
+  </div>
   <table>
     <thead><tr>
-      <th>${T.day}</th><th style="text-align:center">${T.in}</th><th style="text-align:center">${T.out}</th><th style="text-align:center">${T.brk}</th><th style="text-align:center">${T.hrs}</th><th>${T.site}</th><th>${T.work}</th>
+      <th style="width:115px">${T.day}</th>
+      <th style="width:150px">${T.in} / ${T.hrs}</th>
+      <th>${T.site} &amp; ${T.work}</th>
     </tr></thead>
-    <tbody>${rows.length ? rows : `<tr><td colspan="7" style="text-align:center;padding:20px;color:#999">${T.none}</td></tr>`}</tbody>
+    <tbody>${rows.length ? rows : `<tr><td colspan="3" style="text-align:center;padding:20px;color:#999">${T.none}</td></tr>`}</tbody>
     <tfoot><tr>
-      <td colspan="4">${T.total} KW${week}/${year}</td>
-      <td style="text-align:center">${totalHours.toFixed(2)}h</td>
-      <td colspan="2"></td>
+      <td colspan="2">${T.total} KW${week}/${year}</td>
+      <td style="text-align:right">${totalHours.toFixed(2)} h</td>
     </tr></tfoot>
   </table>
-  ${(foreman && (foreman.name || foreman.signature)) ? `
-  <div style="margin-top:34px;border-top:2px solid #1a1a1a;padding-top:14px">
-    <div style="font-size:13px;font-weight:700;margin-bottom:14px">${T.foremanTitle}</div>
+  <div style="margin-top:34px;border-top:2px solid #1a1a1a;padding-top:14px;page-break-inside:avoid">
+    <div style="font-size:13px;font-weight:700;margin-bottom:16px">${T.foremanTitle}</div>
     <div style="display:flex;gap:40px;align-items:flex-end">
       <div style="flex:1">
-        <div style="font-size:12px;color:#555;margin-bottom:4px">${T.foremanName}: <b style="color:#000">${foreman.name || '—'}</b></div>
-        <div style="border-bottom:1px solid #999;height:60px;display:flex;align-items:flex-end;justify-content:center">
-          ${foreman.signature ? `<img src="${foreman.signature}" style="max-height:58px;max-width:200px">` : ''}
+        <div style="font-size:12px;color:#555;margin-bottom:4px">${T.foremanName}: <b style="color:#000">${(foreman && foreman.name) || '—'}</b></div>
+        <div style="border-bottom:1px solid #999;height:64px;display:flex;align-items:flex-end;justify-content:center">
+          ${(foreman && foreman.signature) ? `<img src="${foreman.signature}" style="max-height:60px;max-width:220px">` : ''}
         </div>
         <div style="font-size:11px;color:#888;margin-top:3px">${T.foremanSig}</div>
       </div>
-      <div style="width:160px">
+      <div style="width:170px">
         <div style="font-size:12px;color:#555;margin-bottom:4px">${T.dateLbl}:</div>
-        <div style="border-bottom:1px solid #999;height:60px;display:flex;align-items:flex-end;padding-bottom:4px;font-size:13px">${new Date().toLocaleDateString(T.locale)}</div>
+        <div style="border-bottom:1px solid #999;height:64px;display:flex;align-items:flex-end;padding-bottom:6px;font-size:13px">${new Date().toLocaleDateString(T.locale)}</div>
       </div>
     </div>
-  </div>` : ''}
-  <div style="margin-top:30px;font-size:11px;color:#999">${T.generated}: ${new Date().toLocaleString(T.locale)} | ${T.sys}</div>
-  
-<!-- PRINT OVERLAY - pro PDF export bez popup okna -->
-<div id="print-overlay" style="display:none;position:fixed;inset:0;background:#fff;z-index:9999;overflow-y:auto;padding:20px">
-  <div id="print-content"></div>
-</div>
-<style>
-@media print {
-  body > *:not(#print-overlay) { display: none !important; }
-  #print-overlay { display: block !important; position: static !important; }
-}
-</style>
-
-
-<!-- Checkout dialog - Co jste dnes dělali -->
-<div id="checkout-dialog" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:9999;align-items:center;justify-content:center;padding:16px">
-  <div style="background:#fff;border-radius:20px;padding:24px;width:100%;max-width:400px;box-shadow:0 8px 32px rgba(0,0,0,.3)">
-    <div style="font-size:17px;font-weight:800;margin-bottom:4px;color:#1a1a1a">Zaznamenat odchod</div>
-    <div id="checkout-time-label" style="font-size:13px;color:#666;margin-bottom:20px"></div>
-    <div style="margin-bottom:14px">
-      <label style="font-size:12px;font-weight:700;color:#1a1a1a;display:block;margin-bottom:6px">Na jaké stavbě jste pracoval? *</label>
-      <input type="text" id="checkout-site" placeholder="např. Praha - Vinohrady, Brno - centrum..." 
-        style="width:100%;padding:12px;border:2px solid #e0e0e0;border-radius:10px;font-size:14px;font-family:inherit;box-sizing:border-box"
-        onfocus="this.style.borderColor='#1a1a1a'" onblur="this.style.borderColor='#e0e0e0'">
-    </div>
-    <div style="margin-bottom:20px">
-      <label style="font-size:12px;font-weight:700;color:#1a1a1a;display:block;margin-bottom:6px">Co jste dnes dělal? *</label>
-      <textarea id="checkout-desc" rows="3" placeholder="např. Zednictví, betonáž základů, montáž lešení..."
-        style="width:100%;padding:12px;border:2px solid #e0e0e0;border-radius:10px;font-size:14px;font-family:inherit;resize:vertical;box-sizing:border-box"
-        onfocus="this.style.borderColor='#1a1a1a'" onblur="this.style.borderColor='#e0e0e0'"></textarea>
-    </div>
-    <div style="display:flex;gap:10px">
-      <button onclick="confirmCheckout()" 
-        style="flex:1;padding:14px;background:#1a1a1a;color:#FFCD00;border:none;border-radius:12px;font-size:14px;font-weight:800;cursor:pointer;font-family:inherit">
-        Zaznamenat odchod
-      </button>
-      <button onclick="cancelCheckout()"
-        style="padding:14px 18px;background:none;border:2px solid #e0e0e0;border-radius:12px;font-size:14px;cursor:pointer;font-family:inherit">
-        Zpět
-      </button>
-    </div>
   </div>
-</div>
-
-<!-- Signature Preview Overlay -->
-<div id="sig-preview-overlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.95);z-index:19999;flex-direction:column">
-  <div style="background:#1a1a1a;padding:12px 16px;display:flex;justify-content:space-between;align-items:center;flex-shrink:0;border-bottom:2px solid #FFCD00">
-    <div>
-      <div style="color:#FFCD00;font-weight:800;font-size:15px">Náhled podepsané smlouvy</div>
-      <div style="color:#999;font-size:12px;margin-top:2px">Zkontrolujte umístění podpisu před uložením</div>
-    </div>
-    <button onclick="closeSigPreview()" style="background:rgba(255,255,255,.1);border:none;color:#fff;font-size:20px;cursor:pointer;padding:4px 10px;border-radius:6px">✕</button>
-  </div>
-  <div style="flex:1;overflow:auto;background:#555;display:flex;align-items:flex-start;justify-content:center;padding:16px">
-    <iframe id="sig-preview-frame" style="width:100%;max-width:800px;height:600px;min-height:400px;border:none;border-radius:8px;background:#fff"></iframe>
-  </div>
-  <div style="background:#1a1a1a;padding:14px 16px;display:flex;gap:10px;border-top:1px solid #333;flex-shrink:0">
-    <button onclick="retrySigning()" style="flex:1;padding:13px;background:#333;color:#fff;border:none;border-radius:12px;font-size:14px;font-weight:700;cursor:pointer;font-family:inherit">↩ Zkusit znovu</button>
-    <button onclick="confirmAndSaveSignature()" id="sig-preview-confirm-btn" style="flex:2;padding:13px;background:#FFCD00;color:#1a1a1a;border:none;border-radius:12px;font-size:15px;font-weight:800;cursor:pointer;font-family:inherit">Uložit a odeslat ✓</button>
-  </div>
-</div>
+  <div style="margin-top:26px;font-size:11px;color:#999">${T.generated}: ${new Date().toLocaleString(T.locale)} | ${T.sys}</div>
 </body></html>`
 
   printInPage(printHTML)
@@ -11223,6 +11194,7 @@ function compressImage(file, maxSize) {
 @media print {
   body > *:not(#print-overlay) { display: none !important; }
   #print-overlay { display: block !important; position: static !important; }
+  .no-print { display: none !important; }
 }
 </style>
 
