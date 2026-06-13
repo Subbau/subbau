@@ -4340,10 +4340,16 @@ async function renderCalendar() {
   if (!content) return
   content.innerHTML = '<div style="text-align:center;color:var(--text3);padding:20px">Načítám…</div>'
 
-  // Pracovníci + jejich turnus
+  // Pracovníci + jejich turnus + skupina (firma)
   const { data: allWorkers } = await sb.from('profiles')
-    .select('id, full_name, profession, turnus_work_weeks, turnus_off_weeks, turnus_start')
+    .select('id, full_name, profession, turnus_work_weeks, turnus_off_weeks, turnus_start, team_id')
     .in('role', ['osvec','partak']).eq('is_active', true).order('full_name')
+
+  // Načti názvy skupin (firem) pro zobrazení u jména
+  const { data: calTeams } = await sb.from('teams').select('id, name')
+  const teamNameById = {}
+  ;(calTeams||[]).forEach(t => { teamNameById[t.id] = t.name })
+  window._calTeamNames = teamNameById
 
   // Naplň filtr pracovníků (jen jednou)
   const selEl = document.getElementById('cal-worker')
@@ -4400,7 +4406,8 @@ async function renderCalendar() {
     days.forEach((d,i)=>{ const ds=localDateStr(d); const isT = ds===todayStr; html += `<th style="padding:6px;text-align:center;${isT?'background:var(--amber-l);border-radius:6px':''}">${dayShort[i]}<br><span style="font-weight:400;color:var(--text3)">${d.getDate()}.${d.getMonth()+1}.</span></th>` })
     html += '</tr></thead><tbody>'
     workers.forEach(w=>{
-      html += `<tr style="border-top:1px solid var(--brd);cursor:pointer" onclick="openWorkerModal('${w.id}')"><td style="padding:7px 6px;position:sticky;left:0;background:#fff"><b>${w.full_name}</b></td>`
+      const wFirm = (window._calTeamNames && w.team_id) ? window._calTeamNames[w.team_id] : null
+      html += `<tr style="border-top:1px solid var(--brd);cursor:pointer" onclick="openWorkerModal('${w.id}')"><td style="padding:7px 6px;position:sticky;left:0;background:#fff"><b>${w.full_name}</b>${wFirm?`<div style="font-size:10px;color:var(--blue);font-weight:600;margin-top:1px">🏢 ${wFirm}</div>`:'<div style="font-size:10px;color:var(--text3);margin-top:1px">— bez firmy</div>'}</td>`
       days.forEach(d=>{
         const ds = localDateStr(d)
         const st = dayStatusFor(w, ds, attSet, vacList)
@@ -5436,11 +5443,79 @@ async function loadCompanies() {
       <td style="font-size:13px">${c.dic || '—'}</td>
       <td style="font-size:12px">${contact}${c.note ? `<br><small style="color:var(--text3)">📝 ${c.note}</small>` : ''}</td>
       <td style="white-space:nowrap">
+        <button onclick="showCompanyWorkers('${(c.name||'').replace(/'/g,"\\'")}')" style="font-size:12px;padding:4px 8px;border:1px solid var(--blue);border-radius:6px;cursor:pointer;background:none;font-family:inherit;color:var(--blue)" title="Kdo tu pracuje">👷</button>
         <button onclick="editCompany('${c.id}')" style="font-size:12px;padding:4px 8px;border:1px solid var(--brd);border-radius:6px;cursor:pointer;background:none;font-family:inherit">✏️</button>
         <button onclick="deleteCompany('${c.id}','${(c.name||'').replace(/'/g,"\\'")}')" style="font-size:12px;padding:4px 8px;border:1px solid var(--brd);border-radius:6px;cursor:pointer;background:none;font-family:inherit;color:var(--red)">🗑</button>
       </td>
     </tr>`
   }).join('')
+}
+
+// Zobrazí, kdo ve firmě (skupině stejného názvu) pracuje teď a kdo dříve
+async function showCompanyWorkers(companyName) {
+  if (!companyName) return
+  const norm = s => (s||'').toLowerCase().trim()
+  const cn = norm(companyName)
+  const match = a => { const x = norm(a); return x && (x.includes(cn) || cn.includes(x)) }
+
+  // Skupiny, jejichž název odpovídá firmě
+  const { data: teams } = await sb.from('teams').select('id, name')
+  const matchIds = (teams||[]).filter(t => match(t.name)).map(t => t.id)
+
+  // Kdo pracuje teď (aktuální team_id)
+  let current = []
+  if (matchIds.length) {
+    const { data: cur } = await sb.from('profiles').select('id, full_name, profession').in('team_id', matchIds).eq('is_active', true).order('full_name')
+    current = cur || []
+  }
+
+  // Historie — z team_assignments podle názvu firmy
+  let history = []
+  try {
+    const { data: hist } = await sb.from('team_assignments')
+      .select('worker_id, team_name, assigned_at, removed_at, worker:profiles!worker_id(full_name)')
+      .order('assigned_at', { ascending: false })
+    history = (hist||[]).filter(h => match(h.team_name))
+  } catch(e) { /* tabulka historie nemusí existovat */ }
+
+  const currentIds = new Set(current.map(c => c.id))
+  const pastOnly = history.filter(h => h.removed_at && !currentIds.has(h.worker_id))
+
+  const curHtml = current.length
+    ? current.map(w => `<div style="padding:8px 10px;border-bottom:1px solid var(--brd);display:flex;justify-content:space-between;align-items:center">
+        <span style="font-size:13px;font-weight:600">${w.full_name}</span>
+        <span style="font-size:11px;color:var(--text3)">${w.profession||''}</span>
+      </div>`).join('')
+    : '<div style="padding:14px;text-align:center;color:var(--text3);font-size:13px">Nikdo zde teď nepracuje</div>'
+
+  const seen = new Set()
+  const pastHtml = pastOnly.length
+    ? pastOnly.filter(h => { if (seen.has(h.worker_id)) return false; seen.add(h.worker_id); return true })
+        .map(h => `<div style="padding:8px 10px;border-bottom:1px solid var(--brd)">
+          <div style="font-size:13px;font-weight:600">${h.worker?.full_name || '—'}</div>
+          <div style="font-size:11px;color:var(--text3)">${h.assigned_at ? new Date(h.assigned_at).toLocaleDateString('cs-CZ') : ''}${h.removed_at ? ' – ' + new Date(h.removed_at).toLocaleDateString('cs-CZ') : ''}</div>
+        </div>`).join('')
+    : '<div style="padding:14px;text-align:center;color:var(--text3);font-size:13px">Žádná dřívější přiřazení</div>'
+
+  let dlg = document.getElementById('company-workers-dialog')
+  if (!dlg) {
+    dlg = document.createElement('div')
+    dlg.id = 'company-workers-dialog'
+    dlg.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:10000;display:flex;align-items:center;justify-content:center;padding:16px'
+    dlg.onclick = (e) => { if (e.target === dlg) dlg.style.display = 'none' }
+    document.body.appendChild(dlg)
+  }
+  dlg.innerHTML = `<div style="background:#fff;border-radius:16px;padding:20px;width:100%;max-width:420px;max-height:80vh;overflow-y:auto;box-shadow:0 8px 32px rgba(0,0,0,.3)">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px">
+      <div style="font-size:16px;font-weight:800;color:#1a1a1a">🏢 ${companyName}</div>
+      <button onclick="document.getElementById('company-workers-dialog').style.display='none'" style="background:none;border:none;font-size:22px;cursor:pointer;color:#888">✕</button>
+    </div>
+    <div style="font-size:12px;font-weight:700;color:var(--green);text-transform:uppercase;letter-spacing:1px;margin-bottom:4px">👷 Pracují zde teď (${current.length})</div>
+    <div style="border:1px solid var(--brd);border-radius:10px;overflow:hidden;margin-bottom:16px">${curHtml}</div>
+    <div style="font-size:12px;font-weight:700;color:var(--text3);text-transform:uppercase;letter-spacing:1px;margin-bottom:4px">🕓 Pracovali zde dříve</div>
+    <div style="border:1px solid var(--brd);border-radius:10px;overflow:hidden">${pastHtml}</div>
+  </div>`
+  dlg.style.display = 'flex'
 }
 
 async function editCompany(id) {
@@ -5690,12 +5765,14 @@ async function loadUnassignedForModal() {
 async function addToTeam(workerId, teamId) {
   const { error } = await sb.from('profiles').update({ team_id: teamId }).eq('id', workerId)
   if (error) { showToast('Chyba: ' + error.message); return }
+  await logTeamAssignment(workerId, teamId)
   showToast('Přidáno do skupiny!')
   loadUnassignedForModal()
   loadTeams()
 }
 
 async function removeFromTeam(workerId) {
+  await closeTeamAssignment(workerId)
   const { error } = await sb.from('profiles').update({ team_id: null }).eq('id', workerId)
   if (error) { showToast('Chyba: ' + error.message); return }
   showToast('Odebrano ze skupiny')
@@ -5706,8 +5783,27 @@ async function assignToTeam(workerId, teamId) {
   if (!teamId) return
   const { error } = await sb.from('profiles').update({ team_id: teamId }).eq('id', workerId)
   if (error) { showToast('Chyba: ' + error.message); return }
+  await logTeamAssignment(workerId, teamId)
   showToast('Prirazen do skupiny!')
   loadTeams()
+}
+
+// Historie přiřazení ke skupinám (firmám)
+async function logTeamAssignment(workerId, teamId) {
+  try {
+    // Uzavři případné předchozí otevřené přiřazení
+    await closeTeamAssignment(workerId)
+    const { data: t } = await sb.from('teams').select('name').eq('id', teamId).maybeSingle()
+    await sb.from('team_assignments').insert({
+      worker_id: workerId, team_id: teamId, team_name: t?.name || null, assigned_at: new Date().toISOString()
+    })
+  } catch(e) { console.warn('logTeamAssignment:', e?.message) }
+}
+async function closeTeamAssignment(workerId) {
+  try {
+    await sb.from('team_assignments').update({ removed_at: new Date().toISOString() })
+      .eq('worker_id', workerId).is('removed_at', null)
+  } catch(e) { console.warn('closeTeamAssignment:', e?.message) }
 }
 
 // ============ OSVČ MOBILE ============
