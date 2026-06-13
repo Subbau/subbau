@@ -1319,9 +1319,9 @@ tr:hover td{background:#fafbfc}
             <!-- Rámček = presne kde podpis skončí v PDF (centrovany na klik) -->
             <div style="width:130px;height:44px;background:rgba(255,205,0,0.85);border:2.5px solid #1a1a1a;border-radius:6px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px;box-shadow:0 3px 10px rgba(0,0,0,0.3)">
               <span style="font-size:12px">✍</span>
-              <span style="font-size:9px;font-weight:700;color:#1a1a1a;white-space:nowrap">Podpis bude zde</span>
+              <span style="font-size:9px;font-weight:700;color:#1a1a1a;white-space:nowrap" id="worker-sig-marker-text">Podpis bude zde</span>
             </div>
-            <div style="font-size:9px;color:#666;text-align:center;margin-top:3px;white-space:nowrap">← táhněte →</div>
+            <div style="font-size:9px;color:#666;text-align:center;margin-top:3px;white-space:nowrap" id="worker-sig-marker-drag">← táhněte →</div>
           </div>
         </div>
         <div id="worker-pdf-loading" style="text-align:center;padding:30px;color:#999;font-size:13px">Načítám PDF...</div>
@@ -2063,17 +2063,31 @@ function applySignModalLang(de) {
     title:'Vertrag unterschreiben', place:'Tippen Sie in das PDF, wo die Unterschrift erscheinen soll',
     draw:'Unterschrift zeichnen', clear:'Unterschrift löschen', submit:'Vorschau & Speichern',
     posInfo:'Tippen Sie links ins PDF, um die Unterschrift zu platzieren',
-    preview:'So wird die Unterschrift aussehen', retry:'✏️ Erneut unterschreiben', confirm:'✅ Bestätigen & speichern'
+    preview:'So wird die Unterschrift aussehen', retry:'✏️ Erneut unterschreiben', confirm:'✅ Bestätigen & speichern',
+    markerText:'Unterschrift hier', markerDrag:'← ziehen →'
   } : {
     title:'Podepsat smlouvu', place:'Klikněte do PDF kam chcete umístit podpis',
     draw:'Nakreslete podpis', clear:'Vymazat podpis', submit:'Náhled a uložit',
     posInfo:'Kliknete do PDF vlevo pro umisteni podpisu',
-    preview:'Takto bude podpis vypadat', retry:'✏️ Podepsat znovu', confirm:'✅ Potvrdit a uložit'
+    preview:'Takto bude podpis vypadat', retry:'✏️ Podepsat znovu', confirm:'✅ Potvrdit a uložit',
+    markerText:'Podpis bude zde', markerDrag:'← táhněte →'
   }
   const set = (id, txt) => { const el = document.getElementById(id); if (el) el.textContent = txt }
   set('sign-h-title', t.title); set('sign-h-place', t.place); set('sign-h-draw', t.draw)
   set('sign-btn-clear', t.clear); set('sign-submit-btn', t.submit); set('worker-sig-pos-info', t.posInfo)
   set('sign-h-preview', t.preview); set('sign-btn-retry', t.retry); set('sign-btn-confirm', t.confirm)
+  set('worker-sig-marker-text', t.markerText); set('worker-sig-marker-drag', t.markerDrag)
+}
+
+// Lokalizované texty pro JS hlášky podpisového modalu (umístění / uložit)
+function signTxt(key) {
+  const de = signLangDE
+  const m = {
+    placedPage: de ? 'Unterschrift auf Seite %s platziert — zum Verschieben ziehen' : 'Podpis umisten na strane %s — tazenim upresni polohu',
+    placedPageShort: de ? 'Unterschrift auf Seite %s platziert' : 'Podpis umisten na strane %s',
+    saveBtn: de ? '✍️ Unterschrift speichern' : '✍️ Uložit podpis do smlouvy'
+  }
+  return m[key] || ''
 }
 
 async function _doOpenSignModal(contractId, title, fileUrl) {
@@ -2170,7 +2184,7 @@ function setWorkerSigPos(cx, cy, scaledVp) {
   const marker = document.getElementById('worker-sig-marker')
   if (marker) { marker.style.display = 'block'; marker.style.left = cx+'px'; marker.style.top = cy+'px' }
   const info2 = document.getElementById('worker-sig-pos-info')
-  if (info2) { info2.textContent = 'Podpis umisten na strane ' + workerPdfState.currentPage + ' — tazenim upresni polohu'; info2.style.background='#e8f5e9'; info2.style.color='#2e7d32' }
+  if (info2) { info2.textContent = signTxt('placedPage').replace('%s', workerPdfState.currentPage); info2.style.background='#e8f5e9'; info2.style.color='#2e7d32' }
 }
 
 async function renderWorkerPDFPage(pageNum) {
@@ -2229,7 +2243,7 @@ async function renderWorkerPDFPage(pageNum) {
       if (!wDragging) return
       wDragging = false
       const info2 = document.getElementById('worker-sig-pos-info')
-      if (info2) { info2.textContent = 'Podpis umisten na strane ' + workerPdfState.currentPage; info2.style.background='#e8f5e9'; info2.style.color='#2e7d32' }
+      if (info2) { info2.textContent = signTxt('placedPageShort').replace('%s', workerPdfState.currentPage); info2.style.background='#e8f5e9'; info2.style.color='#2e7d32' }
     })
   }
 }
@@ -2261,6 +2275,9 @@ function closeSignModal() {
   if (modal) { modal.removeAttribute('style') }  // CSS display:none platí
   document.body.style.overflow = ''
   signContractId = null
+  // Reset jazyka zpět na češtinu — němčina platí jen během podpisu firmou
+  signLangDE = false
+  _companySignMode = false
   try { screen.orientation?.unlock?.() } catch(e) {}
 }
 
@@ -2268,8 +2285,8 @@ function closeSignModal() {
 function previewWorkerSignature() {
   if (!workerSignCanvas) { showToast('Chyba: canvas nenalezen'); return }
   const pixels = workerSignCtx.getImageData(0,0,workerSignCanvas.width,workerSignCanvas.height).data
-  if (!pixels.some((v,i) => i%4===3 && v>0)) { showToast('⚠️ Nejprve nakreslete podpis'); return }
-  if (workerPdfState.sigX === null || workerPdfState.sigX === undefined) { showToast('⚠️ Klikněte v PDF kde chcete podpis'); return }
+  if (!pixels.some((v,i) => i%4===3 && v>0)) { showToast(signLangDE ? '⚠️ Bitte zuerst unterschreiben' : '⚠️ Nejprve nakreslete podpis'); return }
+  if (workerPdfState.sigX === null || workerPdfState.sigX === undefined) { showToast(signLangDE ? '⚠️ Tippen Sie im PDF auf die Unterschriftstelle' : '⚠️ Klikněte v PDF kde chcete podpis'); return }
   const img = document.getElementById('worker-sign-preview-img')
   if (img) img.src = workerSignCanvas.toDataURL('image/png')
   const ov = document.getElementById('worker-sign-preview')
@@ -2280,7 +2297,7 @@ function cancelWorkerSignPreview() {
   if (ov) ov.style.display = 'none'
   // Vymaž plátno, ať může pracovník podepsat znovu od začátku
   clearWorkerSignCanvas()
-  showToast('Podepište se prosím znovu')
+  showToast(signLangDE ? 'Bitte erneut unterschreiben' : 'Podepište se prosím znovu')
 }
 async function confirmWorkerSignature() {
   const ov = document.getElementById('worker-sign-preview')
@@ -2359,7 +2376,7 @@ async function submitWorkerSignWithPlacement() {
   } catch(e) {
     showToast('❌ Chyba: ' + e.message)
   } finally {
-    if (btn) { btn.textContent = '✍️ Uložit podpis do smlouvy'; btn.disabled = false }
+    if (btn) { btn.textContent = signLangDE ? '✍️ Unterschrift speichern' : '✍️ Uložit podpis do smlouvy'; btn.disabled = false }
   }
 }
 
@@ -10456,10 +10473,12 @@ async function loadWdContracts(id) {
         <div style="font-size:11px;color:var(--text3)">${c.created_at?.slice(0,10)||'—'}</div>
       </div>
       <span class="pill ${sP[c.status]||'pa'}" style="font-size:11px;white-space:nowrap">${sL[c.status]||c.status}</span>
+      ${c.company_signed_at ? `<span style="font-size:10px;color:var(--green);font-weight:600;white-space:nowrap">🏢 Firma podepsala ${c.company_signed_at.slice(0,10)}</span>` : ''}
       <div style="display:flex;gap:4px;flex-wrap:wrap;flex-shrink:0">
         ${c.file_url ? `<button onclick="openPdfUrl('${c.file_url}')" style="font-size:11px;padding:2px 8px;border:1px solid var(--blue);border-radius:5px;cursor:pointer;background:none;color:var(--blue);font-family:inherit">PDF</button>` : ''}
         ${c.admin_signature_url ? `<button onclick="openPdfUrl('${c.admin_signature_url}')" style="font-size:11px;padding:2px 8px;border:1px solid var(--amber);border-radius:5px;cursor:pointer;background:none;color:var(--amber);font-family:inherit">Adm.podpis</button>` : ''}
         ${c.signature_url ? `<button onclick="openPdfUrl('${c.signature_url}')" style="font-size:11px;padding:2px 8px;border:1px solid var(--green);border-radius:5px;cursor:pointer;background:none;color:var(--green);font-family:inherit">OSVČ podpis</button>` : ''}
+        ${c.company_signature_url ? `<button onclick="openPdfUrl('${c.company_signature_url}')" style="font-size:11px;padding:2px 8px;border:1px solid var(--blue);border-radius:5px;cursor:pointer;background:none;color:var(--blue);font-family:inherit">🏢 Podpis firmy</button>` : ''}
         ${c.status==='admin_pending' ? `<button onclick="openAdminSignModal('${c.id}','${(c.title||'').replace(/'/g,String.fromCharCode(39))}','${c.file_url||''}')" style="font-size:11px;padding:2px 8px;border:none;border-radius:5px;cursor:pointer;background:var(--blue);color:#fff;font-family:inherit;font-weight:700">Podepsat</button>` : ''}
         ${c.status==='pending' ? `<button onclick="openSignForWorker('${c.id}','${(c.title||'').replace(/'/g,String.fromCharCode(39))}','${c.file_url||''}')" style="font-size:11px;padding:2px 8px;border:none;border-radius:5px;cursor:pointer;background:var(--green);color:#fff;font-family:inherit;font-weight:700">Za OSVČ</button>` : ''}
         <button onclick="deleteContract('${c.id}','${(c.title||'').replace(/'/g,String.fromCharCode(39))}','${c.file_url||''}','${c.admin_signature_url||''}','${c.signature_url||''}')" style="font-size:11px;padding:2px 8px;border:1px solid var(--red);border-radius:5px;cursor:pointer;background:none;color:var(--red);font-family:inherit">🗑</button>
