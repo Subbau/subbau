@@ -8882,15 +8882,30 @@ async function deleteContract(contractId, title, fileUrl, adminSigUrl, workerSig
 
 // ===== ODKAZ PRO FIRMU NA PODPIS =====
 let _companyLinkContractId = null
-function openCompanyLinkModal(contractId, title) {
+async function openCompanyLinkModal(contractId, title) {
   _companyLinkContractId = contractId
   const m = document.getElementById('company-link-modal')
   if (!m) return
   document.getElementById('company-link-title').textContent = title || ''
-  document.getElementById('company-link-result').style.display = 'none'
-  document.getElementById('company-link-gen-area').style.display = 'block'
   document.getElementById('company-link-expiry').value = '3'
   m.style.display = 'flex'
+
+  // Má smlouva už aktivní (neprošlý) odkaz? Pak ho rovnou zobraz (lze kopírovat / zneplatnit).
+  const { data } = await sb.from('contracts').select('sign_token, sign_token_expires, company_signed_at').eq('id', contractId).maybeSingle()
+  const tokenActive = data?.sign_token && (!data.sign_token_expires || new Date(data.sign_token_expires) > new Date())
+  if (tokenActive) {
+    const url = window.location.origin + window.location.pathname + '?sign=' + data.sign_token
+    document.getElementById('company-link-url').value = url
+    const exp = data.sign_token_expires ? new Date(data.sign_token_expires) : null
+    document.getElementById('company-link-expiry-info').textContent = exp
+      ? 'Platnost do ' + exp.toLocaleDateString('cs-CZ') + ' ' + exp.toLocaleTimeString('cs-CZ',{hour:'2-digit',minute:'2-digit'}) + (data.company_signed_at ? ' · ✅ už podepsáno' : '')
+      : ''
+    document.getElementById('company-link-gen-area').style.display = 'none'
+    document.getElementById('company-link-result').style.display = 'block'
+  } else {
+    document.getElementById('company-link-result').style.display = 'none'
+    document.getElementById('company-link-gen-area').style.display = 'block'
+  }
 }
 function closeCompanyLinkModal() {
   const m = document.getElementById('company-link-modal')
@@ -10867,6 +10882,7 @@ function compressImage(file, maxSize) {
         <div id="company-link-expiry-info" style="font-size:11px;color:var(--text3);margin-top:4px"></div>
       </div>
       <button onclick="copyCompanyLink()" class="btn-pri" style="width:100%;padding:12px;margin-bottom:8px">📋 Zkopírovat odkaz</button>
+      <button onclick="closeCompanyLinkModal()" style="width:100%;padding:11px;background:var(--bg);border:1px solid var(--brd);border-radius:8px;cursor:pointer;font-family:inherit;font-weight:700;margin-bottom:8px">Hotovo (odkaz zůstane platný)</button>
       <button onclick="revokeCompanyLink()" style="width:100%;padding:10px;background:none;border:1px solid var(--red);color:var(--red);border-radius:8px;cursor:pointer;font-family:inherit;font-weight:700">🔒 Zneplatnit odkaz</button>
     </div>
   </div>
