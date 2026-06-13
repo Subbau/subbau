@@ -1992,8 +1992,36 @@ async function saveAdminSignedPDF(signedBlob) {
 }
 
 async function saveWorkerSignedPDF(signedBlob) {
-  const contractId = workerPdfState.contractId || signContractId
+  const contractId = (_companySignMode ? (_companySignContract?.id) : null) || workerPdfState.contractId || signContractId
   if (!contractId) throw new Error('Chybí contractId')
+
+  // REŽIM FIRMA — ulož do company sloupců (podpis firmy k existující smlouvě)
+  if (_companySignMode) {
+    const filePath = 'signed/' + contractId + '_company_signed.pdf'
+    const {error:upErr} = await sb.storage.from('contracts').upload(filePath, signedBlob, {contentType:'application/pdf',upsert:true})
+    if (upErr) throw new Error('Upload: ' + upErr.message)
+    const {data:urlData} = sb.storage.from('contracts').getPublicUrl(filePath)
+    const signedUrl = urlData?.publicUrl
+    const {error:dbErr} = await sb.from('contracts').update({
+      file_url: signedUrl,
+      company_signature_url: signedUrl,
+      company_signed_at: new Date().toISOString(),
+      sign_token: null  // po podpisu odkaz zneplatni
+    }).eq('id', contractId)
+    if (dbErr) throw new Error('DB: ' + dbErr.message)
+    closeSignModal()
+    // Ukaž firmě potvrzení
+    const body = document.getElementById('company-sign-body')
+    if (body) body.innerHTML = `
+      <div style="background:var(--green-l);border:1px solid var(--green);border-radius:12px;padding:30px;text-align:center;margin-top:20px">
+        <div style="font-size:44px;margin-bottom:10px">✅</div>
+        <div style="font-size:17px;font-weight:800;color:var(--green);margin-bottom:6px">Vertrag unterschrieben</div>
+        <div style="font-size:13px;color:var(--text2)">Vielen Dank. Ihre Unterschrift wurde gespeichert.</div>
+      </div>`
+    _companySignMode = false
+    return
+  }
+
   const filePath = 'signed/' + contractId + '_worker_signed.pdf'
   const {error:upErr} = await sb.storage.from('contracts').upload(filePath, signedBlob, {contentType:'application/pdf',upsert:true})
   if (upErr) throw new Error('Upload: ' + upErr.message)
@@ -8954,6 +8982,8 @@ async function revokeCompanyLink() {
 // ===== VEŘEJNÁ PODPISOVÁ STRÁNKA (firma, bez přihlášení) =====
 let _companySignContract = null
 let _companySignPad = null
+let _companySignMode = false
+let signLangDE = false
 
 async function initCompanySignPage(token) {
   const body = document.getElementById('company-sign-body')
@@ -8964,68 +8994,58 @@ async function initCompanySignPage(token) {
     .eq('sign_token', token).maybeSingle()
 
   if (error || !data) {
-    body.innerHTML = csErrorBox('Odkaz je neplatný', 'Tento podpisový odkaz neexistuje nebo byl zneplatněn. Požádejte prosím o nový odkaz.')
+    body.innerHTML = csErrorBox('Link ungültig', 'Dieser Signaturlink existiert nicht oder wurde deaktiviert. Bitte fordern Sie einen neuen Link an.')
     return
   }
-  // Platnost
   if (data.sign_token_expires && new Date(data.sign_token_expires) < new Date()) {
-    body.innerHTML = csErrorBox('Odkaz vypršel', 'Platnost tohoto odkazu skončila. Požádejte prosím o nový odkaz.')
+    body.innerHTML = csErrorBox('Link abgelaufen', 'Die Gültigkeit dieses Links ist abgelaufen. Bitte fordern Sie einen neuen Link an.')
     return
   }
   _companySignContract = data
 
   // Už podepsáno → jen zobrazení
   if (data.company_signed_at) {
+    const finalUrl = data.company_signature_url || data.file_url
     body.innerHTML = `
       <div style="background:var(--green-l);border:1px solid var(--green);border-radius:12px;padding:18px;text-align:center;margin-bottom:16px">
         <div style="font-size:32px;margin-bottom:6px">✅</div>
-        <div style="font-size:15px;font-weight:800;color:var(--green)">Smlouva už byla podepsána</div>
-        <div style="font-size:13px;color:var(--text2);margin-top:4px">${data.company_signer_name ? 'Podepsal: ' + data.company_signer_name + ' · ' : ''}${new Date(data.company_signed_at).toLocaleDateString('cs-CZ')}</div>
+        <div style="font-size:15px;font-weight:800;color:var(--green)">Vertrag wurde unterschrieben</div>
+        <div style="font-size:13px;color:var(--text2);margin-top:4px">${new Date(data.company_signed_at).toLocaleDateString('de-DE')}</div>
       </div>
       <div style="background:#fff;border:1px solid var(--brd);border-radius:12px;padding:16px">
-        <div style="font-size:14px;font-weight:700;margin-bottom:10px">${data.title || 'Smlouva'}</div>
-        ${data.file_url ? `<button onclick="openPdfUrl('${data.file_url}')" style="width:100%;padding:12px;background:var(--blue);color:#fff;border:none;border-radius:10px;font-size:14px;font-weight:700;cursor:pointer;font-family:inherit">📄 Zobrazit / stáhnout smlouvu</button>` : ''}
+        <div style="font-size:14px;font-weight:700;margin-bottom:10px">${data.title || 'Vertrag'}</div>
+        ${finalUrl ? `<button onclick="openPdfUrl('${finalUrl}')" style="width:100%;padding:12px;background:var(--blue);color:#fff;border:none;border-radius:10px;font-size:14px;font-weight:700;cursor:pointer;font-family:inherit">📄 Vertrag anzeigen / herunterladen</button>` : ''}
       </div>`
     return
   }
 
-  // K podpisu
+  // K podpisu — použijeme stejný podpisový modal jako OSVČ (PDF náhled, umístění, znovu)
   body.innerHTML = `
     <div style="background:#fff;border:1px solid var(--brd);border-radius:12px;padding:18px;margin-bottom:16px">
-      <div style="font-size:11px;color:var(--text3);text-transform:uppercase;letter-spacing:1px;margin-bottom:4px">Smlouva k podpisu</div>
-      <div style="font-size:16px;font-weight:800;margin-bottom:4px">${data.title || 'Smlouva'}</div>
-      ${data.worker?.full_name ? `<div style="font-size:13px;color:var(--text2)">Pracovník: ${data.worker.full_name}</div>` : ''}
+      <div style="font-size:11px;color:var(--text3);text-transform:uppercase;letter-spacing:1px;margin-bottom:4px">Vertrag zur Unterschrift</div>
+      <div style="font-size:16px;font-weight:800;margin-bottom:4px">${data.title || 'Vertrag'}</div>
     </div>
-
     ${data.file_url ? `
     <div style="background:#fff;border:1px solid var(--brd);border-radius:12px;padding:16px;margin-bottom:16px">
-      <div style="font-size:13px;font-weight:700;margin-bottom:8px">1. Přečtěte si smlouvu</div>
-      <button onclick="openPdfUrl('${data.file_url}')" style="width:100%;padding:12px;background:var(--blue);color:#fff;border:none;border-radius:10px;font-size:14px;font-weight:700;cursor:pointer;font-family:inherit">📄 Zobrazit / stáhnout smlouvu (PDF)</button>
+      <div style="font-size:13px;font-weight:700;margin-bottom:8px">1. Vertrag lesen</div>
+      <button onclick="openPdfUrl('${data.file_url}')" style="width:100%;padding:12px;background:var(--blue);color:#fff;border:none;border-radius:10px;font-size:14px;font-weight:700;cursor:pointer;font-family:inherit">📄 Vertrag anzeigen / herunterladen (PDF)</button>
     </div>` : ''}
-
     <div style="background:#fff;border:1px solid var(--brd);border-radius:12px;padding:16px">
-      <div style="font-size:13px;font-weight:700;margin-bottom:10px">2. Podepište smlouvu</div>
-      <input type="text" id="cs-signer-name" placeholder="Jméno podepisující osoby *" style="width:100%;padding:11px;border:1.5px solid var(--brd);border-radius:10px;font-size:15px;font-family:inherit;box-sizing:border-box;margin-bottom:10px">
-      <div style="border:2px dashed #cbd5e0;border-radius:12px;background:#f8fafc;position:relative;height:200px;margin-bottom:10px">
-        <canvas id="cs-sign-canvas" style="width:100%;height:100%;display:block;touch-action:none;border-radius:12px"></canvas>
-        <div id="cs-sign-hint" style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:#aaa;font-size:14px;pointer-events:none">Podpis sem ✍️</div>
-      </div>
-      <div style="display:flex;gap:8px">
-        <button onclick="clearCompanySign()" style="padding:12px 16px;background:none;border:2px solid #e0e0e0;border-radius:10px;font-size:14px;cursor:pointer;font-family:inherit">Vymazat</button>
-        <button onclick="submitCompanySign()" style="flex:1;padding:12px;background:#1a1a1a;color:#FFCD00;border:none;border-radius:10px;font-size:15px;font-weight:800;cursor:pointer;font-family:inherit">✅ Podepsat smlouvu</button>
-      </div>
+      <div style="font-size:13px;font-weight:700;margin-bottom:6px">2. Vertrag unterschreiben</div>
+      <p style="font-size:12px;color:var(--text3);margin:0 0 12px">Tippen Sie auf die Stelle im Vertrag, an der Ihre Unterschrift erscheinen soll, und unterschreiben Sie mit dem Finger oder der Maus. Vor dem Speichern sehen Sie eine Vorschau.</p>
+      <button onclick="startCompanySignFlow()" style="width:100%;padding:14px;background:#1a1a1a;color:#FFCD00;border:none;border-radius:10px;font-size:15px;font-weight:800;cursor:pointer;font-family:inherit">✍️ Jetzt unterschreiben</button>
     </div>`
+}
 
-  setTimeout(() => {
-    const canvas = document.getElementById('cs-sign-canvas')
-    if (canvas && typeof initSignaturePad === 'function') {
-      _companySignPad = initSignaturePad(canvas, {})
-      const hide = () => { const h = document.getElementById('cs-sign-hint'); if (h) h.style.display = 'none' }
-      canvas.addEventListener('pointerdown', hide)
-      canvas.addEventListener('mousedown', hide)
-      canvas.addEventListener('touchstart', hide)
-    }
-  }, 100)
+// Firma spustí stejný podpisový modal jako OSVČ, ale v režimu "company"
+function startCompanySignFlow() {
+  if (!_companySignContract) return
+  _companySignMode = true
+  // Přemostění: použij OSVČ sign-modal (PDF náhled, umístění podpisu, náhled, znovu)
+  signLangDE = true
+  // Přeskoč průvodce (firma nemá localStorage návod)
+  try { localStorage.setItem('signGuideSeen', '1') } catch(e) {}
+  _doOpenSignModal(_companySignContract.id, _companySignContract.title || 'Vertrag', _companySignContract.file_url)
 }
 
 function csErrorBox(title, msg) {
