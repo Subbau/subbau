@@ -844,9 +844,12 @@ tr:hover td{background:#fafbfc}
                 </div>
               </div>
             </div>
-            <div style="padding:10px 16px;display:flex;gap:18px;flex-wrap:wrap;font-size:12px;color:var(--text2);border-bottom:1px solid var(--brd);background:var(--bg)">
-              <span><span style="display:inline-block;width:11px;height:11px;border-radius:3px;background:var(--green);vertical-align:middle"></span> V práci</span>
+            <div style="padding:10px 16px;display:flex;gap:14px;flex-wrap:wrap;font-size:12px;color:var(--text2);border-bottom:1px solid var(--brd);background:var(--bg)">
+              <span><span style="display:inline-block;width:11px;height:11px;border-radius:3px;background:var(--green);vertical-align:middle"></span> Byl v práci</span>
+              <span><span style="display:inline-block;width:11px;height:11px;border-radius:3px;background:#a5d6a7;vertical-align:middle"></span> Plán (měl by být)</span>
+              <span><span style="display:inline-block;width:11px;height:11px;border-radius:3px;background:#f5c518;vertical-align:middle"></span> Problém s časem</span>
               <span><span style="display:inline-block;width:11px;height:11px;border-radius:3px;background:var(--blue);vertical-align:middle"></span> Dovolená</span>
+              <span><span style="display:inline-block;width:11px;height:11px;border-radius:3px;background:#d8c9b8;vertical-align:middle"></span> Odpočinek (víkend)</span>
               <span><span style="display:inline-block;width:11px;height:11px;border-radius:3px;background:#bbb;vertical-align:middle"></span> Volno (turnus)</span>
             </div>
             <div id="cal-content" style="padding:16px;overflow-x:auto">
@@ -1415,6 +1418,13 @@ tr:hover td{background:#fafbfc}
             <option value="3">3 týdny</option><option value="4">4 týdny</option>
           </select>
         </div>
+        <div class="fg" style="margin-bottom:8px">
+          <label>Chodíte i o víkendech?</label>
+          <select id="turnus-weekends" style="width:100%;padding:10px;border:1.5px solid var(--brd);border-radius:8px;font-size:14px">
+            <option value="false">Ne — víkendy volno (Po–Pá)</option>
+            <option value="true">Ano — pracuji i o víkendech (Po–Ne)</option>
+          </select>
+        </div>
         <div class="fg" style="margin-bottom:12px">
           <label>Začátek cyklu (první den práce)</label>
           <input type="date" id="turnus-start" style="width:100%;padding:10px;border:1.5px solid var(--brd);border-radius:8px;font-size:14px">
@@ -1740,6 +1750,13 @@ tr:hover td{background:#fafbfc}
             <div class="fg" style="margin-bottom:0">
               <label style="font-size:11px;color:var(--text3)">Začátek cyklu</label>
               <input type="date" id="wd-turnus-start" style="padding:7px;border:1px solid var(--brd);border-radius:6px;font-size:13px">
+            </div>
+            <div class="fg" style="margin-bottom:0">
+              <label style="font-size:11px;color:var(--text3)">Víkendy</label>
+              <select id="wd-turnus-weekends" style="padding:7px;border:1px solid var(--brd);border-radius:6px;font-size:13px">
+                <option value="false">Ne (Po–Pá)</option>
+                <option value="true">Ano (Po–Ne)</option>
+              </select>
             </div>
             <button onclick="saveWorkerTurnus()" style="padding:8px 14px;background:#1a1a1a;color:#FFCD00;border:none;border-radius:8px;cursor:pointer;font-family:inherit;font-weight:700;font-size:12px">💾 Uložit</button>
           </div>
@@ -4349,15 +4366,37 @@ function mondayOf(d) {
 
 // Status pracovníka pro daný den: 'work' | 'vac' | 'off' | null
 function dayStatusFor(worker, dateStr, attSet, vacList) {
-  // 1) reálná docházka má přednost (byl/je v práci)
-  if (attSet.has(worker.id + '|' + dateStr)) return 'work'
+  const attMap = window._calAttMap || {}
+  const rec = attMap[worker.id + '|' + dateStr]
+  // 1) reálná docházka má přednost — rozliš "byl OK" vs "problém s časem"
+  if (rec || attSet.has(worker.id + '|' + dateStr)) {
+    if (rec && attHasProblem(rec)) return 'bad'   // žlutá — něco nesedí
+    return 'worked'                                // tmavě zelená — reálně byl
+  }
   // 2) dovolená
   if (vacList.some(v => v.worker_id === worker.id && dateStr >= v.date_from && dateStr <= v.date_to)) return 'vac'
-  // 3) turnus
+  // 3) víkend, kdy pracovník nechodí o víkendech → odpočinek (doma), ne plán práce
+  const isWeekend = (() => { const [Y,M,D] = dateStr.split('-').map(Number); const wd = new Date(Y,M-1,D).getDay(); return wd === 0 || wd === 6 })()
+  if (isWeekend && !worker.turnus_weekends) {
+    // jen pokud má vůbec turnus nastavený (jinak nevíme nic)
+    const tt = isWorkingDayByTurnus(worker, dateStr)
+    if (tt !== null) return 'rest'
+  }
+  // 4) turnus — plán (měl by být v práci, ještě nepotvrzeno) vs volno
   const t = isWorkingDayByTurnus(worker, dateStr)
-  if (t === true) return 'work'
+  if (t === true) return 'plan'   // světle zelená — měl by být v práci
   if (t === false) return 'off'
   return null
+}
+
+// Den má problém, když chybí příchod/odchod nebo jsou hodiny mimo rozumný rozsah
+function attHasProblem(rec) {
+  if (!rec.check_in || !rec.check_out) return true          // chybí příchod nebo odchod
+  const h = rec.total_hours
+  if (h != null && (h < 1 || h > 14)) return true           // podezřele krátký/dlouhý den
+  // přestávka jen zčásti vyplněná
+  if ((rec.break_start && !rec.break_end) || (!rec.break_start && rec.break_end)) return true
+  return false
 }
 
 async function renderCalendar() {
@@ -4368,7 +4407,7 @@ async function renderCalendar() {
 
   // Pracovníci + jejich turnus + skupina (firma)
   const { data: allWorkers } = await sb.from('profiles')
-    .select('id, full_name, profession, turnus_work_weeks, turnus_off_weeks, turnus_start, team_id')
+    .select('id, full_name, profession, turnus_work_weeks, turnus_off_weeks, turnus_start, turnus_weekends, team_id')
     .in('role', ['osvec','partak']).eq('is_active', true).order('full_name')
 
   // Načti názvy skupin (firem) pro zobrazení u jména
@@ -4397,10 +4436,13 @@ async function renderCalendar() {
   }
   const startStr = localDateStr(start), endStr = localDateStr(end)
 
-  // Docházka v rozsahu
-  const { data: att } = await sb.from('attendance').select('worker_id, work_date')
+  // Docházka v rozsahu (s časy pro detekci problémů)
+  const { data: att } = await sb.from('attendance').select('worker_id, work_date, check_in, check_out, break_start, break_end, total_hours')
     .gte('work_date', startStr).lte('work_date', endStr)
   const attSet = new Set((att||[]).map(a => a.worker_id + '|' + a.work_date))
+  const attMap = {}
+  ;(att||[]).forEach(a => { attMap[a.worker_id + '|' + a.work_date] = a })
+  window._calAttMap = attMap
 
   // Dovolené (překryv s rozsahem)
   const { data: vacs } = await sb.from('vacations').select('worker_id, date_from, date_to')
@@ -4421,7 +4463,8 @@ async function renderCalendar() {
   calData = { workers, attSet, vacList }
 
   const todayStr = localDateStr()
-  const colors = { work:'var(--green)', vac:'var(--blue)', off:'#bbb' }
+  const colors = { worked:'var(--green)', plan:'#a5d6a7', bad:'#f5c518', vac:'var(--blue)', off:'#bbb', rest:'#d8c9b8' }
+  const stLabel = st => st==='worked'?'práce':st==='plan'?'plán':st==='bad'?'⚠ čas':st==='vac'?'dovolená':st==='off'?'volno':st==='rest'?'odpočinek':''
   const dayShort = ['Po','Út','St','Čt','Pá','So','Ne']
 
   if (calView === 'week') {
@@ -4439,8 +4482,10 @@ async function renderCalendar() {
         const isT = ds===todayStr
         const st = dayStatusFor(w, ds, attSet, vacList)
         const c = st ? colors[st] : 'transparent'
-        const label = st==='work'?'práce':st==='vac'?'dovolená':st==='off'?'volno':''
-        html += `<td style="padding:2px 3px;text-align:center;${isT?'background:var(--amber-l)':''}"><div style="background:${c};color:${st?'#fff':'var(--text3)'};border-radius:6px;padding:7px 2px;font-size:10px;font-weight:700;min-height:16px">${label||'·'}</div></td>`
+        const darkText = (st==='plan' || st==='bad' || st==='rest')
+        const txtCol = !st ? 'var(--text3)' : (darkText ? '#1a1a1a' : '#fff')
+        const label = stLabel(st)
+        html += `<td style="padding:2px 3px;text-align:center;${isT?'background:var(--amber-l)':''}"><div style="background:${c};color:${txtCol};border-radius:6px;padding:7px 2px;font-size:10px;font-weight:700;min-height:16px">${label||'·'}</div></td>`
       })
       html += '</tr>'
     })
@@ -4469,14 +4514,17 @@ async function renderCalendar() {
       let inner = ''
       if (filterId && workers.length === 1) {
         const st = dayStatusFor(workers[0], ds, attSet, vacList)
-        const lbl = st==='work'?'🟢':st==='vac'?'🔵':st==='off'?'⚪':''
+        const lbl = st==='worked'?'🟢':st==='plan'?'🟩':st==='bad'?'⚠️':st==='vac'?'🔵':st==='rest'?'🏠':st==='off'?'⚪':''
         inner = `<div style="font-size:20px;line-height:1">${inMonth?lbl:''}</div>`
       } else {
-        let nWork=0,nVac=0,nOff=0
-        workers.forEach(w=>{ const st=dayStatusFor(w,ds,attSet,vacList); if(st==='work')nWork++; else if(st==='vac')nVac++; else if(st==='off')nOff++ })
-        inner = `<div style="display:flex;flex-direction:column;gap:1px;align-items:center;font-size:11px;font-weight:700;line-height:1.3">
-          ${nWork?`<span style="color:var(--green)">🟢 ${nWork}</span>`:''}
+        let nWorked=0,nPlan=0,nBad=0,nVac=0,nRest=0,nOff=0
+        workers.forEach(w=>{ const st=dayStatusFor(w,ds,attSet,vacList); if(st==='worked')nWorked++; else if(st==='plan')nPlan++; else if(st==='bad')nBad++; else if(st==='vac')nVac++; else if(st==='rest')nRest++; else if(st==='off')nOff++ })
+        inner = `<div style="display:flex;flex-direction:column;gap:0;align-items:center;font-size:10px;font-weight:700;line-height:1.25">
+          ${nWorked?`<span style="color:var(--green)">🟢 ${nWorked}</span>`:''}
+          ${nPlan?`<span style="color:#5fa463">🟩 ${nPlan}</span>`:''}
+          ${nBad?`<span style="color:#c79a00">⚠️ ${nBad}</span>`:''}
           ${nVac?`<span style="color:var(--blue)">🔵 ${nVac}</span>`:''}
+          ${nRest?`<span style="color:#a08c70">🏠 ${nRest}</span>`:''}
           ${nOff?`<span style="color:#999">⚪ ${nOff}</span>`:''}
         </div>`
       }
@@ -4485,7 +4533,7 @@ async function renderCalendar() {
         <div style="flex:1;display:flex;align-items:center;justify-content:center">${inMonth?inner:''}</div>
       </div>`
     })
-    html += '</div><div style="font-size:11px;color:var(--text3);margin-top:10px">' + (filterId ? 'Status pracovníka: 🟢 v práci · 🔵 dovolená · ⚪ volno' : 'Klepněte na den pro seznam lidí · 🟢 v práci · 🔵 dovolená · ⚪ volno') + '</div>'
+    html += '</div><div style="font-size:11px;color:var(--text3);margin-top:10px">🟢 byl v práci · 🟩 plán · ⚠️ problém s časem · 🔵 dovolená · 🏠 odpočinek · ⚪ volno</div>'
     content.innerHTML = html
   }
 }
@@ -4495,23 +4543,27 @@ let calData = null
 function showDayDetail(dateStr) {
   if (!calData) return
   const { workers, attSet, vacList } = calData
-  const groups = { work: [], vac: [], off: [] }
+  const groups = { worked: [], plan: [], bad: [], vac: [], rest: [], off: [] }
   workers.forEach(w => {
     const st = dayStatusFor(w, dateStr, attSet, vacList)
-    if (st && groups[st]) groups[st].push(w.full_name)
+    if (st && groups[st]) groups[st].push(w)
   })
   const [Y,M,D] = dateStr.split('-').map(Number)
   const dateLabel = new Date(Y, M-1, D).toLocaleDateString('cs-CZ', {weekday:'long', day:'2-digit', month:'2-digit', year:'numeric'})
 
-  const section = (title, names, color) => names.length
+  const section = (title, list, color) => list.length
     ? `<div style="margin-bottom:14px">
-         <div style="font-size:13px;font-weight:700;color:${color};margin-bottom:6px">${title} (${names.length})</div>
-         ${names.map(n=>`<div style="font-size:13px;padding:4px 0;border-bottom:1px solid var(--brd)">${n}</div>`).join('')}
+         <div style="font-size:13px;font-weight:700;color:${color};margin-bottom:6px">${title} (${list.length})</div>
+         ${list.map(w=>`<div style="font-size:13px;padding:4px 0;border-bottom:1px solid var(--brd)">${w.full_name}</div>`).join('')}
        </div>` : ''
 
-  const body = (groups.work.length || groups.vac.length || groups.off.length)
-    ? section('🟢 V práci', groups.work, 'var(--green)') +
+  const any = Object.values(groups).some(g => g.length)
+  const body = any
+    ? section('🟢 Byl v práci', groups.worked, 'var(--green)') +
+      section('🟩 Plán (měl by být)', groups.plan, '#5fa463') +
+      section('⚠️ Problém s časem', groups.bad, '#c79a00') +
       section('🔵 Dovolená', groups.vac, 'var(--blue)') +
+      section('🏠 Odpočinek (víkend)', groups.rest, '#a08c70') +
       section('⚪ Volno (turnus)', groups.off, '#888')
     : '<div style="text-align:center;color:var(--text3);padding:20px;font-size:13px">Pro tento den nejsou žádné záznamy ani turnus.</div>'
 
@@ -10030,6 +10082,7 @@ async function saveTurnus() {
   const workRaw = document.getElementById('turnus-work')?.value
   const offRaw = document.getElementById('turnus-off')?.value
   const start = document.getElementById('turnus-start')?.value || null
+  const weekends = document.getElementById('turnus-weekends')?.value === 'true'
   // off může být 0; rozliš "nevyplněno" (prázdný string) od 0
   const work = workRaw !== '' && workRaw != null ? parseInt(workRaw) : null
   const off = offRaw !== '' && offRaw != null ? parseInt(offRaw) : null
@@ -10040,7 +10093,7 @@ async function saveTurnus() {
     return
   }
   const { error } = await sb.from('profiles').update({
-    turnus_work_weeks: work, turnus_off_weeks: off, turnus_start: start
+    turnus_work_weeks: work, turnus_off_weeks: off, turnus_start: start, turnus_weekends: weekends
   }).eq('id', currentUser.id)
   if (error) {
     showToast(/column .* does not exist/i.test(error.message) ? '❌ Chybí sloupce turnusu — spusťte SQL' : '❌ Chyba: ' + error.message)
@@ -10055,9 +10108,11 @@ function loadTurnus(profile) {
   const w = document.getElementById('turnus-work')
   const o = document.getElementById('turnus-off')
   const s = document.getElementById('turnus-start')
+  const wk = document.getElementById('turnus-weekends')
   if (w) w.value = (profile.turnus_work_weeks != null) ? profile.turnus_work_weeks : ''
   if (o) o.value = (profile.turnus_off_weeks != null) ? profile.turnus_off_weeks : ''
   if (s) s.value = profile.turnus_start || ''
+  if (wk) wk.value = profile.turnus_weekends ? 'true' : 'false'
   loadTurnusInfo(profile.turnus_work_weeks, profile.turnus_off_weeks, profile.turnus_start)
 }
 
@@ -10085,9 +10140,13 @@ function isWorkingDayByTurnus(profile, dateStr) {
   const day = new Date(Y, M - 1, D)
   const startD = new Date(sy, sm - 1, sd)
   if (day < startD) return null  // před začátkem cyklu
+  // Víkend: pokud pracovník nechodí o víkendech, víkend není pracovní den
+  const wd = day.getDay()
+  const isWeekend = (wd === 0 || wd === 6)
+  if (isWeekend && !profile.turnus_weekends) return false
   const cycleWeeks = work + off
   if (cycleWeeks <= 0) return null
-  if (off === 0) return true  // bez volna → pracuje každý týden
+  if (off === 0) return true  // bez volna → pracuje každý (pracovní) týden
   const diffDays = Math.floor((day - startD) / 86400000)
   const weekIndex = Math.floor(diffDays / 7) % cycleWeeks
   return weekIndex < work
@@ -10175,6 +10234,7 @@ async function saveWorkerTurnus() {
   const workRaw = document.getElementById('wd-turnus-work')?.value
   const offRaw = document.getElementById('wd-turnus-off')?.value
   const start = document.getElementById('wd-turnus-start')?.value || null
+  const weekends = document.getElementById('wd-turnus-weekends')?.value === 'true'
   const work = workRaw !== '' && workRaw != null ? parseInt(workRaw) : null
   const off = offRaw !== '' && offRaw != null ? parseInt(offRaw) : null
   const anyFilled = work != null || off != null || start
@@ -10184,17 +10244,17 @@ async function saveWorkerTurnus() {
     return
   }
   const { error } = await sb.from('profiles').update({
-    turnus_work_weeks: work, turnus_off_weeks: off, turnus_start: start
+    turnus_work_weeks: work, turnus_off_weeks: off, turnus_start: start, turnus_weekends: weekends
   }).eq('id', currentWorkerId)
   if (error) { showToast('❌ Chyba: ' + error.message); return }
   showToast('✅ Turnus uložen')
-  if (currentWorkerProfile) { currentWorkerProfile.turnus_work_weeks = work; currentWorkerProfile.turnus_off_weeks = off; currentWorkerProfile.turnus_start = start }
+  if (currentWorkerProfile) { currentWorkerProfile.turnus_work_weeks = work; currentWorkerProfile.turnus_off_weeks = off; currentWorkerProfile.turnus_start = start; currentWorkerProfile.turnus_weekends = weekends }
   const ti = document.getElementById('wd-turnus-info')
   if (ti) {
     if (work != null && off != null && start) {
-      const working = isWorkingDayByTurnus({ turnus_work_weeks: work, turnus_off_weeks: off, turnus_start: start }, localDateStr())
+      const working = isWorkingDayByTurnus({ turnus_work_weeks: work, turnus_off_weeks: off, turnus_start: start, turnus_weekends: weekends }, localDateStr())
       const offTxt = off === 0 ? 'bez volna' : off + ' volno'
-      ti.innerHTML = `Cyklus <b>${work} prac. / ${offTxt}</b>, od ${new Date(start).toLocaleDateString('cs-CZ')}. Dnes: <b>${working ? '🟢 v práci' : '⚪ volno'}</b>`
+      ti.innerHTML = `Cyklus <b>${work} prac. / ${offTxt}</b>${weekends?' · vč. víkendů':' · bez víkendů'}, od ${new Date(start).toLocaleDateString('cs-CZ')}. Dnes: <b>${working ? '🟢 v práci' : '⚪ volno'}</b>`
     } else { ti.textContent = 'Turnus zatím nenastaven.' }
   }
 }
@@ -10268,6 +10328,7 @@ async function openWorkerModal(id) {
   const tw = document.getElementById('wd-turnus-work'); if (tw) tw.value = (w.turnus_work_weeks != null) ? w.turnus_work_weeks : ''
   const to = document.getElementById('wd-turnus-off'); if (to) to.value = (w.turnus_off_weeks != null) ? w.turnus_off_weeks : ''
   const ts = document.getElementById('wd-turnus-start'); if (ts) ts.value = w.turnus_start || ''
+  const twk = document.getElementById('wd-turnus-weekends'); if (twk) twk.value = w.turnus_weekends ? 'true' : 'false'
   const ti = document.getElementById('wd-turnus-info')
   if (ti) {
     if (w.turnus_work_weeks != null && w.turnus_off_weeks != null && w.turnus_start) {
