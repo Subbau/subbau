@@ -845,7 +845,9 @@ tr:hover td{background:#fafbfc}
             <div class="card-h" style="flex-wrap:wrap;gap:10px;align-items:center">
               <h4 id="cal-title" style="margin:0;min-width:160px">Kalendář</h4>
               <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-left:auto">
-                <input type="text" id="cal-search" oninput="renderCalendar()" placeholder="🔍 Jméno nebo firma…" style="padding:6px 10px;border:1px solid var(--brd);border-radius:8px;font-size:13px;font-family:inherit;width:190px;background:#fff">
+                <select id="cal-firm" onchange="renderCalendar()" style="padding:6px 10px;border:1px solid var(--brd);border-radius:8px;font-size:13px;font-family:inherit;max-width:200px;background:#fff">
+                  <option value="">Všechny firmy</option>
+                </select>
                 <select id="cal-worker" onchange="renderCalendar()" style="padding:6px 10px;border:1px solid var(--brd);border-radius:8px;font-size:13px;font-family:inherit;max-width:200px;background:#fff">
                   <option value="">Všichni pracovníci</option>
                 </select>
@@ -4445,6 +4447,14 @@ async function renderCalendar() {
   ;(calTeams||[]).forEach(t => { teamNameById[t.id] = t.name })
   window._calTeamNames = teamNameById
 
+  // Naplň rozbalovací nabídku firem (jen jednou)
+  const firmEl = document.getElementById('cal-firm')
+  if (firmEl && firmEl.options.length <= 1 && calTeams?.length) {
+    const uniqNames = [...new Set((calTeams||[]).map(t => t.name).filter(Boolean))].sort((a,b)=>a.localeCompare(b,'cs'))
+    firmEl.innerHTML = '<option value="">Všechny firmy</option>' +
+      uniqNames.map(n => `<option value="${n.replace(/"/g,'&quot;')}">${n}</option>`).join('')
+  }
+
   // Naplň filtr pracovníků (jen jednou)
   const selEl = document.getElementById('cal-worker')
   if (selEl && selEl.options.length <= 1 && allWorkers?.length) {
@@ -4453,13 +4463,10 @@ async function renderCalendar() {
   }
   const filterId = selEl?.value || ''
   let workers = filterId ? (allWorkers||[]).filter(w => w.id === filterId) : (allWorkers||[])
-  // Hledání podle jména nebo firmy
-  const calQ = (document.getElementById('cal-search')?.value || '').trim().toLowerCase()
-  if (calQ) {
-    workers = workers.filter(w => {
-      const firm = (w.team_id && teamNameById[w.team_id]) ? teamNameById[w.team_id].toLowerCase() : ''
-      return (w.full_name||'').toLowerCase().includes(calQ) || firm.includes(calQ)
-    })
+  // Filtr podle vybrané firmy
+  const firmVal = firmEl?.value || ''
+  if (firmVal) {
+    workers = workers.filter(w => (w.team_id && teamNameById[w.team_id]) ? teamNameById[w.team_id] === firmVal : false)
   }
 
   // Rozsah období
@@ -4508,14 +4515,14 @@ async function renderCalendar() {
     // řádky = pracovníci, sloupce = Po–Ne (stejně široké, pevná šířka)
     const days = []
     for (let i=0;i<7;i++){ const d=new Date(start); d.setDate(start.getDate()+i); days.push(d) }
-    let html = '<table style="width:100%;table-layout:fixed;border-collapse:separate;border-spacing:3px;font-size:12px;min-width:760px">'
-    html += '<colgroup><col style="width:200px">' + days.map(()=>'<col style="width:auto">').join('') + '</colgroup>'
+    let html = '<table style="width:100%;table-layout:fixed;border-collapse:separate;border-spacing:3px;font-size:12px;min-width:900px">'
+    html += '<colgroup><col style="width:260px">' + days.map(()=>'<col style="width:auto">').join('') + '</colgroup>'
     html += '<thead><tr><th style="text-align:left;padding:6px 10px;font-size:12px;color:var(--text2)">Pracovník</th>'
     days.forEach((d,i)=>{ const ds=localDateStr(d); const isT = ds===todayStr; html += `<th style="padding:6px 2px;text-align:center;${isT?'background:var(--amber-l);border-radius:8px':''}"><div style="font-weight:700">${dayShort[i]}</div><div style="font-weight:400;color:var(--text3);font-size:11px">${d.getDate()}.${d.getMonth()+1}.</div></th>` })
     html += '</tr></thead><tbody>'
     workers.forEach(w=>{
       const wFirm = (window._calTeamNames && w.team_id) ? window._calTeamNames[w.team_id] : null
-      html += `<tr style="cursor:pointer" onclick="openWorkerModal('${w.id}')"><td style="padding:8px 10px;background:var(--bg);border-radius:8px;overflow:hidden"><b style="font-size:12px">${w.full_name}</b>${wFirm?`<div style="font-size:10px;color:var(--blue);font-weight:600;margin-top:1px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">🏢 ${wFirm}</div>`:'<div style="font-size:10px;color:var(--text3);margin-top:1px">— bez firmy</div>'}</td>`
+      html += `<tr style="cursor:pointer" onclick="openWorkerModal('${w.id}')"><td style="padding:8px 10px;background:var(--bg);border-radius:8px"><b style="font-size:12px">${w.full_name}</b>${wFirm?`<div style="font-size:10px;color:var(--blue);font-weight:600;margin-top:1px;line-height:1.3">🏢 ${wFirm}</div>`:'<div style="font-size:10px;color:var(--text3);margin-top:1px">— bez firmy</div>'}</td>`
       days.forEach((d,di)=>{
         const ds = localDateStr(d)
         const isT = ds===todayStr
@@ -5626,14 +5633,14 @@ async function showCompanyWorkers(companyName) {
     dlg.onclick = (e) => { if (e.target === dlg) dlg.style.display = 'none' }
     document.body.appendChild(dlg)
   }
-  dlg.innerHTML = `<div style="background:#fff;border-radius:16px;padding:20px;width:100%;max-width:420px;max-height:80vh;overflow-y:auto;box-shadow:0 8px 32px rgba(0,0,0,.3)">
-    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px">
-      <div style="font-size:16px;font-weight:800;color:#1a1a1a">🏢 ${companyName}</div>
-      <button onclick="document.getElementById('company-workers-dialog').style.display='none'" style="background:none;border:none;font-size:22px;cursor:pointer;color:#888">✕</button>
+  dlg.innerHTML = `<div style="background:#fff;border-radius:16px;padding:28px;width:100%;max-width:720px;max-height:88vh;overflow-y:auto;box-shadow:0 8px 32px rgba(0,0,0,.3)">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:18px">
+      <div style="font-size:20px;font-weight:800;color:#1a1a1a">🏢 ${companyName}</div>
+      <button onclick="document.getElementById('company-workers-dialog').style.display='none'" style="background:none;border:none;font-size:26px;cursor:pointer;color:#888">✕</button>
     </div>
-    <div style="font-size:12px;font-weight:700;color:var(--green);text-transform:uppercase;letter-spacing:1px;margin-bottom:4px">👷 Pracují zde teď (${current.length})</div>
-    <div style="border:1px solid var(--brd);border-radius:10px;overflow:hidden;margin-bottom:16px">${curHtml}</div>
-    <div style="font-size:12px;font-weight:700;color:var(--text3);text-transform:uppercase;letter-spacing:1px;margin-bottom:4px">🕓 Pracovali zde dříve</div>
+    <div style="font-size:13px;font-weight:700;color:var(--green);text-transform:uppercase;letter-spacing:1px;margin-bottom:6px">👷 Pracují zde teď (${current.length})</div>
+    <div style="border:1px solid var(--brd);border-radius:10px;overflow:hidden;margin-bottom:20px">${curHtml}</div>
+    <div style="font-size:13px;font-weight:700;color:var(--text3);text-transform:uppercase;letter-spacing:1px;margin-bottom:6px">🕓 Pracovali zde dříve</div>
     <div style="border:1px solid var(--brd);border-radius:10px;overflow:hidden">${pastHtml}</div>
   </div>`
   dlg.style.display = 'flex'
