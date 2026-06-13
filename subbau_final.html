@@ -1956,7 +1956,7 @@ function retrySigning() {
 async function confirmAndSaveSignature() {
   if (!sigPreviewBlob) { showToast('Nejdříve zobrazte náhled'); return }
   const btn = document.getElementById('sig-preview-confirm-btn')
-  if (btn) { btn.textContent = 'Ukládám...'; btn.disabled = true }
+  if (btn) { btn.textContent = signLangDE ? 'Wird gespeichert...' : 'Ukládám...'; btn.disabled = true }
   try {
     if (sigPreviewMode === 'admin') await saveAdminSignedPDF(sigPreviewBlob)
     else await saveWorkerSignedPDF(sigPreviewBlob)
@@ -2006,19 +2006,12 @@ async function saveWorkerSignedPDF(signedBlob) {
     const {error:dbErr} = await sb.from('contracts').update({
       file_url: signedUrl,
       company_signature_url: signedUrl,
-      company_signed_at: new Date().toISOString(),
-      sign_token: null  // po podpisu odkaz zneplatni
+      company_signed_at: new Date().toISOString()
+      // sign_token ponecháváme — firma se přes stejný odkaz vrátí ke smlouvě (jen ke stažení)
     }).eq('id', contractId)
     if (dbErr) throw new Error('DB: ' + dbErr.message)
     closeSignModal()
-    // Ukaž firmě potvrzení
-    const body = document.getElementById('company-sign-body')
-    if (body) body.innerHTML = `
-      <div style="background:var(--green-l);border:1px solid var(--green);border-radius:12px;padding:30px;text-align:center;margin-top:20px">
-        <div style="font-size:44px;margin-bottom:10px">✅</div>
-        <div style="font-size:17px;font-weight:800;color:var(--green);margin-bottom:6px">Vertrag unterschrieben</div>
-        <div style="font-size:13px;color:var(--text2)">Vielen Dank. Ihre Unterschrift wurde gespeichert.</div>
-      </div>`
+    showCompanySignedView(contractId)
     _companySignMode = false
     return
   }
@@ -2313,7 +2306,7 @@ async function submitWorkerSignWithPlacement() {
   if (workerPdfState.sigX === null) { showToast('⚠️ Klikněte v PDF kde chcete podpis'); return }
 
   const btn = document.getElementById('sign-submit-btn')
-  if (btn) { btn.textContent = '⏳ Ukládám...'; btn.disabled = true }
+  if (btn) { btn.textContent = signLangDE ? '⏳ Wird gespeichert...' : '⏳ Ukládám...'; btn.disabled = true }
 
   try {
     const sigBlob = await new Promise(r => workerSignCanvas.toBlob(r, 'image/png'))
@@ -2362,26 +2355,30 @@ async function submitWorkerSignWithPlacement() {
     const isCompany = _companySignMode || !!_signToken || !!_companySignContract
     if (isCompany) {
       const cId = _companySignContract?.id || workerPdfState.contractId
-      const cPath = `signed/${cId}_company_signed.pdf`
-      const { error: cUpErr } = await sb.storage.from('contracts').upload(cPath, signedBlob, { contentType: 'application/pdf', upsert: true })
-      if (cUpErr) throw new Error(cUpErr.message)
-      const { data: cUrlData } = sb.storage.from('contracts').getPublicUrl(cPath)
-      const cSignedUrl = cUrlData?.publicUrl
-      const { error: cDbErr } = await sb.from('contracts').update({
-        file_url: cSignedUrl,
-        company_signature_url: cSignedUrl,
-        company_signed_at: new Date().toISOString(),
-        sign_token: null
-      }).eq('id', cId)
+      // Nahrání podepsaného PDF do storage (firma = anon; když selže, uložíme aspoň do DB)
+      let cSignedUrl = null
+      try {
+        const cPath = `signed/${cId}_company_signed.pdf`
+        const up = await Promise.race([
+          sb.storage.from('contracts').upload(cPath, signedBlob, { contentType: 'application/pdf', upsert: true }),
+          new Promise((_, rej) => setTimeout(() => rej(new Error('upload-timeout')), 12000))
+        ])
+        if (!up.error) {
+          const { data: cUrlData } = sb.storage.from('contracts').getPublicUrl(cPath)
+          cSignedUrl = cUrlData?.publicUrl
+        }
+      } catch(e) { console.warn('[company-sign] upload PDF selhal/timeout:', e?.message) }
+
+      const upd = {
+        company_signed_at: new Date().toISOString()
+        // sign_token ponecháváme — firma se přes odkaz vrátí ke smlouvě ke stažení
+      }
+      if (cSignedUrl) { upd.company_signature_url = cSignedUrl; upd.file_url = cSignedUrl }
+      const { error: cDbErr } = await sb.from('contracts').update(upd).eq('id', cId)
       if (cDbErr) throw new Error(cDbErr.message)
+
       closeSignModal()
-      const body = document.getElementById('company-sign-body')
-      if (body) body.innerHTML = `
-        <div style="background:var(--green-l);border:1px solid var(--green);border-radius:12px;padding:30px;text-align:center;margin-top:20px">
-          <div style="font-size:44px;margin-bottom:10px">✅</div>
-          <div style="font-size:17px;font-weight:800;color:var(--green);margin-bottom:6px">Vertrag unterschrieben</div>
-          <div style="font-size:13px;color:var(--text2)">Vielen Dank. Ihre Unterschrift wurde gespeichert.</div>
-        </div>`
+      showCompanySignedView(cId)
       _companySignMode = false
       return
     }
@@ -9055,6 +9052,31 @@ async function revokeCompanyLink() {
 }
 
 // ===== VEŘEJNÁ PODPISOVÁ STRÁNKA (firma, bez přihlášení) =====
+
+// Po podpisu (nebo při návratu na již podepsanou smlouvu) — ukáže firmě smlouvu ke stažení
+async function showCompanySignedView(contractId) {
+  const body = document.getElementById('company-sign-body')
+  if (!body) return
+  body.innerHTML = '<div style="text-align:center;color:var(--text3);padding:30px">…</div>'
+  // Načti aktuální data smlouvy
+  const { data: c } = await sb.from('contracts')
+    .select('id,title,file_url,company_signature_url,company_signed_at, worker:profiles!worker_id(full_name)')
+    .eq('id', contractId).maybeSingle()
+  const dlUrl = (c && (c.company_signature_url || c.file_url)) || null
+  const dateStr = c?.company_signed_at ? new Date(c.company_signed_at).toLocaleDateString('de-DE') : new Date().toLocaleDateString('de-DE')
+  body.innerHTML = `
+    <div style="background:var(--green-l);border:1px solid var(--green);border-radius:12px;padding:24px;text-align:center;margin-bottom:16px">
+      <div style="font-size:44px;margin-bottom:8px">✅</div>
+      <div style="font-size:17px;font-weight:800;color:var(--green);margin-bottom:4px">Vertrag unterschrieben</div>
+      <div style="font-size:13px;color:var(--text2)">Vielen Dank. Ihre Unterschrift wurde gespeichert. (${dateStr})</div>
+    </div>
+    <div style="background:#fff;border:1px solid var(--brd);border-radius:12px;padding:16px">
+      <div style="font-size:14px;font-weight:700;margin-bottom:4px">${c?.title || 'Vertrag'}</div>
+      ${c?.worker?.full_name ? `<div style="font-size:12px;color:var(--text2);margin-bottom:12px">Mitarbeiter: ${c.worker.full_name}</div>` : '<div style="margin-bottom:12px"></div>'}
+      ${dlUrl ? `<button onclick="openPdfUrl('${dlUrl}')" style="width:100%;padding:13px;background:var(--blue);color:#fff;border:none;border-radius:10px;font-size:14px;font-weight:700;cursor:pointer;font-family:inherit">📄 Unterschriebenen Vertrag anzeigen / herunterladen</button>` : '<div style="font-size:13px;color:var(--text3);text-align:center;padding:10px">Das unterschriebene Dokument wird verarbeitet…</div>'}
+      <div style="font-size:11px;color:var(--text3);text-align:center;margin-top:10px">Diesen Vertrag können Sie über denselben Link erneut öffnen und herunterladen.</div>
+    </div>`
+}
 
 async function initCompanySignPage(token) {
   const body = document.getElementById('company-sign-body')
