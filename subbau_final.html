@@ -3685,6 +3685,31 @@ async function toggleWorkerActiveFromAccess(workerId, workerName, isActive) {
 }
 
 
+async function deleteAccountFully(workerId, workerName, email) {
+  if (!confirm(`⚠️ SMAZAT ÚČET pracovníka "${workerName}"?\n\nSmaže se profil i jeho data (docházka, dokumenty, smlouvy).\nTato akce je NEVRATNÁ.\n\nPoužijte jen pro testování registrace.`)) return
+  if (!confirm(`Opravdu definitivně smazat "${workerName}"? Potvrďte ještě jednou.`)) return
+
+  showToast('⏳ Mažu účet…')
+  try {
+    // Smaž navázaná data (ať se email dá znovu použít a nezůstanou sirotci)
+    await sb.from('attendance').delete().eq('worker_id', workerId)
+    await sb.from('vacations').delete().eq('worker_id', workerId)
+    await sb.from('documents').delete().eq('worker_id', workerId)
+    await sb.from('contracts').delete().eq('worker_id', workerId)
+    await sb.from('login_history').delete().eq('worker_id', workerId)
+    await sb.from('weekly_hour_sheets').delete().eq('worker_id', workerId)
+    await sb.from('team_assignments').delete().eq('worker_id', workerId)
+    // Nakonec smaž profil
+    const { error } = await sb.from('profiles').delete().eq('id', workerId)
+    if (error) { showToast('❌ Chyba: ' + error.message); return }
+    showToast(`✅ Účet smazán: ${workerName}`)
+    alert(`Profil "${workerName}" byl smazán.\n\nPokud se nepůjde znovu zaregistrovat se stejným e-mailem (${email}), je to tím, že přihlašovací záznam zůstává v Supabase Authentication. V tom případě ho smažte ručně v Supabase → Authentication → Users, nebo použijte při testu jiný e-mail.`)
+    loadAccess()
+  } catch (e) {
+    showToast('❌ Chyba: ' + (e?.message || e))
+  }
+}
+
 async function showWorkerActivity(workerId, workerName) {
   // Načti online stav pracovníka
   const { data: prof } = await sb.from('profiles').select('last_seen_at, last_login_at').eq('id', workerId).maybeSingle()
@@ -3898,8 +3923,12 @@ async function loadAccess() {
           Reset hesla
         </button>
         <button onclick="toggleWorkerActiveFromAccess('${w.id}','${w.full_name}',${w.is_active})"
-          style="padding:5px 10px;font-size:11px;background:${w.is_active ? '#dc3545' : '#198754'};color:#fff;border:none;border-radius:6px;cursor:pointer;font-family:inherit;font-weight:700;display:block;width:100%">
+          style="padding:5px 10px;font-size:11px;background:${w.is_active ? '#dc3545' : '#198754'};color:#fff;border:none;border-radius:6px;cursor:pointer;font-family:inherit;font-weight:700;display:block;width:100%;margin-bottom:4px">
           ${w.is_active ? 'Odebrat pristup' : 'Obnovit pristup'}
+        </button>
+        <button onclick="deleteAccountFully('${w.id}','${w.full_name.replace(/'/g, String.fromCharCode(39))}','${w.email}')"
+          style="padding:5px 10px;font-size:11px;background:#1a1a1a;color:#ff6b6b;border:1px solid #ff6b6b;border-radius:6px;cursor:pointer;font-family:inherit;font-weight:700;display:block;width:100%">
+          🗑 Smazat účet
         </button>
       </td>
     </tr>`
