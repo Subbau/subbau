@@ -5456,25 +5456,38 @@ function openNewTeamModal() {
   if (m) {
     document.getElementById('new-team-name').value = ''
     document.getElementById('new-team-location').value = ''
-    fillCompanyDatalist()
+    const cs = document.getElementById('new-team-company'); if (cs) cs.value = ''
+    fillCompanyPicker()
     m.style.display = 'flex'
     setTimeout(() => document.getElementById('new-team-name').focus(), 100)
   }
 }
 
-// Naplní rozbalovák názvu skupiny uloženými firmami
-async function fillCompanyDatalist() {
-  const dl = document.getElementById('company-datalist')
-  if (!dl) return
-  const { data, error } = await sb.from('companies').select('name, site').order('name')
-  if (error || !data?.length) { dl.innerHTML = ''; return }
-  // Nabídni název firmy i kombinaci firma + stavba
-  const opts = []
-  data.forEach(c => {
-    if (c.name) opts.push(c.name)
-    if (c.name && c.site) opts.push(`${c.name} — ${c.site}`)
-  })
-  dl.innerHTML = [...new Set(opts)].map(o => `<option value="${o.replace(/"/g,'&quot;')}">`).join('')
+// Naplní rozbalovák firem z databáze firem
+let _teamCompanies = []
+async function fillCompanyPicker() {
+  const sel = document.getElementById('new-team-company')
+  if (!sel) return
+  const { data, error } = await sb.from('companies').select('name, site, address').order('name')
+  _teamCompanies = data || []
+  if (error || !data?.length) {
+    sel.innerHTML = '<option value="">— žádné uložené firmy —</option>'
+    return
+  }
+  sel.innerHTML = '<option value="">— vyberte firmu —</option>' +
+    data.map((c, i) => `<option value="${i}">${(c.name||'').replace(/</g,'&lt;')}${c.site ? ' — ' + c.site : ''}</option>`).join('')
+}
+
+// Když admin vybere firmu z rozbalováku → doplní název skupiny (a lokalitu, je-li prázdná)
+function onTeamCompanyPick() {
+  const sel = document.getElementById('new-team-company')
+  if (!sel || sel.value === '') return
+  const c = _teamCompanies[parseInt(sel.value)]
+  if (!c) return
+  const nameEl = document.getElementById('new-team-name')
+  if (nameEl) nameEl.value = c.site ? `${c.name} — ${c.site}` : c.name
+  const locEl = document.getElementById('new-team-location')
+  if (locEl && !locEl.value.trim() && (c.site || c.address)) locEl.value = c.site || c.address || ''
 }
 
 function closeNewTeamModal() {
@@ -10612,12 +10625,16 @@ function compressImage(file, maxSize) {
       <h3 style="margin:0;font-size:16px">Nova skupina</h3>
       <button onclick="closeNewTeamModal()" style="background:none;border:none;font-size:22px;cursor:pointer">&times;</button>
     </div>
-    <div class="fg"><label>Nazev skupiny *</label>
-      <input type="text" id="new-team-name" placeholder="Vyberte firmu nebo napište ručně..." style="width:100%" list="company-datalist" onkeydown="if(event.key==='Enter')submitNewTeam()">
-      <datalist id="company-datalist"></datalist>
-      <div style="font-size:11px;color:var(--text3);margin-top:3px">Můžete vybrat uloženou firmu, nebo napsat vlastní název.</div>
+    <div class="fg"><label>Název skupiny *</label>
+      <input type="text" id="new-team-name" placeholder="Např. Stavba Praha, Parta Berlín..." style="width:100%" onkeydown="if(event.key==='Enter')submitNewTeam()">
     </div>
-    <div class="fg"><label>Lokalita stavby</label><input type="text" id="new-team-location" placeholder="Praha, Andel..." style="width:100%" onkeydown="if(event.key==='Enter')submitNewTeam()"></div>
+    <div class="fg"><label>Firma z databáze (volitelné)</label>
+      <select id="new-team-company" onchange="onTeamCompanyPick()" style="width:100%;padding:10px;border:1.5px solid var(--brd);border-radius:8px;font-size:14px;font-family:inherit">
+        <option value="">— vyberte firmu —</option>
+      </select>
+      <div style="font-size:11px;color:var(--text3);margin-top:3px">Vyberete-li firmu, doplní se k názvu skupiny.</div>
+    </div>
+    <div class="fg"><label>Lokalita stavby</label><input type="text" id="new-team-location" placeholder="Praha, Anděl..." style="width:100%" onkeydown="if(event.key==='Enter')submitNewTeam()"></div>
     <div style="display:flex;gap:8px;margin-top:8px">
       <button onclick="closeNewTeamModal()" style="flex:1;padding:10px;border:1px solid var(--brd);border-radius:8px;cursor:pointer;font-family:inherit;background:var(--bg)">Zrušit</button>
       <button onclick="submitNewTeam()" class="btn-pri" style="flex:2;padding:10px">Vytvořit skupinu</button>
