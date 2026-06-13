@@ -1989,6 +1989,7 @@ async function saveAdminSignedPDF(signedBlob) {
     }
   }
   closeAdminSignModal(); showToast('Smlouva podepsána! ✓'); loadAdminContracts()
+  if (typeof currentWorkerId !== 'undefined' && currentWorkerId && typeof loadWdContracts === 'function') loadWdContracts(currentWorkerId)
 }
 
 async function saveWorkerSignedPDF(signedBlob) {
@@ -8406,11 +8407,11 @@ async function loadDocumentAlertsStat() {
     other: 'Dokument'
   }
 
-  // Načti všechny aktivní OSVČ pracovníky
+  // Načti všechny AKTIVNÍ OSVČ pracovníky (neaktivní/odebrané neřešíme)
   const { data: workers } = await sb.from('profiles')
     .select('id, full_name, profession')
     .in('role', ['osvec', 'partak'])
-    
+    .eq('is_active', true)
     .order('full_name')
 
   if (!workers?.length) {
@@ -9123,11 +9124,66 @@ async function initCompanySignPage(token) {
       <div style="font-size:13px;font-weight:700;margin-bottom:8px">1. Vertrag lesen</div>
       <button onclick="openPdfUrl('${data.file_url}')" style="width:100%;padding:12px;background:var(--blue);color:#fff;border:none;border-radius:10px;font-size:14px;font-weight:700;cursor:pointer;font-family:inherit">📄 Vertrag anzeigen / herunterladen (PDF)</button>
     </div>` : ''}
-    <div style="background:#fff;border:1px solid var(--brd);border-radius:12px;padding:16px">
-      <div style="font-size:13px;font-weight:700;margin-bottom:6px">2. Vertrag unterschreiben</div>
+    <div style="background:#fff;border:1px solid var(--brd);border-radius:12px;padding:16px;margin-bottom:16px">
+      <div style="font-size:13px;font-weight:700;margin-bottom:6px">2. Online unterschreiben</div>
       <p style="font-size:12px;color:var(--text3);margin:0 0 12px">Tippen Sie auf die Stelle im Vertrag, an der Ihre Unterschrift erscheinen soll, und unterschreiben Sie mit dem Finger oder der Maus. Vor dem Speichern sehen Sie eine Vorschau.</p>
-      <button onclick="startCompanySignFlow()" style="width:100%;padding:14px;background:#1a1a1a;color:#FFCD00;border:none;border-radius:10px;font-size:15px;font-weight:800;cursor:pointer;font-family:inherit">✍️ Jetzt unterschreiben</button>
+      <button onclick="startCompanySignFlow()" style="width:100%;padding:14px;background:#1a1a1a;color:#FFCD00;border:none;border-radius:10px;font-size:15px;font-weight:800;cursor:pointer;font-family:inherit">✍️ Jetzt online unterschreiben</button>
+    </div>
+
+    <div style="display:flex;align-items:center;gap:10px;margin:16px 0;color:var(--text3);font-size:12px">
+      <div style="flex:1;height:1px;background:var(--brd)"></div>
+      <span>ODER</span>
+      <div style="flex:1;height:1px;background:var(--brd)"></div>
+    </div>
+
+    <div style="background:#fff;border:1px solid var(--brd);border-radius:12px;padding:16px">
+      <div style="font-size:13px;font-weight:700;margin-bottom:6px">3. Unterschrieben hochladen</div>
+      <p style="font-size:12px;color:var(--text3);margin:0 0 12px">Sie können den Vertrag herunterladen, ausdrucken, handschriftlich unterschreiben und das unterschriebene PDF hier wieder hochladen.</p>
+      <input type="file" id="company-upload-pdf" accept="application/pdf,.pdf" onchange="onCompanyUploadPick()" style="display:none">
+      <button onclick="document.getElementById('company-upload-pdf').click()" style="width:100%;padding:12px;background:none;border:2px solid #1a1a1a;color:#1a1a1a;border-radius:10px;font-size:14px;font-weight:700;cursor:pointer;font-family:inherit">📤 Unterschriebenes PDF hochladen</button>
+      <div id="company-upload-filename" style="font-size:12px;color:var(--text2);margin-top:8px;text-align:center"></div>
+      <button id="company-upload-submit" onclick="submitCompanyUploadedPDF()" style="display:none;width:100%;padding:13px;background:#1d9e75;color:#fff;border:none;border-radius:10px;font-size:14px;font-weight:800;cursor:pointer;font-family:inherit;margin-top:10px">✅ Hochladen & absenden</button>
     </div>`
+}
+
+// Firma vybrala podepsané PDF
+let _companyUploadFile = null
+function onCompanyUploadPick() {
+  const inp = document.getElementById('company-upload-pdf')
+  const f = inp?.files?.[0]
+  if (!f) return
+  if (f.type !== 'application/pdf' && !f.name.toLowerCase().endsWith('.pdf')) {
+    showToast('⚠️ Bitte nur PDF hochladen'); inp.value = ''; return
+  }
+  _companyUploadFile = f
+  const fn = document.getElementById('company-upload-filename')
+  if (fn) fn.textContent = '📄 ' + f.name
+  const btn = document.getElementById('company-upload-submit')
+  if (btn) btn.style.display = 'block'
+}
+
+async function submitCompanyUploadedPDF() {
+  if (!_companyUploadFile || !_companySignContract) { showToast('⚠️ Keine Datei'); return }
+  const btn = document.getElementById('company-upload-submit')
+  if (btn) { btn.textContent = 'Wird hochgeladen...'; btn.disabled = true }
+  try {
+    const cId = _companySignContract.id
+    const path = `signed/${cId}_company_uploaded.pdf`
+    const { error: upErr } = await sb.storage.from('contracts').upload(path, _companyUploadFile, { contentType: 'application/pdf', upsert: true })
+    if (upErr) throw new Error(upErr.message)
+    const { data: urlData } = sb.storage.from('contracts').getPublicUrl(path)
+    const signedUrl = urlData?.publicUrl
+    const { error: dbErr } = await sb.from('contracts').update({
+      file_url: signedUrl,
+      company_signature_url: signedUrl,
+      company_signed_at: new Date().toISOString()
+    }).eq('id', cId)
+    if (dbErr) throw new Error(dbErr.message)
+    showCompanySignedView(cId)
+  } catch(e) {
+    showToast('❌ Fehler: ' + e.message)
+    if (btn) { btn.textContent = '✅ Hochladen & absenden'; btn.disabled = false }
+  }
 }
 
 // Firma spustí stejný podpisový modal jako OSVČ, ale v režimu "company"
@@ -9176,6 +9232,7 @@ async function loadAdminContracts() {
           ${c.admin_signature_url?`<button onclick="openPdfUrl('${c.admin_signature_url}')" style="font-size:11px;color:var(--amber);display:block;margin-top:2px;background:none;border:none;cursor:pointer;padding:0;font-family:inherit;text-decoration:underline">✍️ Podpis admina</button>`:''}
           ${c.signature_url?`<button onclick="openPdfUrl('${c.signature_url}')" style="font-size:11px;color:var(--green);display:block;margin-top:2px;background:none;border:none;cursor:pointer;padding:0;font-family:inherit;text-decoration:underline">✍️ Podpis OSVČ</button>`:''}
           ${c.status==='admin_pending'?`<button onclick="openAdminSignModal('${c.id}','${(c.title||'').replace(/'/g,"\'")}','${c.file_url||''}')" style="margin-top:6px;width:100%;padding:5px 8px;background:#1a1a1a;color:#FFCD00;border:none;border-radius:6px;cursor:pointer;font-size:11px;font-weight:700">✍️ Podepsat jako admin</button>`:''}
+          ${!c.signature_url?`<button onclick="openSignForWorker('${c.id}','${(c.title||'').replace(/'/g,"\'")}','${c.file_url||''}')" style="margin-top:4px;width:100%;padding:5px 8px;background:var(--green);color:#fff;border:none;border-radius:6px;cursor:pointer;font-size:11px;font-weight:700;font-family:inherit">✍️ Podepsat za OSVČ</button>`:''}
           ${c.company_signed_at?`<div style="font-size:10px;color:var(--green);margin-top:3px">🏢 Firma podepsala: ${c.company_signed_at.slice(0,10)}${c.company_signer_name?' ('+c.company_signer_name+')':''}</div>`:''}
           ${c.company_signature_url?`<button onclick="openPdfUrl('${c.company_signature_url}')" style="font-size:11px;color:var(--blue);display:block;margin-top:2px;background:none;border:none;cursor:pointer;padding:0;font-family:inherit;text-decoration:underline">🏢 Podpis firmy</button>`:''}
           <button onclick="openCompanyLinkModal('${c.id}','${(c.title||'').replace(/'/g,"\'")}')" style="margin-top:4px;width:100%;padding:5px 8px;background:none;border:1px solid var(--blue);color:var(--blue);border-radius:6px;cursor:pointer;font-size:11px;font-weight:700;font-family:inherit">🔗 Odkaz pro firmu</button>
@@ -10533,7 +10590,7 @@ async function loadWdContracts(id) {
         ${c.signature_url ? `<button onclick="openPdfUrl('${c.signature_url}')" style="font-size:11px;padding:2px 8px;border:1px solid var(--green);border-radius:5px;cursor:pointer;background:none;color:var(--green);font-family:inherit">OSVČ podpis</button>` : ''}
         ${c.company_signature_url ? `<button onclick="openPdfUrl('${c.company_signature_url}')" style="font-size:11px;padding:2px 8px;border:1px solid var(--blue);border-radius:5px;cursor:pointer;background:none;color:var(--blue);font-family:inherit">🏢 Podpis firmy</button>` : ''}
         ${c.status==='admin_pending' ? `<button onclick="openAdminSignModal('${c.id}','${(c.title||'').replace(/'/g,String.fromCharCode(39))}','${c.file_url||''}')" style="font-size:11px;padding:2px 8px;border:none;border-radius:5px;cursor:pointer;background:var(--blue);color:#fff;font-family:inherit;font-weight:700">Podepsat</button>` : ''}
-        ${c.status==='pending' ? `<button onclick="openSignForWorker('${c.id}','${(c.title||'').replace(/'/g,String.fromCharCode(39))}','${c.file_url||''}')" style="font-size:11px;padding:2px 8px;border:none;border-radius:5px;cursor:pointer;background:var(--green);color:#fff;font-family:inherit;font-weight:700">Za OSVČ</button>` : ''}
+        ${!c.signature_url ? `<button onclick="openSignForWorker('${c.id}','${(c.title||'').replace(/'/g,String.fromCharCode(39))}','${c.file_url||''}')" style="font-size:11px;padding:2px 8px;border:none;border-radius:5px;cursor:pointer;background:var(--green);color:#fff;font-family:inherit;font-weight:700">Za OSVČ</button>` : ''}
         <button onclick="deleteContract('${c.id}','${(c.title||'').replace(/'/g,String.fromCharCode(39))}','${c.file_url||''}','${c.admin_signature_url||''}','${c.signature_url||''}')" style="font-size:11px;padding:2px 8px;border:1px solid var(--red);border-radius:5px;cursor:pointer;background:none;color:var(--red);font-family:inherit">🗑</button>
       </div>
     </div>`).join('')
