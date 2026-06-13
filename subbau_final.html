@@ -2458,6 +2458,7 @@ async function openAdminSignModal(contractId, title, fileUrl) {
   pdfSignState.title = title
   pdfSignState.fileUrl = fileUrl
   pdfSignState.sigX = null; pdfSignState.sigY = null
+  pdfSignState.signMode = 'admin'  // normální podpis admina (ne za OSVČ)
 
   const modal = document.getElementById('admin-sign-modal')
   if (!modal) return
@@ -2749,20 +2750,23 @@ async function submitAdminSignatureWithPlacement() {
     const { error: dbErr } = await sb.from('contracts').update(updateData).eq('id', pdfSignState.contractId)
     if (dbErr) throw new Error('DB error: ' + dbErr.message)
 
-    // 7. Notifikace pracovníkovi
-    const { data: cont } = await sb.from('contracts').select('worker_id,title').eq('id', pdfSignState.contractId).maybeSingle()
-    if (cont) {
-      await sb.from('notifications').insert({
-        worker_id: cont.worker_id,
-        title: '✍️ Smlouva čeká na Váš podpis',
-        message: `Smlouva "${cont.title}" byla podepsána adminem. Přejděte do sekce Smlouvy a podepište ji.`,
-        type: 'smlouva', is_read: false
-      })
+    // 7. Notifikace pracovníkovi — jen u běžného admin podpisu (ne když admin podepsal za OSVČ)
+    if (!isForWorker) {
+      const { data: cont } = await sb.from('contracts').select('worker_id,title').eq('id', pdfSignState.contractId).maybeSingle()
+      if (cont) {
+        await sb.from('notifications').insert({
+          worker_id: cont.worker_id,
+          title: '✍️ Smlouva čeká na Váš podpis',
+          message: `Smlouva "${cont.title}" byla podepsána adminem. Přejděte do sekce Smlouvy a podepište ji.`,
+          type: 'smlouva', is_read: false
+        })
+      }
     }
 
-    showToast('✅ Podpis vložen do PDF a odeslán pracovníkovi!')
+    showToast(isForWorker ? '✅ Podpis za OSVČ uložen do smlouvy!' : '✅ Podpis vložen do PDF a odeslán pracovníkovi!')
     closeAdminSignModal()
     loadAdminContracts()
+    if (typeof currentWorkerId !== 'undefined' && currentWorkerId && typeof loadWdContracts === 'function') loadWdContracts(currentWorkerId)
 
   } catch(e) {
     showToast('❌ Chyba: ' + e.message)
