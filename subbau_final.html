@@ -890,7 +890,9 @@ tr:hover td{background:#fafbfc}
                   </label>
                 </div>
                 <div id="contract-upload-progress" style="display:none;padding:10px;background:var(--blue-l);border-radius:8px;font-size:13px;color:var(--blue);text-align:center;margin-bottom:10px">⏳ Nahrávám...</div>
-                <button class="btn-pri" onclick="uploadContract()" style="width:100%;padding:11px">📤 Nahrát a podepsat jako admin</button>
+                <button class="btn-pri" onclick="uploadContract()" style="width:100%;padding:11px;margin-bottom:8px">📤 Nahrát a podepsat jako admin</button>
+                <button onclick="uploadSignedContract()" style="width:100%;padding:11px;background:var(--green);color:#fff;border:none;border-radius:10px;font-size:14px;font-weight:700;cursor:pointer;font-family:inherit">✅ Nahrát už podepsanou smlouvu</button>
+                <p style="font-size:11px;color:var(--text3);margin:8px 0 0;text-align:center">Použijte, když máte sken smlouvy podepsané všemi stranami — nikdo už nepodepisuje.</p>
               </div>
             </div>
             <!-- Seznam smluv -->
@@ -9038,6 +9040,59 @@ async function uploadContract() {
   document.getElementById('contract-worker').value = ''
 
   showToast('Smlouva nahrána! Klikněte Podepsat v seznamu smluv.')
+  loadAdminContracts()
+}
+
+// Nahraje smlouvu, která je už podepsaná (sken) — uloží rovnou jako hotovou, nikdo nepodepisuje
+async function uploadSignedContract() {
+  const workerId = document.getElementById('contract-worker').value
+  const title = document.getElementById('contract-title').value.trim()
+  if (!workerId) { showToast('⚠️ Vyberte pracovníka'); return }
+  if (!title) { showToast('⚠️ Zadejte název smlouvy'); return }
+  if (!contractFile) { showToast('⚠️ Vyberte PDF soubor'); return }
+
+  const progress = document.getElementById('contract-upload-progress')
+  progress.style.display = 'block'
+  progress.textContent = '⏳ Nahrávám podepsanou smlouvu...'
+
+  const safeName = contractFile.name
+    .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-zA-Z0-9._-]/g, '_')
+    .replace(/_+/g, '_')
+    .toLowerCase()
+  const filePath = `${workerId}/${Date.now()}_signed_${safeName}`
+  const { error: storageErr } = await sb.storage.from('contracts').upload(filePath, contractFile, { upsert: false })
+  if (storageErr) {
+    let msg = storageErr.message
+    if (msg.includes('not found') || msg.includes('does not exist')) msg = 'Storage bucket "contracts" neexistuje'
+    else if (msg.includes('security') || msg.includes('policy') || msg.includes('403')) msg = 'Chyba oprávnění k nahrávání'
+    showToast('❌ Upload: ' + msg); progress.style.display = 'none'; return
+  }
+
+  const { data: urlData } = sb.storage.from('contracts').getPublicUrl(filePath)
+  const fileUrl = urlData?.publicUrl
+
+  // Ulož jako už podepsanou — status signed_scan, podpis = nahraný soubor
+  const { error: dbErr } = await sb.from('contracts').insert({
+    worker_id: workerId,
+    title,
+    file_url: fileUrl,
+    signature_url: fileUrl,
+    signed_at: new Date().toISOString(),
+    status: 'signed_scan',
+    created_at: new Date().toISOString()
+  })
+  if (dbErr) { showToast('❌ Chyba DB: ' + dbErr.message); progress.style.display = 'none'; return }
+
+  progress.style.display = 'none'
+  contractFile = null
+  const fileInput = document.getElementById('contract-file')
+  if (fileInput) fileInput.value = ''
+  document.getElementById('contract-file-name').textContent = 'Žádný soubor'
+  document.getElementById('contract-title').value = ''
+  document.getElementById('contract-worker').value = ''
+
+  showToast('✅ Podepsaná smlouva uložena!')
   loadAdminContracts()
 }
 
