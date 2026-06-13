@@ -1487,11 +1487,17 @@ tr:hover td{background:#fafbfc}
         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
           <div class="mob-card-title" style="margin-bottom:0">📊 Export mých hodin</div>
         </div>
-        <p style="font-size:12px;color:var(--text2);margin-bottom:10px">Stáhnout přehled hodin za týden jako PDF.</p>
+        <p style="font-size:12px;color:var(--text2);margin-bottom:10px">Stáhnout přehled hodin za týden jako PDF. Vedoucí na stavbě může hodiny podepsat.</p>
         <div class="fg" style="margin-bottom:10px">
           <label style="font-size:12px">Týden</label>
           <select id="mob-export-week" style="width:100%;padding:8px;border:1px solid var(--brd);border-radius:8px;font-size:13px;font-family:inherit"></select>
         </div>
+        <div class="fg" style="margin-bottom:10px">
+          <label style="font-size:12px">Vedoucí na stavbě (volitelné)</label>
+          <input type="text" id="mob-foreman-name" placeholder="Jméno vedoucího" style="width:100%;font-size:16px;padding:10px;border:1px solid var(--brd);border-radius:8px">
+        </div>
+        <button onclick="openForemanSign()" id="foreman-sign-btn" style="width:100%;padding:10px;background:#fff;color:#1a1a1a;border:2px solid #1a1a1a;border-radius:10px;font-size:13px;font-weight:700;cursor:pointer;font-family:inherit;margin-bottom:8px">✍️ Podpis vedoucího</button>
+        <div id="foreman-sign-status" style="display:none;font-size:12px;color:var(--green);text-align:center;margin-bottom:8px;font-weight:600"></div>
         <button onclick="exportMobWorkerHours()" style="width:100%;padding:10px;background:#1a1a1a;color:#FFCD00;border:none;border-radius:10px;font-size:13px;font-weight:700;cursor:pointer;font-family:inherit">📥 Stáhnout PDF hodin</button>
       </div>
 
@@ -2721,7 +2727,8 @@ window.addEventListener('load', async () => {
   }
   setKWChip()
   fillKWSelect()
-  getGPS()
+  // Polohu NEvyvoláváme při startu — žádá se až při akci (příchod/odchod/přestávka),
+  // ať aplikace pracovníky nežádá o polohu pokaždé, když ji jen otevřou.
 
   // Ověř uloženou session — na Androidu/Chrome může být poškozená a blokovat přihlášení.
   // Pokud je session přítomná, ale neplatná, vyčisti ji a ukaž čistý login.
@@ -5449,9 +5456,25 @@ function openNewTeamModal() {
   if (m) {
     document.getElementById('new-team-name').value = ''
     document.getElementById('new-team-location').value = ''
+    fillCompanyDatalist()
     m.style.display = 'flex'
     setTimeout(() => document.getElementById('new-team-name').focus(), 100)
   }
+}
+
+// Naplní rozbalovák názvu skupiny uloženými firmami
+async function fillCompanyDatalist() {
+  const dl = document.getElementById('company-datalist')
+  if (!dl) return
+  const { data, error } = await sb.from('companies').select('name, site').order('name')
+  if (error || !data?.length) { dl.innerHTML = ''; return }
+  // Nabídni název firmy i kombinaci firma + stavba
+  const opts = []
+  data.forEach(c => {
+    if (c.name) opts.push(c.name)
+    if (c.name && c.site) opts.push(`${c.name} — ${c.site}`)
+  })
+  dl.innerHTML = [...new Set(opts)].map(o => `<option value="${o.replace(/"/g,'&quot;')}">`).join('')
 }
 
 function closeNewTeamModal() {
@@ -7736,20 +7759,22 @@ function triggerHtmlDownload(html, filename) {
 
 
 // -- EXPORT HODIN PRACOVNÍKA --
-async function exportWorkerKW(workerId, workerName, week, year, lang) {
+async function exportWorkerKW(workerId, workerName, week, year, lang, foreman) {
   lang = lang || 'cs'
   const T = {
     cs: {
       gen: '⏳ Generuji přehled...', title: 'Přehled hodin',
       day:'Den', in:'Příchod', out:'Odchod', brk:'Přestávka', hrs:'Hodiny', site:'Stavba', work:'Náplň práce',
       none:'Žádné záznamy', total:'Celkem', generated:'Vygenerováno', sys:'SubBau Docházkový systém',
-      locale:'cs-CZ', wTitle:'Hodiny'
+      locale:'cs-CZ', wTitle:'Hodiny',
+      foremanTitle:'Potvrzení vedoucího na stavbě', foremanName:'Vedoucí', foremanSig:'Podpis', workerSig:'Podpis pracovníka', dateLbl:'Datum'
     },
     en: {
       gen:'⏳ Generating report...', title:'Hours Overview',
       day:'Day', in:'Start', out:'End', brk:'Break', hrs:'Hours', site:'Site', work:'Work done',
       none:'No records', total:'Total', generated:'Generated', sys:'SubBau Attendance System',
-      locale:'en-GB', wTitle:'Hours'
+      locale:'en-GB', wTitle:'Hours',
+      foremanTitle:'Site supervisor confirmation', foremanName:'Supervisor', foremanSig:'Signature', workerSig:'Worker signature', dateLbl:'Date'
     }
   }[lang]
 
@@ -7818,6 +7843,23 @@ async function exportWorkerKW(workerId, workerName, week, year, lang) {
       <td colspan="2"></td>
     </tr></tfoot>
   </table>
+  ${(foreman && (foreman.name || foreman.signature)) ? `
+  <div style="margin-top:34px;border-top:2px solid #1a1a1a;padding-top:14px">
+    <div style="font-size:13px;font-weight:700;margin-bottom:14px">${T.foremanTitle}</div>
+    <div style="display:flex;gap:40px;align-items:flex-end">
+      <div style="flex:1">
+        <div style="font-size:12px;color:#555;margin-bottom:4px">${T.foremanName}: <b style="color:#000">${foreman.name || '—'}</b></div>
+        <div style="border-bottom:1px solid #999;height:60px;display:flex;align-items:flex-end;justify-content:center">
+          ${foreman.signature ? `<img src="${foreman.signature}" style="max-height:58px;max-width:200px">` : ''}
+        </div>
+        <div style="font-size:11px;color:#888;margin-top:3px">${T.foremanSig}</div>
+      </div>
+      <div style="width:160px">
+        <div style="font-size:12px;color:#555;margin-bottom:4px">${T.dateLbl}:</div>
+        <div style="border-bottom:1px solid #999;height:60px;display:flex;align-items:flex-end;padding-bottom:4px;font-size:13px">${new Date().toLocaleDateString(T.locale)}</div>
+      </div>
+    </div>
+  </div>` : ''}
   <div style="margin-top:30px;font-size:11px;color:#999">${T.generated}: ${new Date().toLocaleString(T.locale)} | ${T.sys}</div>
   
 <!-- PRINT OVERLAY - pro PDF export bez popup okna -->
@@ -7889,7 +7931,65 @@ async function exportMobWorkerHours() {
   const sel = document.getElementById('mob-export-week')
   if (!sel?.value) { showToast('Vyberte týden'); return }
   const [week, year] = sel.value.split('/').map(Number)
-  await exportWorkerKW(currentUser.id, currentProfile?.full_name || 'Pracovník', week, year)
+  const foremanName = document.getElementById('mob-foreman-name')?.value.trim() || (foremanSignData?.name || '')
+  await exportWorkerKW(currentUser.id, currentProfile?.full_name || 'Pracovník', week, year, 'cs', {
+    name: foremanName,
+    signature: foremanSignData?.dataUrl || null
+  })
+}
+
+// ===== PODPIS VEDOUCÍHO NA STAVBĚ =====
+let foremanSignData = null  // { name, dataUrl }
+let _foremanPad = null
+
+function openForemanSign() {
+  const dlg = document.getElementById('foreman-sign-dialog')
+  if (!dlg) return
+  // Předvyplň jméno z pole nahoře
+  const nameTop = document.getElementById('mob-foreman-name')?.value.trim() || ''
+  const nameInput = document.getElementById('foreman-dialog-name')
+  if (nameInput) nameInput.value = nameTop || (foremanSignData?.name || '')
+  dlg.style.display = 'flex'
+  // Inicializuj podpisovou plochu
+  setTimeout(() => {
+    const canvas = document.getElementById('foreman-sign-canvas')
+    if (canvas && typeof initSignaturePad === 'function') {
+      _foremanPad = initSignaturePad(canvas, {})
+      const hideHint = () => { const h = document.getElementById('foreman-sign-hint'); if (h) h.style.display = 'none' }
+      canvas.addEventListener('pointerdown', hideHint, { once: false })
+      canvas.addEventListener('mousedown', hideHint, { once: false })
+      canvas.addEventListener('touchstart', hideHint, { once: false })
+    }
+  }, 80)
+}
+
+function clearForemanSign() {
+  if (_foremanPad && _foremanPad.clear) _foremanPad.clear()
+  const h = document.getElementById('foreman-sign-hint')
+  if (h) h.style.display = 'flex'
+}
+
+function closeForemanSign() {
+  const dlg = document.getElementById('foreman-sign-dialog')
+  if (dlg) dlg.style.display = 'none'
+}
+
+function saveForemanSign() {
+  const name = document.getElementById('foreman-dialog-name')?.value.trim()
+  if (!name) { showToast('⚠️ Zadejte jméno vedoucího'); return }
+  const canvas = document.getElementById('foreman-sign-canvas')
+  if (!canvas) return
+  // Ověř, že je něco nakresleno (pad má isEmpty, nebo zkontroluj přes hint)
+  const isEmpty = _foremanPad && typeof _foremanPad.isEmpty === 'function' ? _foremanPad.isEmpty() : false
+  if (isEmpty) { showToast('⚠️ Chybí podpis'); return }
+  const dataUrl = canvas.toDataURL('image/png')
+  foremanSignData = { name, dataUrl }
+  // Promítni do pole nahoře + status
+  const topName = document.getElementById('mob-foreman-name'); if (topName) topName.value = name
+  const status = document.getElementById('foreman-sign-status')
+  if (status) { status.style.display = 'block'; status.textContent = '✅ Podpis vedoucího uložen: ' + name }
+  closeForemanSign()
+  showToast('✅ Podpis vedoucího uložen')
 }
 
 async function loadMobExportWeeks() {
@@ -10512,7 +10612,11 @@ function compressImage(file, maxSize) {
       <h3 style="margin:0;font-size:16px">Nova skupina</h3>
       <button onclick="closeNewTeamModal()" style="background:none;border:none;font-size:22px;cursor:pointer">&times;</button>
     </div>
-    <div class="fg"><label>Nazev skupiny *</label><input type="text" id="new-team-name" placeholder="Stavba Praha..." style="width:100%" onkeydown="if(event.key==='Enter')submitNewTeam()"></div>
+    <div class="fg"><label>Nazev skupiny *</label>
+      <input type="text" id="new-team-name" placeholder="Vyberte firmu nebo napište ručně..." style="width:100%" list="company-datalist" onkeydown="if(event.key==='Enter')submitNewTeam()">
+      <datalist id="company-datalist"></datalist>
+      <div style="font-size:11px;color:var(--text3);margin-top:3px">Můžete vybrat uloženou firmu, nebo napsat vlastní název.</div>
+    </div>
     <div class="fg"><label>Lokalita stavby</label><input type="text" id="new-team-location" placeholder="Praha, Andel..." style="width:100%" onkeydown="if(event.key==='Enter')submitNewTeam()"></div>
     <div style="display:flex;gap:8px;margin-top:8px">
       <button onclick="closeNewTeamModal()" style="flex:1;padding:10px;border:1px solid var(--brd);border-radius:8px;cursor:pointer;font-family:inherit;background:var(--bg)">Zrušit</button>
@@ -10596,6 +10700,27 @@ function compressImage(file, maxSize) {
     </div>
   </div>
 </div>
+
+<!-- Podpis vedoucího na stavbě -->
+<div id="foreman-sign-dialog" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:10001;align-items:center;justify-content:center;padding:16px">
+  <div style="background:#fff;border-radius:20px;padding:20px;width:100%;max-width:440px;box-shadow:0 8px 32px rgba(0,0,0,.4)">
+    <div style="font-size:16px;font-weight:800;margin-bottom:4px;color:#1a1a1a">✍️ Podpis vedoucího na stavbě</div>
+    <div style="font-size:12px;color:#666;margin-bottom:12px">Vedoucí potvrzuje odpracované hodiny. Podepište se prosím prstem do pole níže.</div>
+    <div style="margin-bottom:10px">
+      <input type="text" id="foreman-dialog-name" placeholder="Jméno vedoucího" style="width:100%;padding:11px;border:1.5px solid #e0e0e0;border-radius:10px;font-size:15px;font-family:inherit;box-sizing:border-box">
+    </div>
+    <div style="border:2px dashed #cbd5e0;border-radius:12px;background:#f8fafc;position:relative;height:180px;margin-bottom:10px">
+      <canvas id="foreman-sign-canvas" style="width:100%;height:100%;display:block;touch-action:none;border-radius:12px"></canvas>
+      <div id="foreman-sign-hint" style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:#aaa;font-size:13px;pointer-events:none">Podpis sem</div>
+    </div>
+    <div style="display:flex;gap:8px">
+      <button onclick="clearForemanSign()" style="padding:12px 16px;background:none;border:2px solid #e0e0e0;border-radius:12px;font-size:14px;cursor:pointer;font-family:inherit">Vymazat</button>
+      <button onclick="saveForemanSign()" style="flex:1;padding:12px;background:#1a1a1a;color:#FFCD00;border:none;border-radius:12px;font-size:14px;font-weight:800;cursor:pointer;font-family:inherit">Uložit podpis</button>
+      <button onclick="closeForemanSign()" style="padding:12px 16px;background:none;border:2px solid #e0e0e0;border-radius:12px;font-size:14px;cursor:pointer;font-family:inherit">Zrušit</button>
+    </div>
+  </div>
+</div>
+
 <!-- Signature Preview Overlay -->
 <div id="sig-preview-overlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.95);z-index:19999;flex-direction:column">
   <div style="background:#1a1a1a;padding:12px 16px;display:flex;justify-content:space-between;align-items:center;flex-shrink:0;border-bottom:2px solid #FFCD00">
