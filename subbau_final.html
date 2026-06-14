@@ -6364,8 +6364,8 @@ async function mobCheckin(type) {
       // Aktualizuj UI ihned z čerstvých dat — nezávisle na serveru
       updateMobStav(data, [data])
       showToast('✅ Příchod zaznamenán — ' + timeStr)
-      // Zeptej se na adresu pracoviště (čerstvá GPS + možnost ručně)
-      askLocationForAction(data.id, 'Příchod')
+      // Zeptej se na adresu pracoviště (jen pokud ještě není potvrzená)
+      askAddressIfNeeded(data.id, 'Příchod')
       // Pak načti všechny dnešní záznamy (pro přehled směn)
       setTimeout(() => getTodayRecord(), 500)
 
@@ -6406,7 +6406,7 @@ async function mobCheckin(type) {
         updated.break_end = null
         todayRecord = { ...updated }  // Aktualizuj lokální kopii
         showToast('☕ Přestávka začala — ' + timeStr)
-        askLocationForAction(todayAttId, 'Přestávka')
+        askAddressIfNeeded(todayAttId, 'Přestávka')
 
       } else if (type === 'break-end') {
         if (!current.break_start) {
@@ -6420,7 +6420,7 @@ async function mobCheckin(type) {
         updated.break_end = timeStr
         todayRecord = { ...updated }  // Aktualizuj lokální kopii
         showToast('▶ Pokračuješ v práci od ' + timeStr)
-        askLocationForAction(todayAttId, 'Pokračování po přestávce')
+        askAddressIfNeeded(todayAttId, 'Pokračování po přestávce')
 
       } else if (type === 'out') {
         if (current.check_out) {
@@ -6457,10 +6457,17 @@ async function mobCheckin(type) {
           return
         }
 
-        // Odchod je uložen — dialog teď jen DOPLNÍ stavbu a popis (čas se už nemění)
+        // Odchod je uložen — pokud pořád chybí adresa (pracovník ji celý den přeskakoval),
+        // zeptej se na ni teď; pak otevři dialog pro popis práce.
         showToast('🚪 Odchod zaznamenán — ' + timeStr + ' (' + h + 'h)')
         pendingCheckout = { timeStr, hours: h, attId: todayAttId }
-        showCheckoutDialog()
+        const stillNoAddr = !(updated.location_address || '').trim()
+        if (stillNoAddr) {
+          _afterAddrShowCheckout = true
+          askLocationForAction(todayAttId, 'Adresa pracoviště')
+        } else {
+          showCheckoutDialog()
+        }
         updateMobStav(null, [updated])
         loadMobWeek()
         checkinInProgress = false
@@ -7649,12 +7656,25 @@ async function confirmActionAddress() {
   localStorage.setItem('lastConstructionSite', addr)
   closeAddrDialog()
   showToast('📍 Adresa uložena')
+  // Pokud šlo o adresu při odchodu, otevři teď dialog s popisem práce
+  if (_afterAddrShowCheckout) { _afterAddrShowCheckout = false; showCheckoutDialog() }
 }
 
 function closeAddrDialog() {
   const dlg = document.getElementById('addr-dialog')
   if (dlg) dlg.style.display = 'none'
   pendingAddrAttId = null
+  // Pokud uživatel u odchodu adresu přeskočil, i tak otevři dialog s popisem práce
+  if (_afterAddrShowCheckout) { _afterAddrShowCheckout = false; showCheckoutDialog() }
+}
+let _afterAddrShowCheckout = false
+
+// Zeptá se na adresu JEN když dnešní záznam ještě adresu nemá (pracovník ji dosud nepotvrdil).
+// Takže: ráno se zeptá; když přeskočí, zeptá se zas u pauzy/konce; jakmile potvrdí, už ne.
+function askAddressIfNeeded(attId, actionLabel) {
+  const hasAddr = todayRecord && (todayRecord.location_address || '').trim()
+  if (hasAddr) return  // adresa už potvrzena → neptat se
+  askLocationForAction(attId, actionLabel)
 }
 
 function getGPS() {
