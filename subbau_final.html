@@ -8385,18 +8385,28 @@ async function exportWorkerKW(workerId, workerName, week, year, lang, foreman) {
 
   // Když je podpis vedoucího, ulož výkaz, aby ho admin viděl v docházce za týden
   if (foreman && (foreman.name || foreman.signature)) {
+    let pdfUrl = null
+    // 1) Zkus nahrát HTML výkaz do storage (kvůli zobrazení/stažení adminem)
     try {
       const blob = new Blob([printHTML], { type: 'text/html;charset=utf-8' })
       const path = `hour-sheets/${workerId}_KW${week}_${year}_${Date.now()}.html`
       const { error: upErr } = await sb.storage.from('contracts').upload(path, blob, { contentType: 'text/html', upsert: true })
       if (!upErr) {
         const { data: pub } = sb.storage.from('contracts').getPublicUrl(path)
-        await sb.from('weekly_hour_sheets').insert({
-          worker_id: workerId, kw: week, kw_year: year,
-          foreman_name: foreman.name || null, pdf_url: pub?.publicUrl || null
-        })
+        pdfUrl = pub?.publicUrl || null
+      } else {
+        console.warn('[hour-sheet] upload selhal:', upErr.message)
       }
-    } catch(e) { console.warn('[hour-sheet] uložení selhalo:', e?.message) }
+    } catch(e) { console.warn('[hour-sheet] upload výjimka:', e?.message) }
+    // 2) Vždy ulož záznam (i bez pdf_url) — ať admin aspoň vidí jméno vedoucího + že je podepsáno
+    try {
+      const { error: insErr } = await sb.from('weekly_hour_sheets').insert({
+        worker_id: workerId, kw: week, kw_year: year,
+        foreman_name: foreman.name || null, pdf_url: pdfUrl
+      })
+      if (insErr) { console.error('[hour-sheet] insert selhal:', insErr.message); showToast('⚠️ Výkaz se nepodařilo uložit pro admina: ' + insErr.message) }
+      else { showToast('✅ Výkaz uložen' + (foreman.name ? ' (vedoucí: ' + foreman.name + ')' : '')) }
+    } catch(e) { console.error('[hour-sheet] insert výjimka:', e?.message) }
   }
 
   printInPage(printHTML)
@@ -10788,13 +10798,16 @@ async function loadWdForemanSheet(week, year) {
       .eq('worker_id', currentWorkerId).eq('kw', week).eq('kw_year', year)
       .order('created_at', { ascending: false }).limit(1)
     const sheet = data && data[0]
-    if (sheet && sheet.pdf_url) {
+    if (sheet) {
+      const btn = sheet.pdf_url
+        ? `<button onclick="openPdfUrl('${sheet.pdf_url}')" style="padding:6px 12px;font-size:12px;background:var(--green);color:#fff;border:none;border-radius:6px;cursor:pointer;font-family:inherit;font-weight:700">📄 Zobrazit výkaz</button>`
+        : `<span style="font-size:11px;color:var(--text3)">(výkaz uložen bez náhledu)</span>`
       box.innerHTML = `<div style="background:var(--green-l);border:1px solid var(--green);border-radius:10px;padding:10px 12px;display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap">
         <div style="font-size:13px;color:#1a1a1a">✍️ <b>Výkaz podepsaný vedoucím</b>${sheet.foreman_name ? ' · ' + sheet.foreman_name : ''}</div>
-        <button onclick="openPdfUrl('${sheet.pdf_url}')" style="padding:6px 12px;font-size:12px;background:var(--green);color:#fff;border:none;border-radius:6px;cursor:pointer;font-family:inherit;font-weight:700">📄 Zobrazit výkaz</button>
+        ${btn}
       </div>`
     }
-  } catch(e) { /* tabulka nemusí existovat */ }
+  } catch(e) { console.warn('[loadWdForemanSheet]', e?.message) }
 }
 
 // Admin — smazání celého dne docházky pracovníka (s potvrzením)
