@@ -8418,11 +8418,26 @@ async function exportMobWorkerHours(lang) {
   if (!sel?.value) { showToast('Vyberte týden'); return }
   const [week, year] = sel.value.split('/').map(Number)
   const foremanName = document.getElementById('mob-foreman-name')?.value.trim() || (foremanSignData?.name || '')
+  const foremanSig = foremanSignData?.dataUrl || null
+  console.log('[export] foreman →', { name: foremanName, hasSig: !!foremanSig, sigLen: foremanSig?.length })
+
+  // Pokud chybí podpis vedoucího, nabídni podepsání PŘED vytvořením výkazu
+  if (!foremanSig) {
+    const wantSign = confirm('Chcete, aby výkaz obsahoval podpis vedoucího na stavbě?\n\nOK = teď podepsat (otevře se podpis)\nZrušit = vytvořit výkaz bez podpisu')
+    if (wantSign) {
+      // Zapamatuj si, že po podpisu se má rovnou vygenerovat výkaz
+      _exportAfterForemanSign = { lang }
+      openForemanSign()
+      return
+    }
+  }
+
   await exportWorkerKW(currentUser.id, currentProfile?.full_name || 'Pracovník', week, year, (lang === 'en' ? 'en' : 'cs'), {
     name: foremanName,
-    signature: foremanSignData?.dataUrl || null
+    signature: foremanSig
   })
 }
+let _exportAfterForemanSign = null
 
 // ===== PODPIS VEDOUCÍHO NA STAVBĚ =====
 let foremanSignData = null  // { name, dataUrl }
@@ -8476,6 +8491,12 @@ function saveForemanSign() {
   if (status) { status.style.display = 'block'; status.textContent = '✅ Podpis vedoucího uložen: ' + name }
   closeForemanSign()
   showToast('✅ Podpis vedoucího uložen')
+  // Pokud uživatel klikl "Vytvořit výkaz" a byl vyzván k podpisu, vygeneruj výkaz teď (už s podpisem)
+  if (_exportAfterForemanSign) {
+    const lang = _exportAfterForemanSign.lang
+    _exportAfterForemanSign = null
+    setTimeout(() => exportMobWorkerHours(lang), 100)
+  }
 }
 
 async function loadMobExportWeeks() {
