@@ -9372,6 +9372,33 @@ function openPdfUrl(url) {
   }
 }
 
+// Otevři uložený HTML výkaz VYKRESLENÝ (ne jako zdrojový kód).
+// Supabase serveruje .html někdy jako text → načteme obsah a otevřeme přes Blob.
+async function openHourSheet(url) {
+  if (!url) { showToast('⚠️ Výkaz není dostupný'); return }
+  showToast('⏳ Otevírám výkaz…')
+  try {
+    const resp = await fetch(url)
+    if (!resp.ok) throw new Error('HTTP ' + resp.status)
+    let html = await resp.text()
+    // přidej tiskovou lištu jako u ostatních výkazů
+    const bar = `<div class="no-print" style="position:sticky;top:0;z-index:99;display:flex;gap:10px;justify-content:flex-end;padding:10px 14px;background:#1a1a1a">
+      <button onclick="window.print()" style="padding:8px 16px;background:#FFCD00;color:#1a1a1a;border:none;border-radius:8px;cursor:pointer;font-size:14px;font-weight:700;font-family:Arial">🖨️ Vytisknout / Uložit PDF</button>
+      <button onclick="window.close()" style="padding:8px 16px;background:#fff;color:#1a1a1a;border:1px solid #ccc;border-radius:8px;cursor:pointer;font-size:14px;font-weight:700;font-family:Arial">✕ Zavřít</button>
+    </div>`
+    if (html.includes('<body>')) html = html.replace('<body>', '<body>' + bar)
+    const blob = new Blob([html], { type: 'text/html;charset=utf-8' })
+    const blobUrl = URL.createObjectURL(blob)
+    const w = window.open(blobUrl, '_blank')
+    if (!w) { showToast('❌ Povolte vyskakovací okna'); URL.revokeObjectURL(blobUrl); return }
+    setTimeout(() => { try { URL.revokeObjectURL(blobUrl) } catch(_){} }, 60000)
+  } catch(e) {
+    console.warn('[openHourSheet]', e?.message)
+    // záloha: otevři přímo URL
+    window.open(url, '_blank')
+  }
+}
+
 
 async function deleteContract(contractId, title, fileUrl, adminSigUrl, workerSigUrl) {
   if (!confirm('Smazat smlouvu "' + title + '"?\nTato akce je nevratná.')) return
@@ -10774,8 +10801,8 @@ async function loadWdAttendance() {
     const workerName = currentWorkerProfile?.full_name || document.getElementById('wd-name')?.textContent?.trim() || 'Pracovník'
     const dlCs = document.getElementById('wd-download-btn-cs')
     const dlEn = document.getElementById('wd-download-btn-en')
-    if (dlCs) dlCs.onclick = () => exportWorkerKW(currentWorkerId, workerName, w, y, 'cs')
-    if (dlEn) dlEn.onclick = () => exportWorkerKW(currentWorkerId, workerName, w, y, 'en')
+    if (dlCs) dlCs.onclick = () => exportWorkerKWWithForeman(currentWorkerId, workerName, w, y, 'cs')
+    if (dlEn) dlEn.onclick = () => exportWorkerKWWithForeman(currentWorkerId, workerName, w, y, 'en')
 
     // Podepsaný týdenní výkaz od vedoucího na stavbě (pokud existuje)
     loadWdForemanSheet(w, y)
@@ -10800,6 +10827,21 @@ async function loadWdAttendance() {
 }
 
 // Admin — zobrazí podepsaný týdenní výkaz od vedoucího (pokud OSVČ nějaký vyexportoval)
+// Admin generuje výkaz pracovníka — doplní jméno vedoucího z uloženého výkazu (pokud existuje)
+async function exportWorkerKWWithForeman(workerId, workerName, week, year, lang) {
+  let foreman = null
+  try {
+    const { data } = await sb.from('weekly_hour_sheets')
+      .select('foreman_name')
+      .eq('worker_id', workerId).eq('kw', week).eq('kw_year', year)
+      .order('created_at', { ascending: false }).limit(1)
+    if (data && data[0] && data[0].foreman_name) {
+      foreman = { name: data[0].foreman_name, signature: null }
+    }
+  } catch(e) { /* bez vedoucího */ }
+  await exportWorkerKW(workerId, workerName, week, year, lang, foreman)
+}
+
 async function loadWdForemanSheet(week, year) {
   let box = document.getElementById('wd-foreman-sheet')
   if (!box) {
@@ -10821,7 +10863,7 @@ async function loadWdForemanSheet(week, year) {
     const sheet = data && data[0]
     if (sheet) {
       const btn = sheet.pdf_url
-        ? `<button onclick="openPdfUrl('${sheet.pdf_url}')" style="padding:6px 12px;font-size:12px;background:var(--green);color:#fff;border:none;border-radius:6px;cursor:pointer;font-family:inherit;font-weight:700">📄 Zobrazit výkaz</button>`
+        ? `<button onclick="openHourSheet('${sheet.pdf_url}')" style="padding:6px 12px;font-size:12px;background:var(--green);color:#fff;border:none;border-radius:6px;cursor:pointer;font-family:inherit;font-weight:700">📄 Zobrazit výkaz</button>`
         : `<span style="font-size:11px;color:var(--text3)">(výkaz uložen bez náhledu)</span>`
       box.innerHTML = `<div style="background:var(--green-l);border:1px solid var(--green);border-radius:10px;padding:10px 12px;display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap">
         <div style="font-size:13px;color:#1a1a1a">✍️ <b>Výkaz podepsaný vedoucím</b>${sheet.foreman_name ? ' · ' + sheet.foreman_name : ''}</div>
