@@ -8507,6 +8507,23 @@ async function exportWorkerKW(workerId, workerName, week, year, lang, foreman) {
 
   showToast(T.gen)
 
+  // Když podpis vedoucího není v paměti (foreman), zkus načíst uložený z databáze.
+  if (!foreman || !foreman.signature) {
+    try {
+      const { data: sheets } = await sb.from('weekly_hour_sheets')
+        .select('foreman_name, foreman_signature, created_at')
+        .eq('worker_id', workerId).eq('kw', week).eq('kw_year', year)
+        .order('created_at', { ascending: false })
+      const withSig = (sheets || []).find(s => s.foreman_signature) || (sheets || [])[0]
+      if (withSig) {
+        foreman = {
+          name: (foreman && foreman.name) || withSig.foreman_name || '',
+          signature: (foreman && foreman.signature) || withSig.foreman_signature || null
+        }
+      }
+    } catch(e) { console.warn('[exportWorkerKW] foreman load:', e?.message) }
+  }
+
   const startDate = getWeekStartDate(week, year)
   const endDate = new Date(startDate); endDate.setDate(endDate.getDate() + 6)
   const fmt = d => localDateStr(d)
