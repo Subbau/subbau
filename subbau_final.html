@@ -8239,7 +8239,7 @@ function showPrintPreview(html, filename) {
   overlay.appendChild(dlBtn)
 }
 
-// Otevře nové okno s výkazem + tlačítkem na tisk. Okno zůstane otevřené (nezmizí).
+// Otevře výkaz v nové záložce přes Blob URL (v Safari nejstabilnější — nezmizí).
 function openPrintWindow(html) {
   const bar = `<div class="no-print" style="position:sticky;top:0;z-index:99;display:flex;gap:10px;justify-content:center;padding:12px;background:#1a1a1a">
     <button onclick="window.print()" style="padding:10px 20px;background:#FFCD00;color:#1a1a1a;border:none;border-radius:8px;cursor:pointer;font-size:15px;font-weight:700;font-family:Arial">🖨️ Uložit jako PDF / Vytisknout</button>
@@ -8247,12 +8247,21 @@ function openPrintWindow(html) {
   const htmlOut = html
     .replace('<body>', '<body>' + bar)
     .replace('</head>', '<style>@media print{.no-print{display:none!important}}@page{size:A4 portrait;margin:10mm}</style></head>')
-  const w = window.open('', '_blank')
-  if (!w) { showToast('❌ Povolte vyskakovací okna (Safari: Předvolby → Weby → Vyskakovací okna)'); return }
-  w.document.open()
-  w.document.write(htmlOut)
-  w.document.close()
-  // Okno NEzavírám ani neuklízím — uživatel si v klidu dá tisk / uloží PDF a zavře sám
+  try {
+    const blob = new Blob([htmlOut], { type: 'text/html;charset=utf-8' })
+    const url = URL.createObjectURL(blob)
+    const w = window.open(url, '_blank')
+    if (!w) {
+      // okno blokováno → stáhni soubor jako záloha
+      const a = document.createElement('a')
+      a.href = url; a.download = (window._lastPrintName || 'vykaz.html')
+      document.body.appendChild(a); a.click(); document.body.removeChild(a)
+      showToast('📥 Výkaz stažen — otevřete ho a dejte Tisk → Uložit jako PDF')
+    }
+    // URL záměrně NEuklízím hned (revoke by obsah v Safari zničil). Prohlížeč ji uvolní sám.
+  } catch(e) {
+    showToast('❌ Nepodařilo se otevřít výkaz: ' + (e?.message||e))
+  }
 }
 
 // Tisk: otevři nové okno s NÁHLEDEM výkazu (bez automatického tisku)
