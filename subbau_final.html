@@ -7590,48 +7590,59 @@ function captureLocationNow() {
 
 // Dialog: potvrď adresu k akci (GPS adresa nebo ruční zadání)
 let pendingAddrAttId = null
+let _addrGpsValue = ''  // zjištěná GPS adresa
 async function askLocationForAction(attId, actionLabel) {
   pendingAddrAttId = attId
   const dlg = document.getElementById('addr-dialog')
   if (!dlg) return
   document.getElementById('addr-dialog-title').textContent = actionLabel + ' — adresa pracoviště'
   const gpsLine = document.getElementById('addr-gps-line')
-  const gpsRadio = document.getElementById('addr-use-gps')
   const manualInput = document.getElementById('addr-manual-input')
+  const manualWrap = document.getElementById('addr-manual-wrap')
+  const confirmBtn = document.getElementById('addr-confirm-btn')
   // Reset
+  _addrGpsValue = ''
   manualInput.value = ''
-  gpsLine.textContent = '📍 Zjišťuji polohu...'
-  gpsRadio.checked = true
-  gpsRadio.disabled = true
+  manualWrap.style.display = 'none'
+  gpsLine.textContent = 'Zjišťuji polohu…'
+  confirmBtn.disabled = true
+  confirmBtn.style.opacity = '0.5'
   dlg.style.display = 'flex'
   // Načti čerstvou GPS
   const addr = await captureLocationNow()
   if (addr) {
-    gpsLine.textContent = '📍 ' + addr
-    gpsRadio.disabled = false
-    gpsRadio.value = addr
-    gpsRadio.checked = true
+    _addrGpsValue = addr
+    gpsLine.textContent = addr
+    confirmBtn.disabled = false
+    confirmBtn.style.opacity = '1'
   } else {
-    gpsLine.textContent = '📍 Polohu se nepodařilo zjistit — zadejte adresu ručně'
-    gpsRadio.disabled = true
-    document.getElementById('addr-manual-radio').checked = true
-    manualInput.focus()
+    gpsLine.textContent = 'Polohu se nepodařilo zjistit — zadejte adresu ručně níže.'
+    confirmBtn.disabled = true
+    confirmBtn.style.opacity = '0.5'
+    toggleAddrManual(true)
   }
+}
+
+// Rozbalí/sbalí pole pro ruční zadání adresy
+function toggleAddrManual(forceOpen) {
+  const wrap = document.getElementById('addr-manual-wrap')
+  const input = document.getElementById('addr-manual-input')
+  const open = forceOpen === true ? true : (wrap.style.display === 'none')
+  wrap.style.display = open ? 'block' : 'none'
+  if (open) setTimeout(() => input.focus(), 50)
 }
 
 async function confirmActionAddress() {
   const attId = pendingAddrAttId
   if (!attId) { closeAddrDialog(); return }
-  const useGps = document.getElementById('addr-use-gps')?.checked && !document.getElementById('addr-use-gps')?.disabled
-  let addr = ''
-  if (useGps) {
-    addr = document.getElementById('addr-use-gps').value || gpsAddr || ''
-  } else {
-    addr = (document.getElementById('addr-manual-input')?.value || '').trim()
-    if (!addr) { showToast('⚠️ Zadejte adresu nebo vyberte GPS'); return }
-  }
+  // Pokud je rozbalené ruční pole a má hodnotu → použij ji, jinak GPS
+  const manualWrap = document.getElementById('addr-manual-wrap')
+  const manualVal = (document.getElementById('addr-manual-input')?.value || '').trim()
+  const useManual = manualWrap.style.display !== 'none' && manualVal
+  let addr = useManual ? manualVal : _addrGpsValue
+  if (!addr) { showToast('⚠️ Zadejte adresu nebo počkejte na polohu'); return }
   const upd = { location_address: addr }
-  if (useGps && gpsLat && gpsLng) { upd.location_lat = gpsLat; upd.location_lng = gpsLng }
+  if (!useManual && gpsLat && gpsLng) { upd.location_lat = gpsLat; upd.location_lng = gpsLng }
   const { error } = await sb.from('attendance').update(upd).eq('id', attId)
   if (error) { showToast('❌ Chyba uložení adresy: ' + error.message); return }
   if (todayRecord && todayRecord.id === attId) todayRecord.location_address = addr
@@ -11937,29 +11948,36 @@ function compressImage(file, maxSize) {
 <!-- Address pick dialog (příchod/přestávka/odchod) -->
 <div id="addr-dialog" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:10000;align-items:center;justify-content:center;padding:16px">
   <div style="background:#fff;border-radius:20px;padding:24px;width:100%;max-width:400px;box-shadow:0 8px 32px rgba(0,0,0,.3)">
-    <div id="addr-dialog-title" style="font-size:17px;font-weight:800;margin-bottom:4px;color:#1a1a1a">Adresa pracoviště</div>
-    <div style="font-size:13px;color:#666;margin-bottom:16px">Je tato adresa správná? Pokud ne, zadejte ji ručně.</div>
-    <label style="display:flex;align-items:flex-start;gap:10px;padding:12px;border:2px solid #e0e0e0;border-radius:10px;margin-bottom:10px;cursor:pointer">
-      <input type="radio" name="addr-choice" id="addr-use-gps" checked style="margin-top:3px">
-      <span id="addr-gps-line" style="font-size:14px;color:#1a1a1a;flex:1">📍 Zjišťuji polohu...</span>
-    </label>
-    <label style="display:flex;align-items:center;gap:10px;padding:12px;border:2px solid #e0e0e0;border-radius:10px;margin-bottom:10px;cursor:pointer">
-      <input type="radio" name="addr-choice" id="addr-manual-radio" style="flex-shrink:0">
-      <span style="font-size:14px;color:#1a1a1a">✏️ Zadat ručně</span>
-    </label>
-    <input type="text" id="addr-manual-input" placeholder="Ulice, číslo, město..."
-      onfocus="document.getElementById('addr-manual-radio').checked=true; this.style.borderColor='#1a1a1a'" onblur="this.style.borderColor='#e0e0e0'"
-      style="width:100%;padding:12px;border:2px solid #e0e0e0;border-radius:10px;font-size:14px;font-family:inherit;box-sizing:border-box;margin-bottom:18px">
-    <div style="display:flex;gap:10px">
-      <button onclick="confirmActionAddress()"
-        style="flex:1;padding:14px;background:#1a1a1a;color:#FFCD00;border:none;border-radius:12px;font-size:14px;font-weight:800;cursor:pointer;font-family:inherit">
-        Potvrdit adresu
-      </button>
-      <button onclick="closeAddrDialog()"
-        style="padding:14px 18px;background:none;border:2px solid #e0e0e0;border-radius:12px;font-size:14px;cursor:pointer;font-family:inherit">
-        Přeskočit
-      </button>
+    <div id="addr-dialog-title" style="font-size:18px;font-weight:800;margin-bottom:4px;color:#1a1a1a">Adresa pracoviště</div>
+    <div style="font-size:13px;color:#666;margin-bottom:16px">Sedí tato poloha? Pokud ne, zadejte adresu ručně.</div>
+
+    <!-- Zjištěná poloha -->
+    <div style="display:flex;align-items:flex-start;gap:10px;padding:14px;background:var(--blue-l);border:1.5px solid var(--blue);border-radius:12px;margin-bottom:14px">
+      <span style="font-size:18px;flex-shrink:0">📍</span>
+      <span id="addr-gps-line" style="font-size:15px;color:#1a1a1a;line-height:1.4;font-weight:600">Zjišťuji polohu...</span>
     </div>
+
+    <!-- Ruční zadání (skryté, rozbalí se tlačítkem) -->
+    <div id="addr-manual-wrap" style="display:none;margin-bottom:14px">
+      <input type="text" id="addr-manual-input" placeholder="Ulice, číslo, město, PSČ"
+        style="width:100%;padding:13px;border:1.5px solid #1a1a1a;border-radius:10px;font-size:16px;font-family:inherit;box-sizing:border-box">
+    </div>
+
+    <!-- Hlavní akce: potvrdit zjištěnou polohu -->
+    <button onclick="confirmActionAddress()" id="addr-confirm-btn"
+      style="width:100%;padding:15px;background:#1a1a1a;color:#FFCD00;border:none;border-radius:12px;font-size:15px;font-weight:800;cursor:pointer;font-family:inherit;margin-bottom:10px">
+      ✅ Ano, poloha sedí
+    </button>
+    <!-- Zadat ručně -->
+    <button onclick="toggleAddrManual()" id="addr-manual-toggle"
+      style="width:100%;padding:13px;background:#fff;color:#1a1a1a;border:1.5px solid var(--brd);border-radius:12px;font-size:14px;font-weight:700;cursor:pointer;font-family:inherit;margin-bottom:10px">
+      ✏️ Zadat adresu ručně
+    </button>
+    <!-- Přeskočit -->
+    <button onclick="closeAddrDialog()"
+      style="width:100%;padding:11px;background:none;border:none;color:var(--text3);font-size:13px;cursor:pointer;font-family:inherit;text-decoration:underline">
+      Přeskočit (bez adresy)
+    </button>
   </div>
 </div>
 
