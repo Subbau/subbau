@@ -1234,7 +1234,7 @@ tr:hover td{background:#fafbfc}
         <p style="font-size:12px;color:var(--text2);margin-bottom:10px">Stáhnout přehled hodin za týden jako PDF. Vedoucí na stavbě může hodiny podepsat — <b>i zpětně</b> za kterýkoli minulý týden (stačí ho vybrat níže).</p>
         <div class="fg" style="margin-bottom:10px">
           <label style="font-size:12px">Týden (lze vybrat i minulý)</label>
-          <select id="mob-export-week" style="width:100%;padding:8px;border:1px solid var(--brd);border-radius:8px;font-size:13px;font-family:inherit"></select>
+          <select id="mob-export-week" onchange="onExportWeekChange()" style="width:100%;padding:8px;border:1px solid var(--brd);border-radius:8px;font-size:13px;font-family:inherit"></select>
         </div>
         <div class="fg" style="margin-bottom:10px">
           <label style="font-size:12px">Vedoucí na stavbě (volitelné)</label>
@@ -8900,6 +8900,11 @@ function saveForemanSign() {
   const status = document.getElementById('foreman-sign-status')
   if (status) { status.style.display = 'block'; status.textContent = '✅ Podpis vedoucího uložen: ' + name }
   closeForemanSign()
+
+  // Ulož podpis ROVNOU do databáze pro vybraný týden (i bez vytvoření výkazu).
+  // Tím se podpis nikdy neztratí a admin/seznam výkazů ho hned uvidí.
+  saveForemanSignToDb(name, dataUrl)
+
   showToast('✅ Podpis vedoucího uložen')
   // Pokud uživatel klikl "Vytvořit výkaz" a byl vyzván k podpisu, vygeneruj výkaz teď (už s podpisem)
   if (_exportAfterForemanSign) {
@@ -8907,6 +8912,65 @@ function saveForemanSign() {
     _exportAfterForemanSign = null
     setTimeout(() => exportMobWorkerHours(lang), 100)
   }
+}
+
+// Uloží/aktualizuje podpis vedoucího v databázi pro vybraný týden
+async function saveForemanSignToDb(name, dataUrl) {
+  const sel = document.getElementById('mob-export-week')
+  if (!sel?.value) return
+  const [week, year] = sel.value.split('/').map(Number)
+  if (!week || !year) return
+  try {
+    // Je už pro tento týden záznam? Pokud ano, aktualizuj; jinak vlož nový.
+    const { data: existing } = await sb.from('weekly_hour_sheets')
+      .select('id').eq('worker_id', currentUser.id).eq('kw', week).eq('kw_year', year)
+      .order('created_at', { ascending: false }).limit(1)
+    let err
+    if (existing && existing[0]) {
+      const r = await sb.from('weekly_hour_sheets').update({ foreman_name: name, foreman_signature: dataUrl }).eq('id', existing[0].id)
+      err = r.error
+    } else {
+      const r = await sb.from('weekly_hour_sheets').insert({
+        worker_id: currentUser.id, kw: week, kw_year: year,
+        foreman_name: name, foreman_signature: dataUrl, pdf_url: null
+      })
+      err = r.error
+    }
+    if (err) {
+      console.error('[foreman] uložení do DB selhalo:', err.message)
+      showToast('⚠️ Podpis se nepodařilo uložit: ' + err.message)
+      return
+    }
+    console.log('[foreman] podpis uložen do DB pro KW', week + '/' + year)
+    loadMySheets()  // obnov seznam výkazů, ať se ukáže "Podepsáno"
+  } catch(e) {
+    console.error('[foreman] uložení do DB výjimka:', e?.message)
+    showToast('⚠️ Chyba ukládání podpisu: ' + (e?.message || e))
+  }
+}
+
+// Při změně týdne: načti uložený podpis pro daný týden (nebo vyčisti)
+async function onExportWeekChange() {
+  const sel = document.getElementById('mob-export-week')
+  if (!sel?.value) return
+  const [week, year] = sel.value.split('/').map(Number)
+  foremanSignData = null
+  const nameEl = document.getElementById('mob-foreman-name'); if (nameEl) nameEl.value = ''
+  const status = document.getElementById('foreman-sign-status')
+  try {
+    const { data } = await sb.from('weekly_hour_sheets')
+      .select('foreman_name, foreman_signature, created_at')
+      .eq('worker_id', currentUser.id).eq('kw', week).eq('kw_year', year)
+      .order('created_at', { ascending: false }).limit(1)
+    const sheet = data && data[0]
+    if (sheet && sheet.foreman_signature) {
+      foremanSignData = { name: sheet.foreman_name || '', dataUrl: sheet.foreman_signature }
+      if (nameEl) nameEl.value = sheet.foreman_name || ''
+      if (status) { status.style.display = 'block'; status.textContent = '✅ Tento týden je podepsaný: ' + (sheet.foreman_name || '') }
+    } else {
+      if (status) { status.style.display = 'none'; status.textContent = '' }
+    }
+  } catch(e) { /* ignoruj */ }
 }
 
 async function loadMobExportWeeks() {
