@@ -7611,6 +7611,9 @@ async function askLocationForAction(attId, actionLabel) {
   _addrGpsValue = ''
   manualInput.value = ''
   manualWrap.style.display = 'none'
+  confirmBtn.style.display = 'block'
+  const toggleBtn = document.getElementById('addr-manual-toggle')
+  if (toggleBtn) toggleBtn.style.display = 'block'
   gpsLine.textContent = 'Zjišťuji polohu…'
   confirmBtn.disabled = true
   confirmBtn.style.opacity = '0.5'
@@ -7634,26 +7637,36 @@ async function askLocationForAction(attId, actionLabel) {
 function toggleAddrManual(forceOpen) {
   const wrap = document.getElementById('addr-manual-wrap')
   const input = document.getElementById('addr-manual-input')
+  const confirmBtn = document.getElementById('addr-confirm-btn')
+  const toggleBtn = document.getElementById('addr-manual-toggle')
   const open = forceOpen === true ? true : (wrap.style.display === 'none')
   wrap.style.display = open ? 'block' : 'none'
+  // Když je rozbalené ruční zadání, skryj tlačítka pro GPS, ať je to přehledné
+  if (confirmBtn) confirmBtn.style.display = open ? 'none' : 'block'
+  if (toggleBtn) toggleBtn.style.display = open ? 'none' : 'block'
   if (open) setTimeout(() => input.focus(), 50)
 }
 
 async function confirmActionAddress() {
-  const attId = pendingAddrAttId
-  if (!attId) { closeAddrDialog(); return }
-  // Pokud je rozbalené ruční pole a má hodnotu → použij ji, jinak GPS
+  const attId = pendingAddrAttId || todayAttId
+  // Zjisti adresu: ruční pole má přednost, jinak GPS
   const manualWrap = document.getElementById('addr-manual-wrap')
   const manualVal = (document.getElementById('addr-manual-input')?.value || '').trim()
-  const useManual = manualWrap.style.display !== 'none' && manualVal
+  const useManual = manualWrap && manualWrap.style.display !== 'none' && manualVal
   let addr = useManual ? manualVal : _addrGpsValue
   if (!addr) { showToast('⚠️ Zadejte adresu nebo počkejte na polohu'); return }
-  const upd = { location_address: addr }
-  if (!useManual && gpsLat && gpsLng) { upd.location_lat = gpsLat; upd.location_lng = gpsLng }
-  const { error } = await sb.from('attendance').update(upd).eq('id', attId)
-  if (error) { showToast('❌ Chyba uložení adresy: ' + error.message); return }
-  if (todayRecord && todayRecord.id === attId) todayRecord.location_address = addr
+  // Ulož adresu do paměti i lokálně vždy
+  gpsAddr = addr
+  if (todayRecord) todayRecord.location_address = addr
   localStorage.setItem('lastConstructionSite', addr)
+  const mg = document.getElementById('mob-gps'); if (mg) mg.textContent = '📍 ' + addr
+  // Zapiš do databáze (jen když máme ID záznamu)
+  if (attId) {
+    const upd = { location_address: addr }
+    if (!useManual && gpsLat && gpsLng) { upd.location_lat = gpsLat; upd.location_lng = gpsLng }
+    const { error } = await sb.from('attendance').update(upd).eq('id', attId)
+    if (error) { showToast('❌ Chyba uložení: ' + error.message); return }
+  }
   closeAddrDialog()
   showToast('📍 Adresa uložena')
   // Pokud šlo o adresu při odchodu, otevři teď dialog s popisem práce
@@ -7761,6 +7774,9 @@ function applyManualAddress() {
   gpsAddr = val
   const mg = document.getElementById('mob-gps')
   if (mg) mg.textContent = '📍 ' + val
+  // Zavři rozbalený box pro ruční zadání
+  const wrap = document.getElementById('mob-manual-addr')
+  if (wrap) wrap.style.display = 'none'
   showToast('✅ Adresa nastavena')
 }
 
@@ -11980,7 +11996,11 @@ function compressImage(file, maxSize) {
     <!-- Ruční zadání (skryté, rozbalí se tlačítkem) -->
     <div id="addr-manual-wrap" style="display:none;margin-bottom:14px">
       <input type="text" id="addr-manual-input" placeholder="Ulice, číslo, město, PSČ"
-        style="width:100%;padding:13px;border:1.5px solid #1a1a1a;border-radius:10px;font-size:16px;font-family:inherit;box-sizing:border-box">
+        style="width:100%;padding:13px;border:1.5px solid #1a1a1a;border-radius:10px;font-size:16px;font-family:inherit;box-sizing:border-box;margin-bottom:10px">
+      <button onclick="confirmActionAddress()"
+        style="width:100%;padding:14px;background:#1a1a1a;color:#FFCD00;border:none;border-radius:12px;font-size:15px;font-weight:800;cursor:pointer;font-family:inherit">
+        💾 Uložit tuto adresu
+      </button>
     </div>
 
     <!-- Hlavní akce: potvrdit zjištěnou polohu -->
