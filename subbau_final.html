@@ -1246,6 +1246,12 @@ tr:hover td{background:#fafbfc}
           <button onclick="exportMobWorkerHours('cs')" style="flex:1;padding:12px;background:#1a1a1a;color:#FFCD00;border:none;border-radius:10px;font-size:14px;font-weight:700;cursor:pointer;font-family:inherit">📥 Vytvořit výkaz / PDF</button>
         </div>
       </div>
+
+      <!-- Předchozí výkazy -->
+      <div class="mob-card" style="margin-top:0">
+        <div class="mob-card-title" style="margin-bottom:8px">🗂 Předchozí výkazy</div>
+        <div id="mob-sheets-list" style="font-size:13px;color:var(--text3)">Načítám…</div>
+      </div>
     </div>
     <div class="mob-view" id="mob-v-dokumenty">
       <!-- Upload formulář -->
@@ -3340,6 +3346,7 @@ function showOsvec(profile) {
     loadMobAccommodation(currentProfile)
     loadInvoiceWeeks()
     loadMobExportWeeks()
+    loadMySheets()
     loadMobNotifications()
     updateChatBadge()
     if (window._osvecChatBadgeInt) clearInterval(window._osvecChatBadgeInt)
@@ -8343,18 +8350,8 @@ async function saveWorkerInvoiceCustomer() {
 
 // -- PRINT BEZ POPUP - funguje v Safari anonymním okně --
 function printInPage(html) {
-  // Otevři výkaz v JEDNOM novém okně. Uživatel dá Cmd+P (tlačítko window.print()
-  // v Safari okně někdy vyprázdní stránku, Cmd+P ne).
-  const bar = `<div class="no-print" style="position:sticky;top:0;display:flex;gap:12px;align-items:center;justify-content:center;padding:12px;background:#1a1a1a;color:#fff;font-family:Arial;font-size:14px">
-    <span>Uložit jako PDF: stiskněte <b style="color:#FFCD00">⌘ + P</b> → vlevo dole <b style="color:#FFCD00">PDF → Uložit jako PDF</b></span>
-    <button onclick="window.print()" style="padding:8px 16px;background:#FFCD00;color:#1a1a1a;border:none;border-radius:8px;cursor:pointer;font-size:14px;font-weight:700;font-family:Arial">🖨️ Tisk</button>
-  </div>`
-  const out = html
-    .replace('</head>', '<style>@page{size:A4 portrait;margin:10mm}@media print{.no-print{display:none!important}}</style></head>')
-    .replace(/<body[^>]*>/, m => m + bar)
-  const w = window.open('', '_blank')
-  if (!w) { showToast('❌ Povolte vyskakovací okna v Safari'); return }
-  w.document.open(); w.document.write(out); w.document.close()
+  // Náhled přímo v aplikaci (žádné vyskakovací okno — Safari ho blokuje).
+  showPrintPreview(html, 'vykaz-hodin.html')
 }
 
 function showPrintPreviewOLD(html) {
@@ -8930,6 +8927,46 @@ async function loadMobExportWeeks() {
   const weeks = [...map.values()].sort((a,b) => (b.kw_year - a.kw_year) || (b.kw - a.kw))
   if (!weeks.length) { sel.innerHTML = '<option>Žádné týdny</option>'; return }
   sel.innerHTML = weeks.map(r => `<option value="${r.kw}/${r.kw_year}">Týden ${r.kw}/${r.kw_year}</option>`).join('')
+}
+
+// Seznam předchozích výkazů OSVČ (uložené v databázi)
+async function loadMySheets() {
+  const box = document.getElementById('mob-sheets-list')
+  if (!box || !currentUser) return
+  try {
+    const { data } = await sb.from('weekly_hour_sheets')
+      .select('id, kw, kw_year, foreman_name, foreman_signature, pdf_url, created_at')
+      .eq('worker_id', currentUser.id)
+      .order('kw_year', { ascending: false }).order('kw', { ascending: false })
+      .order('created_at', { ascending: false })
+    if (!data || !data.length) { box.innerHTML = '<div style="color:var(--text3);font-size:13px;padding:6px 0">Zatím žádné výkazy. Vytvořte výkaz výše.</div>'; return }
+    // Jeden řádek na týden (nejnovější výkaz daného týdne)
+    const seen = new Set()
+    const rows = []
+    for (const s of data) {
+      const key = s.kw + '/' + s.kw_year
+      if (seen.has(key)) continue
+      seen.add(key)
+      rows.push(s)
+    }
+    box.innerHTML = rows.map(s => {
+      const signed = s.foreman_signature
+      return `<div style="display:flex;align-items:center;justify-content:space-between;gap:8px;padding:10px 0;border-bottom:0.5px solid var(--bg)">
+        <div style="font-size:13px;color:#1a1a1a">
+          <b>Týden ${s.kw}/${s.kw_year}</b>
+          <div style="font-size:11px;color:${signed ? 'var(--green)' : 'var(--text3)'}">${signed ? '✍️ Podepsáno' + (s.foreman_name ? ' · ' + s.foreman_name : '') : 'Nepodepsáno'}</div>
+        </div>
+        <div style="display:flex;gap:6px;flex-shrink:0">
+          <button onclick="openMySheet(${s.kw},${s.kw_year})" style="padding:7px 10px;font-size:12px;background:#1a1a1a;color:#FFCD00;border:none;border-radius:7px;cursor:pointer;font-family:inherit;font-weight:700">📄 Otevřít</button>
+        </div>
+      </div>`
+    }).join('')
+  } catch(e) { box.innerHTML = '<div style="color:var(--text3);font-size:12px">Výkazy se nepodařilo načíst.</div>' }
+}
+
+// Otevři/znovu vytvoř výkaz daného týdne (s uloženým podpisem) — jde i stáhnout/tisknout/podepsat
+async function openMySheet(week, year) {
+  await exportWorkerKW(currentUser.id, currentProfile?.full_name || 'Pracovník', week, year, 'cs')
 }
 
 // -- NASTAVENÍ ZÁKAZNÍKA FAKTUR --
