@@ -3310,6 +3310,9 @@ function showAdmin(profile) {
   updateAdminChatBadge()
   if (window._adminChatBadgeInt) clearInterval(window._adminChatBadgeInt)
   window._adminChatBadgeInt = setInterval(updateAdminChatBadge, 20000)
+  // Automaticky kontroluj nové čekající registrace každých 30 s (žádné ruční obnovování)
+  if (window._adminPendingInt) clearInterval(window._adminPendingInt)
+  window._adminPendingInt = setInterval(refreshPendingRegistrations, 30000)
 }
 
 function showOsvec(profile) {
@@ -4115,6 +4118,53 @@ async function loadDashboard() {
     const row = e.target.closest('.dash-att-row')
     if (row && row.dataset.id) openWorkerModal(row.dataset.id)
   }
+}
+
+// Lehké automatické obnovení jen sekce čekajících registrací (běží na pozadí každých 30 s).
+// Když přibyde nová registrace, admin dostane upozornění bez nutnosti obnovovat stránku.
+let _lastPendingCount = null
+async function refreshPendingRegistrations() {
+  try {
+    const { data: pendingWorkers } = await sb.from('profiles')
+      .select('id, full_name, email, created_at')
+      .in('role', ['osvec', 'partak'])
+      .eq('is_active', false)
+      .eq('registration_status', 'pending')
+      .order('created_at', { ascending: false })
+    const count = pendingWorkers?.length || 0
+    const pendingDiv = document.getElementById('dash-pending-registrations')
+    if (pendingDiv) {
+      if (count) {
+        pendingDiv.style.display = 'block'
+        pendingDiv.innerHTML = `
+          <div style="background:var(--amber-l);border-left:4px solid var(--amber);border-radius:8px;padding:12px 16px;margin-bottom:16px">
+            <div style="font-size:13px;font-weight:700;color:var(--amber);margin-bottom:8px">
+              🔔 ${count} čekající registrace ke schválení
+            </div>
+            ${pendingWorkers.map(w => `
+              <div style="display:flex;justify-content:space-between;align-items:center;padding:6px 0;border-bottom:1px solid rgba(0,0,0,0.08);gap:8px">
+                <div style="min-width:0">
+                  <div style="font-size:13px;font-weight:600">${w.full_name}</div>
+                  <div style="font-size:11px;color:var(--text3)">${w.email}</div>
+                </div>
+                <div style="display:flex;gap:6px;flex-shrink:0">
+                  <button onclick="approveWorkerRegistration('${w.id}','${w.full_name}')"
+                    style="padding:6px 12px;background:#1a1a1a;color:#FFCD00;border:none;border-radius:6px;cursor:pointer;font-size:12px;font-weight:700;font-family:inherit;white-space:nowrap">✅ Schválit</button>
+                  <button onclick="rejectWorkerRegistration('${w.id}','${w.full_name}')"
+                    style="padding:6px 12px;background:var(--red);color:#fff;border:none;border-radius:6px;cursor:pointer;font-size:12px;font-weight:700;font-family:inherit;white-space:nowrap">❌ Zamítnout</button>
+                </div>
+              </div>`).join('')}
+          </div>`
+      } else {
+        pendingDiv.style.display = 'none'
+      }
+    }
+    // Upozorni jen když PŘIBYLA nová registrace (ne při prvním načtení)
+    if (_lastPendingCount !== null && count > _lastPendingCount) {
+      showToast('🔔 Nová registrace ke schválení!')
+    }
+    _lastPendingCount = count
+  } catch(e) { /* ticho — jen automatické obnovení */ }
 }
 
 // Spočítá pracovníky s nezavřenou směnou > 11 h a vrátí pole záznamů; naplní window.unclosedWorkerIds
