@@ -1231,9 +1231,9 @@ tr:hover td{background:#fafbfc}
         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
           <div class="mob-card-title" style="margin-bottom:0">📊 Export mých hodin</div>
         </div>
-        <p style="font-size:12px;color:var(--text2);margin-bottom:10px">Stáhnout přehled hodin za týden jako PDF. Vedoucí na stavbě může hodiny podepsat.</p>
+        <p style="font-size:12px;color:var(--text2);margin-bottom:10px">Stáhnout přehled hodin za týden jako PDF. Vedoucí na stavbě může hodiny podepsat — <b>i zpětně</b> za kterýkoli minulý týden (stačí ho vybrat níže).</p>
         <div class="fg" style="margin-bottom:10px">
-          <label style="font-size:12px">Týden</label>
+          <label style="font-size:12px">Týden (lze vybrat i minulý)</label>
           <select id="mob-export-week" style="width:100%;padding:8px;border:1px solid var(--brd);border-radius:8px;font-size:13px;font-family:inherit"></select>
         </div>
         <div class="fg" style="margin-bottom:10px">
@@ -8916,8 +8916,19 @@ async function loadMobExportWeeks() {
   const sel = document.getElementById('mob-export-week')
   if (!sel || !currentUser) return
   const { data } = await sb.from('attendance').select('kw,kw_year').eq('worker_id', currentUser.id).order('kw_year',{ascending:false}).order('kw',{ascending:false})
-  if (!data?.length) { sel.innerHTML = '<option>Žádné týdny</option>'; return }
-  const weeks = [...new Map(data.map(r => [r.kw+'/'+r.kw_year, r])).values()]
+  // Týdny s docházkou
+  const map = new Map((data||[]).map(r => [r.kw+'/'+r.kw_year, { kw: r.kw, kw_year: r.kw_year }]))
+  // Přidej i posledních 8 týdnů (i bez docházky) — kvůli zpětnému podpisu
+  const now = getKW()
+  for (let i = 0; i < 8; i++) {
+    let w = now.week - i, y = now.year
+    if (w < 1) { w += 52; y-- }
+    const key = w + '/' + y
+    if (!map.has(key)) map.set(key, { kw: w, kw_year: y })
+  }
+  // Seřaď sestupně (nejnovější nahoře)
+  const weeks = [...map.values()].sort((a,b) => (b.kw_year - a.kw_year) || (b.kw - a.kw))
+  if (!weeks.length) { sel.innerHTML = '<option>Žádné týdny</option>'; return }
   sel.innerHTML = weeks.map(r => `<option value="${r.kw}/${r.kw_year}">Týden ${r.kw}/${r.kw_year}</option>`).join('')
 }
 
