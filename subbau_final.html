@@ -738,11 +738,9 @@ tr:hover td{background:#fafbfc}
                   <select id="export-kw" style="width:100%;padding:9px;border:1.5px solid var(--brd);border-radius:8px;font-size:14px"></select>
                 </div>
                 <div class="fg">
-                  <label>Jazyk PDF</label>
-                  <select id="export-lang" style="width:100%;padding:9px;border:1.5px solid var(--brd);border-radius:8px;font-size:14px">
-                    <option value="cs">Čeština</option>
-                    <option value="en">Angličtina</option>
-                  </select>
+                  <label>Jazyk / Language</label>
+                  <div style="padding:9px 12px;border:1.5px solid var(--brd);border-radius:8px;font-size:14px;background:var(--bg);color:var(--text2)">🇬🇧 EN · 🇩🇪 DE · 🇨🇿 CZ <span style="font-size:12px;color:var(--text3)">(vše v jednom)</span></div>
+                  <input type="hidden" id="export-lang" value="cs">
                 </div>
               </div>
               <div class="fg">
@@ -1542,8 +1540,7 @@ tr:hover td{background:#fafbfc}
         <button onclick="openForemanSign()" id="foreman-sign-btn" style="width:100%;padding:10px;background:#fff;color:#1a1a1a;border:2px solid #1a1a1a;border-radius:10px;font-size:13px;font-weight:700;cursor:pointer;font-family:inherit;margin-bottom:8px">✍️ Podpis vedoucího</button>
         <div id="foreman-sign-status" style="display:none;font-size:12px;color:var(--green);text-align:center;margin-bottom:8px;font-weight:600"></div>
         <div style="display:flex;gap:8px">
-          <button onclick="exportMobWorkerHours('cs')" style="flex:1;padding:10px;background:#1a1a1a;color:#FFCD00;border:none;border-radius:10px;font-size:13px;font-weight:700;cursor:pointer;font-family:inherit">📥 PDF (CZ)</button>
-          <button onclick="exportMobWorkerHours('en')" style="flex:1;padding:10px;background:#1a1a1a;color:#FFCD00;border:none;border-radius:10px;font-size:13px;font-weight:700;cursor:pointer;font-family:inherit">📥 PDF (EN)</button>
+          <button onclick="exportMobWorkerHours('cs')" style="flex:1;padding:12px;background:#1a1a1a;color:#FFCD00;border:none;border-radius:10px;font-size:14px;font-weight:700;cursor:pointer;font-family:inherit">📥 Vytvořit výkaz / PDF</button>
         </div>
       </div>
 
@@ -1791,8 +1788,8 @@ tr:hover td{background:#fafbfc}
           <span style="font-size:13px;color:var(--blue)">Celkem tento týden</span>
           <div style="display:flex;align-items:center;gap:10px">
             <span style="font-size:16px;font-weight:700;color:var(--blue)" id="wd-att-total">0h</span>
-            <button id="wd-download-btn-cs" style="padding:5px 12px;font-size:12px;background:#1a1a1a;color:#FFCD00;border:none;border-radius:6px;cursor:pointer;font-family:inherit;font-weight:700">📥 PDF CZ</button>
-            <button id="wd-download-btn-en" style="padding:5px 12px;font-size:12px;background:#1a1a1a;color:#FFCD00;border:none;border-radius:6px;cursor:pointer;font-family:inherit;font-weight:700">📥 PDF EN</button>
+            <button id="wd-download-btn-cs" style="padding:6px 14px;font-size:12px;background:#1a1a1a;color:#FFCD00;border:none;border-radius:6px;cursor:pointer;font-family:inherit;font-weight:700">📥 Výkaz / PDF</button>
+            <button id="wd-download-btn-en" style="display:none"></button>
           </div>
         </div>
       </div>
@@ -2956,7 +2953,7 @@ function startAuthTimeout() {
       try { await sb.auth.signOut() } catch(e) {}
       showLogin()
     }
-  }, 12000)
+  }, 50000)  // dost času na opakované pokusy o načtení profilu (pomalý/uspaný Supabase)
 }
 function clearAuthTimeout() {
   if (authTimeoutId) { clearTimeout(authTimeoutId); authTimeoutId = null }
@@ -3048,30 +3045,35 @@ async function _initAppInner(user) {
     promise,
     new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), ms))
   ])
+  const sleep = ms => new Promise(r => setTimeout(r, ms))
 
-  // Načti profil BEZ joinu na tým (join je nejčastější příčina zaseknutí)
-  try {
-    console.log('[initApp] dotaz na profil id=', user.id)
-    const t0 = Date.now()
-    const r1 = await withTimeout(
-      sb.from('profiles').select('*').eq('id', user.id).maybeSingle(), 8000)
-    console.log('[initApp] profil dotaz hotov za', Date.now()-t0, 'ms | error:', r1.error?.message || 'žádná', '| data:', !!r1.data)
-    if (r1.error) console.error('[initApp] profil error detail:', r1.error)
-    profile = r1.data
-    if (!profile) {
-      const r2 = await withTimeout(
-        sb.from('profiles').select('*').eq('email', user.email).maybeSingle(), 8000)
-      console.log('[initApp] profil dle emailu | error:', r2.error?.message || 'žádná', '| data:', !!r2.data)
-      profile = r2.data
+  // Načti profil s několika pokusy (Supabase může být po nečinnosti pomalý/uspaný).
+  // Postupně prodlužuj timeout: 10s, 15s, 20s; mezi pokusy krátká pauza.
+  const tryLoadProfile = async () => {
+    const timeouts = [10000, 15000, 20000]
+    for (let i = 0; i < timeouts.length; i++) {
+      try {
+        console.log(`[initApp] pokus ${i+1} o načtení profilu (timeout ${timeouts[i]}ms)`)
+        const t0 = Date.now()
+        const r = await withTimeout(
+          sb.from('profiles').select('*').eq('id', user.id).maybeSingle(), timeouts[i])
+        console.log('[initApp] profil dotaz hotov za', Date.now()-t0, 'ms | error:', r.error?.message || 'žádná', '| data:', !!r.data)
+        if (r.data) return r.data
+        // Žádná chyba, ale prázdno → zkus dle emailu
+        const r2 = await withTimeout(
+          sb.from('profiles').select('*').eq('email', user.email).maybeSingle(), timeouts[i])
+        if (r2.data) return r2.data
+        // Pokud ani jeden nevrátil řádek a nebyla chyba, profil opravdu neexistuje → nemá smysl opakovat
+        if (!r.error && !r2.error) return null
+      } catch(e) {
+        console.warn(`[initApp] pokus ${i+1} selhal:`, e?.message || e)
+      }
+      if (i < timeouts.length - 1) await sleep(800)  // krátká pauza před dalším pokusem
     }
-  } catch(e) {
-    console.error('[initApp] načítání profilu selhalo/timeout:', e)
-    try {
-      const r3 = await withTimeout(
-        sb.from('profiles').select('*').eq('id', user.id).maybeSingle(), 8000)
-      profile = r3.data
-    } catch(e2) { console.error('[initApp] druhý pokus selhal:', e2) }
+    return null
   }
+
+  profile = await tryLoadProfile()
 
   // Tým doplň zvlášť (když selže, profil i tak funguje)
   if (profile && profile.team_id) {
@@ -3085,18 +3087,16 @@ async function _initAppInner(user) {
   currentProfile = profile
 
   if (!profile) {
-    // Profil se nepodařilo načíst (nejspíš RLS na profiles blokuje čtení).
-    // Nevyhazuj uživatele ven — zkus poslední čtení a jinak ukaž jasnou hlášku.
-    console.warn('[initApp] profil se nenačetl — pravděpodobně RLS na tabulce profiles')
+    // Profil se nepodařilo načíst ani po opakování.
+    console.warn('[initApp] profil se nenačetl ani po opakovaných pokusech')
     initAppDone = true
     clearAuthTimeout()
     authHandling = false
-    // Ukáže srozumitelnou obrazovku místo nekonečného loginu
     const loginErr = document.getElementById('login-err')
     showLogin()
     if (loginErr) {
       loginErr.style.display = 'block'
-      loginErr.textContent = 'Nepodařilo se načíst profil. Zkuste to prosím za chvíli znovu — pokud potíže trvají, kontaktujte správce.'
+      loginErr.innerHTML = 'Nepodařilo se načíst profil — spojení s databází bylo pomalé.<br>Zkuste to prosím <b>znovu za chvíli</b> (stačí načíst stránku znovu). Pokud potíže trvají, kontaktujte správce.'
     }
     return
   }
@@ -7938,7 +7938,7 @@ async function generateAttendanceExport() {
     : ['Neděle','Pondělí','Úterý','Středa','Čtvrtek','Pátek','Sobota']
 
   // Trojjazyčný popisek: EN hlavní, DE+CZ menší
-  const L3 = (en, de, cs) => `<div style="font-weight:700;font-size:11px;line-height:1.1">${en}</div><div style="font-weight:400;font-size:9px;color:#aaa;line-height:1.15">${de} · ${cs}</div>`
+  const L3 = (en, de, cs) => `<div style="font-weight:700;font-size:11px;line-height:1.1">${en}</div><div style="font-weight:400;font-size:9px;color:#666;line-height:1.15">${de} · ${cs}</div>`
   const dayEN = ['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday']
   const dayDE = ['Sonntag','Montag','Dienstag','Mittwoch','Donnerstag','Freitag','Samstag']
   const dayCS = ['Neděle','Pondělí','Úterý','Středa','Čtvrtek','Pátek','Sobota']
@@ -7989,15 +7989,15 @@ async function generateAttendanceExport() {
       <div style="margin-bottom:18px;page-break-inside:avoid;${idx>0?'page-break-before:always':''}">
         <h2 style="font-size:14px;margin:0 0 6px;padding-bottom:3px;border-bottom:2px solid #1a1a1a">${w.name} <span style="font-size:11px;font-weight:400;color:#666">· ${profLabel(w.prof)||''}</span></h2>
         <table style="width:100%;border-collapse:collapse;table-layout:fixed">
-          <thead><tr style="background:#1a1a1a;color:#fff">
-            <th style="padding:6px 7px;text-align:left;border:1px solid #333;width:92px;vertical-align:top">${L3('Day','Tag','Den')}</th>
-            <th style="padding:6px 7px;text-align:left;border:1px solid #333;width:118px;vertical-align:top">${L3('Time / Hours','Zeit / Stunden','Čas / Hodiny')}</th>
-            <th style="padding:6px 7px;text-align:left;border:1px solid #333;vertical-align:top">${L3('Site &amp; Work done','Baustelle &amp; Arbeit','Stavba &amp; Náplň práce')}</th>
+          <thead><tr style="background:#eee;color:#000">
+            <th style="padding:6px 7px;text-align:left;border:1px solid #999;width:92px;vertical-align:top">${L3('Day','Tag','Den')}</th>
+            <th style="padding:6px 7px;text-align:left;border:1px solid #999;width:118px;vertical-align:top">${L3('Time / Hours','Zeit / Stunden','Čas / Hodiny')}</th>
+            <th style="padding:6px 7px;text-align:left;border:1px solid #999;vertical-align:top">${L3('Site &amp; Work done','Baustelle &amp; Arbeit','Stavba &amp; Náplň práce')}</th>
           </tr></thead>
           <tbody>${rows}</tbody>
-          <tfoot><tr style="background:#f0f0f0;font-weight:700">
-            <td colspan="2" style="padding:6px 7px;border:1px solid #ccc;text-align:right">${L3('Total','Gesamt','Celkem')}</td>
-            <td style="padding:6px 7px;border:1px solid #ccc;font-size:13px">${w.total.toFixed(2)} h</td>
+          <tfoot><tr style="background:#f3f3f3;font-weight:700">
+            <td colspan="2" style="padding:6px 7px;border:1px solid #999;text-align:right">${L3('Total','Gesamt','Celkem')}</td>
+            <td style="padding:6px 7px;border:1px solid #999;font-size:13px">${w.total.toFixed(2)} h</td>
           </tr></tfoot>
         </table>
         <div style="margin-top:12px;display:flex;gap:30px;align-items:flex-end">
@@ -8014,18 +8014,19 @@ async function generateAttendanceExport() {
       </div>`
   }).join('')
 
-  const printHTML = `<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Attendance Report ${periodLabel}</title>
+  const printHTML = `<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Hours Overview ${periodLabel}</title>
   <style>
     *{box-sizing:border-box}
-    body{font-family:Arial,sans-serif;font-size:11px;color:#000;margin:0;padding:14mm}
+    body{font-family:Arial,sans-serif;font-size:11px;color:#000;margin:0;padding:14mm;-webkit-print-color-adjust:economy;print-color-adjust:economy}
     h1{font-size:17px;margin:0}
     @page{size:A4 portrait;margin:0}
     @media print{.no-print{display:none!important}}
   </style></head><body>
-  <div style="border-bottom:3px solid #1a1a1a;padding-bottom:8px;margin-bottom:14px">
-    <h1>Attendance Report</h1>
-    <div style="font-size:10px;color:#666">Anwesenheitsbericht · Přehled docházky</div>
-    <div style="margin:5px 0 0;font-size:11px;color:#444">${periodLabel} &nbsp;|&nbsp; ${workerCount} ${lang==='en'?'worker(s)':'prac.'} &nbsp;|&nbsp; Total · Gesamt · Celkem: <b>${grandTotal.toFixed(2)} h</b></div>
+  <div style="border-bottom:2px solid #1a1a1a;padding-bottom:8px;margin-bottom:14px">
+    <h1>Hours Overview</h1>
+    <div style="font-size:10px;color:#666">Stundenübersicht · Přehled hodin</div>
+    <div style="font-size:9px;color:#999;margin-top:2px">🇬🇧 English · 🇩🇪 Deutsch · 🇨🇿 Čeština</div>
+    <div style="margin:5px 0 0;font-size:11px;color:#444">${periodLabel} &nbsp;|&nbsp; ${workerCount} ${'prac. · workers'} &nbsp;|&nbsp; Total · Gesamt · Celkem: <b>${grandTotal.toFixed(2)} h</b></div>
   </div>
   ${sections}
   <div style="margin-top:14px;font-size:9px;color:#aaa">${new Date().toLocaleString('cs-CZ')} | SubBau Attendance System</div>
@@ -8210,25 +8211,37 @@ function showPrintPreview(html, filename) {
   overlay.appendChild(dlBtn)
 }
 
-// Tisk: otevři nové okno jen s NÁHLEDEM výkazu (bez automatického tisku)
+// Tisk: otevři nové okno s NÁHLEDEM výkazu (bez automatického tisku)
 function printHtmlViaIframe(html) {
-  // Vlož do okna lištu s tlačítky Tisk/Zavřít — uživatel tiskne, až sám chce
+  // Lišta s tlačítky Tisk/Zavřít (skryje se při tisku)
   const bar = `<div class="no-print" style="position:sticky;top:0;z-index:99;display:flex;gap:10px;justify-content:flex-end;padding:10px 14px;background:#1a1a1a">
     <button onclick="window.print()" style="padding:8px 16px;background:#FFCD00;color:#1a1a1a;border:none;border-radius:8px;cursor:pointer;font-size:14px;font-weight:700;font-family:Arial">🖨️ Vytisknout / Uložit PDF</button>
     <button onclick="window.close()" style="padding:8px 16px;background:#fff;color:#1a1a1a;border:1px solid #ccc;border-radius:8px;cursor:pointer;font-size:14px;font-weight:700;font-family:Arial">✕ Zavřít</button>
   </div>`
   const htmlWithBar = html
     .replace('<body>', '<body>' + bar)
-    .replace('</head>', '<style>@media print{.no-print{display:none!important}}</style></head>')
-  const w = window.open('', '_blank')
-  if (w && w.document) {
-    w.document.open()
-    w.document.write(htmlWithBar)
-    w.document.close()
+    .replace('</head>', '<style>@media print{.no-print{display:none!important}} @page{size:A4 portrait;margin:10mm}</style></head>')
+
+  // Blob URL je nejspolehlivější pro tisk (Safari i Chrome) — obsah se vždy vykreslí
+  try {
+    const blob = new Blob([htmlWithBar], { type: 'text/html;charset=utf-8' })
+    const url = URL.createObjectURL(blob)
+    const w = window.open(url, '_blank')
+    if (w) {
+      // ukliď URL po chvíli
+      setTimeout(() => { try { URL.revokeObjectURL(url) } catch(_){} }, 60000)
+      return
+    }
+    // Okno blokované → zkus aspoň přesměrovat přes document.write
+    URL.revokeObjectURL(url)
+  } catch(e) { /* fallback níže */ }
+
+  const w2 = window.open('', '_blank')
+  if (w2 && w2.document) {
+    w2.document.open(); w2.document.write(htmlWithBar); w2.document.close()
     return
   }
-  // Záloha: stáhni HTML, když prohlížeč blokuje okna
-  showToast('❌ Povolte vyskakovací okna, nebo použijte Stáhnout HTML')
+  showToast('❌ Povolte vyskakovací okna pro tisk, nebo použijte Stáhnout HTML')
 }
 
 function downloadAsHtml(html, filename) { showPrintPreview(html, filename) }
@@ -8315,21 +8328,23 @@ async function exportWorkerKW(workerId, workerName, week, year, lang, foreman) {
   <title>Hours Overview ${workerName} KW${week}/${year}</title>
   <style>
     *{box-sizing:border-box}
-    body{font-family:Arial,sans-serif;font-size:11px;margin:0;padding:14mm;color:#1a1a1a}
+    body{font-family:Arial,sans-serif;font-size:11px;margin:0;padding:14mm;color:#1a1a1a;-webkit-print-color-adjust:economy;print-color-adjust:economy}
     h1{font-size:17px;margin:0}
     table{width:100%;border-collapse:collapse;table-layout:fixed}
-    thead tr{background:#1a1a1a;color:#fff}
-    thead th{padding:6px 7px;text-align:left;border:1px solid #333;vertical-align:top}
-    tfoot tr{background:#f0f0f0;font-weight:700}
-    tfoot td{padding:7px;border:1px solid #ccc;font-size:12px}
+    thead tr{background:#eee;color:#000}
+    thead th{padding:6px 7px;text-align:left;border:1px solid #999;vertical-align:top}
+    tfoot tr{background:#f3f3f3;font-weight:700}
+    tfoot td{padding:7px;border:1px solid #999;font-size:12px}
+    tbody td{border:1px solid #bbb}
     @page{size:A4 portrait;margin:0}
     @media print{.no-print{display:none!important}}
   </style>
 </head><body>
-  <div style="display:flex;justify-content:space-between;align-items:flex-start;border-bottom:3px solid #1a1a1a;padding-bottom:8px;margin-bottom:12px">
+  <div style="display:flex;justify-content:space-between;align-items:flex-start;border-bottom:2px solid #1a1a1a;padding-bottom:8px;margin-bottom:12px">
     <div>
       <h1>${T.title}</h1>
       <div style="font-size:10px;color:#666">${T.titleSub}</div>
+      <div style="font-size:9px;color:#999;margin-top:2px">🇬🇧 English · 🇩🇪 Deutsch · 🇨🇿 Čeština</div>
       <div style="font-size:14px;font-weight:700;margin-top:4px">${workerName}</div>
     </div>
     <div style="text-align:right;font-size:11px;color:#555">
