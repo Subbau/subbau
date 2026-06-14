@@ -1486,10 +1486,10 @@ tr:hover td{background:#fafbfc}
           </select>
         </div>
         <div class="fg" style="margin-bottom:8px">
-          <label>Chodíte i o víkendech?</label>
+          <label>Chodíte i v sobotu?</label>
           <select id="turnus-weekends" style="width:100%;padding:10px;border:1.5px solid var(--brd);border-radius:8px;font-size:14px">
             <option value="false">Ne — víkendy volno (Po–Pá)</option>
-            <option value="true">Ano — pracuji i o víkendech (Po–Ne)</option>
+            <option value="true">Ano — pracuji i v sobotu (Po–So, neděle volno)</option>
           </select>
         </div>
         <div class="fg" style="margin-bottom:12px">
@@ -1806,7 +1806,7 @@ tr:hover td{background:#fafbfc}
               <label style="font-size:11px;color:var(--text3)">Víkendy</label>
               <select id="wd-turnus-weekends" style="padding:7px;border:1px solid var(--brd);border-radius:6px;font-size:13px">
                 <option value="false">Ne (Po–Pá)</option>
-                <option value="true">Ano (Po–Ne)</option>
+                <option value="true">Ano i sobota (Po–So)</option>
               </select>
             </div>
             <button onclick="saveWorkerTurnus()" style="padding:8px 14px;background:#1a1a1a;color:#FFCD00;border:none;border-radius:8px;cursor:pointer;font-family:inherit;font-weight:700;font-size:12px">💾 Uložit</button>
@@ -4476,9 +4476,9 @@ function dayStatusFor(worker, dateStr, attSet, vacList) {
   }
   // 2) dovolená
   if (vacList.some(v => v.worker_id === worker.id && dateStr >= v.date_from && dateStr <= v.date_to)) return 'vac'
-  // 3) víkend, kdy pracovník nechodí o víkendech → odpočinek (doma), ne plán práce
-  const isWeekend = (() => { const [Y,M,D] = dateStr.split('-').map(Number); const wd = new Date(Y,M-1,D).getDay(); return wd === 0 || wd === 6 })()
-  if (isWeekend && !worker.turnus_weekends) {
+  // 3) neděle vždy volno; sobota volno pokud pracovník v sobotu nechodí → odpočinek
+  const wdOf = (() => { const [Y,M,D] = dateStr.split('-').map(Number); return new Date(Y,M-1,D).getDay() })()
+  if (wdOf === 0 || (wdOf === 6 && !worker.turnus_weekends)) {
     // jen pokud má vůbec turnus nastavený (jinak nevíme nic)
     const tt = isWorkingDayByTurnus(worker, dateStr)
     if (tt !== null) return 'rest'
@@ -10708,9 +10708,11 @@ function isWorkingDayByTurnus(profile, dateStr) {
   const startD = new Date(sy, sm - 1, sd)
   if (day < startD) return null  // před začátkem cyklu
   // Víkend: pokud pracovník nechodí o víkendech, víkend není pracovní den
-  const wd = day.getDay()
-  const isWeekend = (wd === 0 || wd === 6)
-  if (isWeekend && !profile.turnus_weekends) return false
+  const wd = day.getDay()  // 0 = neděle, 6 = sobota
+  // Neděle je VŽDY volno (v Německu se v neděli bez výjimky nepracuje)
+  if (wd === 0) return false
+  // Sobota jen když pracovník chodí i v sobotu
+  if (wd === 6 && !profile.turnus_weekends) return false
   const cycleWeeks = work + off
   if (cycleWeeks <= 0) return null
   if (off === 0) return true  // bez volna → pracuje každý (pracovní) týden
