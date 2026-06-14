@@ -8416,13 +8416,27 @@ async function exportWorkerKW(workerId, workerName, week, year, lang, foreman) {
     } catch(e) { console.warn('[hour-sheet] upload výjimka:', e?.message) }
     // 2) Vždy ulož záznam (i bez pdf_url) — ať admin aspoň vidí jméno vedoucího + že je podepsáno
     try {
-      const { error: insErr } = await sb.from('weekly_hour_sheets').insert({
+      console.log('[hour-sheet] ukládám | jméno:', foreman.name, '| podpis délka:', foreman.signature?.length || 0)
+      const { data: insData, error: insErr } = await sb.from('weekly_hour_sheets').insert({
         worker_id: workerId, kw: week, kw_year: year,
         foreman_name: foreman.name || null, pdf_url: pdfUrl,
         foreman_signature: foreman.signature || null
-      })
-      if (insErr) { console.error('[hour-sheet] insert selhal:', insErr.message); showToast('⚠️ Výkaz se nepodařilo uložit pro admina: ' + insErr.message) }
-      else { showToast('✅ Výkaz uložen' + (foreman.name ? ' (vedoucí: ' + foreman.name + ')' : '')) }
+      }).select('id, foreman_signature')
+      if (insErr) {
+        console.error('[hour-sheet] insert selhal:', insErr.message)
+        showToast('⚠️ Výkaz se nepodařilo uložit pro admina: ' + insErr.message)
+      } else {
+        const savedId = insData && insData[0]?.id
+        const savedSigLen = insData && insData[0]?.foreman_signature?.length
+        console.log('[hour-sheet] uloženo id:', savedId, '| podpis v DB délka:', savedSigLen || 0)
+        // Pojistka: když se podpis nezapsal, ale máme ho, doplň ho update-em
+        if (savedId && foreman.signature && !savedSigLen) {
+          const { error: updErr } = await sb.from('weekly_hour_sheets')
+            .update({ foreman_signature: foreman.signature }).eq('id', savedId)
+          console.log('[hour-sheet] dodatečný update podpisu | chyba:', updErr?.message || 'žádná')
+        }
+        showToast('✅ Výkaz uložen' + (foreman.name ? ' (vedoucí: ' + foreman.name + ')' : ''))
+      }
     } catch(e) { console.error('[hour-sheet] insert výjimka:', e?.message) }
   }
 
@@ -8500,7 +8514,22 @@ function saveForemanSign() {
   // Ověř, že je něco nakresleno (pad má isEmpty, nebo zkontroluj přes hint)
   const isEmpty = _foremanPad && typeof _foremanPad.isEmpty === 'function' ? _foremanPad.isEmpty() : false
   if (isEmpty) { showToast('⚠️ Chybí podpis'); return }
-  const dataUrl = canvas.toDataURL('image/png')
+  // Zmenši podpis na rozumnou velikost, ať se base64 spolehlivě uloží do DB
+  let dataUrl
+  try {
+    const maxW = 360
+    const scale = Math.min(1, maxW / (canvas.width || maxW))
+    const tmp = document.createElement('canvas')
+    tmp.width = Math.round((canvas.width || maxW) * scale)
+    tmp.height = Math.round((canvas.height || 120) * scale)
+    const tctx = tmp.getContext('2d')
+    tctx.fillStyle = '#fff'; tctx.fillRect(0, 0, tmp.width, tmp.height)
+    tctx.drawImage(canvas, 0, 0, tmp.width, tmp.height)
+    dataUrl = tmp.toDataURL('image/jpeg', 0.7)  // JPEG je výrazně menší než PNG
+  } catch(e) {
+    dataUrl = canvas.toDataURL('image/png')
+  }
+  console.log('[foreman] podpis uložen do paměti, délka:', dataUrl?.length || 0)
   foremanSignData = { name, dataUrl }
   // Promítni do pole nahoře + status
   const topName = document.getElementById('mob-foreman-name'); if (topName) topName.value = name
