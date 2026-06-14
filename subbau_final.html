@@ -3261,6 +3261,9 @@ function showAdmin(profile) {
   loadActiveAnnouncements()
   loadAdminChatList()
   loadDocumentAlertsStat()
+  updateAdminChatBadge()
+  if (window._adminChatBadgeInt) clearInterval(window._adminChatBadgeInt)
+  window._adminChatBadgeInt = setInterval(updateAdminChatBadge, 20000)
 }
 
 function showOsvec(profile) {
@@ -3303,6 +3306,8 @@ function showOsvec(profile) {
     loadMobExportWeeks()
     loadMobNotifications()
     updateChatBadge()
+    if (window._osvecChatBadgeInt) clearInterval(window._osvecChatBadgeInt)
+    window._osvecChatBadgeInt = setInterval(updateChatBadge, 20000)
     checkDocumentAlerts()
     checkShowTutorial()
     // Po přihlášení skryj badge — badge se zobrazí až přijde NOVÁ zpráva
@@ -4889,6 +4894,27 @@ async function updateChatBadge() {
   }
 }
 
+// Aktualizuje admin badge (nepřečtené zprávy od pracovníků) — funguje i mimo sekci Chat
+async function updateAdminChatBadge() {
+  if (!currentUser || currentProfile?.role !== 'admin') return
+  const { data: unread } = await sb.from('chat_messages')
+    .select('worker_id')
+    .eq('sender_role', 'osvec')
+    .eq('is_read', false)
+  // Nepočítej právě otevřenou konverzaci
+  const chatView = document.getElementById('v-chat')
+  const chatOpen = chatView?.classList.contains('on')
+  let total = 0
+  ;(unread||[]).forEach(u => {
+    if (chatOpen && activeChatWorkerId === u.worker_id) return
+    total++
+  })
+  document.querySelectorAll('#admin-chat-badge').forEach(badge => {
+    badge.textContent = total
+    badge.style.display = total > 0 ? 'inline' : 'none'
+  })
+}
+
 // Enter to send on mobile chat
 document.addEventListener('keydown', function(e) {
   if (e.target.id === 'mob-chat-input' && e.key === 'Enter' && !e.shiftKey) {
@@ -5013,6 +5039,7 @@ async function openAdminChat(workerId, workerName) {
 
   // Aktualizuj seznam a badge
   await loadAdminChatList()
+  updateAdminChatBadge()
 
   // Realtime
   if (adminChatRealtimeSub) sb.removeChannel(adminChatRealtimeSub)
