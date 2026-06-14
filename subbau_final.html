@@ -8239,29 +8239,54 @@ function showPrintPreview(html, filename) {
   overlay.appendChild(dlBtn)
 }
 
-// Otevře výkaz v nové záložce přes Blob URL (v Safari nejstabilnější — nezmizí).
+// Otevře výkaz v nové záložce a počká, až se vykreslí (i obrázek podpisu).
 function openPrintWindow(html) {
   const bar = `<div class="no-print" style="position:sticky;top:0;z-index:99;display:flex;gap:10px;justify-content:center;padding:12px;background:#1a1a1a">
-    <button onclick="window.print()" style="padding:10px 20px;background:#FFCD00;color:#1a1a1a;border:none;border-radius:8px;cursor:pointer;font-size:15px;font-weight:700;font-family:Arial">🖨️ Uložit jako PDF / Vytisknout</button>
+    <button id="__printbtn" style="padding:10px 20px;background:#FFCD00;color:#1a1a1a;border:none;border-radius:8px;cursor:pointer;font-size:15px;font-weight:700;font-family:Arial">🖨️ Uložit jako PDF / Vytisknout</button>
+    <button onclick="window.close()" style="padding:10px 16px;background:#fff;color:#1a1a1a;border:1px solid #ccc;border-radius:8px;cursor:pointer;font-size:15px;font-weight:700;font-family:Arial">✕ Zavřít</button>
   </div>`
+  // Skript v okně: před tiskem počkej, až se načtou všechny obrázky (podpis)
+  const waitScript = `<script>
+    (function(){
+      function doPrint(){
+        var imgs = Array.prototype.slice.call(document.images);
+        var pending = imgs.filter(function(i){ return !i.complete; });
+        if (pending.length === 0) { window.focus(); window.print(); return; }
+        var done = 0;
+        pending.forEach(function(i){
+          i.addEventListener('load', check); i.addEventListener('error', check);
+        });
+        function check(){ done++; if (done >= pending.length) { window.focus(); window.print(); } }
+        setTimeout(function(){ window.focus(); window.print(); }, 2000); // pojistka
+      }
+      window.addEventListener('DOMContentLoaded', function(){
+        var b = document.getElementById('__printbtn');
+        if (b) b.onclick = doPrint;
+      });
+    })();
+  <\/script>`
   const htmlOut = html
     .replace('<body>', '<body>' + bar)
-    .replace('</head>', '<style>@media print{.no-print{display:none!important}}@page{size:A4 portrait;margin:10mm}</style></head>')
-  try {
-    const blob = new Blob([htmlOut], { type: 'text/html;charset=utf-8' })
-    const url = URL.createObjectURL(blob)
-    const w = window.open(url, '_blank')
-    if (!w) {
-      // okno blokováno → stáhni soubor jako záloha
+    .replace('</head>', '<style>@media print{.no-print{display:none!important}}@page{size:A4 portrait;margin:10mm}</style>' + waitScript + '</head>')
+
+  // Otevři prázdné okno a zapiš obsah napřímo (v Safari nejstabilnější, když se nezavírá hned)
+  const w = window.open('about:blank', '_blank')
+  if (!w) {
+    // Okno blokováno → stáhni HTML jako zálohu
+    try {
+      const blob = new Blob([htmlOut], { type: 'text/html;charset=utf-8' })
+      const url = URL.createObjectURL(blob)
       const a = document.createElement('a')
       a.href = url; a.download = (window._lastPrintName || 'vykaz.html')
       document.body.appendChild(a); a.click(); document.body.removeChild(a)
       showToast('📥 Výkaz stažen — otevřete ho a dejte Tisk → Uložit jako PDF')
-    }
-    // URL záměrně NEuklízím hned (revoke by obsah v Safari zničil). Prohlížeč ji uvolní sám.
-  } catch(e) {
-    showToast('❌ Nepodařilo se otevřít výkaz: ' + (e?.message||e))
+    } catch(e) { showToast('❌ Povolte vyskakovací okna pro tisk') }
+    return
   }
+  w.document.open()
+  w.document.write(htmlOut)
+  w.document.close()
+  showToast('✅ Výkaz otevřen v nové záložce')
 }
 
 // Tisk: otevři nové okno s NÁHLEDEM výkazu (bez automatického tisku)
