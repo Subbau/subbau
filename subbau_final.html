@@ -1859,25 +1859,22 @@ tr:hover td{background:#fafbfc}
         <!-- Nastavení zákazníka faktury pro tohoto pracovníka -->
         <div style="border:1.5px solid var(--brd);border-radius:10px;padding:14px;margin-bottom:16px">
           <div style="font-size:13px;font-weight:700;margin-bottom:10px">📄 Fakturace — odběratel</div>
-          <p style="font-size:12px;color:var(--text2);margin-bottom:10px">Firma, které tento pracovník fakturuje. OSVČ tuto adresu nemůže změnit.</p>
-          <div class="g2" style="gap:8px">
-            <div class="fg" style="margin-bottom:0">
-              <label style="font-size:11px">Název firmy *</label>
-              <input type="text" id="wd-inv-cust-name" placeholder="Treskower Zimmermann..." style="width:100%;font-size:12px">
-            </div>
-            <div class="fg" style="margin-bottom:0">
-              <label style="font-size:11px">IČO / ID</label>
-              <input type="text" id="wd-inv-cust-id" placeholder="198456703" style="width:100%;font-size:12px">
-            </div>
-            <div class="fg" style="margin-bottom:0">
-              <label style="font-size:11px">VAT ID</label>
-              <input type="text" id="wd-inv-cust-vat" placeholder="DE198456703" style="width:100%;font-size:12px">
-            </div>
-            <div class="fg" style="margin-bottom:0">
-              <label style="font-size:11px">Adresa</label>
-              <input type="text" id="wd-inv-cust-addr" placeholder="Ulice, město, země" style="width:100%;font-size:12px">
-            </div>
+          <p style="font-size:12px;color:var(--text2);margin-bottom:10px">Firma, které tento pracovník fakturuje. Obvykle se vyplní automaticky podle týmu — zde to může přepsat jen admin. OSVČ tuto adresu nemůže měnit.</p>
+          <div class="fg" style="margin-bottom:8px">
+            <label style="font-size:11px">Vyberte firmu z databáze</label>
+            <select id="wd-inv-cust-company" onchange="onWorkerCustomerPick()" style="width:100%;font-size:12px;padding:8px;border:1.5px solid var(--brd);border-radius:8px;font-family:inherit">
+              <option value="">— vyberte firmu —</option>
+            </select>
           </div>
+          <div id="wd-inv-cust-preview" style="background:var(--bg);border-radius:8px;padding:8px 10px;font-size:11px;color:var(--text2);display:none">
+            <div style="font-weight:700;font-size:12px;color:var(--text);margin-bottom:2px" id="wd-inv-cust-prev-name">—</div>
+            <div id="wd-inv-cust-prev-detail"></div>
+          </div>
+          <!-- skryté hodnoty, které se uloží -->
+          <input type="hidden" id="wd-inv-cust-name">
+          <input type="hidden" id="wd-inv-cust-id">
+          <input type="hidden" id="wd-inv-cust-vat">
+          <input type="hidden" id="wd-inv-cust-addr">
           <button onclick="saveWorkerInvoiceCustomer()" class="btn-pri" style="margin-top:10px;width:100%;font-size:12px;padding:8px">💾 Uložit odběratele</button>
         </div>
         <div id="wd-finance-kw-wrap" style="display:flex;gap:8px;margin-bottom:14px;align-items:center">
@@ -5855,6 +5852,7 @@ async function deleteCompany(id, name) {
 // ============ TÝMY ============
 let _teamsCache = []
 let _workersCache = []
+let _teamCompaniesCache = []
 
 async function loadTeams() {
   const div = document.getElementById('teams-list')
@@ -5873,6 +5871,9 @@ async function loadTeams() {
 
   _teamsCache = teams || []
   _workersCache = workers || []
+  // Načti firmy pro dropdown navázání firmy k týmu
+  const { data: comps } = await sb.from('companies').select('id, name').order('name')
+  _teamCompaniesCache = comps || []
   renderTeams()
 }
 
@@ -5916,6 +5917,13 @@ function renderTeams() {
           <div>
             <div style="font-size:15px;font-weight:800">${t.name}</div>
             ${t.location ? `<div style="font-size:12px;color:var(--text2)">📍 ${t.location}</div>` : ''}
+            <div style="margin-top:6px;display:flex;align-items:center;gap:6px">
+              <span style="font-size:11px;color:var(--text3)">🏢 Firma:</span>
+              <select onchange="setTeamCompany('${t.id}', this.value)" style="font-size:11px;padding:3px 6px;border:1px solid var(--brd);border-radius:6px;font-family:inherit;max-width:200px">
+                <option value="">— nenavázáno —</option>
+                ${_teamCompaniesCache.map(c => `<option value="${c.id}" ${String(t.company_id)===String(c.id)?'selected':''}>${(c.name||'').replace(/</g,'&lt;')}</option>`).join('')}
+              </select>
+            </div>
           </div>
           <div style="display:flex;gap:6px">
             <button onclick="openAddMemberModal('${t.id}','${(t.name||'').replace(/'/g,String.fromCharCode(39))}')" style="padding:4px 10px;font-size:12px;border:1px solid var(--brd);border-radius:6px;cursor:pointer;background:var(--bg);font-family:inherit">+ Přidat</button>
@@ -5974,10 +5982,12 @@ function openNewTeamModal() {
 
 // Naplní rozbalovák firem z databáze firem
 let _teamCompanies = []
+let _selectedTeamCompanyId = null
 async function fillCompanyPicker() {
   const sel = document.getElementById('new-team-company')
   if (!sel) return
-  const { data, error } = await sb.from('companies').select('name, site, address').order('name')
+  _selectedTeamCompanyId = null
+  const { data, error } = await sb.from('companies').select('id, name, site, address').order('name')
   _teamCompanies = data || []
   if (error || !data?.length) {
     sel.innerHTML = '<option value="">— žádné uložené firmy —</option>'
@@ -5990,9 +6000,10 @@ async function fillCompanyPicker() {
 // Když admin vybere firmu z rozbalováku → doplní název skupiny (a lokalitu, je-li prázdná)
 function onTeamCompanyPick() {
   const sel = document.getElementById('new-team-company')
-  if (!sel || sel.value === '') return
+  if (!sel || sel.value === '') { _selectedTeamCompanyId = null; return }
   const c = _teamCompanies[parseInt(sel.value)]
-  if (!c) return
+  if (!c) { _selectedTeamCompanyId = null; return }
+  _selectedTeamCompanyId = c.id || null
   const nameEl = document.getElementById('new-team-name')
   if (nameEl) nameEl.value = c.site ? `${c.name} — ${c.site}` : c.name
   const locEl = document.getElementById('new-team-location')
@@ -6008,13 +6019,16 @@ async function submitNewTeam() {
   const name = document.getElementById('new-team-name').value.trim()
   if (!name) { showToast('Zadejte název skupiny'); return }
   const location = document.getElementById('new-team-location').value.trim()
+  const companyId = _selectedTeamCompanyId
   closeNewTeamModal()
-  await createTeam(name, location)
+  await createTeam(name, location, companyId)
 }
 
-async function createTeam(name, location) {
+async function createTeam(name, location, companyId) {
+  const payload = { name, location, is_active: true }
+  if (companyId) payload.company_id = companyId
   const { data: inserted, error } = await sb.from('teams')
-    .insert({ name, location, is_active: true })
+    .insert(payload)
     .select()
     .single()
   if (error) { showToast('Chyba: ' + error.message); return }
@@ -6025,7 +6039,6 @@ async function createTeam(name, location) {
 
 async function deleteTeam(teamId, teamName) {
   if (!confirm('Smazat skupinu "' + (teamName||'') + '"?\nPracovníci budou odřazeni (zůstanou v systému).')) return
-  // 1. Odřaď všechny pracovníky z této skupiny
   const { error: upErr } = await sb.from('profiles').update({ team_id: null }).eq('team_id', teamId)
   if (upErr) { showToast('Chyba při odřazení: ' + upErr.message); return }
   // 2. Zkus tvrdě smazat řádek
@@ -6038,6 +6051,25 @@ async function deleteTeam(teamId, teamName) {
   }
   showToast('🗑 Skupina smazána')
   loadTeams()
+}
+
+// Admin naváže/změní firmu u týmu. Změna firmy přepíše odběratele u všech členů týmu.
+async function setTeamCompany(teamId, companyId) {
+  const cid = companyId || null
+  const { error } = await sb.from('teams').update({ company_id: cid }).eq('id', teamId)
+  if (error) { showToast('Chyba: ' + error.message); return }
+  // Aktualizuj cache
+  const tt = _teamsCache.find(t => String(t.id) === String(teamId)); if (tt) tt.company_id = cid
+  if (cid) {
+    // Přepiš odběratele u všech členů týmu podle nové firmy
+    const members = _workersCache.filter(w => String(w.team_id) === String(teamId))
+    for (const m of members) {
+      await fillInvoiceCustomerFromTeam(m.id, teamId)
+    }
+    showToast('✅ Firma navázána, fakturace členů aktualizována')
+  } else {
+    showToast('Firma odpojena od týmu')
+  }
 }
 
 function openAddMemberModal(teamId, teamName) {
@@ -6072,6 +6104,7 @@ async function addToTeam(workerId, teamId) {
   const { error } = await sb.from('profiles').update({ team_id: teamId }).eq('id', workerId)
   if (error) { showToast('Chyba: ' + error.message); return }
   await logTeamAssignment(workerId, teamId)
+  await fillInvoiceCustomerFromTeam(workerId, teamId)
   showToast('Přidáno do skupiny!')
   loadUnassignedForModal()
   loadTeams()
@@ -6090,6 +6123,7 @@ async function assignToTeam(workerId, teamId) {
   const { error } = await sb.from('profiles').update({ team_id: teamId }).eq('id', workerId)
   if (error) { showToast('Chyba: ' + error.message); return }
   await logTeamAssignment(workerId, teamId)
+  await fillInvoiceCustomerFromTeam(workerId, teamId)
   showToast('Prirazen do skupiny!')
   loadTeams()
 }
@@ -6110,6 +6144,23 @@ async function closeTeamAssignment(workerId) {
     await sb.from('team_assignments').update({ removed_at: new Date().toISOString() })
       .eq('worker_id', workerId).is('removed_at', null)
   } catch(e) { console.warn('closeTeamAssignment:', e?.message) }
+}
+
+// Když pracovníka přiřadíme do týmu, předvyplní se mu odběratel faktury
+// podle firmy navázané na tým (tým má přednost — přepíše dosavadní odběratele).
+async function fillInvoiceCustomerFromTeam(workerId, teamId) {
+  try {
+    const { data: team } = await sb.from('teams').select('company_id').eq('id', teamId).maybeSingle()
+    if (!team || !team.company_id) return  // tým nemá navázanou firmu → nic neměníme
+    const { data: c } = await sb.from('companies').select('name, ico, dic, address').eq('id', team.company_id).maybeSingle()
+    if (!c) return
+    await sb.from('profiles').update({
+      invoice_customer_name: c.name || null,
+      invoice_customer_id: c.ico || null,
+      invoice_customer_vat: c.dic || null,
+      invoice_customer_address: c.address || null
+    }).eq('id', workerId)
+  } catch(e) { console.warn('fillInvoiceCustomerFromTeam:', e?.message) }
 }
 
 // ============ OSVČ MOBILE ============
@@ -8546,21 +8597,68 @@ async function saveWorkerAccommodation() {
 }
 
 // -- FAKTURACE ZÁKAZNÍK PER WORKER --
-function loadWorkerInvoiceCustomer(profile) {
-  const n = document.getElementById('wd-inv-cust-name')
-  const i = document.getElementById('wd-inv-cust-id')
-  const v = document.getElementById('wd-inv-cust-vat')
-  const a = document.getElementById('wd-inv-cust-addr')
-  if (n) n.value = profile.invoice_customer_name || ''
-  if (i) i.value = profile.invoice_customer_id || ''
-  if (v) v.value = profile.invoice_customer_vat || ''
-  if (a) a.value = profile.invoice_customer_address || ''
+let _workerCustCompanies = []
+async function loadWorkerInvoiceCustomer(profile) {
+  const sel = document.getElementById('wd-inv-cust-company')
+  // Načti firmy z databáze
+  const { data } = await sb.from('companies').select('id, name, ico, dic, address').order('name')
+  _workerCustCompanies = data || []
+  if (sel) {
+    sel.innerHTML = '<option value="">— vyberte firmu —</option>' +
+      _workerCustCompanies.map(c => `<option value="${c.id}">${(c.name||'').replace(/</g,'&lt;')}</option>`).join('')
+  }
+  // Nastav skrytá pole z profilu
+  const setVal = (id, v) => { const el = document.getElementById(id); if (el) el.value = v || '' }
+  setVal('wd-inv-cust-name', profile.invoice_customer_name)
+  setVal('wd-inv-cust-id', profile.invoice_customer_id)
+  setVal('wd-inv-cust-vat', profile.invoice_customer_vat)
+  setVal('wd-inv-cust-addr', profile.invoice_customer_address)
+  // Pokud aktuální odběratel odpovídá některé firmě, předvyber ji v dropdownu
+  if (sel && profile.invoice_customer_name) {
+    const match = _workerCustCompanies.find(c => (c.name||'') === profile.invoice_customer_name)
+    if (match) sel.value = match.id
+  }
+  renderWorkerCustomerPreview(profile.invoice_customer_name, profile.invoice_customer_id, profile.invoice_customer_vat, profile.invoice_customer_address)
+}
+
+function renderWorkerCustomerPreview(name, id, vat, addr) {
+  const box = document.getElementById('wd-inv-cust-preview')
+  const nameEl = document.getElementById('wd-inv-cust-prev-name')
+  const detEl = document.getElementById('wd-inv-cust-prev-detail')
+  if (!box) return
+  if (!name) { box.style.display = 'none'; return }
+  box.style.display = 'block'
+  if (nameEl) nameEl.textContent = name
+  if (detEl) {
+    const parts = []
+    if (id) parts.push('IČO: ' + id)
+    if (vat) parts.push('DIČ: ' + vat)
+    if (addr) parts.push(addr)
+    detEl.innerHTML = parts.map(p => `<div>${(p||'').replace(/</g,'&lt;')}</div>`).join('')
+  }
+}
+
+function onWorkerCustomerPick() {
+  const sel = document.getElementById('wd-inv-cust-company')
+  if (!sel) return
+  const c = _workerCustCompanies.find(x => String(x.id) === String(sel.value))
+  const setVal = (id, v) => { const el = document.getElementById(id); if (el) el.value = v || '' }
+  if (!c) {
+    setVal('wd-inv-cust-name',''); setVal('wd-inv-cust-id',''); setVal('wd-inv-cust-vat',''); setVal('wd-inv-cust-addr','')
+    renderWorkerCustomerPreview('', '', '', '')
+    return
+  }
+  setVal('wd-inv-cust-name', c.name)
+  setVal('wd-inv-cust-id', c.ico)
+  setVal('wd-inv-cust-vat', c.dic)
+  setVal('wd-inv-cust-addr', c.address)
+  renderWorkerCustomerPreview(c.name, c.ico, c.dic, c.address)
 }
 
 async function saveWorkerInvoiceCustomer() {
   if (!currentWorkerId) return
   const name = document.getElementById('wd-inv-cust-name')?.value.trim()
-  if (!name) { showToast('Zadejte název firmy'); return }
+  if (!name) { showToast('Vyberte firmu z databáze'); return }
   const { error } = await sb.from('profiles').update({
     invoice_customer_name: name,
     invoice_customer_id: document.getElementById('wd-inv-cust-id')?.value.trim() || null,
