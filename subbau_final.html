@@ -449,6 +449,10 @@ tr:hover td{background:#fafbfc}
         <div style="margin-top:8px;text-align:center;font-size:13px;color:var(--text2)">
           Ještě nemáte účet? <a href="#" onclick="showRegForm()" style="color:var(--blue);font-weight:700">Registrovat se</a>
         </div>
+        <!-- Stáhnout aplikaci na plochu (PWA) -->
+        <div id="install-app-wrap" style="margin-top:16px;text-align:center;display:none">
+          <button onclick="installApp()" style="width:100%;padding:13px;background:#fff;color:#1a1a1a;border:2px solid #1a1a1a;border-radius:12px;font-size:14px;font-weight:700;cursor:pointer;font-family:inherit;display:flex;align-items:center;justify-content:center;gap:8px">📲 Stáhnout aplikaci do telefonu</button>
+        </div>
         <div style="border-top:1px solid #E8DDD4;padding-top:20px;margin-top:20px;display:flex;align-items:center;justify-content:center;gap:12px"><div style="width:28px;height:4px;background:#C4573A;border-radius:2px"></div><div style="width:28px;height:4px;background:#FFCD00;border-radius:2px"></div><div style="width:28px;height:4px;background:#8B5930;border-radius:2px"></div><span style="font-size:11px;color:#C8A898;margin-left:4px">SubBau s.r.o.</span></div>
       </div>
 
@@ -2956,6 +2960,84 @@ if ('serviceWorker' in navigator) {
   window.addEventListener('load', () => {
     navigator.serviceWorker.register('/sw.js').catch(err => console.warn('SW registrace selhala:', err))
   })
+}
+
+// ===== "Stáhnout aplikaci" na přihlašovací obrazovce =====
+window._deferredInstallPrompt = null
+// Android/Chrome: zachyť nabídku instalace
+window.addEventListener('beforeinstallprompt', (e) => {
+  e.preventDefault()
+  window._deferredInstallPrompt = e
+  showInstallButton()
+})
+// Když je appka už nainstalovaná (běží jako standalone), tlačítko neukazuj
+function isAppInstalled() {
+  return window.matchMedia('(display-mode: standalone)').matches || window.navigator.standalone === true
+}
+function isIOS() {
+  return /iphone|ipad|ipod/i.test(navigator.userAgent) ||
+    (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1) // iPad s iPadOS
+}
+function isMobile() {
+  return /android|iphone|ipad|ipod|mobile/i.test(navigator.userAgent)
+}
+function showInstallButton() {
+  const w = document.getElementById('install-app-wrap')
+  if (!w) return
+  // Ukaž jen na mobilu a jen když appka ještě není nainstalovaná
+  if (isMobile() && !isAppInstalled()) w.style.display = 'block'
+}
+// Zavolej při startu (iPhone nemá beforeinstallprompt, tak ho ukážeme rovnou)
+window.addEventListener('load', () => { setTimeout(showInstallButton, 300) })
+
+async function installApp() {
+  // Android/Chrome: spusť nativní instalaci
+  if (window._deferredInstallPrompt) {
+    window._deferredInstallPrompt.prompt()
+    const { outcome } = await window._deferredInstallPrompt.userChoice
+    window._deferredInstallPrompt = null
+    if (outcome === 'accepted') {
+      const w = document.getElementById('install-app-wrap'); if (w) w.style.display = 'none'
+    }
+    return
+  }
+  // iPhone (Safari): nelze spustit tlačítkem → ukaž návod
+  if (isIOS()) {
+    showIosInstallGuide()
+    return
+  }
+  // Ostatní (už nainstalováno nebo nepodporováno)
+  alert('Pro přidání na plochu otevřete tuto stránku v prohlížeči telefonu (Safari na iPhonu, Chrome na Androidu) a zvolte „Přidat na plochu".')
+}
+
+function showIosInstallGuide() {
+  let ov = document.getElementById('ios-install-guide')
+  if (ov) { ov.style.display = 'flex'; return }
+  ov = document.createElement('div')
+  ov.id = 'ios-install-guide'
+  ov.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:99999;display:flex;align-items:flex-end;justify-content:center;padding:0'
+  ov.onclick = (e) => { if (e.target === ov) ov.style.display = 'none' }
+  ov.innerHTML = `
+    <div style="background:#fff;width:100%;max-width:480px;border-radius:20px 20px 0 0;padding:24px 22px calc(24px + env(safe-area-inset-bottom));box-shadow:0 -4px 30px rgba(0,0,0,.3)">
+      <div style="width:40px;height:4px;background:#ddd;border-radius:2px;margin:0 auto 18px"></div>
+      <div style="font-size:18px;font-weight:800;margin-bottom:6px;text-align:center">📲 Přidat aplikaci na plochu</div>
+      <div style="font-size:13px;color:#777;text-align:center;margin-bottom:20px">Pár klepnutí a máte SubBau jako appku</div>
+      <div style="display:flex;align-items:center;gap:14px;margin-bottom:16px">
+        <div style="width:34px;height:34px;background:#FFCD00;border-radius:10px;display:flex;align-items:center;justify-content:center;font-weight:800;flex-shrink:0">1</div>
+        <div style="font-size:14px;line-height:1.4">Klepněte dole na ikonu <b>Sdílet</b> <span style="display:inline-block;border:1.5px solid #007aff;border-radius:5px;padding:0 5px;color:#007aff;font-weight:700">↑</span> (čtvereček se šipkou nahoru)</div>
+      </div>
+      <div style="display:flex;align-items:center;gap:14px;margin-bottom:16px">
+        <div style="width:34px;height:34px;background:#FFCD00;border-radius:10px;display:flex;align-items:center;justify-content:center;font-weight:800;flex-shrink:0">2</div>
+        <div style="font-size:14px;line-height:1.4">Sjeďte dolů a zvolte <b>„Přidat na plochu"</b> ➕</div>
+      </div>
+      <div style="display:flex;align-items:center;gap:14px;margin-bottom:22px">
+        <div style="width:34px;height:34px;background:#FFCD00;border-radius:10px;display:flex;align-items:center;justify-content:center;font-weight:800;flex-shrink:0">3</div>
+        <div style="font-size:14px;line-height:1.4">Vpravo nahoře klepněte na <b>Přidat</b> — hotovo!</div>
+      </div>
+      <div style="background:#FFF8E1;border-radius:10px;padding:10px 12px;font-size:12px;color:#8B6914;margin-bottom:18px">💡 Tip: Musí být otevřené v <b>Safari</b>. Pokud tlačítko Sdílet nevidíte, klepněte jednou na spodek obrazovky — lišta Safari se objeví.</div>
+      <button onclick="document.getElementById('ios-install-guide').style.display='none'" style="width:100%;padding:13px;background:#1a1a1a;color:#fff;border:none;border-radius:12px;font-size:15px;font-weight:700;cursor:pointer;font-family:inherit">Rozumím</button>
+    </div>`
+  document.body.appendChild(ov)
 }
 
 // Vrátí datum v MÍSTNÍM čase jako YYYY-MM-DD (ne UTC — jinak se večer den posune)
