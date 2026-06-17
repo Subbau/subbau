@@ -2957,18 +2957,23 @@ async function ensureLibs(...names) { for (const n of names) await ensureLib(n) 
 
 // ===== PWA: registrace service workeru (umožní instalaci na plochu) =====
 if ('serviceWorker' in navigator) {
-  window.addEventListener('load', () => {
-    navigator.serviceWorker.register('/sw.js').catch(err => console.warn('SW registrace selhala:', err))
-  })
+  // Registruj hned (ne až po load) — ať je SW připravený co nejdřív pro instalaci
+  navigator.serviceWorker.register('/sw.js').catch(err => console.warn('SW registrace selhala:', err))
 }
 
 // ===== "Stáhnout aplikaci" na přihlašovací obrazovce =====
 window._deferredInstallPrompt = null
-// Android/Chrome: zachyť nabídku instalace
+// Android/Chrome: zachyť nabídku instalace (Chrome ji posílá, až je vše připravené)
 window.addEventListener('beforeinstallprompt', (e) => {
   e.preventDefault()
   window._deferredInstallPrompt = e
   showInstallButton()
+})
+// Když se instalace povede, schovej tlačítko a poděkuj
+window.addEventListener('appinstalled', () => {
+  window._deferredInstallPrompt = null
+  const w = document.getElementById('install-app-wrap'); if (w) w.style.display = 'none'
+  try { showToast('✅ Aplikace nainstalována na plochu!') } catch(e) {}
 })
 // Když je appka už nainstalovaná (běží jako standalone), tlačítko neukazuj
 function isAppInstalled() {
@@ -2990,15 +2995,18 @@ function showInstallButton() {
 // Zavolej při startu (iPhone nemá beforeinstallprompt, tak ho ukážeme rovnou)
 window.addEventListener('load', () => { setTimeout(showInstallButton, 300) })
 
-async function installApp() {
-  // Android/Chrome: spusť nativní instalaci
-  if (window._deferredInstallPrompt) {
-    window._deferredInstallPrompt.prompt()
-    const { outcome } = await window._deferredInstallPrompt.userChoice
-    window._deferredInstallPrompt = null
-    if (outcome === 'accepted') {
-      const w = document.getElementById('install-app-wrap'); if (w) w.style.display = 'none'
-    }
+function installApp() {
+  // Android/Chrome: pokud máme nativní nabídku, spusť ji OKAMŽITĚ (bez await před prompt)
+  const dp = window._deferredInstallPrompt
+  if (dp) {
+    dp.prompt()
+    dp.userChoice.then(res => {
+      if (res && res.outcome === 'accepted') {
+        const w = document.getElementById('install-app-wrap'); if (w) w.style.display = 'none'
+      }
+      // Prompt se dá použít jen jednou — zahoď ho. Chrome pošle nový, až bude chtít.
+      window._deferredInstallPrompt = null
+    }).catch(() => { window._deferredInstallPrompt = null })
     return
   }
   // iPhone (Safari): nelze spustit tlačítkem → ukaž návod
@@ -3006,8 +3014,38 @@ async function installApp() {
     showIosInstallGuide()
     return
   }
-  // Ostatní (už nainstalováno nebo nepodporováno)
-  alert('Pro přidání na plochu otevřete tuto stránku v prohlížeči telefonu (Safari na iPhonu, Chrome na Androidu) a zvolte „Přidat na plochu".')
+  // Android bez nabídky (už byla appka nainstalovaná, nebo ji Chrome ještě neposlal) → návod přes menu
+  showAndroidInstallGuide()
+}
+
+function showAndroidInstallGuide() {
+  let ov = document.getElementById('android-install-guide')
+  if (ov) { ov.style.display = 'flex'; return }
+  ov = document.createElement('div')
+  ov.id = 'android-install-guide'
+  ov.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:99999;display:flex;align-items:flex-end;justify-content:center;padding:0'
+  ov.onclick = (e) => { if (e.target === ov) ov.style.display = 'none' }
+  ov.innerHTML = `
+    <div style="background:#fff;width:100%;max-width:480px;border-radius:20px 20px 0 0;padding:24px 22px calc(24px + env(safe-area-inset-bottom));box-shadow:0 -4px 30px rgba(0,0,0,.3)">
+      <div style="width:40px;height:4px;background:#ddd;border-radius:2px;margin:0 auto 18px"></div>
+      <div style="font-size:18px;font-weight:800;margin-bottom:6px;text-align:center">📲 Přidat aplikaci na plochu</div>
+      <div style="font-size:13px;color:#777;text-align:center;margin-bottom:20px">Nejspolehlivější je přidat ji ručně přes menu Chrome:</div>
+      <div style="display:flex;align-items:center;gap:14px;margin-bottom:16px">
+        <div style="width:34px;height:34px;background:#FFCD00;border-radius:10px;display:flex;align-items:center;justify-content:center;font-weight:800;flex-shrink:0">1</div>
+        <div style="font-size:14px;line-height:1.4">Klepněte vpravo nahoře na <b>menu</b> <span style="font-weight:900;letter-spacing:1px">⋮</span> (tři tečky)</div>
+      </div>
+      <div style="display:flex;align-items:center;gap:14px;margin-bottom:16px">
+        <div style="width:34px;height:34px;background:#FFCD00;border-radius:10px;display:flex;align-items:center;justify-content:center;font-weight:800;flex-shrink:0">2</div>
+        <div style="font-size:14px;line-height:1.4">Zvolte <b>„Přidat na plochu"</b> nebo <b>„Nainstalovat aplikaci"</b> 📲</div>
+      </div>
+      <div style="display:flex;align-items:center;gap:14px;margin-bottom:22px">
+        <div style="width:34px;height:34px;background:#FFCD00;border-radius:10px;display:flex;align-items:center;justify-content:center;font-weight:800;flex-shrink:0">3</div>
+        <div style="font-size:14px;line-height:1.4">Potvrďte <b>Přidat / Nainstalovat</b> — hotovo!</div>
+      </div>
+      <div style="background:#FFF8E1;border-radius:10px;padding:10px 12px;font-size:12px;color:#8B6914;margin-bottom:18px">💡 Tip: Musí být otevřené v <b>Chrome</b>. Pokud jste appku dříve smazali, automatická nabídka se nemusí objevit — proto ji přidejte ručně přes menu ⋮.</div>
+      <button onclick="document.getElementById('android-install-guide').style.display='none'" style="width:100%;padding:13px;background:#1a1a1a;color:#fff;border:none;border-radius:12px;font-size:15px;font-weight:700;cursor:pointer;font-family:inherit">Rozumím</button>
+    </div>`
+  document.body.appendChild(ov)
 }
 
 function showIosInstallGuide() {
