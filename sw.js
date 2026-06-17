@@ -1,55 +1,54 @@
 // SubBau service worker
-// Network-first strategie: vždy se snaží o čerstvá data ze sítě.
-// Hlavní stránku (shell) si ukládá do cache jako záložku pro případ
-// výpadku sítě — to Android (Chrome) vyžaduje, aby nabídl instalaci PWA.
+// Network-first: vždy se snaží o čerstvá data ze sítě.
+// Cachuje hlavní stránku jako offline záložku — to Chrome vyžaduje pro instalaci PWA.
 
-const CACHE = 'subbau-v2'
-const OFFLINE_URLS = ['/', '/index.html', '/manifest.json']
+const CACHE = 'subbau-v3'
 
-// Při instalaci ulož hlavní stránku do cache
+// Při instalaci ulož hlavní stránku. Každou URL zvlášť, ať jedna chyba nezhodí instalaci.
 self.addEventListener('install', event => {
+  self.skipWaiting()  // aktivuj hned, ať je SW připravený pro instalaci
   event.waitUntil(
-    caches.open(CACHE)
-      .then(cache => cache.addAll(OFFLINE_URLS).catch(() => {}))
-      .then(() => self.skipWaiting())
+    caches.open(CACHE).then(async cache => {
+      try { await cache.add('/') } catch (e) {}
+      try { await cache.add('/manifest.json') } catch (e) {}
+    })
   )
 })
 
-// Po aktivaci ukliď staré cache a převezmi kontrolu
+// Po aktivaci převezmi kontrolu nad stránkou hned
 self.addEventListener('activate', event => {
   event.waitUntil(
-    caches.keys()
-      .then(keys => Promise.all(keys.filter(k => k !== CACHE).map(k => caches.delete(k))))
-      .then(() => self.clients.claim())
+    (async () => {
+      // ukliď staré cache
+      const keys = await caches.keys()
+      await Promise.all(keys.filter(k => k !== CACHE).map(k => caches.delete(k)))
+      // převezmi kontrolu nad otevřenými kartami
+      await self.clients.claim()
+    })()
   )
 })
 
-// Network-first: zkus síť, při neúspěchu vrať z cache (jen pro navigaci/HTML)
+// Network-first pro navigaci, s offline záložkou
 self.addEventListener('fetch', event => {
   const req = event.request
-
-  // Jen GET požadavky řešíme; ostatní (POST do databáze atd.) necháme být
   if (req.method !== 'GET') return
 
-  // Požadavky na jiné domény (Supabase, CDN) neřešíme — jdou rovnou na síť
   const url = new URL(req.url)
-  if (url.origin !== self.location.origin) return
+  if (url.origin !== self.location.origin) return  // cizí domény (Supabase, CDN) neřešíme
 
-  // Navigace (otevření stránky): network-first s offline záložkou
   if (req.mode === 'navigate') {
     event.respondWith(
       fetch(req)
         .then(resp => {
           const copy = resp.clone()
-          caches.open(CACHE).then(c => c.put(req, copy)).catch(() => {})
+          caches.open(CACHE).then(c => c.put('/', copy)).catch(() => {})
           return resp
         })
-        .catch(() => caches.match(req).then(r => r || caches.match('/')))
+        .catch(() => caches.match('/').then(r => r || Response.error()))
     )
     return
   }
 
-  // Ostatní GET (vlastní statické soubory): zkus síť, fallback cache
   event.respondWith(
     fetch(req).catch(() => caches.match(req))
   )
