@@ -8575,8 +8575,11 @@ async function exportKW() {
   <div style="margin-top:30px;font-size:11px;color:#999">Vygenerováno: ${new Date().toLocaleString('cs-CZ')} | SubBau Docházkový systém</div>
   
 <!-- PRINT OVERLAY - pro PDF export bez popup okna -->
-<div id="print-overlay" style="display:none;position:fixed;inset:0;background:#e8e8e8;z-index:9999;overflow-y:auto;padding:70px 20px 40px">
-  <div id="print-content" style="max-width:800px;margin:0 auto;background:#fff;padding:28px;box-shadow:0 4px 24px rgba(0,0,0,.15)"></div>
+<div id="print-overlay" style="display:none;position:fixed;inset:0;background:#e8e8e8;z-index:9999;flex-direction:column">
+  <div id="print-overlay-bar" style="background:#1a1a1a;padding:calc(10px + env(safe-area-inset-top)) 12px 10px;display:flex;gap:8px;align-items:center;flex-shrink:0;flex-wrap:wrap;border-bottom:2px solid #FFCD00"></div>
+  <div id="print-scroll" style="flex:1;overflow-y:auto;-webkit-overflow-scrolling:touch;padding:16px 12px calc(24px + env(safe-area-inset-bottom))">
+    <div id="print-content" style="max-width:800px;margin:0 auto;background:#fff;padding:24px;box-shadow:0 4px 24px rgba(0,0,0,.15)"></div>
+  </div>
 </div>
 <style>
 /* Tisk přímo z náhledu (overlay): když má <html> třídu printing-now, ukaž JEN výkaz */
@@ -8592,6 +8595,10 @@ async function exportKW() {
     background: #fff !important; padding: 0 !important; margin: 0 !important;
     overflow: visible !important;
   }
+  html.printing-now #print-scroll {
+    overflow: visible !important; padding: 0 !important; height: auto !important; flex: none !important;
+  }
+  html.printing-now #print-overlay-bar { display: none !important; }
   html.printing-now #print-content {
     max-width: none !important; width: auto !important; margin: 0 !important;
     box-shadow: none !important; padding: 0 !important; background: #fff !important;
@@ -9077,9 +9084,50 @@ function showPrintPreview(html, filename) {
   window._lastPrintName = filename || 'export.html'
   const overlay = document.getElementById('print-overlay')
   const printContent = document.getElementById('print-content')
-  if (!overlay || !printContent) { printHtmlViaIframe(html); return }  // bez overlay → otevři náhled v okně (NE stahování)
+  const bar = document.getElementById('print-overlay-bar')
+  if (!overlay || !printContent || !bar) { printHtmlViaIframe(html); return }
 
   // Vlož náhled (jen pro zobrazení na obrazovce)
+  const parser = new DOMParser()
+  const doc = parser.parseFromString(html, 'text/html')
+  printContent.innerHTML = ''
+  doc.querySelectorAll('style').forEach(s => {
+    const ns = document.createElement('style'); ns.textContent = s.textContent; printContent.appendChild(ns)
+  })
+  const bd = document.createElement('div'); bd.innerHTML = doc.body.innerHTML; printContent.appendChild(bd)
+
+  overlay.style.display = 'flex'
+  document.body.style.overflow = 'hidden'
+
+  // Postav hlavičku s tlačítky (zalamuje se, sedí pod výřezem, dají se zmáčknout)
+  bar.innerHTML = ''
+  const mkBtn = (label, bg, color, handler, border) => {
+    const b = document.createElement('button')
+    b.innerHTML = label
+    b.className = 'no-print'
+    b.style.cssText = `padding:10px 14px;background:${bg};color:${color};border:${border||'none'};border-radius:10px;cursor:pointer;font-size:14px;font-weight:700;font-family:inherit;white-space:nowrap`
+    b.onclick = handler
+    return b
+  }
+  // Zavřít (vlevo, ať je vždy po ruce)
+  const closeBtn = mkBtn('✕ Zavřít', 'rgba(255,255,255,.15)', '#fff', () => {
+    overlay.style.display = 'none'; document.body.style.overflow = ''
+  })
+  bar.appendChild(closeBtn)
+  // Mezera (roztáhne zbytek doprava)
+  const spacer = document.createElement('div'); spacer.style.flex = '1'; bar.appendChild(spacer)
+  // Uložit PDF (hlavní akce)
+  bar.appendChild(mkBtn('📄 Uložit PDF', '#FFCD00', '#1a1a1a', () => savePdfDirect(window._lastPrintHtml, window._lastPrintName)))
+  // Tisk
+  bar.appendChild(mkBtn('🖨️ Tisk', '#fff', '#1a1a1a', () => printViaIframe(window._lastPrintHtml), '1px solid #ccc'))
+}
+
+function showPrintPreviewOLD_unused(html, filename) {
+  window._lastPrintHtml = html
+  window._lastPrintName = filename || 'export.html'
+  const overlay = document.getElementById('print-overlay')
+  const printContent = document.getElementById('print-content')
+  if (!overlay || !printContent) { printHtmlViaIframe(html); return }
   const parser = new DOMParser()
   const doc = parser.parseFromString(html, 'text/html')
   printContent.innerHTML = ''
@@ -9105,7 +9153,6 @@ function showPrintPreview(html, filename) {
   printBtn.onclick = () => savePdfDirect(window._lastPrintHtml, window._lastPrintName)
   overlay.appendChild(printBtn)
 
-  // Tisk (hlavně PC) — na mobilu raději PDF výše
   const tiskBtn = document.createElement('button')
   tiskBtn.innerHTML = '🖨️ Tisk'
   tiskBtn.className = 'no-print'
@@ -12900,6 +12947,12 @@ function compressImage(file, maxSize) {
 
 <!-- PRINT OVERLAY - pro PDF export bez popup okna -->
   <!-- PDF knihovny pdf-lib a pdf.js se načítají na vyžádání přes ensureLib() -->
+<div id="print-overlay" style="display:none;position:fixed;inset:0;background:#e8e8e8;z-index:9999;flex-direction:column">
+  <div id="print-overlay-bar" style="background:#1a1a1a;padding:calc(10px + env(safe-area-inset-top)) 12px 10px;display:flex;gap:8px;align-items:center;flex-shrink:0;flex-wrap:wrap;border-bottom:2px solid #FFCD00"></div>
+  <div id="print-scroll" style="flex:1;overflow-y:auto;-webkit-overflow-scrolling:touch;padding:16px 12px calc(24px + env(safe-area-inset-bottom))">
+    <div id="print-content" style="max-width:800px;margin:0 auto;background:#fff;padding:24px;box-shadow:0 4px 24px rgba(0,0,0,.15)"></div>
+  </div>
+</div>
 
 <!-- Checkout dialog - Co jste dnes dělali -->
 <div id="checkout-dialog" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:9999;align-items:center;justify-content:center;padding:16px">
