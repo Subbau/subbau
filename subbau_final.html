@@ -9393,14 +9393,31 @@ function showPrintPreview(html, filename) {
   const bar = document.getElementById('print-overlay-bar')
   if (!overlay || !printContent || !bar) { printHtmlViaIframe(html); return }
 
-  // Vlož náhled (jen pro zobrazení na obrazovce)
-  const parser = new DOMParser()
-  const doc = parser.parseFromString(html, 'text/html')
+  // IZOLACE: výkaz vykresli v iframe, aby jeho <style> (body{padding}, *{...}) neunikly do appky
   printContent.innerHTML = ''
-  doc.querySelectorAll('style').forEach(s => {
-    const ns = document.createElement('style'); ns.textContent = s.textContent; printContent.appendChild(ns)
-  })
-  const bd = document.createElement('div'); bd.innerHTML = doc.body.innerHTML; printContent.appendChild(bd)
+  printContent.style.padding = '0'
+  printContent.style.background = 'transparent'
+  printContent.style.boxShadow = 'none'
+  const iframe = document.createElement('iframe')
+  iframe.id = '__sb_preview_iframe'
+  iframe.style.cssText = 'width:100%;border:none;background:#fff;display:block;border-radius:4px;box-shadow:0 4px 24px rgba(0,0,0,.15);min-height:60vh'
+  printContent.appendChild(iframe)
+  try {
+    const idoc = iframe.contentDocument || iframe.contentWindow.document
+    idoc.open(); idoc.write(html); idoc.close()
+    const fit = () => {
+      try {
+        const h = Math.max(idoc.body.scrollHeight, idoc.documentElement.scrollHeight)
+        if (h > 0) iframe.style.height = (h + 4) + 'px'
+      } catch(e) {}
+    }
+    setTimeout(fit, 60)
+    setTimeout(fit, 300)
+    if (iframe.contentWindow) iframe.contentWindow.onload = fit
+  } catch(e) {
+    // záloha: vlož text bez stylů (raději nic než únik stylů)
+    printContent.innerHTML = '<div style="padding:16px;background:#fff">' + html.replace(/<style[\s\S]*?<\/style>/gi, '') + '</div>'
+  }
 
   overlay.style.display = 'flex'
   document.body.style.overflow = 'hidden'
@@ -9415,10 +9432,11 @@ function showPrintPreview(html, filename) {
     b.onclick = handler
     return b
   }
-  // Zavřít (vlevo, ať je vždy po ruce)
+  // Zavřít (vlevo, ať je vždy po ruce) — obnoví scroll a odstraní iframe
   const closeBtn = mkBtn('✕ Zavřít', 'rgba(255,255,255,.15)', '#fff', () => {
     overlay.style.display = 'none'; document.body.style.overflow = ''
-    const f = document.getElementById('__sb_print_iframe'); if (f) f.remove()
+    const f = document.getElementById('__sb_preview_iframe'); if (f) f.remove()
+    const f2 = document.getElementById('__sb_print_iframe'); if (f2) f2.remove()
   })
   bar.appendChild(closeBtn)
   // Mezera (roztáhne zbytek doprava)
