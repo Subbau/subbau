@@ -9892,24 +9892,36 @@ function showForemanPreview(html) {
       </div>`
     document.body.appendChild(ov)
   }
-  // Vlož náhled (styly + tělo)
+  // Vlož náhled do IZOLOVANÉHO iframe (styly výkazu nesmí ovlivnit appku!)
   const content = document.getElementById('foreman-preview-content')
   content.innerHTML = ''
   const wrap = document.createElement('div')
   wrap.style.cssText = 'max-width:800px;margin:0 auto;background:#fff;border-radius:8px;overflow:hidden'
-  try {
-    const parser = new DOMParser()
-    const doc = parser.parseFromString(html, 'text/html')
-    doc.querySelectorAll('style').forEach(s => {
-      const ns = document.createElement('style'); ns.textContent = s.textContent; wrap.appendChild(ns)
-    })
-    const bd = document.createElement('div'); bd.innerHTML = doc.body.innerHTML; wrap.appendChild(bd)
-  } catch(e) {
-    wrap.innerHTML = html
-  }
+  const iframe = document.createElement('iframe')
+  iframe.style.cssText = 'width:100%;border:none;display:block;background:#fff;min-height:60vh'
+  iframe.setAttribute('title', 'Náhled výkazu')
+  wrap.appendChild(iframe)
   content.appendChild(wrap)
   ov.style.display = 'flex'
   document.body.style.overflow = 'hidden'
+  // zapiš obsah do iframe a dopočítej výšku
+  try {
+    const idoc = iframe.contentDocument || iframe.contentWindow.document
+    idoc.open(); idoc.write(html); idoc.close()
+    // nastav výšku iframe podle obsahu, ať není scrollbar uvnitř
+    const fit = () => {
+      try {
+        const h = Math.max(idoc.body.scrollHeight, idoc.documentElement.scrollHeight)
+        if (h > 0) iframe.style.height = (h + 4) + 'px'
+      } catch(e) {}
+    }
+    setTimeout(fit, 60)
+    setTimeout(fit, 300)
+    if (iframe.contentWindow) iframe.contentWindow.onload = fit
+  } catch(e) {
+    // záloha: kdyby iframe selhal, vlož aspoň text bez stylů
+    wrap.innerHTML = '<div style="padding:16px">' + html.replace(/<style[\s\S]*?<\/style>/gi, '') + '</div>'
+  }
 }
 
 function closeForemanPreview() {
