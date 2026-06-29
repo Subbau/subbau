@@ -2179,7 +2179,6 @@ button > svg:first-child{margin-right:6px}
 <script>
 
 window._adminRefreshTimers = window._adminRefreshTimers || {}
-window._descTransCache = window._descTransCache || {}
 
 // ============ OSVČ PDF SIGNING S UMÍSTĚNÍM ============
 let workerPdfState = {
@@ -6792,53 +6791,6 @@ async function populateTeamPdfWeeks() {
   }
 }
 
-// ===== PŘEKLAD POPISŮ PRÁCE (CZ → DE + EN) pro PDF export =====
-// Volá vlastní Vercel endpoint /api/translate (klíč je bezpečně na serveru).
-// Cachuje výsledky, takže stejný popis se nepřekládá opakovaně.
-// Při jakékoli chybě se tiše vrátí prázdno → PDF se vygeneruje jen s originálem.
-async function translateDescriptions(texts) {
-  const out = {}
-  // co ještě nemáme v cache
-  const need = [...new Set((texts || [])
-    .map(t => String(t || '').trim())
-    .filter(t => t && t !== '—' && !window._descTransCache[t]))]
-  // doplň z cache rovnou
-  ;(texts || []).forEach(t => {
-    const k = String(t || '').trim()
-    if (k && window._descTransCache[k]) out[k] = window._descTransCache[k]
-  })
-  if (!need.length) return out
-  try {
-    const resp = await fetch('/api/translate', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ texts: need })
-    })
-    if (!resp.ok) throw new Error('translate endpoint ' + resp.status)
-    const data = await resp.json()
-    const tr = data.translations || {}
-    for (const k of Object.keys(tr)) {
-      window._descTransCache[k] = tr[k]
-      out[k] = tr[k]
-    }
-  } catch (e) {
-    console.warn('[translateDescriptions] překlad přeskočen:', e?.message)
-  }
-  return out
-}
-
-// Sestaví HTML buňky popisu: originál + (pokud jsou) DE a EN překlad pod sebou.
-function descCellHTML(desc, transMap) {
-  const safe = (desc || '—')
-  const tr = transMap && transMap[String(desc || '').trim()]
-  let html = `<div style="font-size:10px;color:#444;line-height:1.3">${safe}</div>`
-  if (tr && (tr.de || tr.en)) {
-    if (tr.de) html += `<div style="font-size:9px;color:#666;line-height:1.3"><b style="color:#9c3b22">DE:</b> ${tr.de}</div>`
-    if (tr.en) html += `<div style="font-size:9px;color:#888;line-height:1.3"><b style="color:#9c3b22">EN:</b> ${tr.en}</div>`
-  }
-  return html
-}
-
 // Vygeneruje PDF docházky všech členů týmu za zvolený týden (KW).
 async function generateTeamAttendancePdf(teamId, teamName) {
   const sel = document.getElementById('team-pdf-week-' + teamId)
@@ -6897,9 +6849,6 @@ async function generateTeamAttendancePdf(teamId, teamName) {
 
   let grandTotal = 0
   const workerCount = Object.keys(byWorker).length
-  // Přelož všechny popisy práce do DE+EN dávkově (jednou pro celé PDF)
-  const _allDescs = Object.values(byWorker).flatMap(w => w.rows.map(r => r.work_description)).filter(Boolean)
-  const _transMap = await translateDescriptions(_allDescs)
   const sections = Object.entries(byWorker).map(([wid, w], idx) => {
     grandTotal += w.total
     const fm = foremanByWorker[wid] || null
@@ -6941,7 +6890,7 @@ async function generateTeamAttendancePdf(teamId, teamName) {
         <td style="padding:6px 5px;border:1px solid #999;vertical-align:top;width:52px;text-align:center;font-size:13px;font-weight:800">${hh}</td>
         <td style="padding:6px 7px;border:1px solid #999;vertical-align:top">
           <div style="font-size:10px;font-weight:600;color:#333">📍 ${site}</div>
-          ${descCellHTML(desc, _transMap)}
+          <div style="font-size:10px;color:#444;line-height:1.3">${desc}</div>
         </td>
       </tr>`
     }).join('')
@@ -9906,9 +9855,6 @@ async function generateAttendanceExport() {
   const fmt = t => t ? t.slice(0,5) : '—'
   let grandTotal = 0
   const workerCount = Object.keys(byWorker).length
-  // Přelož všechny popisy práce do DE+EN dávkově (jednou pro celé PDF)
-  const _allDescs = Object.values(byWorker).flatMap(w => w.rows.map(r => r.work_description)).filter(Boolean)
-  const _transMap = await translateDescriptions(_allDescs)
   const sections = Object.entries(byWorker).map(([wid, w], idx) => {
     grandTotal += w.total
     const fm = foremanByWorker[wid] || null
@@ -9950,7 +9896,7 @@ async function generateAttendanceExport() {
         <td style="padding:6px 5px;border:1px solid #999;vertical-align:top;width:52px;text-align:center;font-size:13px;font-weight:800">${hh}</td>
         <td style="padding:6px 7px;border:1px solid #999;vertical-align:top">
           <div style="font-size:10px;font-weight:600;color:#333">📍 ${site}</div>
-          ${descCellHTML(desc, _transMap)}
+          <div style="font-size:10px;color:#444;line-height:1.3">${desc}</div>
         </td>
       </tr>`
     }).join('')
@@ -10653,9 +10599,6 @@ async function exportWorkerKW(workerId, workerName, week, year, lang, foreman, r
   const dayDE = ['Sonntag','Montag','Dienstag','Mittwoch','Donnerstag','Freitag','Samstag']
   const dayCS = ['Neděle','Pondělí','Úterý','Středa','Čtvrtek','Pátek','Sobota']
 
-  // Přelož popisy práce do DE+EN (dávkově)
-  const _transMap = await translateDescriptions((att||[]).map(r => r.work_description).filter(Boolean))
-
   const rows = (att||[]).map(r => {
     const dt = new Date(r.work_date + 'T00:00:00')
     const wd = dt.getDay()
@@ -10682,7 +10625,7 @@ async function exportWorkerKW(workerId, workerName, week, year, lang, foreman, r
       </td>
       <td style="padding:5px 7px;border:1px solid #ccc;vertical-align:top">
         <div style="font-size:10px;font-weight:600;color:#333">📍 ${site}</div>
-        ${descCellHTML(desc, _transMap)}
+        <div style="font-size:10px;color:#444;line-height:1.3">${desc}</div>
       </td>
     </tr>`
   }).join('')
