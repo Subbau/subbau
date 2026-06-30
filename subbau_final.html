@@ -7674,8 +7674,8 @@ function clearCheckoutPhotos() {
   if (inp) inp.value = ''
 }
 
-// Nahraje frontu fotek do storage a doplní URL k záznamu docházky.
-// Nepovinné: když fronta prázdná, nic nedělá. Chyba nahrávání neblokuje uložení směny.
+// Nahraje frontu fotek do storage. Zapíše je do galerie (site_photos, vidí admin)
+// i k záznamu docházky (attendance.photo_urls). Nepovinné; chyba neblokuje uložení směny.
 async function uploadCheckoutPhotos(attId) {
   if (!attId || _checkoutPhotoQueue.length === 0) return []
   const uploaded = []
@@ -7683,21 +7683,37 @@ async function uploadCheckoutPhotos(attId) {
     const { file } = _checkoutPhotoQueue[i]
     try {
       const ext = (file.name.split('.').pop() || 'jpg').toLowerCase().replace(/[^a-z0-9]/g, '') || 'jpg'
-      const path = `${attId}/${Date.now()}_${i}.${ext}`
+      // cesta podle pracovníka (stejně jako volné focení), ať RLS sedí
+      const uid = currentUser?.id || attId
+      const path = `${uid}/${Date.now()}_${i}.${ext}`
       const { error: upErr } = await sb.storage.from('site-photos').upload(path, file, { contentType: file.type || 'image/jpeg', upsert: true })
       if (upErr) { console.warn('[fotky] upload chyba:', upErr.message); continue }
       const { data: urlData } = sb.storage.from('site-photos').getPublicUrl(path)
-      if (urlData?.publicUrl) uploaded.push(urlData.publicUrl)
+      const url = urlData?.publicUrl
+      if (!url) continue
+      uploaded.push(url)
+      // Zapiš do galerie site_photos (ať to admin vidí, stejně jako focení z profilu)
+      try {
+        await sb.from('site_photos').insert({
+          worker_id: currentUser?.id || null,
+          worker_name: currentProfile?.full_name || (currentUser?.email || ''),
+          team_id: currentProfile?.team_id || null,
+          team_name: currentProfile?.team?.name || '',
+          location: currentProfile?.team?.location || '',
+          url,
+          created_at: new Date().toISOString()
+        })
+      } catch (e) { console.warn('[fotky] zápis do galerie selhal:', e?.message) }
     } catch (e) { console.warn('[fotky] výjimka:', e) }
   }
   if (uploaded.length > 0) {
     try {
-      // Připoj k existujícím (pokud sloupec photo_urls existuje)
+      // Připoj i k záznamu docházky (pokud sloupec photo_urls existuje)
       const { data: cur } = await sb.from('attendance').select('photo_urls').eq('id', attId).single()
       const existing = Array.isArray(cur?.photo_urls) ? cur.photo_urls : []
       const merged = existing.concat(uploaded)
       const { error: updErr } = await sb.from('attendance').update({ photo_urls: merged }).eq('id', attId)
-      if (updErr) console.warn('[fotky] uložení URL selhalo (chybí sloupec photo_urls?):', updErr.message)
+      if (updErr) console.warn('[fotky] uložení URL k docházce selhalo:', updErr.message)
     } catch (e) { console.warn('[fotky] update URL výjimka:', e) }
   }
   return uploaded
