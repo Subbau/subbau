@@ -5027,11 +5027,16 @@ async function loadTodayTimeline() {
     } else if (r.break_start) {
       g.breaks.push({ bs: r.break_start.slice(0,5), be: r.break_end ? r.break_end.slice(0,5) : null })
     }
-    // adresy: GPS a ruční zvlášť
+    // adresy: GPS a ruční zvlášť — primárně z nových polí gps_address/manual_address
     const cs = (r.construction_site || '').trim()
+    const gpsA = (r.gps_address || '').trim()
+    const manA = (r.manual_address || '').trim()
+    if (gpsA && !g.gpsAddr) g.gpsAddr = gpsA
+    if (manA && !g.manualAddr) g.manualAddr = manA
     if (cs && !g.manualAddr) g.manualAddr = cs
+    // fallback na staré location_address, když nová pole chybí
     const la = (r.location_address || '').trim()
-    if (la) {
+    if (la && !gpsA && !manA) {
       if (r.address_source === 'manual') { if (!g.manualAddr) g.manualAddr = la }
       else { if (!g.gpsAddr) g.gpsAddr = la }
     }
@@ -9701,35 +9706,49 @@ function toggleAddrManual(forceOpen) {
 
 async function confirmActionAddress() {
   const attId = pendingAddrAttId || todayAttId
-  // Zjisti adresu: ruční pole má přednost, jinak GPS
+  // Zjisti adresu: ruční pole má přednost pro zobrazení, ale GPS i ruční ukládáme ZVLÁŠŤ
   const manualWrap = document.getElementById('addr-manual-wrap')
   const manualVal = (document.getElementById('addr-manual-input')?.value || '').trim()
   const useManual = manualWrap && manualWrap.style.display !== 'none' && manualVal
-  let addr = useManual ? manualVal : _addrGpsValue
+  const gpsVal = _addrGpsValue || null
+  let addr = useManual ? manualVal : gpsVal
   if (!addr) { showToast('⚠️ Zadejte adresu nebo počkejte na polohu'); return }
-  // Ulož adresu do paměti i lokálně vždy
+  // Ulož do paměti i lokálně
   gpsAddr = addr
   if (todayRecord) {
     todayRecord.location_address = addr
     todayRecord.address_source = useManual ? 'manual' : 'gps'
+    if (useManual) todayRecord.manual_address = manualVal
+    if (gpsVal) todayRecord.gps_address = gpsVal
   }
-  // Když pracovník zadal adresu ručně, zastav případné dobíhání GPS, ať ji nepřepíše
-  if (useManual) { _manualAddressLocked = true }
   lsSet('lastConstructionSite', addr)
   const mg = document.getElementById('mob-gps'); if (mg) mg.textContent = (useManual ? '✍️ ' : '📍 ') + addr
-  // Zapiš do databáze (jen když máme ID záznamu)
+  // Zapiš do databáze — GPS i ruční adresa každá do svého pole
   if (attId) {
     const upd = { location_address: addr, address_source: useManual ? 'manual' : 'gps' }
-    if (!useManual && gpsLat && gpsLng) { upd.location_lat = gpsLat; upd.location_lng = gpsLng }
-    const { error } = await sb.from('attendance').update(upd).eq('id', attId)
-    if (error) { showToast('❌ Chyba uložení: ' + error.message); return }
+    if (useManual) {
+      upd.manual_address = manualVal
+      // pokud máme i GPS souřadnice/adresu, ulož je taky (ať to admin vidí obě)
+      if (gpsVal) upd.gps_address = gpsVal
+      if (gpsLat && gpsLng) { upd.location_lat = gpsLat; upd.location_lng = gpsLng }
+    } else {
+      upd.gps_address = gpsVal
+      if (gpsLat && gpsLng) { upd.location_lat = gpsLat; upd.location_lng = gpsLng }
+    }
+    // Zkus uložit se separátními poli; kdyby sloupce nebyly, ulož aspoň základ
+    let { error } = await sb.from('attendance').update(upd).eq('id', attId)
+    if (error) {
+      console.warn('[adresa] update se separátními poli selhal, zkouším bez:', error.message)
+      const basic = { location_address: addr, address_source: useManual ? 'manual' : 'gps' }
+      if (!useManual && gpsLat && gpsLng) { basic.location_lat = gpsLat; basic.location_lng = gpsLng }
+      const r2 = await sb.from('attendance').update(basic).eq('id', attId)
+      if (r2.error) { showToast('❌ Chyba uložení: ' + r2.error.message); return }
+    }
   }
   closeAddrDialog()
-  // Adresa je zadaná → vypni GPS pro úsporu baterie (ten den už ji nehledáme)
-  if (todayRecord) todayRecord.location_address = addr
-  stopGPS()
+  // GPS necháme dobíhat jen pokud ještě nemáme GPS adresu; ruční ji nezablokuje
+  if (!useManual || !gpsVal) stopGPS()
   showToast('📍 Adresa uložena')
-  // Pokud šlo o adresu při odchodu, otevři teď dialog s popisem práce
   if (_afterAddrShowCheckout) { _afterAddrShowCheckout = false; showCheckoutDialog() }
 }
 
@@ -9905,7 +9924,22 @@ function getGPS(force) {
     }
 
     gpsAddr = resolved || `${gpsLat.toFixed(5)}, ${gpsLng.toFixed(5)}`
-    // Pokud pracovník mezitím zadal adresu ručně, GPS ji nepřepíše
+    // Ulož GPS adresu do svého pole (ať ji admin vidí i když pracovník zadal i ruční)
+    if (todayRecord) todayRecord.gps_address = gpsAddr
+    if (todayAttId) {
+      const gpsUpd = { gps_address: gpsAddr }
+      if (gpsLat && gpsLng) { gpsUpd.location_lat = gpsLat; gpsUpd.location_lng = gpsLng }
+      // pokud ještě není žádná hlavní adresa, dosaď GPS i do location_address
+      if (!(todayRecord && todayRecord.manual_address) && !(todayRecord && todayRecord.address_source === 'manual')) {
+        gpsUpd.location_address = gpsAddr
+        gpsUpd.address_source = 'gps'
+        if (todayRecord) { todayRecord.location_address = gpsAddr; todayRecord.address_source = 'gps' }
+      }
+      sb.from('attendance').update(gpsUpd).eq('id', todayAttId).then(({error}) => {
+        if (error) console.warn('[GPS adresa] uložení selhalo (chybí gps_address?):', error.message)
+      })
+    }
+    // Pokud pracovník mezitím zadal adresu ručně, GPS nepřepíše zobrazení, jen se uloží na pozadí
     if (_manualAddressLocked) return
 
     // Ukaž adresu + jak je přesná. Při špatné přesnosti varuj.
@@ -9942,24 +9976,34 @@ function applyManualAddress() {
   if (street) parts.push(street)
   if (city) parts.push(city)
   const val = parts.join(', ')
-  // ulož i do skrytého pole (kvůli confirmActionAddress, které čte addr-manual-input/manual-addr-input)
   const hidden = document.getElementById('mob-manual-addr-input'); if (hidden) hidden.value = val
-  gpsAddr = val
-  // Označ jako ruční a zamkni proti přepsání GPS
-  _manualAddressLocked = true
-  if (todayRecord) { todayRecord.location_address = val; todayRecord.address_source = 'manual' }
+  // Ruční adresu ulož ZVLÁŠŤ — ať se GPS adresa nepřepíše a admin viděl obě
+  const haveGps = !!(gpsAddr && todayRecord && todayRecord.gps_address)
+  if (todayRecord) {
+    todayRecord.manual_address = val
+    todayRecord.address_source = 'manual'
+    // location_address (zobrazované) nech na ruční, ale GPS zůstává v gps_address
+    todayRecord.location_address = val
+  }
   lsSet('lastConstructionSite', val)
   const mg = document.getElementById('mob-gps')
-  if (mg) mg.textContent = '✍️ ' + val
-  // Ulož do databáze, pokud máme dnešní záznam
+  if (mg) mg.textContent = '✍️ ' + val + (todayRecord?.gps_address ? '  •  📍 ' + todayRecord.gps_address : '')
+  // Ulož do databáze
   if (todayAttId) {
-    sb.from('attendance').update({ location_address: val, address_source: 'manual' }).eq('id', todayAttId)
-      .then(({ error }) => { if (error) showToast('❌ Chyba uložení: ' + error.message) })
+    const upd = { manual_address: val, location_address: val, address_source: 'manual' }
+    sb.from('attendance').update(upd).eq('id', todayAttId)
+      .then(({ error }) => {
+        if (error) {
+          console.warn('[ruční adresa] update s manual_address selhal, zkouším bez:', error.message)
+          sb.from('attendance').update({ location_address: val, address_source: 'manual' }).eq('id', todayAttId)
+            .then(({ error: e2 }) => { if (e2) showToast('❌ Chyba uložení: ' + e2.message) })
+        }
+      })
   }
   const wrap = document.getElementById('mob-manual-addr')
   if (wrap) wrap.style.display = 'none'
-  // Adresa zadaná ručně → vypni GPS pro úsporu baterie (ten den už ji nehledáme)
-  stopGPS()
+  // GPS nech doběhnout a uložit svou adresu (pokud ji ještě nemáme); jinak vypni
+  if (todayRecord && todayRecord.gps_address) stopGPS()
   showToast('✅ Adresa nastavena')
 }
 
