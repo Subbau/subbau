@@ -5021,7 +5021,12 @@ async function loadTodayTimeline() {
     const co = r.check_out ? r.check_out.slice(0,5) : null
     if (ci && (!g.check_in || ci < g.check_in)) g.check_in = ci
     if (co && (!g.check_out || co > g.check_out)) g.check_out = co
-    if (r.break_start) g.breaks.push({ bs: r.break_start.slice(0,5), be: r.break_end ? r.break_end.slice(0,5) : null })
+    // Pauzy: primárně z pole breaks (víc pauz za směnu), fallback na break_start/break_end
+    if (Array.isArray(r.breaks) && r.breaks.length) {
+      r.breaks.forEach(b => { if (b && b.bs) g.breaks.push({ bs: b.bs, be: b.be || null }) })
+    } else if (r.break_start) {
+      g.breaks.push({ bs: r.break_start.slice(0,5), be: r.break_end ? r.break_end.slice(0,5) : null })
+    }
     // adresy: GPS a ruční zvlášť
     const cs = (r.construction_site || '').trim()
     if (cs && !g.manualAddr) g.manualAddr = cs
@@ -5170,8 +5175,10 @@ async function loadKWData() {
     if (ci && (!di.ci || ci < di.ci)) di.ci = ci
     // nejnovější odchod
     if (co && (!di.co || co > di.co)) di.co = co
-    // pauza z tohoto záznamu (pokud nějaká)
-    if (r.break_start) {
+    // pauzy z tohoto záznamu: primárně pole breaks (víc pauz), fallback break_start/break_end
+    if (Array.isArray(r.breaks) && r.breaks.length) {
+      r.breaks.forEach(b => { if (b && b.bs) di.breaks.push({ bs: b.bs, be: b.be || null }) })
+    } else if (r.break_start) {
       di.breaks.push({ bs: r.break_start.slice(0,5), be: r.break_end ? r.break_end.slice(0,5) : null })
     }
     if (!r.check_out && r.check_in && r.work_date === todayStrAdmin) di.running = true
@@ -8132,9 +8139,18 @@ async function mobCheckin(type) {
           checkinInProgress = false
           return
         }
-        const { error } = await withTimeout(sb.from('attendance').update({ break_end: timeStr }).eq('id', todayAttId), 12000)
-        if (error) { showToast('❌ Chyba: ' + error.message); checkinInProgress = false; return }
+        // Přidej dokončenou pauzu do pole breaks (kvůli více pauzám za směnu)
+        const existingBreaks = Array.isArray(current.breaks) ? current.breaks.slice() : []
+        existingBreaks.push({ bs: current.break_start.slice(0,5), be: timeStr.slice(0,5) })
+        const { error } = await withTimeout(sb.from('attendance').update({ break_end: timeStr, breaks: existingBreaks }).eq('id', todayAttId), 12000)
+        if (error) {
+          // Kdyby sloupec breaks neexistoval, ulož aspoň break_end (zpětná kompatibilita)
+          console.warn('[break-end] update s breaks selhal, zkouším bez:', error.message)
+          const { error: e2 } = await withTimeout(sb.from('attendance').update({ break_end: timeStr }).eq('id', todayAttId), 12000)
+          if (e2) { showToast('❌ Chyba: ' + e2.message); checkinInProgress = false; return }
+        }
         updated.break_end = timeStr
+        updated.breaks = existingBreaks
         todayRecord = { ...updated }  // Aktualizuj lokální kopii
         showToast('▶ Pokračuješ v práci od ' + timeStr)
         askAddressIfNeeded(todayAttId, 'Pokračování po přestávce')
@@ -14234,6 +14250,19 @@ function applyAttendanceRules(record) {
   let breakDeducted = 0
   if (adjBs !== null && adjBe !== null) {
     breakDeducted = adjBe - adjBs
+  }
+  // Více pauz za směnu: odečti i další pauzy z pole breaks (kromě té hlavní v bs/be)
+  if (Array.isArray(record.breaks) && record.breaks.length > 1) {
+    // Hlavní pauza (bs/be) odpovídá poslední; odečti délky všech ostatních
+    const mainBs = record.break_start ? record.break_start.slice(0,5) : null
+    const mainBe = record.break_end ? record.break_end.slice(0,5) : null
+    record.breaks.forEach(b => {
+      if (!b || !b.bs || !b.be) return
+      // přeskoč hlavní pauzu (už je odečtená výše)
+      if (b.bs === mainBs && b.be === mainBe) return
+      const len = timeToMin(b.be) - timeToMin(b.bs)
+      if (len > 0) breakDeducted += len
+    })
   }
   const totalMin = Math.max(0, adjCo - adjCi - breakDeducted)
   const hours = Math.round(totalMin * 100 / 60) / 100
