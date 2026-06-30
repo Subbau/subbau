@@ -5681,11 +5681,12 @@ function renderSitePhotosAdmin() {
     gallery.innerHTML = '<div style="grid-column:1/-1;text-align:center;color:var(--text3);padding:30px">Žádné fotky</div>'
     return
   }
-  gallery.innerHTML = list.map(p => {
+  gallery.innerHTML = list.map((p, idx) => {
     const when = p.created_at ? new Date(p.created_at).toLocaleString('cs-CZ', { day:'2-digit', month:'2-digit', year:'numeric', hour:'2-digit', minute:'2-digit' }) : ''
     const loc = [p.team_name, p.location].filter(Boolean).join(' · ')
     const author = p.worker?.full_name || p.worker_name || 'Neznámý pracovník'
     const prof = profLabel(p.worker?.profession) || ''
+    const safeAuthor = author.replace(/'/g, "\\'")
     return `<div style="border:1px solid var(--brd);border-radius:12px;overflow:hidden;background:#fff">
       <a href="${p.url}" target="_blank" rel="noopener" style="display:block;aspect-ratio:4/3;background:var(--bg)">
         <img src="${p.url}" loading="lazy" style="width:100%;height:100%;object-fit:cover">
@@ -5700,9 +5701,59 @@ function renderSitePhotosAdmin() {
         </div>
         ${loc ? `<div style="font-size:11px;color:var(--text2);margin-top:6px">📍 ${loc}</div>` : ''}
         <div style="font-size:10px;color:var(--text3);margin-top:3px">🕑 ${when}</div>
+        <div style="display:flex;gap:6px;margin-top:8px">
+          <button onclick="downloadSitePhoto('${p.url}','${safeAuthor}','${p.created_at||''}')" style="flex:1;display:flex;align-items:center;justify-content:center;gap:5px;padding:6px 8px;font-size:11px;font-weight:700;border:1px solid var(--brd);border-radius:7px;background:#fff;color:var(--text);cursor:pointer;font-family:inherit"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:14px;height:14px"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="M7 10l5 5 5-5"/><path d="M12 15V3"/></svg>Stáhnout</button>
+          <button onclick="printSitePhoto('${p.url}','${safeAuthor}')" title="Vytisknout fotku" style="display:flex;align-items:center;justify-content:center;padding:6px 9px;font-size:11px;font-weight:700;border:1px solid var(--brd);border-radius:7px;background:#fff;color:var(--text);cursor:pointer;font-family:inherit"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:14px;height:14px"><path d="M6 9V2h12v7"/><path d="M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2"/><rect x="6" y="14" width="12" height="8"/></svg></button>
+        </div>
       </div>
     </div>`
   }).join('')
+}
+
+// Stáhne fotku do počítače (přes blob, aby fungovalo i ze Supabase storage)
+async function downloadSitePhoto(url, author, createdAt) {
+  if (!url) return
+  showToast('⏳ Stahuji fotku…')
+  try {
+    const res = await fetch(url)
+    if (!res.ok) throw new Error('HTTP ' + res.status)
+    const blob = await res.blob()
+    const ext = (blob.type && blob.type.split('/')[1]) ? blob.type.split('/')[1].replace('jpeg','jpg') : 'jpg'
+    const datePart = createdAt ? new Date(createdAt).toISOString().slice(0,10) : new Date().toISOString().slice(0,10)
+    const safeName = (author || 'foto').replace(/[^\p{L}\p{N}]+/gu, '_').replace(/^_+|_+$/g, '') || 'foto'
+    const fname = `SubBau_${safeName}_${datePart}.${ext}`
+    const objUrl = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = objUrl
+    a.download = fname
+    document.body.appendChild(a)
+    a.click()
+    document.body.removeChild(a)
+    setTimeout(() => URL.revokeObjectURL(objUrl), 4000)
+    showToast('✅ Fotka stažena')
+  } catch (e) {
+    console.warn('[stáhnout foto]', e)
+    window.open(url, '_blank')
+    showToast('ℹ️ Otevřel jsem fotku v nové záložce — uložte ji přes pravé tlačítko')
+  }
+}
+
+// Otevře fotku v tiskovém okně a vyvolá tisk
+function printSitePhoto(url, author) {
+  if (!url) return
+  const w = window.open('', '_blank')
+  if (!w) { showToast('⚠️ Povolte vyskakovací okna pro tisk'); return }
+  w.document.write(`<!DOCTYPE html><html><head><meta charset="utf-8"><title>Tisk fotky — ${author || 'SubBau'}</title>
+    <style>
+      @page { margin: 12mm; }
+      body { margin:0; font-family: Arial, sans-serif; text-align:center; }
+      .hdr { font-size:13px; color:#444; margin:0 0 10px; }
+      img { max-width:100%; max-height:88vh; object-fit:contain; }
+    </style></head><body>
+    <div class="hdr">${author ? 'Pracovník: ' + author : ''}</div>
+    <img src="${url}" onload="setTimeout(function(){window.print()},250)" alt="Fotka stavby">
+    </body></html>`)
+  w.document.close()
 }
 
 function renderDocuments() {
