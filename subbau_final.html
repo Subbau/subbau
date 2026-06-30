@@ -976,10 +976,10 @@ button > svg:first-child{margin-right:6px}
             <div class="card-h" style="flex-wrap:wrap;gap:10px">
               <h4 style="margin:0">Týdenní přehled hodin</h4>
               <div style="font-size:11px;color:var(--text3);display:flex;align-items:center;gap:12px;flex-wrap:wrap">
-                <span style="display:flex;align-items:center;gap:4px"><span style="width:8px;height:8px;border-radius:2px;background:var(--green)"></span>příchod</span>
-                <span style="display:flex;align-items:center;gap:4px"><span style="width:8px;height:8px;border-radius:2px;background:var(--text3)"></span>pauza od–do</span>
-                <span style="display:flex;align-items:center;gap:4px"><span style="width:8px;height:8px;border-radius:2px;background:var(--red)"></span>odchod</span>
-                <span style="display:flex;align-items:center;gap:4px"><span style="width:8px;height:8px;border-radius:2px;background:var(--blue)"></span>hodiny</span>
+                <span style="display:flex;align-items:center;gap:4px"><span style="width:8px;height:8px;border-radius:2px;background:var(--green)"></span>↖ příchod</span>
+                <span style="display:flex;align-items:center;gap:4px"><span style="width:8px;height:8px;border-radius:2px;background:var(--red)"></span>↗ odchod</span>
+                <span style="display:flex;align-items:center;gap:4px"><span style="width:8px;height:8px;border-radius:2px;background:var(--blue)"></span>hodiny (střed)</span>
+                <span style="color:var(--text3)">↙↘ pauzy</span>
               </div>
               <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-left:auto">
                 <input type="text" id="kw-search" oninput="loadKWData()" placeholder="🔍 Hledat jméno nebo firmu…" style="padding:6px 10px;border:1px solid var(--brd);border-radius:8px;font-size:13px;font-family:inherit;width:200px">
@@ -5024,16 +5024,30 @@ async function loadKWData() {
       }
     }
     workers[wid].days[day] = (workers[wid].days[day] || 0) + h
-    // Ulož i časy pro detailní zobrazení (příchod / pauza / odchod)
+    // Ulož časy pro detailní zobrazení; sbírej VŠECHNY pauzy ze všech záznamů dne
     workers[wid].dayInfo = workers[wid].dayInfo || {}
-    workers[wid].dayInfo[day] = {
-      ci: r.check_in ? r.check_in.slice(0,5) : null,
-      co: r.check_out ? r.check_out.slice(0,5) : null,
-      bs: r.break_start ? r.break_start.slice(0,5) : null,
-      be: r.break_end ? r.break_end.slice(0,5) : null,
-      running: (!r.check_out && r.check_in && r.work_date === todayStrAdmin)
+    const di = workers[wid].dayInfo[day] || { ci: null, co: null, breaks: [], running: false }
+    const ci = r.check_in ? r.check_in.slice(0,5) : null
+    const co = r.check_out ? r.check_out.slice(0,5) : null
+    // nejstarší příchod
+    if (ci && (!di.ci || ci < di.ci)) di.ci = ci
+    // nejnovější odchod
+    if (co && (!di.co || co > di.co)) di.co = co
+    // pauza z tohoto záznamu (pokud nějaká)
+    if (r.break_start) {
+      di.breaks.push({ bs: r.break_start.slice(0,5), be: r.break_end ? r.break_end.slice(0,5) : null })
     }
+    if (!r.check_out && r.check_in && r.work_date === todayStrAdmin) di.running = true
+    workers[wid].dayInfo[day] = di
     workers[wid].total += h
+  })
+
+  // Seřaď pauzy podle času začátku
+  Object.values(workers).forEach(w => {
+    if (!w.dayInfo) return
+    Object.values(w.dayInfo).forEach(di => {
+      if (di.breaks) di.breaks.sort((a,b) => (a.bs||'').localeCompare(b.bs||''))
+    })
   })
 
   // Zjisti, které dny týdne (Po..So) už nastaly (do dneška včetně) — jen ty barvíme červeně
@@ -5044,22 +5058,26 @@ async function loadKWData() {
     d.setDate(weekStart.getDate() + (dayIdx - 1))
     return localDateStr(d)
   }
-  // buňka pro den: detailní časy (příchod / pauza od-do / odchod) + hodiny
+  // buňka pro den: příchod (↖) · odchod (↗) · hodiny (střed) · pauza1 (↙) · pauza2 (↘)
   function dayCell(w, dayIdx) {
     const h = w.days[dayIdx]
     const info = w.dayInfo && w.dayInfo[dayIdx]
     const dateStr = dateOfDay(dayIdx)
     const isPastOrToday = dateStr <= todayStrAdmin
     if (h !== undefined && h > 0 && info) {
-      const pauza = info.bs ? `${info.bs}–${info.be || '…'}` : '—'
+      const b1 = info.breaks && info.breaks[0] ? `${info.breaks[0].bs}–${info.breaks[0].be || '…'}` : ''
+      const b2 = info.breaks && info.breaks[1] ? `${info.breaks[1].bs}–${info.breaks[1].be || '…'}` : ''
       const hLabel = info.running
-        ? `<span style="color:var(--amber)">${h.toFixed(1)}h ▶</span>`
+        ? `<span style="color:var(--amber)">${h.toFixed(1)}h▶</span>`
         : `${h.toFixed(1)}h`
-      return `<td style="text-align:center;vertical-align:middle;padding:5px 3px">
-        <div style="font-size:11px;font-weight:700;color:var(--green);line-height:1.35">${info.ci || '—'}</div>
-        <div style="font-size:9px;color:var(--text3);line-height:1.3">${pauza}</div>
-        <div style="font-size:11px;font-weight:700;color:var(--red);line-height:1.35">${info.co || '—'}</div>
-        <div style="font-size:11px;font-weight:800;color:var(--blue);margin-top:2px">${hLabel}</div>
+      return `<td style="padding:4px 3px;vertical-align:middle">
+        <div style="position:relative;min-height:46px;display:flex;align-items:center;justify-content:center">
+          <span style="position:absolute;top:0;left:2px;font-size:10px;font-weight:700;color:var(--green)">${info.ci || ''}</span>
+          <span style="position:absolute;top:0;right:2px;font-size:10px;font-weight:700;color:var(--red)">${info.co || ''}</span>
+          <span style="font-size:15px;font-weight:800;color:var(--blue);font-family:'Archivo',-apple-system,sans-serif">${hLabel}</span>
+          <span style="position:absolute;bottom:0;left:2px;font-size:8.5px;color:var(--text3)">${b1}</span>
+          <span style="position:absolute;bottom:0;right:2px;font-size:8.5px;color:var(--text3)">${b2}</span>
+        </div>
       </td>`
     }
     // 0h nebo žádný záznam
