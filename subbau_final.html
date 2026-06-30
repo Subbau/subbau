@@ -3824,6 +3824,11 @@ function _onAdminDbChange(table) {
       break
     case 'attendance':
       if (view === 'dashboard') _debouncedRefresh('dashboard', loadDashboard)
+      if (view === 'dochazka') _debouncedRefresh('dochazka', () => {
+        if (typeof loadTodayTimeline === 'function') loadTodayTimeline()
+        if (typeof loadKWData === 'function') loadKWData()
+        if (typeof loadWdAttendance === 'function' && typeof currentWorkerId !== 'undefined' && currentWorkerId) loadWdAttendance()
+      })
       break
     case 'notifications':
     case 'announcements':
@@ -3900,6 +3905,7 @@ function showOsvec(profile) {
     loadMobExportWeeks()
     loadMySheets()
     loadMobNotifications()
+    startOsvecRealtime()
     updateChatBadge()
     if (window._osvecChatBadgeInt) clearInterval(window._osvecChatBadgeInt)
     window._osvecChatBadgeInt = setInterval(updateChatBadge, 20000)
@@ -4283,6 +4289,7 @@ async function doLogout() {
   stopClock()
   // Odpoj živou aktualizaci admin dat
   if (adminRealtimeSub) { try { sb.removeChannel(adminRealtimeSub) } catch(e) {} adminRealtimeSub = null }
+  if (osvecRealtimeSub) { try { sb.removeChannel(osvecRealtimeSub) } catch(e) {} osvecRealtimeSub = null }
   if (window._adminPendingInt) { clearInterval(window._adminPendingInt); window._adminPendingInt = null }
   try { await sb.auth.signOut() } catch(e) { console.error('signOut error:', e) }
   showLogin()  // Vždy přejdi na login, i kdyby event selhal
@@ -5071,12 +5078,12 @@ async function loadKWData() {
         ? `<span style="color:var(--amber)">${h.toFixed(1)}h▶</span>`
         : `${h.toFixed(1)}h`
       return `<td style="padding:4px 3px;vertical-align:middle">
-        <div style="position:relative;min-height:46px;display:flex;align-items:center;justify-content:center">
-          <span style="position:absolute;top:0;left:2px;font-size:10px;font-weight:700;color:var(--green)">${info.ci || ''}</span>
-          <span style="position:absolute;top:0;right:2px;font-size:10px;font-weight:700;color:var(--red)">${info.co || ''}</span>
-          <span style="font-size:15px;font-weight:800;color:var(--blue);font-family:'Archivo',-apple-system,sans-serif">${hLabel}</span>
-          <span style="position:absolute;bottom:0;left:2px;font-size:8.5px;color:var(--text3)">${b1}</span>
-          <span style="position:absolute;bottom:0;right:2px;font-size:8.5px;color:var(--text3)">${b2}</span>
+        <div style="position:relative;min-height:52px;display:flex;align-items:center;justify-content:center">
+          <span style="position:absolute;top:0;left:2px;font-size:11.5px;font-weight:700;color:var(--green)">${info.ci || ''}</span>
+          <span style="position:absolute;top:0;right:2px;font-size:11.5px;font-weight:700;color:var(--red)">${info.co || ''}</span>
+          <span style="font-size:16px;font-weight:800;color:var(--blue);font-family:'Archivo',-apple-system,sans-serif">${hLabel}</span>
+          <span style="position:absolute;bottom:0;left:2px;font-size:9.5px;color:var(--text3)">${b1}</span>
+          <span style="position:absolute;bottom:0;right:2px;font-size:9.5px;color:var(--text3)">${b2}</span>
         </div>
       </td>`
     }
@@ -5584,6 +5591,45 @@ let activeChatWorkerId = null
 let currentWorkerProfile = null
 let chatRealtimeSub = null
 let adminChatRealtimeSub = null
+let osvecRealtimeSub = null
+
+// ===== ŽIVÁ AKTUALIZACE PRO PRACOVNÍKA (mobil) =====
+// Když admin nebo systém něco změní, mobil pracovníka se sám aktualizuje.
+function _debouncedRefreshMob(key, fn, delay = 400) {
+  window._mobRefreshTimers = window._mobRefreshTimers || {}
+  clearTimeout(window._mobRefreshTimers[key])
+  window._mobRefreshTimers[key] = setTimeout(fn, delay)
+}
+function startOsvecRealtime() {
+  if (typeof sb === 'undefined' || !sb || !currentUser) return
+  if (osvecRealtimeSub) { try { sb.removeChannel(osvecRealtimeSub) } catch(e) {} osvecRealtimeSub = null }
+  const uid = currentUser.id
+  osvecRealtimeSub = sb.channel('osvec-live-' + uid)
+    // Docházka pracovníka (úpravy od admina, dorovnání)
+    .on('postgres_changes', { event: '*', schema: 'public', table: 'attendance', filter: 'worker_id=eq.' + uid }, () => {
+      _debouncedRefreshMob('att', () => { if (typeof getTodayRecord==='function') getTodayRecord(); if (typeof loadMobWeek==='function') loadMobWeek() })
+    })
+    // Dokumenty
+    .on('postgres_changes', { event: '*', schema: 'public', table: 'documents', filter: 'worker_id=eq.' + uid }, () => {
+      _debouncedRefreshMob('docs', () => { if (typeof loadMobDocs==='function') loadMobDocs() })
+    })
+    // Smlouvy
+    .on('postgres_changes', { event: '*', schema: 'public', table: 'contracts', filter: 'worker_id=eq.' + uid }, () => {
+      _debouncedRefreshMob('contracts', () => { if (typeof loadMobContracts==='function') loadMobContracts() })
+    })
+    // Zprávy / oznámení od SubBau
+    .on('postgres_changes', { event: '*', schema: 'public', table: 'notifications' }, () => {
+      _debouncedRefreshMob('notif', () => { if (typeof loadMobNotifications==='function') loadMobNotifications() })
+    })
+    .on('postgres_changes', { event: '*', schema: 'public', table: 'announcements' }, () => {
+      _debouncedRefreshMob('notif', () => { if (typeof loadMobNotifications==='function') loadMobNotifications() })
+    })
+    // Profil pracovníka (změna týmu, lokace…)
+    .on('postgres_changes', { event: '*', schema: 'public', table: 'profiles', filter: 'id=eq.' + uid }, () => {
+      _debouncedRefreshMob('profil', () => { if (typeof loadMobProfil==='function' && currentProfile) loadMobProfil(currentProfile) })
+    })
+    .subscribe(status => { if (status === 'SUBSCRIBED') console.log('[osvec realtime] živá aktualizace aktivní') })
+}
 
 // Formátování zprávy v bublině
 function chatBubble(msg, isMine, senderName) {
