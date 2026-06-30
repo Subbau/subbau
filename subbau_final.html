@@ -5030,10 +5030,12 @@ async function loadTodayTimeline() {
     // adresy: GPS a ruční zvlášť — primárně z nových polí gps_address/manual_address
     const cs = (r.construction_site || '').trim()
     const gpsA = (r.gps_address || '').trim()
-    const manA = (r.manual_address || '').trim()
+    let manA = (r.manual_address || '').trim()
+    // Když je ruční shodná s GPS, neukazuj ji dvakrát
+    if (manA && gpsA && manA === gpsA) manA = ''
     if (gpsA && !g.gpsAddr) g.gpsAddr = gpsA
     if (manA && !g.manualAddr) g.manualAddr = manA
-    if (cs && !g.manualAddr) g.manualAddr = cs
+    if (cs && !g.manualAddr && cs !== g.gpsAddr) g.manualAddr = cs
     // fallback na staré location_address, když nová pole chybí
     const la = (r.location_address || '').trim()
     if (la && !gpsA && !manA) {
@@ -9818,21 +9820,30 @@ async function confirmActionAddress() {
   // Zapiš do databáze — GPS i ruční adresa každá do svého pole
   if (attId) {
     const upd = { location_address: addr, address_source: useManual ? 'manual' : 'gps' }
-    if (useManual) {
+    // Ruční adresu ber jen když se liší od GPS (jinak je to vlastně ta samá adresa)
+    const manualDistinct = useManual && (!gpsVal || manualVal.trim() !== gpsVal.trim())
+    if (manualDistinct) {
       upd.manual_address = manualVal
       if (gpsVal) {
-        // Má i GPS → ulož obě
+        // Má GPS i odlišnou ruční → ulož obě
         upd.gps_address = gpsVal
         if (gpsLat && gpsLng) { upd.location_lat = gpsLat; upd.location_lng = gpsLng }
       } else {
-        // GPS zakázaná / nedostupná → vymaž případnou starou GPS, zůstane jen ruční
+        // Ruční bez GPS → vymaž případnou starou GPS, zůstane jen ruční
         upd.gps_address = null
         upd.location_lat = null
         upd.location_lng = null
       }
     } else {
+      // Pouze GPS (nebo ruční shodná s GPS) → ulož jen GPS, ruční pole vyčisti
       upd.gps_address = gpsVal
+      upd.manual_address = null
       if (gpsLat && gpsLng) { upd.location_lat = gpsLat; upd.location_lng = gpsLng }
+    }
+    // synchronizuj i lokální kopii
+    if (todayRecord) {
+      todayRecord.manual_address = manualDistinct ? manualVal : null
+      todayRecord.gps_address = (manualDistinct && !gpsVal) ? null : gpsVal
     }
     // Zkus uložit se separátními poli; kdyby sloupce nebyly, ulož aspoň základ
     let { error } = await sb.from('attendance').update(upd).eq('id', attId)
