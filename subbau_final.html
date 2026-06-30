@@ -8264,15 +8264,20 @@ async function mobCheckin(type) {
           return
         }
 
-        // Odchod je uložen — pokud pořád chybí adresa (pracovník ji celý den přeskakoval),
-        // zeptej se na ni teď; pak otevři dialog pro popis práce.
+        // Odchod je uložen. Zjisti z ČERSTVÝCH dat, jestli už má adresu —
+        // když ano (zadal ji na příchodu), přeskoč dotaz na adresu a jdi rovnou na "co dělal".
         showToast('🚪 Odchod zaznamenán — ' + timeStr + ' (' + h + 'h)')
         pendingCheckout = { timeStr, hours: h, attId: todayAttId }
+        let freshRec = updated
+        try {
+          const { data: fr } = await withTimeout(sb.from('attendance').select('*').eq('id', todayAttId).single(), 8000)
+          if (fr) { freshRec = fr; todayRecord = { ...fr, check_out: timeStr, total_hours: h } }
+        } catch(e) { /* použij lokální updated */ }
         const stillNoAddr = !(
-          (updated.location_address || '').trim() ||
-          (updated.gps_address || '').trim() ||
-          (updated.manual_address || '').trim() ||
-          (updated.construction_site || '').trim()
+          (freshRec.location_address || '').trim() ||
+          (freshRec.gps_address || '').trim() ||
+          (freshRec.manual_address || '').trim() ||
+          (freshRec.construction_site || '').trim()
         )
         if (stillNoAddr) {
           _afterAddrShowCheckout = true
