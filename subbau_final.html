@@ -13931,20 +13931,30 @@ async function markNotificationsRead() {
 }
 
 async function markRead(id, el) {
-  await sb.from('notifications').update({ is_read: true }).eq('id', id)
+  // Optimisticky přebarvi hned
   if (el) {
     el.style.background = 'var(--bg)'
     el.style.border = '1.5px solid var(--brd)'
     const dot = el.querySelector('span[style*="border-radius:50%"]')
     if (dot) dot.remove()
   }
-  // Aktualizuj badge
+  const { error } = await sb.from('notifications').update({ is_read: true }).eq('id', id).eq('worker_id', currentUser.id)
+  if (error) { console.warn('[markRead] selhalo:', error.message); showToast('⚠️ Nepodařilo se uložit (oprávnění?)') }
   loadMobNotifications()
 }
 
 async function markAllRead() {
   if (!currentUser) return
-  await sb.from('notifications').update({ is_read: true }).eq('worker_id', currentUser.id)
+  const { data, error } = await sb.from('notifications')
+    .update({ is_read: true })
+    .eq('worker_id', currentUser.id)
+    .eq('is_read', false)
+    .select('id')
+  if (error) {
+    console.warn('[markAllRead] selhalo:', error.message)
+    showToast('⚠️ Nepodařilo se uložit — chybí oprávnění (spusťte SQL zpravy-oznaceni)')
+    return
+  }
   showToast('✅ Vše označeno jako přečteno')
   loadMobNotifications()
 }
