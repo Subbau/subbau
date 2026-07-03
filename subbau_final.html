@@ -3882,15 +3882,16 @@ function _activeAdminView() {
 function _onAdminDbChange(table, payload) {
   const evt = payload?.eventType || payload?.event || payload?.type || null
   const isInsert = evt === 'INSERT' || evt === 'insert'
+  const isUpdate = evt === 'UPDATE' || evt === 'update'
 
   // Diagnostika (zobrazí se v konzoli prohlížeče) — pomůže zjistit, proč (ne)pípá
   try { console.log('[admin realtime] změna:', table, '| typ:', evt, '| role:', (typeof currentProfile!=='undefined'?currentProfile?.role:'?'), '| zvuk:', _adminSoundOn) } catch(e) {}
 
-  // ── ZVUK: jen u NOVÉ události (INSERT), ne při editaci/mazání ──
+  // ── ZVUK: nová věc (INSERT) i vybrané úpravy docházky (odchod / přestávka) ──
+  let notify = false
   if (isInsert) {
-    let notify = false
     switch (table) {
-      case 'attendance':      // nový záznam docházky (příchod/odchod)
+      case 'attendance':      // nový záznam docházky = PŘÍCHOD
       case 'documents':       // nově nahraný dokument
       case 'site_photos':     // nová fotka ze stavby
       case 'contracts':       // nová smlouva
@@ -3898,11 +3899,25 @@ function _onAdminDbChange(table, payload) {
       case 'chat_messages':   // nová zpráva — jen když ji poslal pracovník, ne admin
         if (payload?.new && payload.new.sender_role !== 'admin') notify = true
         break
-      case 'profiles':        // nová registrace pracovníka
-        notify = true; break
+      case 'profiles':        // nová registrace pracovníka — jen když čeká na schválení
+        if (!payload?.new || payload.new.registration_status === 'pending') notify = true
+        break
     }
-    if (notify) playAdminBeep()
+  } else if (isUpdate && table === 'attendance') {
+    // ODCHOD nebo PŘESTÁVKA: pole se změnilo z prázdného na vyplněné.
+    // Pokud realtime posílá i starou hodnotu (payload.old), porovnáme přesně;
+    // jinak použijeme lokální paměť posledního stavu záznamu.
+    const n = payload?.new
+    if (n && n.id) {
+      const o = payload?.old || _attLastSeen[n.id] || {}
+      const becameSet = (field) => !o[field] && !!n[field]
+      if (becameSet('check_out') || becameSet('break_start') || becameSet('break_end')) {
+        notify = true
+      }
+      _attLastSeen[n.id] = { check_out: n.check_out, break_start: n.break_start, break_end: n.break_end }
+    }
   }
+  if (notify) playAdminBeep()
 
   const view = _activeAdminView()
   // Chat má vlastní obnovu; tady jen zvuk (výše) — dál nepokračuj kvůli refreshi sekcí
@@ -3955,6 +3970,7 @@ function _onAdminDbChange(table, payload) {
 let _adminAudioCtx = null
 let _adminSoundOn = true            // výchozí zapnuto
 let _adminSoundUnlocked = false
+const _attLastSeen = {}             // id záznamu → poslední známý stav (check_out/break_start/break_end)
 
 // Načti uložené nastavení (localStorage nemusí být dostupný → try/catch)
 try {
