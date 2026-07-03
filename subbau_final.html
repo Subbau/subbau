@@ -8208,7 +8208,14 @@ async function getTodayRecord() {
   if (data && data.length > 0) {
     // Aktivní SMĚNA = má příchod, ale ještě nemá odchod.
     // Záznamy "2. stavba" nemají check_in — nesmí se brát jako běžící směna.
-    const active = data.find(r => r.check_in && !r.check_out)
+    let active = data.find(r => r.check_in && !r.check_out)
+    // Pojistka proti závodu: když jsme právě zapsali příchod a server ho ještě
+    // nevrací, drž lokální aktivní směnu, ať UI nespadne zpět na "Začít směnu".
+    if (!active && todayRecord && todayRecord.check_in && !todayRecord.check_out) {
+      const stillThere = data.find(r => r.id === todayRecord.id)
+      if (stillThere) active = stillThere
+      else active = todayRecord
+    }
     if (active) {
       todayAttId = active.id
       todayRecord = { ...active }  // Ulož lokální kopii
@@ -8447,8 +8454,26 @@ async function mobCheckin(type) {
       showToast('✅ Příchod zaznamenán — ' + timeStr)
       // Zeptej se na adresu pracoviště (jen pokud ještě není potvrzená)
       askAddressIfNeeded(data.id, 'Příchod')
-      // Pak načti všechny dnešní záznamy (pro přehled směn)
-      setTimeout(() => getTodayRecord(), 500)
+      // Přehled dnešních směn dotáhneme JEDNÍM awaitovaným dotazem (bez závodu s okamžitým renderem).
+      // Aktivní směnu držíme z právě vloženého záznamu — nesmí ji přepsat pomalejší čtení.
+      try {
+        const { data: allToday } = await sb.from('attendance').select('*')
+          .eq('worker_id', currentUser.id)
+          .eq('work_date', today)
+          .order('check_in', { ascending: false })
+        if (allToday && allToday.length) {
+          // Jistota: aktivní = náš právě vytvořený záznam (má příchod, nemá odchod)
+          const activeNow = allToday.find(r => r.id === data.id) ||
+                            allToday.find(r => r.check_in && !r.check_out)
+          if (activeNow && activeNow.check_in && !activeNow.check_out) {
+            todayAttId = activeNow.id
+            todayRecord = { ...activeNow }
+            updateMobStav(activeNow, allToday)
+          } else {
+            updateMobStav(data, allToday)   // fallback: drž náš záznam
+          }
+        }
+      } catch(e) { /* okamžitý render výše stačí */ }
 
     } else {
       // Přestávka / Odchod
