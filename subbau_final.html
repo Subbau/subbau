@@ -8206,7 +8206,9 @@ async function getTodayRecord() {
   if (error) { console.error('[getTodayRecord]', error); updateMobStav(null, []); return }
 
   if (data && data.length > 0) {
-    const active = data.find(r => !r.check_out)
+    // Aktivní SMĚNA = má příchod, ale ještě nemá odchod.
+    // Záznamy "2. stavba" nemají check_in — nesmí se brát jako běžící směna.
+    const active = data.find(r => r.check_in && !r.check_out)
     if (active) {
       todayAttId = active.id
       todayRecord = { ...active }  // Ulož lokální kopii
@@ -8405,12 +8407,16 @@ async function mobCheckin(type) {
 
   try {
     if (type === 'in') {
-      // Zkontroluj jestli není aktivní neukončená směna
-      const { data: active } = await sb.from('attendance').select('id,check_in')
+      // Zkontroluj jestli není aktivní neukončená SMĚNA (má příchod, chybí odchod).
+      // Záznamy "2. stavba" (bez check_in) sem nepatří — proto filtrujeme na check_in not null.
+      const { data: activeRows } = await sb.from('attendance').select('id,check_in')
         .eq('worker_id', currentUser.id)
         .eq('work_date', today)
         .is('check_out', null)
-        .maybeSingle()
+        .not('check_in', 'is', null)
+        .order('check_in', { ascending: false })
+        .limit(1)
+      const active = activeRows && activeRows[0]
 
       if (active) {
         todayAttId = active.id
