@@ -729,6 +729,7 @@ button:not(.x-close) > svg:first-child{margin-right:6px}
       <button class="sb-a" onclick="sv('chat',this);closeAdminDrawer()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 11.5a8.38 8.38 0 0 1-9 8.5 8.5 8.5 0 0 1-3.8-.9L3 20l1.3-3.8A8.5 8.5 0 0 1 12 3a8.38 8.38 0 0 1 9 8.5z"/></svg> Chat <span id="admin-chat-badge" style="display:none;background:var(--red);color:#fff;border-radius:8px;font-size:10px;padding:1px 5px;margin-left:4px"></span></button>
       <button class="sb-a" onclick="sv('oznameni',this);closeAdminDrawer()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 11l18-5v12L3 14v-3z"/><path d="M11.6 16.8a3 3 0 1 1-5.8-1.6"/></svg> Oznámení</button>
       <button class="sb-a" onclick="sv('pristupy',this);closeAdminDrawer()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg> Přístupy</button>
+      <button class="sb-a" id="admin-sound-toggle-mob" onclick="toggleAdminSound()" style="display:flex;align-items:center;gap:8px"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:16px;height:16px;flex-shrink:0"><path d="M11 5L6 9H2v6h4l5 4V5z"/><path d="M15.54 8.46a5 5 0 0 1 0 7.07M19.07 4.93a10 10 0 0 1 0 14.14"/></svg><span>Zvuk zapnutý</span></button>
       <div style="border-top:1px solid #333;margin-top:12px;padding-top:12px">
         <button onclick="doLogout();closeAdminDrawer()" style="width:100%;padding:10px;background:none;border:1px solid var(--red);color:var(--red);border-radius:8px;cursor:pointer;font-family:inherit;font-size:13px">Odhlásit se</button>
       </div>
@@ -754,6 +755,7 @@ button:not(.x-close) > svg:first-child{margin-right:6px}
         <button class="sb-a" onclick="sv('chat',this)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 11.5a8.38 8.38 0 0 1-9 8.5 8.5 8.5 0 0 1-3.8-.9L3 20l1.3-3.8A8.5 8.5 0 0 1 12 3a8.38 8.38 0 0 1 9 8.5z"/></svg> Chat <span id="admin-chat-badge" style="display:none;background:var(--red);color:#fff;border-radius:10px;font-size:10px;padding:1px 6px;margin-left:4px">0</span></button>
         <button class="sb-a" onclick="sv('oznameni',this)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 11l18-5v12L3 14v-3z"/><path d="M11.6 16.8a3 3 0 1 1-5.8-1.6"/></svg> Oznámení</button>
         <button class="sb-a" onclick="sv('pristupy',this)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg> Přístupy</button>
+        <button class="sb-a" id="admin-sound-toggle" onclick="toggleAdminSound()" style="display:flex;align-items:center;gap:8px"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:16px;height:16px;flex-shrink:0"><path d="M11 5L6 9H2v6h4l5 4V5z"/><path d="M15.54 8.46a5 5 0 0 1 0 7.07M19.07 4.93a10 10 0 0 1 0 14.14"/></svg><span>Zvuk zapnutý</span></button>
         <button class="sb-a" onclick="doLogout()" style="color:var(--red)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><path d="M16 17l5-5-5-5M21 12H9"/></svg> Odhlásit se</button>
       </div>
       <div class="sb-foot">
@@ -3858,6 +3860,8 @@ function showAdmin(profile) {
   window._adminPendingInt = setInterval(refreshPendingRegistrations, 30000)
   // Spusť živou aktualizaci admin dat (realtime) — vše se obnovuje samo, bez načítání stránky
   startAdminRealtime()
+  // Nastav stav tlačítka zvuku podle uloženého nastavení
+  _updateAdminSoundBtn()
 }
 
 // ============ ADMIN REALTIME — živá aktualizace bez reloadu ============
@@ -3875,8 +3879,31 @@ function _activeAdminView() {
   return on ? on.id.replace(/^v-/, '') : null
 }
 // Reakce na změnu v dané tabulce
-function _onAdminDbChange(table) {
+function _onAdminDbChange(table, payload) {
+  const evt = payload?.eventType || payload?.event || null
+  const isInsert = evt === 'INSERT'
+
+  // ── ZVUK: jen u NOVÉ události (INSERT), ne při editaci/mazání ──
+  if (isInsert) {
+    let notify = false
+    switch (table) {
+      case 'attendance':      // nový záznam docházky (příchod/odchod)
+      case 'documents':       // nově nahraný dokument
+      case 'site_photos':     // nová fotka ze stavby
+      case 'contracts':       // nová smlouva
+        notify = true; break
+      case 'chat_messages':   // nová zpráva — jen když ji poslal pracovník, ne admin
+        if (payload?.new && payload.new.sender_role !== 'admin') notify = true
+        break
+      case 'profiles':        // nová registrace pracovníka
+        notify = true; break
+    }
+    if (notify) playAdminBeep()
+  }
+
   const view = _activeAdminView()
+  // Chat má vlastní obnovu; tady jen zvuk (výše) — dál nepokračuj kvůli refreshi sekcí
+  if (table === 'chat_messages') return
   // Statistiky na dashboardu se týkají skoro všeho — drž je svěží
   if (view === 'dashboard') {
     _debouncedRefresh('dashboard', () => { loadDashboard(); checkDocumentAlerts(); loadDocumentAlertsStat() })
@@ -3919,14 +3946,93 @@ function _onAdminDbChange(table) {
       break
   }
 }
+// ============ ADMIN ZVUKOVÉ UPOZORNĚNÍ ============
+// Dvojité pípnutí přes Web Audio (žádný externí soubor). Přehraje se jen u admina
+// při NOVÉ události (nová zpráva/docházka/dokument/fotka/registrace).
+let _adminAudioCtx = null
+let _adminSoundOn = true            // výchozí zapnuto
+let _adminSoundUnlocked = false
+
+// Načti uložené nastavení (localStorage nemusí být dostupný → try/catch)
+try {
+  const saved = localStorage.getItem('subbau_admin_sound')
+  if (saved !== null) _adminSoundOn = saved === '1'
+} catch(e) {}
+
+// Prohlížeče (hlavně Safari) povolí zvuk až po interakci uživatele.
+// Při prvním kliknutí/dotyku „odemkneme" audio kontext.
+function _unlockAdminAudio() {
+  if (_adminSoundUnlocked) return
+  try {
+    const Ctx = window.AudioContext || window.webkitAudioContext
+    if (!Ctx) return
+    _adminAudioCtx = _adminAudioCtx || new Ctx()
+    if (_adminAudioCtx.state === 'suspended') _adminAudioCtx.resume()
+    _adminSoundUnlocked = true
+  } catch(e) {}
+}
+if (!window._adminAudioHooked) {
+  window._adminAudioHooked = true
+  ;['click','touchstart','keydown'].forEach(ev =>
+    document.addEventListener(ev, _unlockAdminAudio, { once: false, passive: true }))
+}
+
+// Zahraj dvojité pípnutí (jen když je zvuk zapnutý a jsme admin)
+function playAdminBeep() {
+  if (!_adminSoundOn) return
+  if (typeof currentProfile === 'undefined' || currentProfile?.role !== 'admin') return
+  try {
+    const Ctx = window.AudioContext || window.webkitAudioContext
+    if (!Ctx) return
+    _adminAudioCtx = _adminAudioCtx || new Ctx()
+    const ctx = _adminAudioCtx
+    if (ctx.state === 'suspended') ctx.resume()
+    // dvě krátká pípnutí za sebou
+    const beep = (startAt, freq) => {
+      const osc = ctx.createOscillator()
+      const gain = ctx.createGain()
+      osc.type = 'sine'
+      osc.frequency.value = freq
+      gain.gain.setValueAtTime(0.0001, startAt)
+      gain.gain.exponentialRampToValueAtTime(0.25, startAt + 0.02)
+      gain.gain.exponentialRampToValueAtTime(0.0001, startAt + 0.16)
+      osc.connect(gain); gain.connect(ctx.destination)
+      osc.start(startAt); osc.stop(startAt + 0.18)
+    }
+    const t0 = ctx.currentTime
+    beep(t0, 880)          // první tón
+    beep(t0 + 0.22, 1175)  // druhý, o něco výš
+  } catch(e) { console.warn('[admin beep]', e?.message) }
+}
+
+// Přepnutí zvuku (volané z tlačítka v UI)
+function toggleAdminSound() {
+  _adminSoundOn = !_adminSoundOn
+  try { localStorage.setItem('subbau_admin_sound', _adminSoundOn ? '1' : '0') } catch(e) {}
+  _updateAdminSoundBtn()
+  if (_adminSoundOn) { _unlockAdminAudio(); playAdminBeep() }  // ukázka po zapnutí
+}
+
+function _updateAdminSoundBtn() {
+  const html = _adminSoundOn
+    ? '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:16px;height:16px;flex-shrink:0"><path d="M11 5L6 9H2v6h4l5 4V5z"/><path d="M15.54 8.46a5 5 0 0 1 0 7.07M19.07 4.93a10 10 0 0 1 0 14.14"/></svg><span>Zvuk zapnutý</span>'
+    : '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:16px;height:16px;flex-shrink:0"><path d="M11 5L6 9H2v6h4l5 4V5z"/><path d="M23 9l-6 6M17 9l6 6"/></svg><span>Zvuk vypnutý</span>'
+  ;['admin-sound-toggle','admin-sound-toggle-mob'].forEach(id => {
+    const btn = document.getElementById(id)
+    if (!btn) return
+    btn.innerHTML = html
+    btn.style.opacity = _adminSoundOn ? '1' : '0.55'
+  })
+}
+
 function startAdminRealtime() {
   if (typeof sb === 'undefined' || !sb) return
   // Nezakládej duplicitní kanál
   if (adminRealtimeSub) { try { sb.removeChannel(adminRealtimeSub) } catch(e) {} adminRealtimeSub = null }
-  const tables = ['profiles','documents','teams','team_assignments','subteams','companies','contracts','attendance','notifications','announcements','site_photos']
+  const tables = ['profiles','documents','teams','team_assignments','subteams','companies','contracts','attendance','notifications','announcements','site_photos','chat_messages']
   let ch = sb.channel('admin-live')
   tables.forEach(t => {
-    ch = ch.on('postgres_changes', { event: '*', schema: 'public', table: t }, () => _onAdminDbChange(t))
+    ch = ch.on('postgres_changes', { event: '*', schema: 'public', table: t }, (payload) => _onAdminDbChange(t, payload))
   })
   adminRealtimeSub = ch.subscribe(status => {
     if (status === 'SUBSCRIBED') console.log('[admin realtime] živá aktualizace aktivní')
