@@ -3988,12 +3988,29 @@ function _unlockAdminAudio() {
     _adminAudioCtx = _adminAudioCtx || new Ctx()
     if (_adminAudioCtx.state === 'suspended') _adminAudioCtx.resume()
     _adminSoundUnlocked = true
+    _startAudioKeepAlive()
   } catch(e) {}
 }
 if (!window._adminAudioHooked) {
   window._adminAudioHooked = true
   ;['click','touchstart','keydown'].forEach(ev =>
     document.addEventListener(ev, _unlockAdminAudio, { once: false, passive: true }))
+  // Když se admin vrátí na záložku, hned probuď audio (jinak by první pípnutí vynechalo)
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible' && _adminAudioCtx) {
+      try { if (_adminAudioCtx.state !== 'running') _adminAudioCtx.resume() } catch(e) {}
+    }
+  })
+}
+
+// Drž audio kontext probuzený, aby prohlížeč pípnutí neztratil po nečinnosti.
+function _startAudioKeepAlive() {
+  if (window._audioKeepAliveInt) return
+  window._audioKeepAliveInt = setInterval(() => {
+    try {
+      if (_adminAudioCtx && _adminAudioCtx.state !== 'running') _adminAudioCtx.resume()
+    } catch(e) {}
+  }, 15000)
 }
 
 // Zahraj dvojité pípnutí (jen když je zvuk zapnutý a jsme admin)
@@ -4005,22 +4022,34 @@ function playAdminBeep() {
     if (!Ctx) return
     _adminAudioCtx = _adminAudioCtx || new Ctx()
     const ctx = _adminAudioCtx
-    if (ctx.state === 'suspended') ctx.resume()
-    // dvě krátká pípnutí za sebou
-    const beep = (startAt, freq) => {
-      const osc = ctx.createOscillator()
-      const gain = ctx.createGain()
-      osc.type = 'sine'
-      osc.frequency.value = freq
-      gain.gain.setValueAtTime(0.0001, startAt)
-      gain.gain.exponentialRampToValueAtTime(0.25, startAt + 0.02)
-      gain.gain.exponentialRampToValueAtTime(0.0001, startAt + 0.16)
-      osc.connect(gain); gain.connect(ctx.destination)
-      osc.start(startAt); osc.stop(startAt + 0.18)
+
+    // Naplánuj a přehraj dvě pípnutí — voláme AŽ když je kontext probuzený,
+    // jinak by se naplánovala do minulosti a nezahrála (to způsobovalo vynechávání).
+    const doBeeps = () => {
+      const beep = (startAt, freq) => {
+        const osc = ctx.createOscillator()
+        const gain = ctx.createGain()
+        osc.type = 'sine'
+        osc.frequency.value = freq
+        gain.gain.setValueAtTime(0.0001, startAt)
+        gain.gain.exponentialRampToValueAtTime(0.28, startAt + 0.02)
+        gain.gain.exponentialRampToValueAtTime(0.0001, startAt + 0.16)
+        osc.connect(gain); gain.connect(ctx.destination)
+        osc.start(startAt); osc.stop(startAt + 0.2)
+      }
+      const t0 = ctx.currentTime + 0.02   // malá rezerva, ať se netrefíme do minulosti
+      beep(t0, 880)          // první tón
+      beep(t0 + 0.22, 1175)  // druhý, o něco výš
     }
-    const t0 = ctx.currentTime
-    beep(t0, 880)          // první tón
-    beep(t0 + 0.22, 1175)  // druhý, o něco výš
+
+    if (ctx.state === 'suspended' || ctx.state === 'interrupted') {
+      // probuď kontext a AŽ POTOM přehraj
+      const p = ctx.resume()
+      if (p && typeof p.then === 'function') p.then(doBeeps).catch(() => { try { doBeeps() } catch(e){} })
+      else doBeeps()
+    } else {
+      doBeeps()
+    }
   } catch(e) { console.warn('[admin beep]', e?.message) }
 }
 
