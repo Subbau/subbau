@@ -9899,13 +9899,29 @@ function fillKWSelect(autoLoad) {
   if (autoLoad) loadKWData()
 }
 
-// Získá ČERSTVOU GPS adresu v okamžiku volání (vrací Promise s textem adresy nebo '')
+// Získá ČERSTVOU a co nejpřesnější GPS adresu (vrací Promise s textem adresy nebo '').
+// Sleduje polohu a vezme nejpřesnější — skončí při ≤50 m, nebo po 10 s vezme nejlepší dosud.
 function captureLocationNow() {
   return new Promise((resolve) => {
     if (!navigator.geolocation) { resolve(''); return }
-    navigator.geolocation.getCurrentPosition(async p => {
-      gpsLat = p.coords.latitude
-      gpsLng = p.coords.longitude
+
+    let bestAcc = Infinity
+    let bestLat = null, bestLng = null
+    let done = false
+    let watchId = null
+
+    const stopWatch = () => {
+      if (watchId !== null) { try { navigator.geolocation.clearWatch(watchId) } catch(e){} watchId = null }
+    }
+
+    // Přeloží nejlepší polohu na adresu a vrátí ji
+    const finish = async () => {
+      if (done) return
+      done = true
+      stopWatch()
+      if (bestLat === null) { resolve(''); return }
+      gpsLat = bestLat; gpsLng = bestLng
+      _gpsAccuracy = bestAcc
       let resolved = ''
       try {
         const r = await fetch(`https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${gpsLat}&lon=${gpsLng}&addressdetails=1&accept-language=cs&zoom=18`, { headers: { 'Accept':'application/json' } })
@@ -9936,7 +9952,24 @@ function captureLocationNow() {
       }
       gpsAddr = resolved || (gpsLat && gpsLng ? `${gpsLat.toFixed(5)}, ${gpsLng.toFixed(5)}` : '')
       resolve(gpsAddr)
-    }, () => resolve(''), { enableHighAccuracy: true, timeout: 20000, maximumAge: 60000 })
+    }
+
+    // Sleduj polohu — ber jen přesnější údaje. Skonči při ≤50 m.
+    watchId = navigator.geolocation.watchPosition(p => {
+      const acc = p.coords.accuracy || 9999
+      if (acc < bestAcc) {
+        bestAcc = acc
+        bestLat = p.coords.latitude
+        bestLng = p.coords.longitude
+      }
+      if (bestAcc <= 50) finish()   // dost přesné → hotovo
+    }, () => {
+      // chyba měření — když nemáme vůbec nic, vrať prázdné (zůstane ruční zadání)
+      if (!done && bestLat === null) { done = true; stopWatch(); resolve('') }
+    }, { enableHighAccuracy: true, timeout: 10000, maximumAge: 0 })
+
+    // Po 10 s vezmi nejlepší, co máme (i kdyby to nebylo ≤50 m)
+    setTimeout(() => { if (!done) finish() }, 10000)
   })
 }
 
