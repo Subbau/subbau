@@ -1484,6 +1484,7 @@ button:not(.x-close) > svg:first-child{margin-right:6px}
         </div>
         <button id="att-btn-worklog" onclick="openDayWorkLog()" style="display:none;width:100%;margin-top:10px;padding:13px;background:#fff;color:#211D1A;border:2px solid #211D1A;border-radius:14px;font-size:14px;font-weight:700;cursor:pointer;font-family:inherit"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:1em;height:1em;flex-shrink:0;vertical-align:-2px"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/></svg> Zapsat co jsem dnes dělal</button>
         <div id="att-worklog-done" style="display:none;margin-top:8px;font-size:12px;color:var(--green);text-align:center;font-weight:600"></div>
+        <button type="button" onclick="openSecondSite()" style="width:100%;margin-top:10px;padding:13px;background:#fff;color:#9c3b22;border:2px dashed #9c3b22;border-radius:14px;font-size:14px;font-weight:700;cursor:pointer;font-family:inherit;display:flex;align-items:center;justify-content:center;gap:8px"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:1em;height:1em;flex-shrink:0"><path d="M12 5v14M5 12h14"/></svg> Druhá stavba dnes</button>
         <div style="text-align:center;margin-top:12px">
           <button type="button" onclick="showManualAddress()" style="background:none;border:none;color:var(--text3);font-size:12px;text-decoration:underline;cursor:pointer;font-family:inherit;padding:4px">Zadat adresu stavby ručně</button>
         </div>
@@ -7889,6 +7890,77 @@ async function confirmCheckout() {
   todayAttId = null
   todayRecord = null
   showToast('✅ Zapsáno')
+  getTodayRecord()
+  loadMobWeek()
+}
+
+// ===== DRUHÁ STAVBA (samostatný záznam pro tentýž den) =====
+let _ssGpsLat = null, _ssGpsLng = null, _ssGpsAddr = ''
+
+function openSecondSite() {
+  _ssGpsLat = null; _ssGpsLng = null; _ssGpsAddr = ''
+  const s = document.getElementById('ss-site'); if (s) s.value = ''
+  const d = document.getElementById('ss-desc'); if (d) d.value = ''
+  const st = document.getElementById('ss-gps-status'); if (st) { st.style.display = 'none'; st.textContent = '' }
+  document.getElementById('second-site-dialog').style.display = 'flex'
+  setTimeout(() => s?.focus(), 100)
+}
+
+function closeSecondSite() {
+  document.getElementById('second-site-dialog').style.display = 'none'
+}
+
+async function captureSecondSiteGps() {
+  const st = document.getElementById('ss-gps-status')
+  if (st) { st.style.display = 'block'; st.textContent = '📡 Zjišťuji polohu…' }
+  try {
+    const addr = await captureLocationNow()   // naplní gpsLat/gpsLng, vrátí adresu
+    _ssGpsLat = (typeof gpsLat !== 'undefined') ? gpsLat : null
+    _ssGpsLng = (typeof gpsLng !== 'undefined') ? gpsLng : null
+    _ssGpsAddr = addr || ''
+    if (_ssGpsAddr) {
+      if (st) st.textContent = '📍 ' + _ssGpsAddr
+      const siteEl = document.getElementById('ss-site')
+      if (siteEl && !siteEl.value.trim()) siteEl.value = _ssGpsAddr
+    } else if (st) {
+      st.textContent = '⚠️ Polohu se nepodařilo načíst — zadej adresu ručně'
+    }
+  } catch (e) {
+    if (st) st.textContent = '⚠️ Polohu se nepodařilo načíst — zadej adresu ručně'
+  }
+}
+
+async function saveSecondSite() {
+  const siteEl = document.getElementById('ss-site')
+  const descEl = document.getElementById('ss-desc')
+  const site = siteEl?.value.trim()
+  const desc = descEl?.value.trim()
+  if (!site) { if (siteEl) { siteEl.style.borderColor = '#dc3545'; siteEl.focus() } showToast('⚠️ Zadej adresu druhé stavby'); return }
+  if (siteEl) siteEl.style.borderColor = '#d8cfc0'
+
+  const now = new Date()
+  const kw = getKW()
+  const row = {
+    worker_id: currentUser.id,
+    work_date: localDateStr(now),
+    kw: kw.week, kw_year: kw.year,
+    is_saturday: now.getDay() === 6,
+    construction_site: site,
+    location_address: site,
+    work_description: desc || null,
+    address_source: _ssGpsLat != null ? 'gps' : 'manual',
+    manual_note: '2. stavba'
+  }
+  if (_ssGpsLat != null) { row.location_lat = _ssGpsLat; row.location_lng = _ssGpsLng }
+
+  const { error } = await sb.from('attendance').insert(row)
+  if (error) {
+    console.error('[druhá stavba] insert error:', error)
+    showToast('❌ Chyba uložení: ' + error.message)
+    return
+  }
+  closeSecondSite()
+  showToast('✅ Druhá stavba uložena')
   getTodayRecord()
   loadMobWeek()
 }
@@ -15944,6 +16016,54 @@ function compressImage(file, maxSize) {
       <span>Uložit a ukončit směnu</span>
     </button>
     <button onclick="cancelCheckout()"
+      style="width:100%;padding:13px;background:none;border:none;color:#9a9082;border-radius:12px;font-size:14px;font-weight:600;cursor:pointer;font-family:inherit">
+      Zpět
+    </button>
+  </div>
+</div>
+
+<!-- DRUHÁ STAVBA: samostatný záznam pro tentýž den -->
+<div id="second-site-dialog" style="display:none;position:fixed;inset:0;background:rgba(33,29,26,.6);z-index:9999;align-items:flex-end;justify-content:center">
+  <div style="background:#fff;border-radius:24px 24px 0 0;padding:8px 22px calc(24px + env(safe-area-inset-bottom));width:100%;max-width:480px;box-shadow:0 -8px 40px rgba(0,0,0,.3);max-height:92vh;overflow-y:auto">
+    <div style="padding:8px 0 14px"><div style="width:44px;height:5px;background:#d8cfc0;border-radius:3px;margin:0 auto"></div></div>
+    <div style="display:flex;align-items:center;gap:13px;margin-bottom:6px">
+      <div style="width:46px;height:46px;flex-shrink:0;background:#f7e9e5;border-radius:13px;display:flex;align-items:center;justify-content:center;color:#9c3b22"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:24px;height:24px"><path d="M3 21h18M5 21V7l7-4 7 4v14M9 21v-6h6v6"/></svg></div>
+      <div>
+        <div style="font-size:19px;font-weight:800;color:#211D1A;font-family:'Archivo',-apple-system,sans-serif;letter-spacing:-.3px">Druhá stavba dnes</div>
+        <div style="font-size:13px;color:#9a9082;margin-top:1px">Zaznamenej druhou adresu, kde jsi dnes byl</div>
+      </div>
+    </div>
+    <p style="font-size:13px;color:#6b6157;line-height:1.5;margin:14px 0 18px;padding:12px 14px;background:#faf0dc;border-radius:12px">Pokud jsi byl v jednom dni na <b style="color:#211D1A">dvou stavbách</b>, zapiš tu druhou sem. Uloží se jako samostatný záznam dne.</p>
+
+    <div style="margin-bottom:16px">
+      <label style="font-size:13px;font-weight:800;color:#211D1A;display:block;margin-bottom:8px">Adresa druhé stavby</label>
+      <input type="text" id="ss-site" placeholder="např. Mnichov — Bogenhausen, Praha — Karlín…"
+        style="width:100%;padding:14px;border:1.5px solid var(--brd);border-radius:12px;font-size:16px;font-family:inherit;box-sizing:border-box;background:#fff"
+        onfocus="this.style.borderColor='#9c3b22'" onblur="this.style.borderColor='#d8cfc0'">
+    </div>
+
+    <div style="margin-bottom:16px">
+      <button type="button" onclick="captureSecondSiteGps()"
+        style="width:100%;padding:13px;background:#fff;color:var(--blue);border:1.5px solid var(--blue);border-radius:12px;font-size:14px;font-weight:700;cursor:pointer;font-family:inherit;display:flex;align-items:center;justify-content:center;gap:8px">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:18px;height:18px;flex-shrink:0"><path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"/><circle cx="12" cy="10" r="3"/></svg>
+        Zaznamenat polohu (GPS)
+      </button>
+      <div id="ss-gps-status" style="display:none;font-size:12px;color:var(--blue);margin-top:8px;padding:8px 10px;background:var(--blue-l);border-radius:8px"></div>
+    </div>
+
+    <div style="margin-bottom:22px">
+      <label style="font-size:13px;font-weight:800;color:#211D1A;display:block;margin-bottom:8px">Co jsi na druhé stavbě dělal?</label>
+      <textarea id="ss-desc" rows="4" placeholder="např. montáž lešení, úklid, pomocné práce…"
+        style="width:100%;padding:14px;border:1.5px solid var(--brd);border-radius:12px;font-size:16px;font-family:inherit;resize:vertical;box-sizing:border-box;min-height:100px;line-height:1.5;background:#fff"
+        onfocus="this.style.borderColor='#9c3b22'" onblur="this.style.borderColor='#d8cfc0'"></textarea>
+    </div>
+
+    <button onclick="saveSecondSite()"
+      style="width:100%;padding:16px;background:#9c3b22;color:#fff;border:none;border-radius:14px;font-size:16px;font-weight:800;cursor:pointer;font-family:'Archivo',-apple-system,sans-serif;display:flex;align-items:center;justify-content:center;gap:9px;letter-spacing:-.2px;margin-bottom:10px">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:19px;height:19px"><path d="M20 6 9 17l-5-5"/></svg>
+      <span>Uložit druhou stavbu</span>
+    </button>
+    <button onclick="closeSecondSite()"
       style="width:100%;padding:13px;background:none;border:none;color:#9a9082;border-radius:12px;font-size:14px;font-weight:600;cursor:pointer;font-family:inherit">
       Zpět
     </button>
