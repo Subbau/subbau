@@ -4357,6 +4357,32 @@ function showPending() {
   const mn3 = document.querySelector('.mob-nav'); if(mn3) mn3.style.display = 'none'
 }
 
+// Vloží profil a když si DB stěžuje na chybějící sloupec (schema cache),
+// ten sloupec z dat vyhodí a insert zopakuje. Zkusí to víckrát pro víc chybějících sloupců.
+async function insertProfileResilient(payload) {
+  let data = { ...payload }
+  let lastError = null
+  for (let attempt = 0; attempt < 8; attempt++) {
+    const { error } = await sb.from('profiles').insert(data)
+    if (!error) return { error: null }
+    lastError = error
+    const msg = error.message || ''
+    // Typicky: Could not find the 'business_type' column of 'profiles' in the schema cache
+    let col = null
+    const m1 = msg.match(/find the '([^']+)' column/i)
+    const m2 = msg.match(/column "?([a-z0-9_]+)"? .* does not exist/i)
+    if (m1) col = m1[1]
+    else if (m2) col = m2[1]
+    if (col && Object.prototype.hasOwnProperty.call(data, col)) {
+      console.warn('[register] chybí sloupec "' + col + '", opakuji bez něj')
+      delete data[col]
+      continue
+    }
+    break  // jiná chyba než chybějící sloupec → nemá smysl opakovat
+  }
+  return { error: lastError }
+}
+
 async function doRegister() {
   const name = document.getElementById('reg-name').value.trim()
   const email = document.getElementById('reg-email').value.trim()
@@ -4469,15 +4495,8 @@ async function doRegister() {
       is_active: false,
       registration_status: 'pending'
     }
-    let { error: profileErr } = await sb.from('profiles').insert(baseProfile)
-    // Pojistka: když v DB chybí sloupec (např. english_level/german_level ještě
-    // není přidán migrací), zkus vložit profil bez jazykových polí, ať registrace projde.
-    if (profileErr && /column .* does not exist|english_level|german_level|schema cache/i.test(profileErr.message || '')) {
-      console.warn('[register] jazykový sloupec chybí, opakuji bez něj:', profileErr.message)
-      const p2 = { ...baseProfile }; delete p2.english_level; delete p2.german_level
-      const retry = await sb.from('profiles').insert(p2)
-      profileErr = retry.error
-    }
+    // Pojistka: když v DB chybí jakýkoli sloupec (schema cache), helper ho vyhodí a insert zopakuje.
+    let { error: profileErr } = await insertProfileResilient(baseProfile)
     if (profileErr) {
       console.error('Profile insert error:', profileErr)
       const pCode = profileErr.code || profileErr.status || ''
@@ -4513,12 +4532,7 @@ async function doRegister() {
       is_active: false,
       registration_status: 'pending'
     }
-    let { error: profileErrNoSession } = await sb.from('profiles').insert(baseProfileNS)
-    if (profileErrNoSession && /column .* does not exist|english_level|german_level|schema cache/i.test(profileErrNoSession.message || '')) {
-      const p2 = { ...baseProfileNS }; delete p2.english_level; delete p2.german_level
-      const retry = await sb.from('profiles').insert(p2)
-      profileErrNoSession = retry.error
-    }
+    let { error: profileErrNoSession } = await insertProfileResilient(baseProfileNS)
     if (profileErrNoSession) {
       console.warn('Profile insert without session failed:', profileErrNoSession.message)
     }
