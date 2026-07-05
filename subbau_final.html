@@ -4452,7 +4452,7 @@ async function doRegister() {
     // Nastav session v klientovi PRED insertom profilu
     try { await sb.auth.setSession(session) } catch(e) { console.warn('setSession:', e) }
     // Máme session — vytvoř profil ihned
-    const { error: profileErr } = await sb.from('profiles').insert({
+    const baseProfile = {
       id: userId,
       email,
       full_name: name,
@@ -4468,7 +4468,16 @@ async function doRegister() {
       role: 'osvec',
       is_active: false,
       registration_status: 'pending'
-    })
+    }
+    let { error: profileErr } = await sb.from('profiles').insert(baseProfile)
+    // Pojistka: když v DB chybí sloupec (např. english_level/german_level ještě
+    // není přidán migrací), zkus vložit profil bez jazykových polí, ať registrace projde.
+    if (profileErr && /column .* does not exist|english_level|german_level|schema cache/i.test(profileErr.message || '')) {
+      console.warn('[register] jazykový sloupec chybí, opakuji bez něj:', profileErr.message)
+      const p2 = { ...baseProfile }; delete p2.english_level; delete p2.german_level
+      const retry = await sb.from('profiles').insert(p2)
+      profileErr = retry.error
+    }
     if (profileErr) {
       console.error('Profile insert error:', profileErr)
       const pCode = profileErr.code || profileErr.status || ''
@@ -4487,7 +4496,7 @@ async function doRegister() {
   } else {
     // Zkus profil vložit i bez okamžité session — Supabase ho může mít
     // (nebo email konfirmace je zapnutá — v tom případě uložíme základní data)
-    const { error: profileErrNoSession } = await sb.from('profiles').insert({
+    const baseProfileNS = {
       id: userId,
       email,
       full_name: name,
@@ -4503,7 +4512,13 @@ async function doRegister() {
       role: 'osvec',
       is_active: false,
       registration_status: 'pending'
-    })
+    }
+    let { error: profileErrNoSession } = await sb.from('profiles').insert(baseProfileNS)
+    if (profileErrNoSession && /column .* does not exist|english_level|german_level|schema cache/i.test(profileErrNoSession.message || '')) {
+      const p2 = { ...baseProfileNS }; delete p2.english_level; delete p2.german_level
+      const retry = await sb.from('profiles').insert(p2)
+      profileErrNoSession = retry.error
+    }
     if (profileErrNoSession) {
       console.warn('Profile insert without session failed:', profileErrNoSession.message)
     }
