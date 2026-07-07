@@ -5643,7 +5643,8 @@ async function renderCalendar() {
   let start, end
   if (calView === 'week') {
     start = mondayOf(calAnchor)
-    end = new Date(start); end.setDate(start.getDate()+6)
+    // Načítáme rovnou DVA týdny (tento + následující), ať je můžeme zobrazit pod sebou
+    end = new Date(start); end.setDate(start.getDate()+13)
   } else {
     start = new Date(calAnchor.getFullYear(), calAnchor.getMonth(), 1)
     end = new Date(calAnchor.getFullYear(), calAnchor.getMonth()+1, 0)
@@ -5665,7 +5666,8 @@ async function renderCalendar() {
 
   if (titleEl) {
     if (calView === 'week') {
-      titleEl.textContent = `Týden ${start.toLocaleDateString('cs-CZ',{day:'2-digit',month:'2-digit'})} – ${end.toLocaleDateString('cs-CZ',{day:'2-digit',month:'2-digit'})}`
+      const wkEnd = new Date(start); wkEnd.setDate(start.getDate()+6)
+      titleEl.textContent = `Týden ${start.toLocaleDateString('cs-CZ',{day:'2-digit',month:'2-digit'})} – ${wkEnd.toLocaleDateString('cs-CZ',{day:'2-digit',month:'2-digit'})}`
     } else {
       titleEl.textContent = calAnchor.toLocaleDateString('cs-CZ',{month:'long',year:'numeric'})
     }
@@ -5730,41 +5732,53 @@ async function renderCalendar() {
   const dayShort = ['Po','Út','St','Čt','Pá','So','Ne']
 
   if (calView === 'week') {
-    // řádky = pracovníci, sloupce = Po–Ne (stejně široké, pevná šířka)
-    const days = []
-    for (let i=0;i<7;i++){ const d=new Date(start); d.setDate(start.getDate()+i); days.push(d) }
-    let html = '<table style="width:100%;table-layout:fixed;border-collapse:separate;border-spacing:3px;font-size:12px;min-width:900px">'
-    html += '<colgroup><col style="width:260px">' + days.map(()=>'<col style="width:auto">').join('') + '</colgroup>'
-    html += '<thead><tr><th style="text-align:left;padding:6px 10px;font-size:12px;color:var(--text2)">Pracovník</th>'
-    days.forEach((d,i)=>{ const ds=localDateStr(d); const isT = ds===todayStr; html += `<th style="padding:6px 2px;text-align:center;${isT?'background:var(--amber-l);border-radius:8px':''}"><div style="font-weight:700">${dayShort[i]}</div><div style="font-weight:400;color:var(--text3);font-size:11px">${d.getDate()}.${d.getMonth()+1}.</div></th>` })
-    html += '</tr></thead><tbody>'
-    const colCount = days.length
-    calRows.forEach(item => {
-      if (item.type === 'firm') {
-        html += `<tr><td colspan="${colCount+1}" style="padding:10px 10px 4px"><div style="font-size:13px;font-weight:800;color:#211D1A;border-bottom:2px solid var(--amber,#E8A13A);padding-bottom:4px;display:flex;align-items:center;gap:6px">🏢 ${item.label} <span style="font-size:11px;font-weight:600;color:var(--text3)">(${item.count})</span></div></td></tr>`
-        return
-      }
-      if (item.type === 'sub') {
-        html += `<tr><td colspan="${colCount+1}" style="padding:4px 10px 2px 22px"><div style="font-size:11px;font-weight:700;color:var(--blue)">👥 ${item.label}</div></td></tr>`
-        return
-      }
-      const w = item.w
-      const indent = item.sub ? 'padding-left:22px;' : ''
-      html += `<tr style="cursor:pointer" onclick="openWorkerModal('${w.id}')"><td style="padding:8px 10px;${indent}background:var(--bg);border-radius:8px"><b style="font-size:12px">${w.full_name}</b><div style="font-size:10px;color:var(--text3);margin-top:1px">${profLabel(w.profession)||''}</div></td>`
-      days.forEach((d,di)=>{
-        const ds = localDateStr(d)
-        const isT = ds===todayStr
-        const st = dayStatusFor(w, ds, attSet, vacList)
-        const c = st ? colors[st] : 'transparent'
-        const darkText = (st==='plan' || st==='bad' || st==='rest')
-        const txtCol = !st ? 'var(--text3)' : (darkText ? '#211D1A' : '#fff')
-        const label = stLabel(st)
-        html += `<td style="padding:0;text-align:center;${isT?'background:var(--amber-l);border-radius:6px':''}"><div style="background:${c};color:${txtCol};border-radius:6px;padding:9px 1px;font-size:10px;font-weight:700;min-height:18px;overflow:hidden">${label||'·'}</div></td>`
+    // Sestav jednu týdenní tabulku pro daný začátek týdne (pondělí)
+    const buildWeekTable = (weekStart) => {
+      const days = []
+      for (let i=0;i<7;i++){ const d=new Date(weekStart); d.setDate(weekStart.getDate()+i); days.push(d) }
+      let html = '<table style="width:100%;table-layout:fixed;border-collapse:separate;border-spacing:3px;font-size:12px;min-width:900px">'
+      html += '<colgroup><col style="width:260px">' + days.map(()=>'<col style="width:auto">').join('') + '</colgroup>'
+      html += '<thead><tr><th style="text-align:left;padding:6px 10px;font-size:12px;color:var(--text2)">Pracovník</th>'
+      days.forEach((d,i)=>{ const ds=localDateStr(d); const isT = ds===todayStr; html += `<th style="padding:6px 2px;text-align:center;${isT?'background:var(--amber-l);border-radius:8px':''}"><div style="font-weight:700">${dayShort[i]}</div><div style="font-weight:400;color:var(--text3);font-size:11px">${d.getDate()}.${d.getMonth()+1}.</div></th>` })
+      html += '</tr></thead><tbody>'
+      const colCount = days.length
+      calRows.forEach(item => {
+        if (item.type === 'firm') {
+          html += `<tr><td colspan="${colCount+1}" style="padding:10px 10px 4px"><div style="font-size:13px;font-weight:800;color:#211D1A;border-bottom:2px solid var(--amber,#E8A13A);padding-bottom:4px;display:flex;align-items:center;gap:6px">🏢 ${item.label} <span style="font-size:11px;font-weight:600;color:var(--text3)">(${item.count})</span></div></td></tr>`
+          return
+        }
+        if (item.type === 'sub') {
+          html += `<tr><td colspan="${colCount+1}" style="padding:4px 10px 2px 22px"><div style="font-size:11px;font-weight:700;color:var(--blue)">👥 ${item.label}</div></td></tr>`
+          return
+        }
+        const w = item.w
+        const indent = item.sub ? 'padding-left:22px;' : ''
+        html += `<tr style="cursor:pointer" onclick="openWorkerModal('${w.id}')"><td style="padding:8px 10px;${indent}background:var(--bg);border-radius:8px"><b style="font-size:12px">${w.full_name}</b><div style="font-size:10px;color:var(--text3);margin-top:1px">${profLabel(w.profession)||''}</div></td>`
+        days.forEach((d,di)=>{
+          const ds = localDateStr(d)
+          const isT = ds===todayStr
+          const st = dayStatusFor(w, ds, attSet, vacList)
+          const c = st ? colors[st] : 'transparent'
+          const darkText = (st==='plan' || st==='bad' || st==='rest')
+          const txtCol = !st ? 'var(--text3)' : (darkText ? '#211D1A' : '#fff')
+          const label = stLabel(st)
+          html += `<td style="padding:0;text-align:center;${isT?'background:var(--amber-l);border-radius:6px':''}"><div style="background:${c};color:${txtCol};border-radius:6px;padding:9px 1px;font-size:10px;font-weight:700;min-height:18px;overflow:hidden">${label||'·'}</div></td>`
+        })
+        html += '</tr>'
       })
-      html += '</tr>'
-    })
-    html += '</tbody></table>'
-    content.innerHTML = html
+      html += '</tbody></table>'
+      return html
+    }
+
+    const week1Start = new Date(start)
+    const week2Start = new Date(start); week2Start.setDate(start.getDate()+7)
+    const wk = (s) => { const e=new Date(s); e.setDate(s.getDate()+6); return `${s.toLocaleDateString('cs-CZ',{day:'2-digit',month:'2-digit'})} – ${e.toLocaleDateString('cs-CZ',{day:'2-digit',month:'2-digit'})}` }
+
+    content.innerHTML =
+      `<div style="font-size:13px;font-weight:800;color:#211D1A;margin:0 0 8px;padding:6px 10px;background:var(--amber-l,#faf0dc);border-radius:8px;display:inline-block">Tento týden · ${wk(week1Start)}</div>` +
+      buildWeekTable(week1Start) +
+      `<div style="font-size:13px;font-weight:800;color:#211D1A;margin:26px 0 8px;padding:6px 10px;background:var(--bg,#f4efe7);border-radius:8px;display:inline-block;border:1px solid var(--brd)">Následující týden · ${wk(week2Start)}</div>` +
+      buildWeekTable(week2Start)
   } else {
     // měsíční mřížka — CSS grid, 7 stejných sloupců, čtvercové buňky
     const firstMonday = mondayOf(start)
@@ -6786,7 +6800,7 @@ const tutorialSteps = [
         <div style="display:flex;align-items:center;gap:12px;margin-bottom:8px">
           <div style="width:42px;height:42px;flex-shrink:0;background:#9c3b22;color:#fff;border-radius:50%;display:flex;align-items:center;justify-content:center;font-weight:800;font-size:15px;font-family:'Archivo',sans-serif">BK</div>
           <div>
-            <div style="color:#fff;font-size:14px;font-weight:800">Bibiana Kissova</div>
+            <div style="color:#fff;font-size:14px;font-weight:800">Bibiana Kissová</div>
             <div style="color:#888;font-size:12px">Faktury a ubytování</div>
           </div>
         </div>
@@ -15505,10 +15519,11 @@ async function loadWdDocs(id) {
     expired: { label: 'Propadlý', cls: 'pr' },
     rejected: { label: 'Zamítnutý', cls: 'pr' }
   }
-  if(!data?.length){div.innerHTML='<div style="color:var(--text3);text-align:center;padding:20px">Žádné dokumenty</div>';return}
+  const uploadBtnHtml = '<div style="text-align:right;margin-bottom:12px"><button onclick="openUploadForWorker()" style="font-size:13px;padding:9px 16px;background:#9c3b22;color:#fff;border:none;border-radius:11px;cursor:pointer;font-family:inherit;font-weight:800;display:inline-flex;align-items:center;gap:7px"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:16px;height:16px"><path d="M12 5v14M5 12h14"/></svg>Nahrát dokument</button></div>'
+  if(!data?.length){div.innerHTML = uploadBtnHtml + '<div style="color:var(--text3);text-align:center;padding:20px">Žádné dokumenty — můžete nahrát první za pracovníka</div>';return}
   const todayD = new Date(); todayD.setHours(0,0,0,0)
   const stColor = { pg:{c:'#2f6b45',b:'#3f7d54',bg:'#e6f0e9'}, pa:{c:'#9a6b15',b:'#e8a13a',bg:'#faf0dc'}, pr:{c:'#9c3b22',b:'#9c3b22',bg:'#f7e9e5'} }
-  div.innerHTML = '<div style="text-align:right;margin-bottom:12px"><button onclick="openUploadForWorker()" style="font-size:13px;padding:9px 16px;background:#9c3b22;color:#fff;border:none;border-radius:11px;cursor:pointer;font-family:inherit;font-weight:800;display:inline-flex;align-items:center;gap:7px"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:16px;height:16px"><path d="M12 5v14M5 12h14"/></svg>Nahrát dokument</button></div>' +
+  div.innerHTML = uploadBtnHtml +
   data.map(d=>{
     const si = statusInfo[d.status] || { label: d.status||'—', cls: 'pa' }
     const col = stColor[si.cls] || stColor.pa
