@@ -794,7 +794,7 @@ button:not(.x-close) > svg:first-child{margin-right:6px}
           </div>
           <!-- UPOZORNĚNÍ NA DOKUMENTY -->
           <div class="card" id="doc-alerts-card" style="display:none;border-left:4px solid var(--red)">
-            <div class="card-h"><h4 style="color:var(--red)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:18px;height:18px;flex-shrink:0;vertical-align:-3px;margin-right:7px"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><path d="M12 9v4M12 17h.01"/></svg>Dokumenty vyžadující akci</h4></div>
+            <div class="card-h" style="display:flex;align-items:center;justify-content:space-between"><h4 style="color:var(--red)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:18px;height:18px;flex-shrink:0;vertical-align:-3px;margin-right:7px"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><path d="M12 9v4M12 17h.01"/></svg>Dokumenty vyžadující akci</h4><button onclick="resetDocAlerts()" title="Zobrazit i skryté položky" style="font-size:11px;padding:4px 10px;border:1px solid var(--brd);border-radius:7px;background:#fff;color:var(--text3);cursor:pointer;font-family:inherit;font-weight:600">Obnovit skryté</button></div>
             <div id="doc-alerts-list" style="padding:0 16px 8px"></div>
           </div>
 
@@ -12862,6 +12862,16 @@ async function loadDocumentAlertsStat() {
     .select('*')
     .in('worker_id', workerIds)
 
+  // Načti "vykřížkované" (skryté) položky upozornění — aby nepřekážely.
+  // Perzistentně přes tabulku doc_alert_dismissals; fallback = session (okno).
+  let dismissed = new Set()
+  try {
+    const { data: dis, error: disErr } = await sb.from('doc_alert_dismissals').select('dismiss_key')
+    if (!disErr && dis) dismissed = new Set(dis.map(x => x.dismiss_key))
+    else if (disErr) dismissed = window._docAlertDismissed || new Set()
+  } catch(e) { dismissed = window._docAlertDismissed || new Set() }
+  window._docAlertDismissed = dismissed
+
   const alerts = []
 
   workers.forEach(w => {
@@ -12872,23 +12882,24 @@ async function loadDocumentAlertsStat() {
     REQUIRED_TYPES.forEach(type => {
       const hasDocs = myDocs.some(d => d.doc_type === type)
       if (!hasDocs) {
-        workerAlerts.push({ type: 'missing', msg: `❌ Chybí: ${typeLabels[type]}`, color: 'var(--red)' })
+        workerAlerts.push({ key: w.id+'|missing|'+type, msg: `❌ Chybí: ${typeLabels[type]}`, color: 'var(--red)' })
       }
     })
 
     // 2. Dokumenty čekající na schválení (status = pending)
     myDocs.filter(d => d.status === 'pending').forEach(d => {
-      workerAlerts.push({ type: 'pending', msg: `⏳ Ke schválení: ${typeLabels[d.doc_type]||d.doc_type}`, color: 'var(--amber)' })
+      workerAlerts.push({ key: w.id+'|pending|'+d.id, msg: `⏳ Ke schválení: ${typeLabels[d.doc_type]||d.doc_type}`, color: 'var(--amber)' })
     })
 
     // 3. Nečitelné / odmítnuté dokumenty
     myDocs.filter(d => d.status === 'unreadable' || d.status === 'rejected').forEach(d => {
-      workerAlerts.push({ type: 'unreadable', msg: `❌ Nahrát znovu: ${typeLabels[d.doc_type]||d.doc_type}`, color: 'var(--red)' })
+      workerAlerts.push({ key: w.id+'|unreadable|'+d.id, msg: `❌ Nahrát znovu: ${typeLabels[d.doc_type]||d.doc_type}`, color: 'var(--red)' })
     })
 
-
-    if (workerAlerts.length > 0) {
-      alerts.push({ worker: w, issues: workerAlerts })
+    // Odfiltruj vykřížkované položky
+    const visible = workerAlerts.filter(a => !dismissed.has(a.key))
+    if (visible.length > 0) {
+      alerts.push({ worker: w, issues: visible })
     }
   })
 
@@ -12916,9 +12927,29 @@ async function loadDocumentAlertsStat() {
         <b style="font-size:13px;cursor:pointer;color:var(--blue)" onclick="openWorkerModal('${worker.id}')">${worker.full_name} ↗</b>
         <span style="font-size:11px;color:var(--text3)">${profLabel(worker.profession)||''}</span>
       </div>
-      ${issues.map(i => `<div style="font-size:12px;color:${i.color};padding:2px 0">${i.msg}</div>`).join('')}
+      ${issues.map(i => `<div style="font-size:12px;color:${i.color};padding:2px 0;display:flex;align-items:center;justify-content:space-between;gap:8px">
+        <span>${i.msg}</span>
+        <button onclick="dismissDocAlert('${i.key}')" title="Skrýt — pro tohoto pracovníka to není aktuální" style="flex-shrink:0;font-size:11px;padding:2px 8px;border:1px solid var(--brd);border-radius:7px;background:#fff;color:var(--text3);cursor:pointer;font-family:inherit;font-weight:600;display:inline-flex;align-items:center;gap:4px"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" style="width:12px;height:12px"><path d="M18 6L6 18M6 6l12 12"/></svg>Skrýt</button>
+      </div>`).join('')}
     </div>
   `).join('')
+}
+
+// Vykřížkuj (skryj) položku upozornění, ať nepřekáží. Uloží se do DB (fallback: session).
+async function dismissDocAlert(key) {
+  if (!window._docAlertDismissed) window._docAlertDismissed = new Set()
+  window._docAlertDismissed.add(key)
+  try {
+    await sb.from('doc_alert_dismissals').insert({ dismiss_key: key, dismissed_by: currentUser?.id || null })
+  } catch(e) { /* tabulka nemusí existovat — zůstane aspoň skryté do reloadu */ }
+  loadDocumentAlertsStat()
+}
+
+// Vrať zpět všechna skrytá upozornění
+async function resetDocAlerts() {
+  window._docAlertDismissed = new Set()
+  try { await sb.from('doc_alert_dismissals').delete().neq('dismiss_key', '') } catch(e) {}
+  loadDocumentAlertsStat()
 }
 
 
