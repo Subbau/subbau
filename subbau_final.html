@@ -3345,6 +3345,9 @@ async function ensureLib(name) {
   } else if (name === 'pdfjs') {
     if (typeof pdfjsLib !== 'undefined') return
     await _loadScript('https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js')
+  } else if (name === 'jszip') {
+    if (window.JSZip) return
+    await _loadScript('https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js')
   }
 }
 // Pohodlí: načti víc knihoven najednou
@@ -9301,20 +9304,26 @@ async function imagesToPdfBlob(files) {
     try {
       dataUrl = await loadDataUrl(list[i])
     } catch(e) { throw new Error('Soubor se nepodařilo načíst') }
-    // jsPDF umí JPEG/PNG; pokud je WEBP/HEIC nebo jiné, překresli přes canvas na JPEG
-    let fmt = 'JPEG'
-    if (/^data:image\/png/i.test(dataUrl)) fmt = 'PNG'
-    if (!/^data:image\/(jpe?g|png)/i.test(dataUrl)) {
-      let tmp
-      try {
-        tmp = await loadImg(dataUrl)
-      } catch(e) {
-        throw new Error('Tento formát fotky telefon neumí převést. Vyfoťte přes „Skenovat dokument" nebo nahrajte PDF.')
-      }
-      const c = document.createElement('canvas'); c.width = tmp.naturalWidth; c.height = tmp.naturalHeight
-      c.getContext('2d').drawImage(tmp, 0, 0)
-      dataUrl = c.toDataURL('image/jpeg', 0.92); fmt = 'JPEG'
+    // Načti obrázek (i WEBP/HEIC, pokud ho prohlížeč umí)
+    let tmp
+    try {
+      tmp = await loadImg(dataUrl)
+    } catch(e) {
+      throw new Error('Tento formát fotky telefon neumí převést. Vyfoťte přes „Skenovat dokument" nebo nahrajte PDF.')
     }
+    // VŽDY zmenši na rozumné rozlišení a zkomprimuj na JPEG — jinak jsou fotky OP
+    // z telefonu obrovské (klidně 5–10 MB). 1600 px na delší straně je pro doklad
+    // víc než dost a soubor je pak pod ~300 kB.
+    const MAX_SIDE = 1600
+    let nw = tmp.naturalWidth || tmp.width, nh = tmp.naturalHeight || tmp.height
+    const scale = Math.min(1, MAX_SIDE / Math.max(nw, nh))
+    const cw = Math.max(1, Math.round(nw * scale)), ch = Math.max(1, Math.round(nh * scale))
+    const c = document.createElement('canvas'); c.width = cw; c.height = ch
+    const cx = c.getContext('2d')
+    cx.fillStyle = '#fff'; cx.fillRect(0, 0, cw, ch)  // bílé pozadí (pro průhledné PNG)
+    cx.drawImage(tmp, 0, 0, cw, ch)
+    dataUrl = c.toDataURL('image/jpeg', 0.82)
+    const fmt = 'JPEG'
     let img
     try {
       img = await loadImg(dataUrl)
@@ -15551,8 +15560,13 @@ async function loadWdDocs(id) {
     expired: { label: 'Propadlý', cls: 'pr' },
     rejected: { label: 'Zamítnutý', cls: 'pr' }
   }
-  const uploadBtnHtml = '<div style="text-align:right;margin-bottom:12px"><button onclick="openUploadForWorker()" style="font-size:13px;padding:9px 16px;background:#9c3b22;color:#fff;border:none;border-radius:11px;cursor:pointer;font-family:inherit;font-weight:800;display:inline-flex;align-items:center;gap:7px"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:16px;height:16px"><path d="M12 5v14M5 12h14"/></svg>Nahrát dokument</button></div>'
-  if(!data?.length){div.innerHTML = uploadBtnHtml + '<div style="color:var(--text3);text-align:center;padding:20px">Žádné dokumenty — můžete nahrát první za pracovníka</div>';return}
+  const wid = id || currentWorkerId
+  const uploadBtnHtml = '<div style="display:flex;gap:8px;justify-content:flex-end;margin-bottom:12px;flex-wrap:wrap">' +
+    '<button onclick="downloadAllDocs(\'' + wid + '\')" id="wd-dl-all-btn" style="font-size:13px;padding:9px 16px;background:#fff;color:#211D1A;border:1.5px solid #211D1A;border-radius:11px;cursor:pointer;font-family:inherit;font-weight:800;display:inline-flex;align-items:center;gap:7px"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:16px;height:16px"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="M7 10l5 5 5-5"/><path d="M12 15V3"/></svg>Stáhnout vše (ZIP)</button>' +
+    '<button onclick="openUploadForWorker()" style="font-size:13px;padding:9px 16px;background:#9c3b22;color:#fff;border:none;border-radius:11px;cursor:pointer;font-family:inherit;font-weight:800;display:inline-flex;align-items:center;gap:7px"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:16px;height:16px"><path d="M12 5v14M5 12h14"/></svg>Nahrát dokument</button>' +
+    '</div>'
+  const uploadOnlyHtml = '<div style="text-align:right;margin-bottom:12px"><button onclick="openUploadForWorker()" style="font-size:13px;padding:9px 16px;background:#9c3b22;color:#fff;border:none;border-radius:11px;cursor:pointer;font-family:inherit;font-weight:800;display:inline-flex;align-items:center;gap:7px"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:16px;height:16px"><path d="M12 5v14M5 12h14"/></svg>Nahrát dokument</button></div>'
+  if(!data?.length){div.innerHTML = uploadOnlyHtml + '<div style="color:var(--text3);text-align:center;padding:20px">Žádné dokumenty — můžete nahrát první za pracovníka</div>';return}
   const todayD = new Date(); todayD.setHours(0,0,0,0)
   const stColor = { pg:{c:'#2f6b45',b:'#3f7d54',bg:'#e6f0e9'}, pa:{c:'#9a6b15',b:'#e8a13a',bg:'#faf0dc'}, pr:{c:'#9c3b22',b:'#9c3b22',bg:'#f7e9e5'} }
   div.innerHTML = uploadBtnHtml +
@@ -15572,11 +15586,81 @@ async function loadWdDocs(id) {
     </div>
     <div style="display:flex;align-items:center;gap:7px;flex-wrap:wrap">
       ${d.file_url?`<button onclick="openPdfUrl('${d.file_url}')" style="flex:1;min-width:90px;font-size:12px;padding:9px;border:1.5px solid #211D1A;border-radius:10px;cursor:pointer;background:#fff;color:#211D1A;font-family:inherit;font-weight:700;display:flex;align-items:center;justify-content:center;gap:6px"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:15px;height:15px"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>Zobrazit</button>`:''}
+      ${d.file_url?`<button onclick="downloadOneDoc('${d.file_url}','${(types[d.doc_type]||d.doc_type).replace(/'/g,'')}')" title="Stáhnout tento dokument" style="font-size:12px;padding:9px 11px;border:1.5px solid #211D1A;border-radius:10px;cursor:pointer;background:#fff;color:#211D1A;font-family:inherit"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:15px;height:15px"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="M7 10l5 5 5-5"/><path d="M12 15V3"/></svg></button>`:''}
       ${d.status!=='ok'?`<button onclick="approveDocWd('${d.id}','${id||currentWorkerId}')" style="flex:1;min-width:90px;font-size:12px;padding:9px;border:none;border-radius:10px;cursor:pointer;background:#3f7d54;color:#fff;font-family:inherit;font-weight:700;display:flex;align-items:center;justify-content:center;gap:6px"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" style="width:15px;height:15px"><path d="M20 6 9 17l-5-5"/></svg>Schválit</button>`:''}
       ${d.status!=='rejected'&&d.status!=='unreadable'?`<button class="x-close" onclick="rejectDocWd('${d.id}','${id||currentWorkerId}')" style="font-size:12px;padding:9px 12px;border:1.5px solid #9c3b22;border-radius:10px;cursor:pointer;background:#fff;color:#9c3b22;font-family:inherit;font-weight:700;display:flex;align-items:center;justify-content:center;gap:6px"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:15px;height:15px"><path d="M18 6L6 18M6 6l12 12"/></svg>Odmítnout</button>`:''}
       <button onclick="deleteDocument('${d.id}')" style="font-size:12px;padding:9px 11px;border:1.5px solid var(--brd);border-radius:10px;cursor:pointer;background:#fff;color:#9c3b22;font-family:inherit" title="Smazat dokument"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:15px;height:15px"><path d="M3 6h18M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6M14 11v6"/></svg></button>
     </div>
   </div>${d.reject_reason && (d.status==='rejected'||d.status==='unreadable') ? `<div style="font-size:11.5px;color:#9c3b22;padding:8px 12px;margin-top:-4px;margin-bottom:10px;background:#f7e9e5;border-radius:8px">Důvod odmítnutí: ${d.reject_reason}</div>` : ''}`}).join('')
+}
+
+// Stáhne jeden dokument napřímo do počítače
+async function downloadOneDoc(url, label) {
+  try {
+    const resp = await fetch(url)
+    const blob = await resp.blob()
+    const ext = (url.split('?')[0].match(/\.([a-z0-9]+)$/i)?.[1]) || (blob.type.includes('pdf') ? 'pdf' : 'jpg')
+    const a = document.createElement('a')
+    a.href = URL.createObjectURL(blob)
+    a.download = ((label||'dokument').normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/[^a-zA-Z0-9._-]/g,'_')) + '.' + ext
+    document.body.appendChild(a); a.click(); a.remove()
+    setTimeout(() => URL.revokeObjectURL(a.href), 4000)
+  } catch(e) {
+    // fallback — otevři v novém okně
+    window.open(url, '_blank')
+  }
+}
+
+// Stáhne VŠECHNY dokumenty pracovníka jako jeden ZIP (pro odeslání Němcům)
+async function downloadAllDocs(workerId) {
+  const btn = document.getElementById('wd-dl-all-btn')
+  const orig = btn ? btn.innerHTML : ''
+  if (btn) { btn.disabled = true; btn.innerHTML = '⏳ Připravuji ZIP…' }
+  try {
+    const { data: docs } = await sb.from('documents').select('*').eq('worker_id', workerId)
+    if (!docs || !docs.length) { showToast('Žádné dokumenty ke stažení'); if(btn){btn.disabled=false;btn.innerHTML=orig} return }
+
+    // Jméno pracovníka pro název ZIPu
+    let wName = 'pracovnik'
+    try {
+      const { data: w } = await sb.from('profiles').select('full_name').eq('id', workerId).maybeSingle()
+      if (w?.full_name) wName = w.full_name
+    } catch(e) {}
+    const safeW = wName.normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/[^a-zA-Z0-9._-]/g,'_')
+
+    await ensureLib('jszip')
+    const zip = new window.JSZip()
+    const typeNames = {op:'Obcansky_prukaz',zivnost:'Zivnostenske_opravneni',gewerbeschein:'Gewerbeschein',a1:'Potvrzeni_A1',freistellung:'Freistellung',other:'Jiny_dokument'}
+    const used = {}
+    let added = 0
+    for (const d of docs) {
+      if (!d.file_url) continue
+      try {
+        const resp = await fetch(d.file_url)
+        const blob = await resp.blob()
+        const ext = (d.file_url.split('?')[0].match(/\.([a-z0-9]+)$/i)?.[1]) || (blob.type.includes('pdf') ? 'pdf' : 'jpg')
+        let base = typeNames[d.doc_type] || (d.doc_type||'dokument')
+        used[base] = (used[base]||0) + 1
+        if (used[base] > 1) base += '_' + used[base]
+        zip.file(safeW + '_' + base + '.' + ext, blob)
+        added++
+      } catch(e) { console.warn('Nešlo stáhnout:', d.file_url, e) }
+    }
+    if (!added) { showToast('❌ Soubory se nepodařilo načíst'); if(btn){btn.disabled=false;btn.innerHTML=orig} return }
+
+    const content = await zip.generateAsync({ type: 'blob' })
+    const a = document.createElement('a')
+    a.href = URL.createObjectURL(content)
+    a.download = 'Dokumenty_' + safeW + '.zip'
+    document.body.appendChild(a); a.click(); a.remove()
+    setTimeout(() => URL.revokeObjectURL(a.href), 6000)
+    showToast('✅ Staženo ' + added + ' dokumentů')
+  } catch(e) {
+    console.error('[downloadAllDocs]', e)
+    showToast('❌ Chyba při stahování: ' + (e.message||''))
+  } finally {
+    if (btn) { btn.disabled = false; btn.innerHTML = orig }
+  }
 }
 
 // Schválení dokumentu (admin, detail pracovníka)
