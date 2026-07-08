@@ -8641,8 +8641,24 @@ async function mobCheckin(type) {
           checkinInProgress = false
           return
         }
-        // Spočítej hodiny podle pravidel směny
-        const adjOut = applyAttendanceRules({ check_in: updated.check_in, check_out: timeStr, break_start: updated.break_start, break_end: updated.break_end })
+        // Spočítej hodiny podle pravidel směny (včetně 2. pauzy!)
+        // Načti aktuální pauzy ze serveru, ať se nespoléháme na možná neúplnou lokální kopii.
+        let brkSrc = updated
+        try {
+          const { data: fresh } = await withTimeout(sb.from('attendance')
+            .select('break_start,break_end,break2_start,break2_end,breaks')
+            .eq('id', todayAttId).single(), 8000)
+          if (fresh) brkSrc = { ...updated, ...fresh }
+        } catch(e) { /* fallback: lokální kopie */ }
+        const adjOut = applyAttendanceRules({
+          check_in: updated.check_in,
+          check_out: timeStr,
+          break_start: brkSrc.break_start,
+          break_end: brkSrc.break_end,
+          break2_start: brkSrc.break2_start,
+          break2_end: brkSrc.break2_end,
+          breaks: brkSrc.breaks
+        })
         const h = adjOut.hours
 
         // ČAS ODCHODU ULOŽ HNED (než pracovník dopíše dialog — jinak by se ukrojily minuty)
