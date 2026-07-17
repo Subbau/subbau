@@ -5435,6 +5435,21 @@ async function loadKWData() {
 
   const { data } = await sb.from('attendance').select('*, worker:profiles(full_name,profession)').eq('kw',week).eq('kw_year',year)
 
+  // Dovolené v tomto týdnu — ať se u dnů bez docházky ukáže "Dovolená" místo 0h
+  const _wkStart = getWeekStartDate(week, year)
+  const _wkEnd = new Date(_wkStart); _wkEnd.setDate(_wkStart.getDate() + 6)
+  const _wkStartStr = localDateStr(_wkStart), _wkEndStr = localDateStr(_wkEnd)
+  let vacDays = {}   // { "workerId|YYYY-MM-DD": {note} }
+  try {
+    const { data: vacs } = await sb.from('vacations').select('worker_id, date_from, date_to, note')
+      .lte('date_from', _wkEndStr).gte('date_to', _wkStartStr)
+    ;(vacs||[]).forEach(v => {
+      let d = new Date(v.date_from < _wkStartStr ? _wkStartStr : v.date_from)
+      const end = new Date(v.date_to > _wkEndStr ? _wkEndStr : v.date_to)
+      while (d <= end) { vacDays[v.worker_id + '|' + localDateStr(d)] = { note: v.note || '' }; d.setDate(d.getDate()+1) }
+    })
+  } catch(e) { /* tabulka dovolených nemusí být dostupná */ }
+
   if (!allWorkers?.length) { tbody.innerHTML='<tr><td colspan="9" style="text-align:center;color:var(--text3);padding:20px">Žádní pracovníci</td></tr>'; return }
 
   const nowAdmin = new Date()
@@ -5519,6 +5534,12 @@ async function loadKWData() {
           <span style="position:absolute;bottom:0;right:2px;font-size:9.5px;color:var(--text3)">${b2}</span>
         </div>
       </td>`
+    }
+    // Dovolená — místo 0h ukaž, že měl dovolenou (jasné, proč nebyl v práci)
+    const vac = vacDays[(w.id||'') + '|' + dateStr]
+    if (vac) {
+      const noteTxt = vac.note ? (' — ' + vac.note) : ''
+      return `<td class="kw-day" data-date="${dateStr}" style="text-align:center;background:var(--blue-l,#e7eefc);color:var(--blue);font-weight:700;vertical-align:middle" title="Dovolená${noteTxt.replace(/"/g,'&quot;')}"><div style="display:flex;flex-direction:column;align-items:center;gap:2px;line-height:1.1"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:15px;height:15px"><path d="M17.5 19H9a7 7 0 1 1 6.71-9h1.79a4.5 4.5 0 1 1 0 9Z"/></svg><span style="font-size:10px;font-weight:800">Dovolená</span></div></td>`
     }
     // 0h nebo žádný záznam
     if (isPastOrToday) {
