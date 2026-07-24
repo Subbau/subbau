@@ -3355,8 +3355,29 @@ async function ensureLibs(...names) { for (const n of names) await ensureLib(n) 
 
 // ===== PWA: registrace service workeru (umožní instalaci na plochu) =====
 if ('serviceWorker' in navigator) {
-  // Registruj hned (ne až po load) — ať je SW připravený co nejdřív pro instalaci
-  navigator.serviceWorker.register('/sw.js').catch(err => console.warn('SW registrace selhala:', err))
+  navigator.serviceWorker.register('/sw.js').then(reg => {
+    // Zkontroluj aktualizaci hned a pak občas — ať Android nedrží starou verzi
+    try { reg.update() } catch(e) {}
+    setInterval(() => { try { reg.update() } catch(e) {} }, 60 * 60 * 1000)
+    // Když je připravená nová verze, aktivuj ji a jednou přenačti stránku
+    reg.addEventListener('updatefound', () => {
+      const nw = reg.installing
+      if (!nw) return
+      nw.addEventListener('statechange', () => {
+        if (nw.state === 'installed' && navigator.serviceWorker.controller) {
+          // nová verze čeká → řekni jí ať převezme řízení
+          try { nw.postMessage && nw.postMessage('SKIP_WAITING') } catch(e) {}
+        }
+      })
+    })
+  }).catch(err => console.warn('SW registrace selhala:', err))
+  // Po převzetí nové verze přenačti (jen jednou, ať se nezacyklí)
+  let _swReloaded = false
+  navigator.serviceWorker.addEventListener('controllerchange', () => {
+    if (_swReloaded) return
+    _swReloaded = true
+    location.reload()
+  })
 }
 
 // ===== "Stáhnout aplikaci" na přihlašovací obrazovce =====
