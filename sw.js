@@ -1,55 +1,57 @@
-// SubBau service worker
-// Network-first: vždy se snaží o čerstvá data ze sítě.
-// Cachuje hlavní stránku jako offline záložku — to Chrome vyžaduje pro instalaci PWA.
+// SubBau PWA service worker
+// Strategie: NETWORK-FIRST — vždy zkusí stáhnout aktuální verzi z internetu,
+// a jen když není síť, sáhne do cache. Tím appka nikdy nedrží "starou verzi".
+// Verzi zvyš při každém větším nasazení (nebo klidně datum).
+const CACHE = 'subbau-v37';
 
-const CACHE = 'subbau-v3'
+self.addEventListener('install', (event) => {
+  // Nová verze se má aktivovat hned, nečekat na zavření všech karet
+  self.skipWaiting();
+});
 
-// Při instalaci ulož hlavní stránku. Každou URL zvlášť, ať jedna chyba nezhodí instalaci.
-self.addEventListener('install', event => {
-  self.skipWaiting()  // aktivuj hned, ať je SW připravený pro instalaci
-  event.waitUntil(
-    caches.open(CACHE).then(async cache => {
-      try { await cache.add('/') } catch (e) {}
-      try { await cache.add('/manifest.json') } catch (e) {}
-    })
-  )
-})
+self.addEventListener('activate', (event) => {
+  event.waitUntil((async () => {
+    // Smaž všechny staré cache kromě aktuální
+    const keys = await caches.keys();
+    await Promise.all(keys.filter(k => k !== CACHE).map(k => caches.delete(k)));
+    await self.clients.claim();
+  })());
+});
 
-// Po aktivaci převezmi kontrolu nad stránkou hned
-self.addEventListener('activate', event => {
-  event.waitUntil(
-    (async () => {
-      // ukliď staré cache
-      const keys = await caches.keys()
-      await Promise.all(keys.filter(k => k !== CACHE).map(k => caches.delete(k)))
-      // převezmi kontrolu nad otevřenými kartami
-      await self.clients.claim()
-    })()
-  )
-})
+// Umožni stránce vynutit převzetí nové verze
+self.addEventListener('message', (event) => {
+  if (event.data === 'SKIP_WAITING') self.skipWaiting();
+});
 
-// Network-first pro navigaci, s offline záložkou
-self.addEventListener('fetch', event => {
-  const req = event.request
-  if (req.method !== 'GET') return
+self.addEventListener('fetch', (event) => {
+  const req = event.request;
+  // Jen GET požadavky; POST/PUT (Supabase) necháme projít přímo na síť
+  if (req.method !== 'GET') return;
 
-  const url = new URL(req.url)
-  if (url.origin !== self.location.origin) return  // cizí domény (Supabase, CDN) neřešíme
+  const url = new URL(req.url);
+  // Požadavky na jiné domény (Supabase API, CDN, mapy…) neřešíme — přímo na síť
+  if (url.origin !== self.location.origin) return;
 
-  if (req.mode === 'navigate') {
-    event.respondWith(
-      fetch(req)
-        .then(resp => {
-          const copy = resp.clone()
-          caches.open(CACHE).then(c => c.put('/', copy)).catch(() => {})
-          return resp
-        })
-        .catch(() => caches.match('/').then(r => r || Response.error()))
-    )
-    return
-  }
-
-  event.respondWith(
-    fetch(req).catch(() => caches.match(req))
-  )
-})
+  event.respondWith((async () => {
+    try {
+      // NETWORK-FIRST: zkus síť
+      const fresh = await fetch(req);
+      // Ulož kopii do cache pro offline
+      try {
+        const cache = await caches.open(CACHE);
+        cache.put(req, fresh.clone());
+      } catch (e) {}
+      return fresh;
+    } catch (e) {
+      // Offline → zkus cache
+      const cached = await caches.match(req);
+      if (cached) return cached;
+      // Pro navigaci (otevření appky) offline vrať aspoň hlavní stránku z cache
+      if (req.mode === 'navigate') {
+        const fallback = await caches.match('/');
+        if (fallback) return fallback;
+      }
+      throw e;
+    }
+  })());
+});
