@@ -8032,10 +8032,16 @@ async function confirmCheckout() {
   lsSet('lastConstructionSite', site)
 
   // Odchod (check_out + hodiny) už je uložen — teď jen DOPLNÍME stavbu a popis
-  const { data: savedRows, error } = await sb.from('attendance').update({
-    construction_site: site,
-    work_description: desc
-  }).eq('id', attId).select()
+  window.zapisProbiha = true
+  let savedRows, error
+  try {
+    ;({ data: savedRows, error } = await sb.from('attendance').update({
+      construction_site: site,
+      work_description: desc
+    }).eq('id', attId).select())
+  } finally {
+    window.zapisProbiha = false
+  }
   if (error) {
     console.error('[checkout] update error:', error)
     showToast('❌ Chyba uložení popisu: ' + error.message)
@@ -8566,6 +8572,7 @@ async function mobCheckin(type) {
   if (!navigator.onLine) { showToast('❌ Žádné připojení k internetu'); return }
 
   checkinInProgress = true
+  window.zapisProbiha = true
   // Bezpečnostní pojistka: kdyby cokoliv zůstalo viset (slabý signál na stavbě),
   // po 20 s flag tvrdě uvolni, ať tlačítka nezamrznou napořád.
   const _stuckGuard = setTimeout(() => {
@@ -8807,6 +8814,7 @@ async function mobCheckin(type) {
   } finally {
     clearTimeout(_stuckGuard)
     checkinInProgress = false
+    window.zapisProbiha = false
   }
 }
 
@@ -10015,6 +10023,13 @@ function renderContactChoice() {
         <div style="font-size:11px;opacity:.85;margin-top:2px">Zavolat na správnou osobu</div>
       </button>
     </div>
+    <a href="mailto:info@subbau.cz" style="display:flex;align-items:center;justify-content:center;gap:9px;margin-top:12px;background:#faf6ee;border:1.5px solid #E8A13A;border-radius:14px;padding:14px 12px;text-decoration:none;color:#211D1A;font-family:inherit">
+      <svg viewBox="0 0 24 24" fill="none" stroke="#9c3b22" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:20px;height:20px;flex-shrink:0"><rect x="2" y="4" width="20" height="16" rx="2"/><path d="m22 7-10 6L2 7"/></svg>
+      <div style="text-align:left;line-height:1.25">
+        <div style="font-size:11px;color:#8B5930;font-weight:700">Napsat e-mail</div>
+        <div style="font-size:15px;font-weight:800;color:#211D1A">info@subbau.cz</div>
+      </div>
+    </a>
     <button onclick="closeContactSheet()" style="width:100%;margin-top:14px;background:none;border:none;color:#6b6157;font-size:13px;padding:10px;cursor:pointer;font-family:inherit">Zavřít</button>`
 }
 
@@ -12685,17 +12700,22 @@ async function saveEditAttRecord() {
   }
 
   let updData, error
-  if (id) {
-    // Úprava existujícího záznamu
-    ;({ data: updData, error } = await sb.from('attendance').update(payload).eq('id', id).select())
-  } else {
-    // Nový den (z týdenního přehledu) — vlož nový záznam
-    if (!workerId || !dateStr) { showToast('❌ Chybí pracovník nebo datum'); return }
-    const kw = parseInt(document.getElementById('edit-att-kw').value) || getKW(new Date(dateStr)).week
-    const kwYear = parseInt(document.getElementById('edit-att-kwyear').value) || getKW(new Date(dateStr)).year
-    ;({ data: updData, error } = await sb.from('attendance').insert({
-      ...payload, worker_id: workerId, work_date: dateStr, kw, kw_year: kwYear
-    }).select())
+  window.zapisProbiha = true
+  try {
+    if (id) {
+      // Úprava existujícího záznamu
+      ;({ data: updData, error } = await sb.from('attendance').update(payload).eq('id', id).select())
+    } else {
+      // Nový den (z týdenního přehledu) — vlož nový záznam
+      if (!workerId || !dateStr) { showToast('❌ Chybí pracovník nebo datum'); return }
+      const kw = parseInt(document.getElementById('edit-att-kw').value) || getKW(new Date(dateStr)).week
+      const kwYear = parseInt(document.getElementById('edit-att-kwyear').value) || getKW(new Date(dateStr)).year
+      ;({ data: updData, error } = await sb.from('attendance').insert({
+        ...payload, worker_id: workerId, work_date: dateStr, kw, kw_year: kwYear
+      }).select())
+    }
+  } finally {
+    window.zapisProbiha = false
   }
 
   if (error) { showToast('❌ Chyba: ' + error.message); return }
@@ -12883,38 +12903,50 @@ async function saveManualAttendance() {
   if (existing) {
     const countMsg = existingAll.length > 1 ? ` (${existingAll.length} záznamy — aktualizuji první)` : ''
     if (!confirm(`Pro tento den již existuje záznam (${existing.check_in?.slice(0,5)} → ${existing.check_out?.slice(0,5)||'?'})${countMsg}. Přepsat?`)) return
-    const { error } = await sb.from('attendance').update({
-      check_in: ci+':00',
-      check_out: co+':00',
-      break_start: bs ? bs+':00' : null,
-      break_end: be ? be+':00' : null,
-      break2_start: bs2 ? bs2+':00' : null,
-      break2_end: be2 ? be2+':00' : null,
-      total_hours: hours,
-      location_address: site || null,
-      manual_note: note || null,
-      is_manual: true
-    }).eq('id', existing.id)
+    window.zapisProbiha = true
+    let error
+    try {
+      ;({ error } = await sb.from('attendance').update({
+        check_in: ci+':00',
+        check_out: co+':00',
+        break_start: bs ? bs+':00' : null,
+        break_end: be ? be+':00' : null,
+        break2_start: bs2 ? bs2+':00' : null,
+        break2_end: be2 ? be2+':00' : null,
+        total_hours: hours,
+        location_address: site || null,
+        manual_note: note || null,
+        is_manual: true
+      }).eq('id', existing.id))
+    } finally {
+      window.zapisProbiha = false
+    }
     if (error) { showToast('❌ Chyba: ' + error.message); return }
     showToast('✅ Záznam aktualizován — ' + hours + 'h')
   } else {
     // Nový záznam
-    const { error } = await sb.from('attendance').insert({
-      worker_id: workerId,
-      work_date: date,
-      check_in: ci+':00',
-      check_out: co+':00',
-      break_start: bs ? bs+':00' : null,
-      break_end: be ? be+':00' : null,
-      break2_start: bs2 ? bs2+':00' : null,
-      break2_end: be2 ? be2+':00' : null,
-      total_hours: hours,
-      location_address: site || null,
-      kw: kw.week,
-      kw_year: kw.year,
-      is_saturday: new Date(date).getDay() === 6,
-      is_manual: true
-    })
+    window.zapisProbiha = true
+    let error
+    try {
+      ;({ error } = await sb.from('attendance').insert({
+        worker_id: workerId,
+        work_date: date,
+        check_in: ci+':00',
+        check_out: co+':00',
+        break_start: bs ? bs+':00' : null,
+        break_end: be ? be+':00' : null,
+        break2_start: bs2 ? bs2+':00' : null,
+        break2_end: be2 ? be2+':00' : null,
+        total_hours: hours,
+        location_address: site || null,
+        kw: kw.week,
+        kw_year: kw.year,
+        is_saturday: new Date(date).getDay() === 6,
+        is_manual: true
+      }))
+    } finally {
+      window.zapisProbiha = false
+    }
     if (error) { showToast('❌ Chyba: ' + error.message); return }
     showToast('✅ Záznam přidán — ' + hours + 'h')
   }
@@ -15919,19 +15951,25 @@ async function saveWorkerProfile() {
   const germanLevel = document.getElementById('wd-german')?.value || null
   const englishLevel = document.getElementById('wd-english')?.value || null
   const hasCar = document.getElementById('wd-car')?.value === 'yes'
-  const { error } = await sb.from('profiles').update({
-    hourly_rate_worker: rate,
-    cooperation_start: coopStart || null,
-    cooperation_end: coopEnd || null,
-    email: email,
-    phone: phone,
-    business_type: businessType,
-    is_osvec: businessType === 'osvec',
-    profession: profession,
-    german_level: germanLevel,
-    english_level: englishLevel,
-    has_car: hasCar
-  }).eq('id',currentWorkerId)
+  window.zapisProbiha = true
+  let error
+  try {
+    ;({ error } = await sb.from('profiles').update({
+      hourly_rate_worker: rate,
+      cooperation_start: coopStart || null,
+      cooperation_end: coopEnd || null,
+      email: email,
+      phone: phone,
+      business_type: businessType,
+      is_osvec: businessType === 'osvec',
+      profession: profession,
+      german_level: germanLevel,
+      english_level: englishLevel,
+      has_car: hasCar
+    }).eq('id',currentWorkerId))
+  } finally {
+    window.zapisProbiha = false
+  }
   if(error){showToast('Chyba: '+error.message);return}
   showToast('✅ Profil uložen')
   loadWorkers()
@@ -16009,6 +16047,85 @@ function compressImage(file, maxSize) {
     reader.readAsDataURL(file)
   })
 }
+
+// ============================================================
+// AUTOMATICKÁ TICHÁ OBNOVA DAT
+// Seznam se sám aktualizuje, není třeba mačkat "obnovit".
+// - běží každých 60 s, ale jen když je stránka viditelná
+// - obnova i při focus okna a při visibilitychange
+// - tichá: nespouští "Načítám…", spinner ani neroluje nahoru
+// - přeskočí se během ukládání (zapisProbiha) i když je uživatel odhlášený
+// ============================================================
+window.zapisProbiha = window.zapisProbiha || false
+
+function _tichaObnovaBezi() {
+  // Uživatel odhlášený → neobnovuj
+  if (typeof currentUser === 'undefined' || !currentUser) return false
+  // Stránka není vidět → neobnovuj
+  if (document.visibilityState !== 'visible') return false
+  // Zrovna se ukládá → neobnovuj (jinak by to vrátilo rozdělanou změnu)
+  if (window.zapisProbiha) return false
+  // Kurzor je v poli (píše se) → neobnovuj, ať se nesmaže rozepsaný text
+  const ae = document.activeElement
+  if (ae && (ae.tagName === 'INPUT' || ae.tagName === 'TEXTAREA' || ae.tagName === 'SELECT' || ae.isContentEditable)) return false
+  // Je otevřený nějaký modal/dialog/overlay/sheet → neobnovuj, ať se pod rukama nezavře
+  if (_jeOtevrenyDialog()) return false
+  return true
+}
+
+// Zjistí, jestli je viditelný nějaký modal / dialog / overlay / sheet
+function _jeOtevrenyDialog() {
+  try {
+    const els = document.querySelectorAll(
+      '[id$="-modal"],[id$="-dialog"],[id$="-overlay"],[id$="-sheet"],#worker-modal,#contact-sheet,.modal'
+    )
+    for (const el of els) {
+      if (!el) continue
+      const st = window.getComputedStyle(el)
+      if (st.display === 'none' || st.visibility === 'hidden' || st.opacity === '0') continue
+      // fixed overlaye nemají offsetParent — ověř přes rozměry, že se reálně zobrazují
+      const r = el.getBoundingClientRect()
+      if (r.width > 0 && r.height > 0) return true
+    }
+  } catch (e) { /* při chybě raději nechej obnovu běžet */ }
+  return false
+}
+
+function tichaObnovaDat() {
+  if (!_tichaObnovaBezi()) return
+  try {
+    // ADMIN: která sekce je zrovna otevřená (.view.on → id "v-<nazev>")
+    const adminView = document.querySelector('.view.on')
+    if (adminView && adminView.id && adminView.id.indexOf('v-') === 0) {
+      const name = adminView.id.slice(2)
+      if (name === 'dashboard' && typeof loadDashboard === 'function') loadDashboard()
+      else if (name === 'dochazka' && typeof loadKWData === 'function') loadKWData()
+      else if (name === 'pracovnici' && typeof loadWorkers === 'function') loadWorkers()
+      else if (name === 'kalendar' && typeof renderCalendar === 'function') renderCalendar()
+      else if (name === 'pristupy' && typeof loadAccess === 'function') loadAccess()
+    }
+    // OSVČ (mobil): která obrazovka je otevřená (.mob-view.on → id "mob-v-<nazev>")
+    const mobView = document.querySelector('.mob-view.on')
+    if (mobView && mobView.id && mobView.id.indexOf('mob-v-') === 0) {
+      const mname = mobView.id.slice(6)
+      if (mname === 'dochazka') {
+        if (typeof getTodayRecord === 'function') getTodayRecord()
+        if (typeof loadMobWeek === 'function') loadMobWeek()
+      } else if (mname === 'vykaz' && typeof loadMobWeek === 'function') {
+        loadMobWeek()
+      }
+    }
+  } catch (e) { /* tichá obnova nikdy nesmí shodit appku */ }
+}
+
+// každých 60 s (interval sám kontroluje viditelnost i přihlášení uvnitř tichaObnovaDat)
+setInterval(tichaObnovaDat, 60000)
+// při návratu k oknu
+window.addEventListener('focus', tichaObnovaDat)
+// při přepnutí zpět na záložku / probuzení telefonu
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible') tichaObnovaDat()
+})
 
 </script>
 
