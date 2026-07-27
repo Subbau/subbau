@@ -791,6 +791,7 @@ button:not(.x-close) > svg:first-child{margin-right:6px}
             <div class="sc g"><div class="sc-lbl">Hodiny tento týden</div><div class="sc-val" style="color:var(--green)" id="stat-hours">—</div><div class="sc-sub">z evidence</div></div>
             <div class="sc a"><div class="sc-lbl">Týmy aktivní</div><div class="sc-val" style="color:var(--amber)" id="stat-teams">—</div><div class="sc-sub">z databáze</div></div>
             <div class="sc r"><div class="sc-lbl">Chybí dokumenty</div><div class="sc-val" style="color:var(--red)" id="stat-docs">—</div><div class="sc-sub">vyžaduje akci</div></div>
+            <div class="sc a" style="border-color:#9c3b22"><div class="sc-lbl">🔒 Provize tento týden</div><div class="sc-val" style="color:#9c3b22" id="stat-provize">—</div><div class="sc-sub">provize × hodiny</div></div>
           </div>
           <!-- UPOZORNĚNÍ NA DOKUMENTY -->
           <div class="card" id="doc-alerts-card" style="display:none;border-left:4px solid var(--red)">
@@ -2130,6 +2131,9 @@ button:not(.x-close) > svg:first-child{margin-right:6px}
           <div><div style="font-size:11px;color:var(--text3);margin-bottom:3px">Stav</div><div id="wd-status">—</div></div>
           <div><div style="font-size:11px;color:var(--text3);margin-bottom:3px">Sazba OSVČ (€/h)</div>
             <input type="number" id="wd-rate" placeholder="0" style="width:120px;padding:6px 10px;border:1.5px solid var(--brd);border-radius:7px;font-size:13px">
+          </div>
+          <div><div style="font-size:11px;color:var(--text3);margin-bottom:3px">🔒 Provize (€/h) <span style="font-size:9px;color:#9c3b22;font-weight:700">jen admin</span></div>
+            <input type="number" id="wd-provize" placeholder="0" style="width:120px;padding:6px 10px;border:1.5px solid #E8A13A;border-radius:7px;font-size:13px;background:#faf6ee">
           </div>
         </div>
         <div class="g2" style="gap:8px;margin-top:12px">
@@ -5041,6 +5045,28 @@ async function loadDashboard() {
     return s
   }, 0) || 0
   document.getElementById('stat-hours').textContent = totalH.toFixed(1)+'h'
+
+  // 🔒 Provize tento týden = součet (provize pracovníka × jeho hodiny). Jen pro admina.
+  // Provize se čte z admin-only tabulky worker_commissions (ne z profiles).
+  try {
+    const { data: provRows } = await sb.from('worker_commissions').select('worker_id, provize')
+    const provMap = {}
+    ;(provRows||[]).forEach(p => { if (p.provize != null) provMap[p.worker_id] = Number(p.provize) })
+    let provTotal = 0
+    ;(att||[]).forEach(a => {
+      const pr = provMap[a.worker_id]
+      if (!pr) return
+      let h = 0
+      if (a.total_hours) h = a.total_hours
+      else if (a.check_in && !a.check_out) h = calcHours(a.check_in, nowStrDash, a.break_start, a.break_end)
+      provTotal += pr * h
+    })
+    const provEl = document.getElementById('stat-provize')
+    if (provEl) provEl.textContent = Math.round(provTotal).toLocaleString('cs-CZ') + ' €'
+  } catch(e) {
+    const provEl = document.getElementById('stat-provize')
+    if (provEl) provEl.textContent = '—'
+  }
 
   // Pracovníci kteří nemají všechny dokumenty schválené
   await loadDocumentAlertsStat()
@@ -8722,6 +8748,29 @@ async function mobCheckin(type) {
           updateMobStav(current, [current])
           checkinInProgress = false
           return
+        }
+        // Neukončená pauza? (pauza běží — má začátek, ale ne konec)
+        const openBreak = (current.break_start && !current.break_end) ||
+                          (current.break2_start && !current.break2_end)
+        if (openBreak) {
+          const goOut = confirm('Máte rozdělanou pauzu, která ještě neskončila.\n\nOpravdu chcete ukončit pracovní dobu (odchod)?\n\n• OK = ukončit pracovní dobu\n• Zrušit = zpět (pak zvolte „Konec pauzy")')
+          if (!goOut) {
+            updateMobStav(current, [current])
+            checkinInProgress = false
+            window.zapisProbiha = false
+            return
+          }
+          // Pokud jde ven s otevřenou pauzou, uzavři pauzu na čas odchodu, ať se správně odečte
+          try {
+            if (current.break_start && !current.break_end) {
+              await sb.from('attendance').update({ break_end: timeStr }).eq('id', todayAttId)
+              updated.break_end = timeStr
+            }
+            if (current.break2_start && !current.break2_end) {
+              await sb.from('attendance').update({ break2_end: timeStr }).eq('id', todayAttId)
+              updated.break2_end = timeStr
+            }
+          } catch(e) { /* i kdyby se nepovedlo, pokračuj s odchodem */ }
         }
         // Spočítej hodiny podle pravidel směny (včetně 2. pauzy!)
         // Načti aktuální pauzy ze serveru, ať se nespoléháme na možná neúplnou lokální kopii.
@@ -15106,6 +15155,15 @@ async function openWorkerModal(id) {
   if (wdBt) wdBt.value = w.business_type || (w.is_osvec === false ? 'sro' : 'osvec')
   document.getElementById('wd-status').innerHTML = `<span class="pill ${w.is_active?'pg':'pr'}">${w.is_active?'Aktivní':'Neaktivní'}</span>`
   document.getElementById('wd-rate').value = w.hourly_rate_worker || ''
+  // Provize se načítá z admin-only tabulky worker_commissions (ne z profiles)
+  const wdProv = document.getElementById('wd-provize')
+  if (wdProv) {
+    wdProv.value = ''
+    try {
+      const { data: wc } = await sb.from('worker_commissions').select('provize').eq('worker_id', w.id).maybeSingle()
+      if (wc && wc.provize != null) wdProv.value = wc.provize
+    } catch(e) { /* jen admin má přístup; jinak zůstane prázdné */ }
+  }
   document.getElementById('wd-coop-start').value = w.cooperation_start || w.start_date || ''
   document.getElementById('wd-coop-end').value = w.cooperation_end || ''
   const wdGer = document.getElementById('wd-german'); if (wdGer) wdGer.value = w.german_level || ''
@@ -15951,6 +16009,8 @@ async function saveWorkerProfile() {
   const germanLevel = document.getElementById('wd-german')?.value || null
   const englishLevel = document.getElementById('wd-english')?.value || null
   const hasCar = document.getElementById('wd-car')?.value === 'yes'
+  const provizeRaw = document.getElementById('wd-provize')?.value
+  const provize = (provizeRaw === '' || provizeRaw == null) ? null : Number(provizeRaw)
   window.zapisProbiha = true
   let error
   try {
@@ -15967,6 +16027,12 @@ async function saveWorkerProfile() {
       english_level: englishLevel,
       has_car: hasCar
     }).eq('id',currentWorkerId))
+    // Provize se ukládá do admin-only tabulky worker_commissions (ne do profiles)
+    if (!error) {
+      const { error: provErr } = await sb.from('worker_commissions')
+        .upsert({ worker_id: currentWorkerId, provize: provize, updated_at: new Date().toISOString() }, { onConflict: 'worker_id' })
+      if (provErr) error = provErr
+    }
   } finally {
     window.zapisProbiha = false
   }
