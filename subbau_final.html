@@ -13172,6 +13172,8 @@ async function generateInvoiceMob(lang = 'en') {
   if (!iban) { showToast('⚠️ Zadejte IBAN'); return }
   if (!rate) { showToast('⚠️ Zadejte hodinovou sazbu'); return }
 
+  saveInvoicePrefs() // zapamatuj naposledy zadané údaje pro příště
+
   const [week, year] = weekSel.value.split('/')
   showToast('⏳ Načítám docházku...')
 
@@ -13631,6 +13633,20 @@ function prefillInvoiceItem() {
   itemEl.value = `${profEn} service week ${week}/${year}`
 }
 
+// Uloží naposledy zadané fakturační údaje do zařízení (IBAN, SWIFT, sazba, splatnost).
+// Používá bezpečný lsSet (try/catch) → funguje na Androidu, iPhonu i Samsungu, i v privátním režimu.
+function saveInvoicePrefs() {
+  try {
+    const key = 'subbau_inv_' + (currentUser?.id || 'anon')
+    lsSet(key, JSON.stringify({
+      iban: (document.getElementById('inv-iban')?.value || '').trim(),
+      swift: (document.getElementById('inv-swift')?.value || '').trim(),
+      rate: (document.getElementById('inv-rate')?.value || '').trim(),
+      due: (document.getElementById('inv-due')?.value || '')
+    }))
+  } catch(e) {}
+}
+
 async function loadInvoiceWeeks() {
   if (!currentUser) return
   const sel = document.getElementById('inv-week-sel')
@@ -13672,11 +13688,30 @@ async function loadInvoiceWeeks() {
     custEl.style.color = currentProfile?.invoice_customer_name ? 'var(--text)' : 'var(--red)'
   }
 
-  // Předvyplň IBAN/SWIFT/hodinovku z profilu (OSVČ je může přepsat před stažením)
+  // Předvyplň IBAN/SWIFT/sazbu/splatnost.
+  // Priorita: co uživatel naposledy zadal (uložené v zařízení) > údaje z profilu.
+  // OSVČ může kdykoliv přepsat; změna se hned uloží pro příště.
+  const invPrefsKey = 'subbau_inv_' + (currentUser?.id || 'anon')
+  let invPrefs = {}
+  try { invPrefs = JSON.parse(lsGet(invPrefsKey) || '{}') || {} } catch(e) { invPrefs = {} }
+
   const ibanEl = document.getElementById('inv-iban')
-  if (ibanEl && !ibanEl.value && currentProfile?.invoice_iban) ibanEl.value = currentProfile.invoice_iban
+  if (ibanEl && !ibanEl.value) ibanEl.value = invPrefs.iban || currentProfile?.invoice_iban || ''
   const swiftEl = document.getElementById('inv-swift')
-  if (swiftEl && !swiftEl.value && currentProfile?.invoice_swift) swiftEl.value = currentProfile.invoice_swift
+  if (swiftEl && !swiftEl.value) swiftEl.value = invPrefs.swift || currentProfile?.invoice_swift || ''
+  // Sazbu z minula doplníme jen když ji admin nezamknul a pole je prázdné
+  const rateElP = document.getElementById('inv-rate')
+  if (rateElP && !rateElP.value && !rateElP.readOnly && invPrefs.rate) rateElP.value = invPrefs.rate
+  // Splatnost
+  const dueElP = document.getElementById('inv-due')
+  if (dueElP && invPrefs.due) dueElP.value = invPrefs.due
+
+  // Jakmile uživatel pole přepíše, hned to ulož (ať to zůstane i bez vytvoření faktury)
+  const _invPrefIds = ['inv-iban', 'inv-swift', 'inv-rate', 'inv-due']
+  _invPrefIds.forEach(id => {
+    const el = document.getElementById(id)
+    if (el && !el._invPrefBound) { el._invPrefBound = true; el.addEventListener('change', saveInvoicePrefs) }
+  })
 }
 
 
