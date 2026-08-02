@@ -13344,7 +13344,7 @@ function renderInvoice(d, lang = 'en') {
   }
 
   content.innerHTML = `
-  <div id="invoice-sheet" style="font-family:-apple-system,'Segoe UI',Arial,sans-serif;font-size:9pt;color:#211D1A;background:#fff;max-width:100%;padding:0;line-height:1.5">
+  <div id="invoice-sheet" style="font-family:-apple-system,'Segoe UI',Arial,sans-serif;font-size:9pt;color:#211D1A;background:#fff;width:210mm;min-height:296mm;max-height:296mm;overflow:hidden;margin:0 auto;padding:0;line-height:1.5;box-sizing:border-box">
 
     <!-- TOP BAR: brand + title -->
     <div style="display:flex;justify-content:space-between;align-items:flex-start;padding:28px 34px 18px">
@@ -13496,18 +13496,23 @@ async function downloadInvoicePDF() {
     await ensureLib('jspdf')
     await ensureLib('html2canvas')
     const jsPDFctor = (window.jspdf && window.jspdf.jsPDF) || window.jsPDF
-    // Vyfoť fakturu ve vysokém rozlišení
-    const canvas = await window.html2canvas(sheet, { scale: 2, backgroundColor: '#ffffff', useCORS: true })
+    // Dočasně zruš zmenšení náhledu, ať se faktura vyfotí v plné velikosti A4
+    const prevTransform = sheet.style.transform
+    const prevMargin = sheet.style.marginBottom
+    sheet.style.transform = 'none'
+    sheet.style.marginBottom = '0'
+    let canvas
+    try {
+      canvas = await window.html2canvas(sheet, { scale: 2, backgroundColor: '#ffffff', useCORS: true, windowWidth: sheet.scrollWidth, windowHeight: sheet.scrollHeight })
+    } finally {
+      sheet.style.transform = prevTransform
+      sheet.style.marginBottom = prevMargin
+    }
     const img = canvas.toDataURL('image/jpeg', 0.95)
     const pdf = new jsPDFctor({ orientation: 'portrait', unit: 'mm', format: 'a4' })
     const pageW = 210, pageH = 297
-    // Zachovej poměr stran, vejdi na jednu A4 (s malým okrajem)
-    const margin = 8
-    const availW = pageW - margin * 2, availH = pageH - margin * 2
-    const ratio = Math.min(availW / canvas.width, availH / canvas.height)
-    const w = canvas.width * ratio, h = canvas.height * ratio
-    const x = (pageW - w) / 2, y = margin
-    pdf.addImage(img, 'JPEG', x, y, w, h)
+    // Faktura má poměr A4 → vyplní celou stránku (bez okrajů, obsah má vlastní padding)
+    pdf.addImage(img, 'JPEG', 0, 0, pageW, pageH)
     const safeName = (window._lastInvoiceName || 'faktura').normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/[^a-zA-Z0-9._-]/g,'_')
     pdf.save('Faktura_' + (window._lastInvoiceNum || '') + '_' + safeName + '.pdf')
     showToast('✅ PDF staženo')
@@ -16323,14 +16328,24 @@ document.addEventListener('visibilitychange', () => {
 </div>
 
 <style>
+/* Náhled: A4 list zmenši, ať se vejde do okna náhledu */
+#invoice-content { display:flex; justify-content:center; }
+#invoice-content #invoice-sheet {
+  transform: scale(var(--inv-scale, 0.62));
+  transform-origin: top center;
+  margin-bottom: -114mm; /* dorovnání výšky po zmenšení, ať okolo není prázdno */
+}
+@media (max-width: 480px){ #invoice-content #invoice-sheet { transform: scale(0.42); margin-bottom:-172mm; } }
 @media print {
-  @page { size: A4 portrait; margin: 8mm; }
+  @page { size: A4 portrait; margin: 0; }
+  html, body { margin:0!important; padding:0!important; }
   body > *:not(#invoice-overlay) { display: none !important; }
   #invoice-overlay { position:static!important; background:white!important; padding:0!important; overflow:visible!important; }
   #invoice-overlay > div { max-width:none!important; padding:0!important; margin:0!important; }
   #invoice-overlay > div > div:first-child { display:none!important; }
-  #invoice-content { border-radius:0!important; }
-  #invoice-sheet { font-size:8.5pt!important; }
+  #invoice-content { border-radius:0!important; display:block!important; }
+  /* Při tisku list v plné velikosti, žádné zmenšení, přesně jedna A4 */
+  #invoice-content #invoice-sheet { transform:none!important; margin:0!important; width:210mm!important; height:297mm!important; min-height:297mm!important; max-height:297mm!important; overflow:hidden!important; box-shadow:none!important; }
 }
 </style>
 
