@@ -1997,6 +1997,11 @@ button:not(.x-close) > svg:first-child{margin-right:6px}
             <option value="14" selected>14 dní</option>
           </select>
         </div>
+        <div class="fg" style="margin-bottom:12px">
+          <label style="font-size:12px">Popis položky (na faktuře)</label>
+          <input type="text" id="inv-item-text" placeholder="např. Carpenter service week 31/2026" style="width:100%;padding:8px;border:1px solid var(--brd);border-radius:8px;font-size:13px;font-family:inherit">
+          <div style="font-size:10px;color:var(--text3);margin-top:3px">Předvyplní se automaticky — můžete upravit.</div>
+        </div>
         <div id="inv-customer-info" style="background:var(--bg);border-radius:8px;padding:8px 10px;margin-bottom:12px;font-size:11px;color:var(--text2)">
           <div style="font-weight:700;font-size:12px;margin-bottom:2px">Fakturuje se:</div>
           <div id="inv-customer-name">Načítám...</div>
@@ -13253,8 +13258,11 @@ async function generateInvoiceMob(lang = 'en') {
   }
   const profDe = profDE_map[currentProfile.profession] || 'Bauarbeiten'
   const profCz = currentProfile.profession || 'Stavební práce'
-  // Předvyplněný popis položky ANGLICKY (editovatelný v náhledu): "<profese EN> service week X/rok"
-  const serviceDesc = `${profEn} service week ${week}/${year}`
+  // Popis položky: přednostně to, co OSVČ zadal/upravil ve formuláři; jinak předvyplněný anglický text
+  const itemTextEl = document.getElementById('inv-item-text')
+  const serviceDesc = (itemTextEl && itemTextEl.value.trim())
+    ? itemTextEl.value.trim()
+    : `${profEn} service week ${week}/${year}`
   const serviceDescSub = ''
 
   // Jméno na faktuře: u s.r.o. název firmy, jinak jméno osoby
@@ -13429,7 +13437,7 @@ function renderInvoice(d, lang = 'en') {
         </thead>
         <tbody>
           <tr style="border-bottom:1px solid #ececec">
-            <td style="padding:10px 8px 10px 0;font-size:12px;font-weight:600"><span id="inv-item-desc" contenteditable="true" spellcheck="false" style="outline:none;display:inline-block;min-width:60%;border-bottom:1px dotted #d8cfc0;padding:1px 2px" title="Klikni a uprav popis">${d.serviceDesc}</span></td>
+            <td style="padding:10px 8px 10px 0;font-size:12px;font-weight:600">${d.serviceDesc}</td>
             <td style="padding:10px 8px;text-align:center;font-size:12px;white-space:nowrap">${d.totalHours.toFixed(2)} h</td>
             <td style="padding:10px 8px;text-align:right;font-size:12px;white-space:nowrap">${d.rate.toFixed(2)} €</td>
             <td style="padding:10px 0 10px 8px;text-align:right;font-size:12px;font-weight:700;white-space:nowrap">${d.totalAmount.toFixed(2)} €</td>
@@ -13535,6 +13543,52 @@ async function downloadInvoicePDF() {
   }
 }
 
+// Anglický název profese (pro předvyplnění popisu položky na faktuře)
+function _professionEN(prof) {
+  const map = {
+    'Svářeč — elektroda (111)': 'Welder electrode (111)',
+    'Svářeč — MIG/MAG (135/136/138)': 'Welder MIG/MAG (135/136/138)',
+    'Pokrývač — rovné i šikmé střechy': 'Roofer flat and pitched roofs',
+    'Pokrývač — bitumen': 'Roofer bitumen',
+    'Pokrývač — fólie': 'Roofer membrane',
+    'Pomocný střechař': 'Roofing assistant',
+    'Tesař': 'Carpenter',
+    'Pomocný tesař': 'Carpentry assistant',
+    'Dřevostavby': 'Timber frame construction',
+    'Topenář': 'Heating engineer',
+    'Instalatér': 'Plumber',
+    'Vzduchotechnik': 'HVAC technician',
+    'Montáž dveří a oken': 'Door and window installation',
+    'Instalace solárních panelů': 'Solar panel installation',
+    'Elektrikář': 'Electrician',
+    'Pomocný elektrikář': 'Electrician assistant',
+    'Zedník': 'Bricklayer',
+    'Zedník — klinker': 'Bricklayer klinker',
+    'Obkladač': 'Tiler',
+    'Omítkář': 'Plasterer',
+    'Fasádník': 'Facade worker',
+    'Sádrokartonář': 'Drywaller',
+    'Pokladač zámkové dlažby': 'Paving installer',
+    'Klempíř (střechař)': 'Sheet metal worker',
+    'Lešenář': 'Scaffolder',
+    'Jeřábník': 'Crane operator',
+    'Bagrista': 'Excavator operator',
+    'Malíř': 'Painter',
+    'Pomocné práce na stavbě': 'General construction worker',
+  }
+  return map[prof] || 'Construction work'
+}
+
+// Předvyplní popis položky ve formuláři podle vybraného týdne (uživatel může přepsat)
+function prefillInvoiceItem() {
+  const itemEl = document.getElementById('inv-item-text')
+  const sel = document.getElementById('inv-week-sel')
+  if (!itemEl || !sel || !sel.value) return
+  const [week, year] = sel.value.split('/')
+  const profEn = _professionEN(currentProfile?.profession)
+  itemEl.value = `${profEn} service week ${week}/${year}`
+}
+
 async function loadInvoiceWeeks() {
   if (!currentUser) return
   const sel = document.getElementById('inv-week-sel')
@@ -13563,6 +13617,9 @@ async function loadInvoiceWeeks() {
     const [w, y] = key.split('/')
     return `<option value="${key}">Týden ${w}/${y} — ${h.toFixed(1)}h</option>`
   }).join('')
+  sel.onchange = prefillInvoiceItem
+  // Předvyplň popis položky pro první (vybraný) týden
+  prefillInvoiceItem()
 
   // Zobraz zákazníka komu se fakturuje
   // Zákazník je nastaven adminem v profilu pracovníka
