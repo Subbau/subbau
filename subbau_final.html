@@ -2140,7 +2140,9 @@ button:not(.x-close) > svg:first-child{margin-right:6px}
       <!-- PROFIL -->
       <div id="wdt-profil" class="wdt on">
         <div class="g2">
-          <div><div style="font-size:11px;color:var(--text3);margin-bottom:3px">Jméno</div><div style="font-weight:700" id="wd-fullname">—</div></div>
+          <div><div style="font-size:11px;color:var(--text3);margin-bottom:3px">Jméno</div>
+            <input type="text" id="wd-fullname-input" placeholder="Celé jméno" style="width:100%;padding:6px 10px;border:1.5px solid var(--brd);border-radius:7px;font-size:13px;font-weight:700">
+          </div>
           <div><div style="font-size:11px;color:var(--text3);margin-bottom:3px">Email</div>
             <input type="email" id="wd-email-input" placeholder="email@…" style="width:100%;padding:6px 10px;border:1.5px solid var(--brd);border-radius:7px;font-size:13px">
           </div>
@@ -3578,20 +3580,27 @@ function clearAdminSignCanvas() {
 }
 
 // ===== PAMĚŤ PODPISU ADMINA (jeden uložený podpis) =====
+// Ukládá se na dvou místech:
+//  1) localStorage — rychlá lokální kopie, funguje i offline
+//  2) Supabase Storage (bucket "contracts", složka signatures/) — stejný podpis
+//     je pak dostupný i z jiného zařízení (počítač i tablet stejného admina).
 const ADMIN_SIG_KEY = 'adminSavedSignature'
+function adminSigStoragePath() {
+  const uid = (typeof currentUser !== 'undefined' && currentUser?.id) ? currentUser.id : 'anon'
+  return 'signatures/admin_' + uid + '.png'
+}
 
-function saveAdminSignatureMemory() {
+async function saveAdminSignatureMemory() {
   const canvas = document.getElementById('admin-sign-canvas')
   if (!canvas) return
   const cw = canvas.width, ch = canvas.height
   const d = canvas.getContext('2d').getImageData(0,0,cw,ch).data
   const hasInk = d.some((v,i) => i % 4 === 3 && v > 0)
   if (!hasInk) { showToast('⚠️ Nejprve nakreslete podpis, pak ho uložte'); return }
-  // Ořízni na skutečně nakreslenou plochu a zmenši — celý canvas jako PNG bývá
-  // velký (stovky KB až MB) a uložení do localStorage pak na některých telefonech
-  // (hlavně Safari v soukromém prohlížení, nebo plná paměť) tiše selže. Menší
-  // oříznutý JPEG se uloží spolehlivě a navíc se hezčeji vloží podruhé.
-  let dataUrl
+  // Ořízni na skutečně nakreslenou plochu a zmenši. Pozadí NECHÁVÁME průhledné
+  // (žádné fillRect bílou) a ukládáme jako PNG — jinak by se při vložení
+  // vytvořil přes smlouvu neprůhledný bílý obdélník kolem podpisu.
+  let dataUrl, blob
   try {
     let minX = cw, minY = ch, maxX = 0, maxY = 0, found = false
     for (let y = 0; y < ch; y++) {
@@ -3615,20 +3624,48 @@ function saveAdminSignatureMemory() {
     const tmp = document.createElement('canvas')
     tmp.width = Math.round(cropW * scale); tmp.height = Math.round(cropH * scale)
     const tctx = tmp.getContext('2d')
-    tctx.fillStyle = '#fff'; tctx.fillRect(0, 0, tmp.width, tmp.height)
     tctx.drawImage(canvas, minX, minY, cropW, cropH, 0, 0, tmp.width, tmp.height)
-    dataUrl = tmp.toDataURL('image/jpeg', 0.85)
+    dataUrl = tmp.toDataURL('image/png')
+    blob = await new Promise(r => tmp.toBlob(r, 'image/png'))
   } catch(e) {
     dataUrl = canvas.toDataURL('image/png')
+    blob = await new Promise(r => canvas.toBlob(r, 'image/png'))
   }
-  const ok = lsSet(ADMIN_SIG_KEY, dataUrl)
-  if (!ok) { showToast('❌ Podpis se nepodařilo uložit do zařízení (plná paměť nebo soukromé prohlížení)'); refreshAdminSavedSigBtn(); return }
-  showToast('✅ Podpis uložen — příště ho jen vložíte')
+  const okLocal = lsSet(ADMIN_SIG_KEY, dataUrl)
+  let okCloud = false
+  try {
+    if (blob && typeof currentUser !== 'undefined' && currentUser?.id) {
+      const { error } = await sb.storage.from('contracts').upload(adminSigStoragePath(), blob, { contentType: 'image/png', upsert: true })
+      okCloud = !error
+      if (error) console.warn('[admin sig] cloud upload:', error.message)
+    }
+  } catch(e) { console.warn('[admin sig] cloud upload selhal:', e?.message) }
+  if (!okLocal && !okCloud) { showToast('❌ Podpis se nepodařilo uložit'); refreshAdminSavedSigBtn(); return }
+  showToast(okCloud ? '✅ Podpis uložen — dostupný na všech zařízeních' : '✅ Podpis uložen v tomto zařízení')
   refreshAdminSavedSigBtn()
 }
 
-function useAdminSignatureMemory() {
-  const saved = lsGet(ADMIN_SIG_KEY)
+async function useAdminSignatureMemory() {
+  let saved = lsGet(ADMIN_SIG_KEY)
+  // Chybí lokálně (jiné zařízení než na kterém byl uložen) → zkus cloud
+  if (!saved && typeof currentUser !== 'undefined' && currentUser?.id) {
+    try {
+      const { data } = sb.storage.from('contracts').getPublicUrl(adminSigStoragePath())
+      if (data?.publicUrl) {
+        const resp = await fetch(data.publicUrl, { cache: 'no-store' })
+        if (resp.ok) {
+          const blob = await resp.blob()
+          saved = await new Promise(res => {
+            const r = new FileReader()
+            r.onload = () => res(r.result)
+            r.onerror = () => res(null)
+            r.readAsDataURL(blob)
+          })
+          if (saved) lsSet(ADMIN_SIG_KEY, saved)
+        }
+      }
+    } catch(e) { console.warn('[admin sig] cloud fetch selhal:', e?.message) }
+  }
   if (!saved) { showToast('⚠️ Žádný uložený podpis — nejprve ho nakreslete a uložte tlačítkem výše'); refreshAdminSavedSigBtn(); return }
   const canvas = document.getElementById('admin-sign-canvas')
   if (!canvas) return
@@ -3649,9 +3686,19 @@ function useAdminSignatureMemory() {
   img.src = saved
 }
 
-function refreshAdminSavedSigBtn() {
+async function refreshAdminSavedSigBtn() {
   const btn = document.getElementById('admin-use-saved-sig-btn')
-  if (btn) btn.style.display = lsGet(ADMIN_SIG_KEY) ? 'inline-block' : 'none'
+  if (!btn) return
+  if (lsGet(ADMIN_SIG_KEY)) { btn.style.display = 'inline-block'; return }
+  btn.style.display = 'none'
+  // Lokálně nic není — zkus zjistit, jestli existuje v cloudu (jiné zařízení)
+  if (typeof currentUser === 'undefined' || !currentUser?.id) return
+  try {
+    const { data } = sb.storage.from('contracts').getPublicUrl(adminSigStoragePath())
+    if (!data?.publicUrl) return
+    const resp = await fetch(data.publicUrl, { method: 'HEAD', cache: 'no-store' })
+    if (resp.ok) btn.style.display = 'inline-block'
+  } catch(e) { /* offline nebo podpis zatím neexistuje — tlačítko zůstane skryté */ }
 }
 
 function closeAdminSignModal() {
@@ -3681,10 +3728,15 @@ async function submitAdminSignatureWithPlacement() {
   const canvas = document.getElementById('admin-sign-canvas')
   if (!canvas) { showToast('Chyba: canvas nenalezen'); return }
 
-  // Zkontroluj podpis
-  const imgData = canvas.getContext('2d').getImageData(0, 0, canvas.width, canvas.height).data
-  if (!imgData.some((v, i) => i % 4 === 3 && v > 0)) {
-    showToast('⚠️ Nejprve nakreslete podpis')
+  let imgData
+  try {
+    imgData = canvas.getContext('2d').getImageData(0, 0, canvas.width, canvas.height).data
+  } catch(e) {
+    showToast('❌ Chyba čtení podpisu: ' + e.message)
+    return
+  }
+  if (!canvas.width || !canvas.height || !imgData.some((v, i) => i % 4 === 3 && v > 0)) {
+    showToast('⚠️ Nejprve nakreslete nebo vložte podpis')
     return
   }
 
@@ -15551,14 +15603,27 @@ window.pdfFillState = pdfFillState
 // (jméno, datum apod.). Lze přeskočit — v obou případech se pak automaticky
 // otevře výběr místa, kam se má OSVČ podepsat.
 let _pdfFillThenSignPlace = null
+let _fillChoicePending = null
 function offerFillThenSignPlace(contractId, title, fileUrl) {
   if (!fileUrl) return
-  const wantsFill = confirm('Chcete do smlouvy nejdřív něco dopsat (jméno, datum apod.)?\n\nOK = dopsat text do PDF\nZrušit = přeskočit a rovnou vybrat místo podpisu OSVČ')
+  _fillChoicePending = { contractId, title, fileUrl }
+  const modal = document.getElementById('fill-choice-modal')
+  if (!modal) { openWorkerSignPlaceModal(contractId, title, fileUrl); return }
+  const titleEl = document.getElementById('fill-choice-title')
+  if (titleEl) titleEl.textContent = title || ''
+  modal.style.display = 'flex'
+}
+function fillChoiceConfirm(wantsFill) {
+  const modal = document.getElementById('fill-choice-modal')
+  if (modal) modal.style.display = 'none'
+  const chain = _fillChoicePending
+  _fillChoicePending = null
+  if (!chain) return
   if (wantsFill) {
-    _pdfFillThenSignPlace = { contractId, title, fileUrl }
-    openPdfFillModal(contractId, title, fileUrl)
+    _pdfFillThenSignPlace = chain
+    openPdfFillModal(chain.contractId, chain.title, chain.fileUrl)
   } else {
-    openWorkerSignPlaceModal(contractId, title, fileUrl)
+    openWorkerSignPlaceModal(chain.contractId, chain.title, chain.fileUrl)
   }
 }
 
@@ -15930,9 +15995,14 @@ function initSignaturePad(canvas, opts = {}) {
       }
     }
     w = Math.max(2, w); h = Math.max(2, h)
+    const newDpr = Math.max(1, Math.min(window.devicePixelRatio || 1, 2))
+    // Beze změny skutečné velikosti nic nedělej — jinak každý "resize" event
+    // (např. dojezd zámku orientace na tabletu, schování lišty Safari) vynuluje
+    // canvas.width/height a smaže právě nakreslený nebo vložený podpis.
+    if (canvas.width === Math.round(w * newDpr) && canvas.height === Math.round(h * newDpr)) return
     let prev = null
     try { prev = (canvas.width && canvas.height) ? ctx.getImageData(0,0,canvas.width,canvas.height) : null } catch(e){}
-    dpr = Math.max(1, Math.min(window.devicePixelRatio || 1, 2))
+    dpr = newDpr
     canvas.width = w * dpr
     canvas.height = h * dpr
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
@@ -16003,7 +16073,10 @@ function initSignaturePad(canvas, opts = {}) {
   }
   function end(e) { drawing = false; pts = []; if (e) e.preventDefault() }
 
-  const onResize = () => resize()
+  // Debounce: při otáčení tabletu/telefonu přijde krátká série resize eventů,
+  // než se rozložení usadí. Bez debounce by každý z nich mohl smazat plátno.
+  let resizeTimer = null
+  const onResize = () => { clearTimeout(resizeTimer); resizeTimer = setTimeout(resize, 200) }
   // Pointer Events pokrývají myš, dotyk i Apple Pencil jednotně
   canvas.addEventListener('pointerdown', start)
   canvas.addEventListener('pointermove', move)
@@ -16019,6 +16092,7 @@ function initSignaturePad(canvas, opts = {}) {
     toDataURL(type) { return canvas.toDataURL(type || 'image/png') },
     toBlob(cb, type) { return canvas.toBlob(cb, type || 'image/png') },
     destroy() {
+      clearTimeout(resizeTimer)
       canvas.removeEventListener('pointerdown', start)
       canvas.removeEventListener('pointermove', move)
       canvas.removeEventListener('pointerup', end)
@@ -16725,7 +16799,8 @@ async function openWorkerModal(id) {
       wdAvatarInit.textContent = (w.full_name||'?').split(' ').map(n=>n[0]).join('').slice(0,2).toUpperCase()
     }
   }
-  document.getElementById('wd-fullname').textContent = w.full_name
+  const wdFullnameInput = document.getElementById('wd-fullname-input')
+  if (wdFullnameInput) wdFullnameInput.value = w.full_name || ''
   const emInput = document.getElementById('wd-email-input'); if (emInput) emInput.value = w.email || ''
   const phInput = document.getElementById('wd-phone-input'); if (phInput) phInput.value = w.phone || ''
   const wdProfSel = document.getElementById('wd-profession-sel')
@@ -17597,6 +17672,8 @@ async function saveFinance() {
 
 async function saveWorkerProfile() {
   if(!currentWorkerId) return
+  const fullName = document.getElementById('wd-fullname-input')?.value.trim() || ''
+  if (!fullName) { showToast('⚠️ Jméno nesmí být prázdné'); return }
   const rate = parseFloat(document.getElementById('wd-rate').value)||0
   const coopStart = document.getElementById('wd-coop-start')?.value || null
   const coopEnd = document.getElementById('wd-coop-end')?.value || null
@@ -17613,6 +17690,7 @@ async function saveWorkerProfile() {
   let error
   try {
     ;({ error } = await sb.from('profiles').update({
+      full_name: fullName,
       hourly_rate_worker: rate,
       cooperation_start: coopStart || null,
       cooperation_end: coopEnd || null,
@@ -17636,6 +17714,18 @@ async function saveWorkerProfile() {
   }
   if(error){showToast('Chyba: '+error.message);return}
   showToast('✅ Profil uložen')
+  // Aktualizuj hlavičku modalu (jméno, iniciály) i lokální cache pracovníků
+  const wdNameEl = document.getElementById('wd-name')
+  if (wdNameEl) wdNameEl.textContent = fullName
+  const wdFullnameEl = document.getElementById('wd-fullname')
+  if (wdFullnameEl) wdFullnameEl.textContent = fullName
+  const wdAvatarInitEl = document.getElementById('wd-avatar-init')
+  if (wdAvatarInitEl && wdAvatarInitEl.style.display !== 'none') {
+    wdAvatarInitEl.textContent = fullName.split(' ').map(n=>n[0]).join('').slice(0,2).toUpperCase()
+  }
+  if (currentWorkerProfile) currentWorkerProfile.full_name = fullName
+  const wIdx = (_workersCache||[]).find(w => String(w.id) === String(currentWorkerId))
+  if (wIdx) wIdx.full_name = fullName
   loadWorkers()
 }
 
@@ -17877,6 +17967,27 @@ document.addEventListener('visibilitychange', () => {
 }
 </style>
 
+
+<!-- VOLBA: dopsat text do smlouvy, nebo rovnou vybrat místo podpisu -->
+<div id="fill-choice-modal" style="display:none;position:fixed;inset:0;z-index:10010;background:rgba(33,29,26,.55);align-items:center;justify-content:center;padding:20px">
+  <div style="background:#fff;border-radius:18px;padding:26px;width:100%;max-width:420px;box-shadow:0 16px 48px rgba(0,0,0,.35)">
+    <div style="width:46px;height:46px;border-radius:13px;background:var(--amber-l,#faf0dc);color:#9a6b15;display:flex;align-items:center;justify-content:center;margin-bottom:14px">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:24px;height:24px"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/></svg>
+    </div>
+    <div style="font-size:17px;font-weight:800;color:#211D1A;margin-bottom:5px">Chcete do smlouvy něco dopsat?</div>
+    <div id="fill-choice-title" style="font-size:12px;color:#9a9082;margin-bottom:12px;font-weight:600"></div>
+    <p style="font-size:13.5px;color:#6b6157;line-height:1.55;margin:0 0 20px">Než OSVČ smlouvu podepíše, můžete do ní doplnit text — třeba jméno, datum nebo poznámku. Nebo rovnou pokračovat k výběru místa, kam se má podepsat.</p>
+    <div style="display:flex;flex-direction:column;gap:9px">
+      <button onclick="fillChoiceConfirm(true)" style="padding:14px;background:#211D1A;color:#E8A13A;border:none;border-radius:12px;font-size:14px;font-weight:800;cursor:pointer;font-family:inherit;display:flex;align-items:center;justify-content:center;gap:8px">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:16px;height:16px"><path d="M12 5v14M5 12h14"/></svg>
+        Ano, chci něco dopsat
+      </button>
+      <button onclick="fillChoiceConfirm(false)" style="padding:14px;background:#f4efe7;color:#211D1A;border:none;border-radius:12px;font-size:14px;font-weight:700;cursor:pointer;font-family:inherit">
+        Přeskočit — rovnou vybrat místo podpisu
+      </button>
+    </div>
+  </div>
+</div>
 
 <!-- PDF FILL MODAL — klikni na PDF a piš text (datum, podpis, cokoli) -->
 <div id="pdf-fill-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.85);z-index:9998;flex-direction:column">
