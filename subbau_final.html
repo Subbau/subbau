@@ -13912,6 +13912,13 @@ async function saveEditAttRecord() {
   const site = document.getElementById('edit-att-site')?.value.trim() || null
   const desc = document.getElementById('edit-att-desc')?.value.trim() || null
 
+  // Pole "breaks" má při zobrazování PŘEDNOST před break_start/break_end (kvůli
+  // více pauzám za směnu) — pokud bychom ho tady nepřepsali, staré pauzy z
+  // mobilní appky by v přehledech zůstaly viset i po ruční úpravě admina.
+  const breaksArr = []
+  if (bs && be) breaksArr.push({ bs, be })
+  if (bs2 && be2) breaksArr.push({ bs: bs2, be: be2 })
+
   const payload = {
     check_in: ci + ':00',
     check_out: co ? co + ':00' : null,
@@ -13919,6 +13926,7 @@ async function saveEditAttRecord() {
     break_end: be ? be + ':00' : null,
     break2_start: bs2 ? bs2 + ':00' : null,
     break2_end: be2 ? be2 + ':00' : null,
+    breaks: breaksArr,
     total_hours: hours,
     is_manual: true,
     construction_site: site || null,
@@ -14111,6 +14119,13 @@ async function saveManualAttendance() {
   }).hours
   const kw = getKW(new Date(date))
 
+  // Pole "breaks" má při zobrazování PŘEDNOST před break_start/break_end (kvůli
+  // více pauzám za směnu) — přepiš ho, ať staré pauzy z mobilní appky nezůstanou
+  // viset v přehledech i po ručním zápisu/opravě admina.
+  const breaksArr = []
+  if (bs && be) breaksArr.push({ bs, be })
+  if (bs2 && be2) breaksArr.push({ bs: bs2, be: be2 })
+
   // Zkontroluj jestli záznam pro tento den a pracovníka už existuje
   // Načti všechny záznamy pro daný den (může být více směn)
   const { data: existingAll } = await sb.from('attendance')
@@ -14134,6 +14149,7 @@ async function saveManualAttendance() {
         break_end: be ? be+':00' : null,
         break2_start: bs2 ? bs2+':00' : null,
         break2_end: be2 ? be2+':00' : null,
+        breaks: breaksArr,
         total_hours: hours,
         location_address: site || null,
         manual_note: note || null,
@@ -14158,6 +14174,7 @@ async function saveManualAttendance() {
         break_end: be ? be+':00' : null,
         break2_start: bs2 ? bs2+':00' : null,
         break2_end: be2 ? be2+':00' : null,
+        breaks: breaksArr,
         total_hours: hours,
         location_address: site || null,
         kw: kw.week,
@@ -14806,9 +14823,9 @@ async function uploadContract() {
   document.getElementById('contract-title').value = ''
   document.getElementById('contract-worker').value = ''
 
-  showToast('✅ Smlouva nahrána — vyberte v náhledu, kam se má OSVČ podepsat')
+  showToast('✅ Smlouva nahrána')
   loadAdminContracts()
-  if (fileUrl) openWorkerSignPlaceModal(contractId, title, fileUrl)
+  if (fileUrl) offerFillThenSignPlace(contractId, title, fileUrl)
 }
 
 // Nahraje smlouvu, která je už podepsaná (sken) — uloží rovnou jako hotovou, nikdo nepodepisuje
@@ -14928,9 +14945,9 @@ async function uploadAdminSignedContract() {
   document.getElementById('contract-title').value = ''
   document.getElementById('contract-worker').value = ''
 
-  showToast('✅ Smlouva nahrána — vyberte v náhledu, kam se má OSVČ podepsat')
+  showToast('✅ Smlouva nahrána')
   loadAdminContracts()
-  if (fileUrl && contractData?.id) openWorkerSignPlaceModal(contractData.id, title, fileUrl)
+  if (fileUrl && contractData?.id) offerFillThenSignPlace(contractData.id, title, fileUrl)
 }
 
 
@@ -15236,10 +15253,25 @@ function csErrorBox(title, msg) {
 const pdfFillState = {
   contractId: null, fileUrl: null, pdfBytes: null,
   pdfDoc: null, page: 1, total: 1, scale: 1.5,
-  viewport: null, fontSize: 14,
+  viewport: null, fontSize: 16,
   fields: []
 }
 window.pdfFillState = pdfFillState
+
+// Po nahrání smlouvy: zeptej se, jestli chce admin do PDF nejdřív dopsat text
+// (jméno, datum apod.). Lze přeskočit — v obou případech se pak automaticky
+// otevře výběr místa, kam se má OSVČ podepsat.
+let _pdfFillThenSignPlace = null
+function offerFillThenSignPlace(contractId, title, fileUrl) {
+  if (!fileUrl) return
+  const wantsFill = confirm('Chcete do smlouvy nejdřív něco dopsat (jméno, datum apod.)?\n\nOK = dopsat text do PDF\nZrušit = přeskočit a rovnou vybrat místo podpisu OSVČ')
+  if (wantsFill) {
+    _pdfFillThenSignPlace = { contractId, title, fileUrl }
+    openPdfFillModal(contractId, title, fileUrl)
+  } else {
+    openWorkerSignPlaceModal(contractId, title, fileUrl)
+  }
+}
 
 async function openPdfFillModal(contractId, title, fileUrl) {
   if (!fileUrl) { showToast('❌ Smlouva nemá PDF'); return }
@@ -15247,9 +15279,9 @@ async function openPdfFillModal(contractId, title, fileUrl) {
   pdfFillState.fileUrl = fileUrl
   pdfFillState.fields = []
   pdfFillState.page = 1
-  pdfFillState.fontSize = 14
+  pdfFillState.fontSize = 16
   document.getElementById('pdf-fill-title').textContent = title || 'Vyplnit smlouvu'
-  document.getElementById('pdf-fill-fontsize').textContent = '14'
+  document.getElementById('pdf-fill-fontsize').textContent = '16'
   const modal = document.getElementById('pdf-fill-modal')
   modal.style.display = 'flex'
   document.body.style.overflow = 'hidden'
@@ -15282,6 +15314,13 @@ function closePdfFillModal() {
   pdfFillState.fields = []
   // vyčisti textová pole
   document.querySelectorAll('.pdf-fill-field').forEach(el => el.remove())
+  // Byl fill modal otevřen jako mezikrok po nahrání smlouvy? Pokračuj rovnou
+  // na výběr místa podpisu OSVČ (ať uloženo, nebo jen zavřeno bez uložení).
+  if (_pdfFillThenSignPlace) {
+    const chain = _pdfFillThenSignPlace
+    _pdfFillThenSignPlace = null
+    openWorkerSignPlaceModal(chain.contractId, chain.title, chain.fileUrl)
+  }
 }
 
 async function pdfFillRenderPage(pageNum) {
@@ -15441,7 +15480,7 @@ async function pdfFillSave() {
       const pw = page.getWidth(), ph = page.getHeight()
       // scale té stránky: použij uložený, jinak aktuální
       const sc = f.scale || pdfFillState.scale
-      const fontSize = f.fontSize || 14
+      const fontSize = f.fontSize || 16
       // levý-horní roh pole v css px → PDF: x = xCss/sc ; y = ph - (yCss/sc) - fontSizePDF (baseline)
       const xPdf = f.xCss / sc
       const baselineFromTopCss = f.yCss + fontSize  // text baseline ~ horní okraj + velikost
@@ -15480,6 +15519,10 @@ async function pdfFillSave() {
       if (dbErr) showToast('⚠️ PDF uloženo, ale záznam smlouvy se nepodařilo aktualizovat')
       else showToast('✅ Vyplněné PDF uloženo')
       loadAdminContracts()
+      // Pokud pokračujeme na výběr místa podpisu, ať se otevře už s vyplněnou verzí
+      if (_pdfFillThenSignPlace && _pdfFillThenSignPlace.contractId === pdfFillState.contractId) {
+        _pdfFillThenSignPlace.fileUrl = publicUrl
+      }
     }
     closePdfFillModal()
   } catch(e) {
@@ -17558,7 +17601,7 @@ document.addEventListener('visibilitychange', () => {
   <div style="padding:6px 14px;background:#2c2722;color:#cfc7bd;font-size:11.5px;display:flex;align-items:center;gap:10px;flex-wrap:wrap">
     <span>👆 Klepni kamkoli na stránku a napiš text. Pole můžeš tahat. Velikost:</span>
     <button onclick="pdfFillFontDelta(-2)" style="padding:2px 9px;background:#3a342f;color:#fff;border:none;border-radius:6px;cursor:pointer;font-family:inherit">A−</button>
-    <span id="pdf-fill-fontsize" style="min-width:30px;text-align:center">14</span>
+    <span id="pdf-fill-fontsize" style="min-width:30px;text-align:center">16</span>
     <button onclick="pdfFillFontDelta(2)" style="padding:2px 9px;background:#3a342f;color:#fff;border:none;border-radius:6px;cursor:pointer;font-family:inherit">A+</button>
   </div>
   <div id="pdf-fill-scroll" style="flex:1;overflow:auto;display:flex;justify-content:center;align-items:flex-start;padding:16px">
