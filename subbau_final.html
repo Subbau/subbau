@@ -1797,9 +1797,11 @@ button:not(.x-close) > svg:first-child{margin-right:6px}
       </div>
       <!-- PRAVÁ ČÁST: Kreslení podpisu -->
       <div class="sign-canvas-pane">
-        <div style="font-size:12px;font-weight:600;margin-bottom:6px;color:#444" id="sign-h-draw">Nakreslete podpis</div>
-        <div id="sign-canvas-area" style="aspect-ratio:1/1;width:100%;border:2px solid #211D1A;border-radius:8px;overflow:hidden;margin-bottom:8px;min-height:160px">
+        <div style="font-size:13px;font-weight:700;margin-bottom:2px;color:#211D1A;text-align:center" id="sign-h-draw">Zde podepište</div>
+        <div style="text-align:center;color:#c0392b;font-size:20px;line-height:1;margin-bottom:5px" aria-hidden="true">↓</div>
+        <div id="sign-canvas-area" style="position:relative;aspect-ratio:1/1;width:100%;border:2px solid #211D1A;box-shadow:inset 0 0 0 3px #c0392b;border-radius:8px;overflow:hidden;margin-bottom:8px;min-height:160px">
           <canvas id="sign-canvas" style="display:block;width:100%;height:100%;touch-action:none;user-select:none"></canvas>
+          <div id="sign-canvas-hint" style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:#c0392b;font-size:13px;font-weight:700;pointer-events:none;text-align:center;padding:10px;line-height:1.4">Do tohoto pole se podepište</div>
         </div>
         <button onclick="clearWorkerSignCanvas()" id="sign-btn-clear" style="font-size:12px;padding:6px;border:1px solid #ddd;border-radius:6px;cursor:pointer;margin-bottom:10px">Vymazat podpis</button>
         <div id="worker-sig-pos-info" style="font-size:11px;color:#888;padding:7px 9px;background:#f0f0f0;border-radius:6px;margin-bottom:10px">Kliknete do PDF vlevo pro umisteni podpisu</div>
@@ -2654,19 +2656,20 @@ function closeSignGuide() {
 function applySignModalLang(de) {
   const t = de ? {
     title:'Vertrag unterschreiben', place:'Tippen Sie in das PDF, wo die Unterschrift erscheinen soll',
-    draw:'Unterschrift zeichnen', clear:'Unterschrift löschen', submit:'Vorschau & Speichern',
+    draw:'Hier unterschreiben', hint:'Unterschreiben Sie in diesem Feld', clear:'Unterschrift löschen', submit:'Vorschau & Speichern',
     posInfo:'Tippen Sie links ins PDF, um die Unterschrift zu platzieren',
     preview:'So wird die Unterschrift aussehen', retry:'✏️ Erneut unterschreiben', confirm:'✅ Bestätigen & speichern',
     markerText:'Unterschrift hier', markerDrag:'← ziehen →'
   } : {
     title:'Podepsat smlouvu', place:'Klikněte do PDF kam chcete umístit podpis',
-    draw:'Nakreslete podpis', clear:'Vymazat podpis', submit:'Náhled a uložit',
+    draw:'Zde podepište', hint:'Do tohoto pole se podepište', clear:'Vymazat podpis', submit:'Náhled a uložit',
     posInfo:'Kliknete do PDF vlevo pro umisteni podpisu',
     preview:'Takto bude podpis vypadat', retry:'✏️ Podepsat znovu', confirm:'✅ Potvrdit a uložit',
     markerText:'Podpis bude zde', markerDrag:'← táhněte →'
   }
   const set = (id, txt) => { const el = document.getElementById(id); if (el) el.textContent = txt }
   set('sign-h-title', t.title); set('sign-h-place', t.place); set('sign-h-draw', t.draw)
+  set('sign-canvas-hint', t.hint)
   set('sign-btn-clear', t.clear); set('sign-submit-btn', t.submit); set('worker-sig-pos-info', t.posInfo)
   set('sign-h-preview', t.preview); set('sign-btn-retry', t.retry); set('sign-btn-confirm', t.confirm)
   set('worker-sig-marker-text', t.markerText); set('worker-sig-marker-drag', t.markerDrag)
@@ -2898,11 +2901,22 @@ function setupWorkerSignCanvas() {
   const c = workerSignCanvas; if (!c) return
   initSignaturePad(c, { width: 2.4 })
   workerSignCtx = c.getContext('2d')
+  const hint = document.getElementById('sign-canvas-hint')
+  if (hint) {
+    hint.style.display = 'flex'
+    if (!c._hintBound) {
+      c._hintBound = true
+      const hideHint = () => { hint.style.display = 'none' }
+      c.addEventListener('pointerdown', hideHint)
+    }
+  }
 }
 
 function clearWorkerSignCanvas() {
-  if (workerSignCanvas && workerSignCanvas._sigPad) { workerSignCanvas._sigPad.clear(); return }
-  if (workerSignCtx && workerSignCanvas) workerSignCtx.clearRect(0,0,workerSignCanvas.width,workerSignCanvas.height)
+  if (workerSignCanvas && workerSignCanvas._sigPad) { workerSignCanvas._sigPad.clear() }
+  else if (workerSignCtx && workerSignCanvas) workerSignCtx.clearRect(0,0,workerSignCanvas.width,workerSignCanvas.height)
+  const hint = document.getElementById('sign-canvas-hint')
+  if (hint) hint.style.display = 'flex'
 }
 
 function closeSignModal() {
@@ -3569,19 +3583,53 @@ const ADMIN_SIG_KEY = 'adminSavedSignature'
 function saveAdminSignatureMemory() {
   const canvas = document.getElementById('admin-sign-canvas')
   if (!canvas) return
-  const d = canvas.getContext('2d').getImageData(0,0,canvas.width,canvas.height).data
+  const cw = canvas.width, ch = canvas.height
+  const d = canvas.getContext('2d').getImageData(0,0,cw,ch).data
   const hasInk = d.some((v,i) => i % 4 === 3 && v > 0)
   if (!hasInk) { showToast('⚠️ Nejprve nakreslete podpis, pak ho uložte'); return }
+  // Ořízni na skutečně nakreslenou plochu a zmenši — celý canvas jako PNG bývá
+  // velký (stovky KB až MB) a uložení do localStorage pak na některých telefonech
+  // (hlavně Safari v soukromém prohlížení, nebo plná paměť) tiše selže. Menší
+  // oříznutý JPEG se uloží spolehlivě a navíc se hezčeji vloží podruhé.
+  let dataUrl
   try {
-    lsSet(ADMIN_SIG_KEY, canvas.toDataURL('image/png'))
-    showToast('✅ Podpis uložen — příště ho jen vložíte')
-    refreshAdminSavedSigBtn()
-  } catch(e) { showToast('❌ Podpis se nepodařilo uložit') }
+    let minX = cw, minY = ch, maxX = 0, maxY = 0, found = false
+    for (let y = 0; y < ch; y++) {
+      for (let x = 0; x < cw; x++) {
+        if (d[(y * cw + x) * 4 + 3] > 20) {
+          found = true
+          if (x < minX) minX = x
+          if (x > maxX) maxX = x
+          if (y < minY) minY = y
+          if (y > maxY) maxY = y
+        }
+      }
+    }
+    if (!found) { minX = 0; minY = 0; maxX = cw - 1; maxY = ch - 1 }
+    const pad = Math.round(Math.max(cw, ch) * 0.04)
+    minX = Math.max(0, minX - pad); minY = Math.max(0, minY - pad)
+    maxX = Math.min(cw - 1, maxX + pad); maxY = Math.min(ch - 1, maxY + pad)
+    const cropW = Math.max(1, maxX - minX + 1), cropH = Math.max(1, maxY - minY + 1)
+    const targetW = 500
+    const scale = Math.min(1, targetW / cropW)
+    const tmp = document.createElement('canvas')
+    tmp.width = Math.round(cropW * scale); tmp.height = Math.round(cropH * scale)
+    const tctx = tmp.getContext('2d')
+    tctx.fillStyle = '#fff'; tctx.fillRect(0, 0, tmp.width, tmp.height)
+    tctx.drawImage(canvas, minX, minY, cropW, cropH, 0, 0, tmp.width, tmp.height)
+    dataUrl = tmp.toDataURL('image/jpeg', 0.85)
+  } catch(e) {
+    dataUrl = canvas.toDataURL('image/png')
+  }
+  const ok = lsSet(ADMIN_SIG_KEY, dataUrl)
+  if (!ok) { showToast('❌ Podpis se nepodařilo uložit do zařízení (plná paměť nebo soukromé prohlížení)'); refreshAdminSavedSigBtn(); return }
+  showToast('✅ Podpis uložen — příště ho jen vložíte')
+  refreshAdminSavedSigBtn()
 }
 
 function useAdminSignatureMemory() {
   const saved = lsGet(ADMIN_SIG_KEY)
-  if (!saved) { showToast('⚠️ Žádný uložený podpis'); return }
+  if (!saved) { showToast('⚠️ Žádný uložený podpis — nejprve ho nakreslete a uložte tlačítkem výše'); refreshAdminSavedSigBtn(); return }
   const canvas = document.getElementById('admin-sign-canvas')
   if (!canvas) return
   const img = new Image()
@@ -3594,8 +3642,10 @@ function useAdminSignatureMemory() {
     const ratio = Math.min(cw / img.width, ch / img.height)
     const w = img.width * ratio, h = img.height * ratio
     ctx.drawImage(img, (cw - w)/2, (ch - h)/2, w, h)
-    showToast('📎 Uložený podpis vložen')
+    if (canvas._sigPad && canvas._sigPad.markInk) canvas._sigPad.markInk()
+    showToast('📎 Uložený podpis vložen — teď klikněte do PDF, kam se má umístit')
   }
+  img.onerror = () => { showToast('❌ Uložený podpis se nepodařilo načíst — podepište prosím znovu a uložte') }
   img.src = saved
 }
 
@@ -5762,9 +5812,32 @@ function _nameToHue(name) {
   for (let i = 0; i < s.length; i++) { h = (h * 31 + s.charCodeAt(i)) % 360 }
   return h
 }
+// Registr přidělených odstínů podle druhu (firma / podskupina), aby žádné dvě
+// firmy (a zvlášť žádné dvě podskupiny) nedostaly stejnou nebo příliš podobnou
+// barvu. Barva se pro dané jméno spočítá jednou a pak zůstává stabilní.
+window._groupColorRegistry = window._groupColorRegistry || { company: {}, sub: {} }
+function _hueDist(a, b) {
+  const d = Math.abs(a - b) % 360
+  return d > 180 ? 360 - d : d
+}
+function _assignedHue(name, kind) {
+  const reg = window._groupColorRegistry[kind] || (window._groupColorRegistry[kind] = {})
+  const key = String(name || '')
+  if (reg[key] != null) return reg[key]
+  const MIN_GAP = 28
+  const used = Object.values(reg)
+  let hue = _nameToHue(key + '|' + kind)
+  let attempt = 0
+  while (attempt < 40 && used.some(h => _hueDist(h, hue) < MIN_GAP)) {
+    hue = (hue + 47) % 360
+    attempt++
+  }
+  reg[key] = hue
+  return hue
+}
 function groupColor(name, kind) {
-  const hue = _nameToHue(name + '|' + kind)
-  return { bg: `hsl(${hue}, 70%, 93%)`, text: `hsl(${hue}, 65%, 32%)`, border: `hsl(${hue}, 55%, 82%)` }
+  const hue = _assignedHue(name, kind)
+  return { bg: `hsl(${hue}, 38%, 94%)`, text: `hsl(${hue}, 40%, 30%)`, border: `hsl(${hue}, 32%, 72%)` }
 }
 
 function groupCellHtml(teamName, subName) {
@@ -5776,7 +5849,7 @@ function groupCellHtml(teamName, subName) {
   }
   if (subName) {
     const c = groupColor(subName, 'sub')
-    html += `<span class="pill" style="background:${c.bg};color:${c.text};border:1px solid ${c.border};white-space:nowrap">👥 ${subName}</span>`
+    html += `<span class="pill" style="background:#fff;color:${c.text};border:1.5px solid ${c.border};white-space:nowrap">👥 ${subName}</span>`
   }
   html += '</div>'
   return html
@@ -15942,6 +16015,7 @@ function initSignaturePad(canvas, opts = {}) {
   const pad = {
     clear() { ctx.setTransform(dpr,0,0,dpr,0,0); ctx.clearRect(0,0,canvas.width,canvas.height); empty = true },
     isEmpty() { return empty },
+    markInk() { empty = false },
     toDataURL(type) { return canvas.toDataURL(type || 'image/png') },
     toBlob(cb, type) { return canvas.toBlob(cb, type || 'image/png') },
     destroy() {
