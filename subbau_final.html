@@ -828,9 +828,9 @@ button:not(.x-close) > svg:first-child{margin-right:6px}
           </div>
           <div class="card">
             <table>
-              <thead><tr><th>Jméno</th><th>Email</th><th>Profese</th><th>Role</th><th>Stav</th><th>Docházka</th><th>Přístup</th></tr></thead>
+              <thead><tr><th>Jméno</th><th>Skupina</th><th>Profese</th><th>Email</th><th>Role</th><th>Stav</th><th>Docházka</th><th>Přístup</th></tr></thead>
               <tbody id="workers-table">
-                <tr><td colspan="7" style="text-align:center;color:var(--text3);padding:20px">Načítám pracovníky...</td></tr>
+                <tr><td colspan="8" style="text-align:center;color:var(--text3);padding:20px">Načítám pracovníky...</td></tr>
               </tbody>
             </table>
           </div>
@@ -5615,6 +5615,34 @@ async function loadUnclosedShiftsAlert() {
   }
 }
 
+// Barevný odznak skupiny (firma, světle zelená) a podskupiny (parta, světle modrá) —
+// sdíleno mezi tabulkou Pracovníci a Docházka, aby vypadaly stejně.
+function groupCellHtml(teamName, subName) {
+  if (!teamName && !subName) return '<span style="color:var(--text3)">—</span>'
+  let html = '<div style="display:flex;flex-direction:column;gap:4px;align-items:flex-start">'
+  if (teamName) html += `<span class="pill" style="background:#e6f4ea;color:#2f7d4f;border:1px solid #bfe3c8;white-space:nowrap">🏢 ${teamName}</span>`
+  if (subName) html += `<span class="pill" style="background:#e3f0fc;color:#1a5fa8;border:1px solid #bcdcf7;white-space:nowrap">👥 ${subName}</span>`
+  html += '</div>'
+  return html
+}
+
+// Seřadí podle firmy (skupiny), pak podskupiny, pak jména — nezařazení pracovníci nakonec
+function sortByGroup(list, teamNameById, subteamById) {
+  return [...list].sort((a,b) => {
+    const ta = a.team_id ? (teamNameById[a.team_id]||'') : ''
+    const tb = b.team_id ? (teamNameById[b.team_id]||'') : ''
+    if (!ta && tb) return 1
+    if (ta && !tb) return -1
+    const tc = ta.localeCompare(tb, 'cs')
+    if (tc) return tc
+    const sa = a.subteam_id ? (subteamById[a.subteam_id]?.name||'') : ''
+    const sbb = b.subteam_id ? (subteamById[b.subteam_id]?.name||'') : ''
+    const sc = sa.localeCompare(sbb, 'cs')
+    if (sc) return sc
+    return (a.full_name||'').localeCompare(b.full_name||'', 'cs')
+  })
+}
+
 async function loadWorkers() {
   // Neaktivní lidi a lidi bez povolené docházky tu nechceme – ti se spravují v Přístupech.
   const { data } = await sb.from('profiles').select('*').in('role',['osvec','partak']).eq('is_active',true)
@@ -5622,16 +5650,31 @@ async function loadWorkers() {
   const tbody = document.getElementById('workers-table')
   const cntEl = document.getElementById('workers-count')
   if (cntEl) cntEl.textContent = data?.length ? data.length : ''
-  if (!data?.length) { tbody.innerHTML='<tr><td colspan="7" style="text-align:center;color:var(--text3);padding:20px">Žádní pracovníci</td></tr>'; return }
+  if (!data?.length) { tbody.innerHTML='<tr><td colspan="8" style="text-align:center;color:var(--text3);padding:20px">Žádní pracovníci</td></tr>'; return }
+
+  // Skupiny (firmy) a podskupiny — pro barevné odznaky a řazení podle firmy
+  const { data: teamsForW } = await sb.from('teams').select('id,name')
+  const teamNameById = {}
+  ;(teamsForW||[]).forEach(t => { teamNameById[t.id] = t.name })
+  const { data: subteamsForW } = await sb.from('subteams').select('id,name,team_id')
+  const subteamById = {}
+  ;(subteamsForW||[]).forEach(s => { subteamById[s.id] = s })
+
   // Zjisti, kdo má nezavřenou směnu > 11 h (pro červený odznáček)
   await computeUnclosedWorkerIds()
-  tbody.innerHTML = data.map(w=>{
+
+  const sortedWorkers = sortByGroup(data, teamNameById, subteamById)
+
+  tbody.innerHTML = sortedWorkers.map(w=>{
     const canTrack = w.can_track_hours !== false   // null/undefined = povoleno (zpětná kompatibilita)
+    const teamName = w.team_id ? (teamNameById[w.team_id]||'') : ''
+    const subName = w.subteam_id ? (subteamById[w.subteam_id]?.name||'') : ''
     return `
     <tr style="cursor:pointer" class="worker-row" data-id="${w.id}">
-      <td><b>${w.full_name}</b>${w.has_car ? ' <span style="font-size:11px;background:#eef7ee;color:#2e7d32;border:1px solid #b8dcb8;font-weight:700;padding:1px 6px;border-radius:8px;white-space:nowrap" title="Má vlastní auto">🚗 auto</span>' : ''}${(window.unclosedWorkerIds && window.unclosedWorkerIds.has(w.id)) ? ' <span style="background:var(--red);color:#fff;font-size:10px;font-weight:700;padding:2px 6px;border-radius:8px;white-space:nowrap" title="Nemá ukončený den (směna přes 11 h)">⚠️ neukončeno</span>' : ''}<br><small style="color:var(--text3)">${profLabel(w.profession)||''}</small></td>
-      <td style="font-size:12px">${w.email}</td>
+      <td><b>${w.full_name}</b>${w.has_car ? ' <span style="font-size:11px;background:#eef7ee;color:#2e7d32;border:1px solid #b8dcb8;font-weight:700;padding:1px 6px;border-radius:8px;white-space:nowrap" title="Má vlastní auto">🚗 auto</span>' : ''}${(window.unclosedWorkerIds && window.unclosedWorkerIds.has(w.id)) ? ' <span style="background:var(--red);color:#fff;font-size:10px;font-weight:700;padding:2px 6px;border-radius:8px;white-space:nowrap" title="Nemá ukončený den (směna přes 11 h)">⚠️ neukončeno</span>' : ''}</td>
+      <td>${groupCellHtml(teamName, subName)}</td>
       <td>${profLabel(w.profession)||'—'}</td>
+      <td style="font-size:12px">${w.email}</td>
       <td><span class="pill pb">${{admin:'Admin',osvec:'OSVČ',partak:'Parťák',klient:'Klient'}[w.role]||w.role}</span>${((w.role==='osvec'||w.role==='partak') && (w.business_type==='sro'||w.is_osvec===false)) ? ` <span class="pill" style="background:#eef;color:#3b4cad;margin-left:2px">s.r.o.</span>` : ''}</td>
       <td><span class="pill ${(w.is_active && canTrack)?'pg':'pr'}">${(w.is_active && canTrack)?'Aktivní':'Neaktivní'}</span></td>
       <td onclick="event.stopPropagation()">
@@ -5884,16 +5927,19 @@ async function loadKWData() {
 
   // Načti aktivní pracovníky s povolenou docházkou (bez docházky = jen v Přístupech)
   const { data: allWorkers } = await sb.from('profiles')
-    .select('id, full_name, profession, team_id')
+    .select('id, full_name, profession, team_id, subteam_id')
     .in('role', ['osvec', 'partak'])
     .eq('is_active', true)
     .or('can_track_hours.is.null,can_track_hours.eq.true')
     .order('full_name')
 
-  // Názvy skupin (firem)
+  // Názvy skupin (firem) a podskupin
   const { data: kwTeams } = await sb.from('teams').select('id, name')
   const kwTeamName = {}
   ;(kwTeams||[]).forEach(t => { kwTeamName[t.id] = t.name })
+  const { data: kwSubteams } = await sb.from('subteams').select('id, name, team_id')
+  const kwSubteamById = {}
+  ;(kwSubteams||[]).forEach(s => { kwSubteamById[s.id] = s })
 
   const { data } = await sb.from('attendance').select('*, worker:profiles(full_name,profession)').eq('kw',week).eq('kw_year',year)
 
@@ -5921,7 +5967,10 @@ async function loadKWData() {
   // Inicializuj všechny pracovníky (i s 0h)
   const workers = {}
   allWorkers.forEach(w => {
-    workers[w.id] = { id: w.id, name: w.full_name, prof: w.profession, firm: w.team_id ? (kwTeamName[w.team_id] || '') : '', days:{}, total:0 }
+    workers[w.id] = { id: w.id, name: w.full_name, prof: w.profession,
+      firm: w.team_id ? (kwTeamName[w.team_id] || '') : '',
+      sub: w.subteam_id ? (kwSubteamById[w.subteam_id]?.name || '') : '',
+      days:{}, total:0 }
   })
 
   ;(data||[]).forEach(r => {
@@ -6010,17 +6059,28 @@ async function loadKWData() {
     return `<td class="kw-day" data-date="${dateStr}" style="text-align:center;color:var(--text3);vertical-align:middle">—</td>`  // budoucí den
   }
 
-  // Filtr podle hledání (jméno nebo firma)
+  // Filtr podle hledání (jméno, firma nebo podskupina)
   const q = (document.getElementById('kw-search')?.value || '').trim().toLowerCase()
   let list = Object.values(workers)
   if (q) {
-    list = list.filter(w => (w.name||'').toLowerCase().includes(q) || (w.firm||'').toLowerCase().includes(q))
+    list = list.filter(w => (w.name||'').toLowerCase().includes(q) || (w.firm||'').toLowerCase().includes(q) || (w.sub||'').toLowerCase().includes(q))
   }
   if (!list.length) { tbody.innerHTML = '<tr><td colspan="10" style="text-align:center;color:var(--text3);padding:20px">Nikdo neodpovídá hledání</td></tr>'; return }
 
+  // Seřaď podle firmy, pak podskupiny, pak jména — nezařazení pracovníci nakonec
+  list.sort((a,b) => {
+    if (!a.firm && b.firm) return 1
+    if (a.firm && !b.firm) return -1
+    const tc = (a.firm||'').localeCompare(b.firm||'', 'cs')
+    if (tc) return tc
+    const sc = (a.sub||'').localeCompare(b.sub||'', 'cs')
+    if (sc) return sc
+    return (a.name||'').localeCompare(b.name||'', 'cs')
+  })
+
   const kwHtml = list.map(w=>`
     <tr style="cursor:pointer;height:56px" class="kw-row" data-id="${w.id||''}" data-name="${(w.name||'').replace(/"/g,'&quot;')}">
-      <td style="vertical-align:middle;overflow:hidden"><b>${w.name}</b>${w.firm?`<div style="font-size:10px;color:var(--blue);font-weight:600;margin-top:1px;line-height:1.3;word-break:break-word">🏢 ${w.firm}</div>`:''}</td><td style="font-size:12px;vertical-align:middle">${profLabel(w.prof)||''}</td>
+      <td style="vertical-align:middle;overflow:hidden"><b>${w.name}</b>${(w.firm||w.sub)?`<div style="margin-top:3px">${groupCellHtml(w.firm, w.sub)}</div>`:''}</td><td style="font-size:12px;vertical-align:middle">${profLabel(w.prof)||''}</td>
       ${dayCell(w,1)}${dayCell(w,2)}${dayCell(w,3)}${dayCell(w,4)}${dayCell(w,5)}${dayCell(w,6)}${dayCell(w,7)}
       <td style="vertical-align:middle"><b style="color:var(--blue)">${w.total.toFixed(1)}h</b></td>
     </tr>`).join('')
@@ -15395,7 +15455,7 @@ function pdfFillCreateFieldEl(f) {
   input.contentEditable = 'true'
   input.spellcheck = false
   input.textContent = f.text || ''
-  input.style.cssText = `min-width:24px;min-height:${f.fontSize+6}px;font-size:${f.fontSize}px;font-family:Helvetica,Arial,sans-serif;color:#0b3d91;background:rgba(255,255,150,.35);border:1px dashed #c79a00;border-radius:3px;padding:1px 3px;outline:none;white-space:pre;line-height:1.2`
+  input.style.cssText = `min-width:24px;min-height:${f.fontSize+6}px;font-size:${f.fontSize}px;font-family:Helvetica,Arial,sans-serif;color:#000;background:rgba(255,255,150,.35);border:1px dashed #c79a00;border-radius:3px;padding:1px 3px;outline:none;white-space:pre;line-height:1.2`
   input.addEventListener('input', () => { f.text = input.textContent })
   input.addEventListener('keydown', (ev) => { if (ev.key === 'Escape') input.blur() })
 
@@ -15493,7 +15553,7 @@ async function pdfFillSave() {
           y: yPdf - (li * fontSize * 1.2) / sc,
           size: fontSize / sc,
           font,
-          color: rgb(0.043, 0.239, 0.569)
+          color: rgb(0, 0, 0)
         })
       })
     }
