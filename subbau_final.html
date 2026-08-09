@@ -2464,8 +2464,8 @@ const WORKER_SIG_MARKER_FREE_HTML = `
   <div style="font-size:9px;color:#666;text-align:center;margin-top:3px;white-space:nowrap" id="worker-sig-marker-drag">← táhněte →</div>
 `
 const WORKER_SIG_MARKER_LOCKED_HTML = `
-  <div style="width:200px;border-top:3px dashed #9c3b22;padding-top:5px;text-align:center">
-    <span style="font-size:11px;font-weight:800;color:#9c3b22;white-space:nowrap">✍ Podepište se na tento řádek</span>
+  <div style="width:26px;height:26px;border-radius:50%;background:rgba(156,59,34,0.92);display:flex;align-items:center;justify-content:center;box-shadow:0 2px 8px rgba(0,0,0,0.3)">
+    <span style="font-size:13px;line-height:1">✍</span>
   </div>
 `
 
@@ -2636,12 +2636,7 @@ async function openSignModal(contractId, title, fileUrl) {
   signLangDE = false
   _companySignMode = false
   _pendingSignArgs = { contractId, title, fileUrl }
-  const guideSeen = lsGet('signGuideSeen') === '1'
-  const guide = document.getElementById('sign-guide')
-  if (!guideSeen && guide) {
-    guide.style.display = 'flex'
-    return
-  }
+  // Návod "Jak podepsat" se už nezobrazuje — jde se rovnou na podpis.
   await _doOpenSignModal(contractId, title, fileUrl)
 }
 
@@ -3201,9 +3196,10 @@ async function wspLoadPDF(url) {
     const buf = await resp.arrayBuffer()
     wspState.pdfDoc = await pdfjsLib.getDocument({ data: buf }).promise
     wspState.totalPages = wspState.pdfDoc.numPages
-    wspState.currentPage = 1
+    // Skoč rovnou na POSLEDNÍ stranu — tam bývá místo na podpis, ať admin nepřemačkává
+    wspState.currentPage = wspState.totalPages
     if (loading) loading.style.display = 'none'
-    await wspRenderPage(1)
+    await wspRenderPage(wspState.totalPages)
   } catch(e) {
     if (loading) { loading.style.display = 'block'; loading.textContent = '❌ PDF se nepodařilo načíst: ' + (e.message || e) }
     console.error('[wsp] nacteni PDF:', e)
@@ -5604,8 +5600,9 @@ async function loadUnclosedShiftsAlert() {
 }
 
 async function loadWorkers() {
-  // Neaktivní lidi tu nechceme – ti se spravují v Přístupech, ať se neztrácí v davu.
-  const { data } = await sb.from('profiles').select('*').in('role',['osvec','partak']).eq('is_active',true).order('full_name')
+  // Neaktivní lidi a lidi bez povolené docházky tu nechceme – ti se spravují v Přístupech.
+  const { data } = await sb.from('profiles').select('*').in('role',['osvec','partak']).eq('is_active',true)
+    .or('can_track_hours.is.null,can_track_hours.eq.true').order('full_name')
   const tbody = document.getElementById('workers-table')
   const cntEl = document.getElementById('workers-count')
   if (cntEl) cntEl.textContent = data?.length ? data.length : ''
@@ -5869,11 +5866,12 @@ async function loadKWData() {
   const [week, year] = val.split('-').map(Number)
   const tbody = document.getElementById('kw-table')
 
-  // Načti VŠECHNY aktivní pracovníky (i bez docházky)
+  // Načti aktivní pracovníky s povolenou docházkou (bez docházky = jen v Přístupech)
   const { data: allWorkers } = await sb.from('profiles')
     .select('id, full_name, profession, team_id')
     .in('role', ['osvec', 'partak'])
     .eq('is_active', true)
+    .or('can_track_hours.is.null,can_track_hours.eq.true')
     .order('full_name')
 
   // Názvy skupin (firem)
@@ -17729,7 +17727,7 @@ document.addEventListener('visibilitychange', () => {
           <canvas id="wsp-render-canvas" style="display:block;max-width:100%"></canvas>
           <div id="wsp-marker" style="display:none;position:absolute;pointer-events:auto;transform:translate(-50%,-50%);cursor:move;user-select:none;touch-action:none">
             <div style="width:200px;border-top:3px dashed #9c3b22;padding-top:5px;text-align:center">
-              <span style="font-size:11px;font-weight:800;color:#9c3b22;white-space:nowrap">✍ Podepište se na tento řádek</span>
+              <span style="font-size:11px;font-weight:800;color:#9c3b22;white-space:nowrap">✍ Zde se podepíše OSVČ</span>
             </div>
             <div style="font-size:9px;color:#666;text-align:center;margin-top:3px;white-space:nowrap">← táhněte pro upřesnění →</div>
           </div>
