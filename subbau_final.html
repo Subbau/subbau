@@ -2464,8 +2464,8 @@ const WORKER_SIG_MARKER_FREE_HTML = `
   <div style="font-size:9px;color:#666;text-align:center;margin-top:3px;white-space:nowrap" id="worker-sig-marker-drag">← táhněte →</div>
 `
 const WORKER_SIG_MARKER_LOCKED_HTML = `
-  <div style="width:26px;height:26px;border-radius:50%;background:rgba(156,59,34,0.92);display:flex;align-items:center;justify-content:center;box-shadow:0 2px 8px rgba(0,0,0,0.3)">
-    <span style="font-size:13px;line-height:1">✍</span>
+  <div style="width:200px;border-top:3px dashed #9c3b22;padding-top:5px;text-align:center">
+    <span style="font-size:11px;font-weight:800;color:#9c3b22;white-space:nowrap">✍ Podepište se na tento řádek</span>
   </div>
 `
 
@@ -2636,7 +2636,12 @@ async function openSignModal(contractId, title, fileUrl) {
   signLangDE = false
   _companySignMode = false
   _pendingSignArgs = { contractId, title, fileUrl }
-  // Návod "Jak podepsat" se už nezobrazuje — jde se rovnou na podpis.
+  const guideSeen = lsGet('signGuideSeen') === '1'
+  const guide = document.getElementById('sign-guide')
+  if (!guideSeen && guide) {
+    guide.style.display = 'flex'
+    return
+  }
   await _doOpenSignModal(contractId, title, fileUrl)
 }
 
@@ -3196,10 +3201,9 @@ async function wspLoadPDF(url) {
     const buf = await resp.arrayBuffer()
     wspState.pdfDoc = await pdfjsLib.getDocument({ data: buf }).promise
     wspState.totalPages = wspState.pdfDoc.numPages
-    // Skoč rovnou na POSLEDNÍ stranu — tam bývá místo na podpis, ať admin nepřemačkává
-    wspState.currentPage = wspState.totalPages
+    wspState.currentPage = 1
     if (loading) loading.style.display = 'none'
-    await wspRenderPage(wspState.totalPages)
+    await wspRenderPage(1)
   } catch(e) {
     if (loading) { loading.style.display = 'block'; loading.textContent = '❌ PDF se nepodařilo načíst: ' + (e.message || e) }
     console.error('[wsp] nacteni PDF:', e)
@@ -5600,9 +5604,8 @@ async function loadUnclosedShiftsAlert() {
 }
 
 async function loadWorkers() {
-  // Neaktivní lidi a lidi bez povolené docházky tu nechceme – ti se spravují v Přístupech.
-  const { data } = await sb.from('profiles').select('*').in('role',['osvec','partak']).eq('is_active',true)
-    .or('can_track_hours.is.null,can_track_hours.eq.true').order('full_name')
+  // Neaktivní lidi tu nechceme – ti se spravují v Přístupech, ať se neztrácí v davu.
+  const { data } = await sb.from('profiles').select('*').in('role',['osvec','partak']).eq('is_active',true).order('full_name')
   const tbody = document.getElementById('workers-table')
   const cntEl = document.getElementById('workers-count')
   if (cntEl) cntEl.textContent = data?.length ? data.length : ''
@@ -5866,12 +5869,11 @@ async function loadKWData() {
   const [week, year] = val.split('-').map(Number)
   const tbody = document.getElementById('kw-table')
 
-  // Načti aktivní pracovníky s povolenou docházkou (bez docházky = jen v Přístupech)
+  // Načti VŠECHNY aktivní pracovníky (i bez docházky)
   const { data: allWorkers } = await sb.from('profiles')
     .select('id, full_name, profession, team_id')
     .in('role', ['osvec', 'partak'])
     .eq('is_active', true)
-    .or('can_track_hours.is.null,can_track_hours.eq.true')
     .order('full_name')
 
   // Názvy skupin (firem)
@@ -14797,9 +14799,18 @@ async function uploadContract() {
   document.getElementById('contract-title').value = ''
   document.getElementById('contract-worker').value = ''
 
-  showToast('✅ Smlouva nahrána — vyberte v náhledu, kam se má OSVČ podepsat')
+  showToast('✅ Smlouva nahrána')
   loadAdminContracts()
-  if (fileUrl) openWorkerSignPlaceModal(contractId, title, fileUrl)
+  // Nejdřív nabídni doplnění textu do PDF (datum, jméno...), pak pokračuj na určení
+  // místa, kde se má OSVČ podepsat. Jen admin může do smlouvy psát text.
+  openPdfFillModal(contractId, title, fileUrl, async () => {
+    let latestUrl = fileUrl
+    try {
+      const { data: fresh } = await sb.from('contracts').select('file_url').eq('id', contractId).maybeSingle()
+      if (fresh?.file_url) latestUrl = fresh.file_url
+    } catch(e) {}
+    if (latestUrl) openWorkerSignPlaceModal(contractId, title, latestUrl)
+  })
 }
 
 // Nahraje smlouvu, která je už podepsaná (sken) — uloží rovnou jako hotovou, nikdo nepodepisuje
@@ -14832,7 +14843,7 @@ async function uploadSignedContract() {
   const fileUrl = urlData?.publicUrl
 
   // Ulož jako už podepsanou — status signed_scan, podpis = nahraný soubor
-  const { error: dbErr } = await sb.from('contracts').insert({
+  const { data: contractData, error: dbErr } = await sb.from('contracts').insert({
     worker_id: workerId,
     title,
     file_url: fileUrl,
@@ -14840,7 +14851,7 @@ async function uploadSignedContract() {
     signed_at: new Date().toISOString(),
     status: 'signed_scan',
     created_at: new Date().toISOString()
-  })
+  }).select().single()
   if (dbErr) { showToast('❌ Chyba DB: ' + dbErr.message); progress.style.display = 'none'; return }
 
   progress.style.display = 'none'
@@ -14853,6 +14864,8 @@ async function uploadSignedContract() {
 
   showToast('✅ Podepsaná smlouva uložena!')
   loadAdminContracts()
+  // Nabídni rovnou doplnění textu do PDF (datum, jméno...) — jen admin, smlouva je hotová.
+  if (contractData?.id && fileUrl) openPdfFillModal(contractData.id, title, fileUrl)
 }
 
 // Nahraje smlouvu, kterou už máme podepsanou za nás (papírově/externě) — ale
@@ -14919,9 +14932,20 @@ async function uploadAdminSignedContract() {
   document.getElementById('contract-title').value = ''
   document.getElementById('contract-worker').value = ''
 
-  showToast('✅ Smlouva nahrána — vyberte v náhledu, kam se má OSVČ podepsat')
+  showToast('✅ Smlouva nahrána')
   loadAdminContracts()
-  if (fileUrl && contractData?.id) openWorkerSignPlaceModal(contractData.id, title, fileUrl)
+  // Nejdřív nabídni doplnění textu do PDF (datum, jméno...), pak pokračuj na určení
+  // místa, kde se má OSVČ podepsat. Jen admin může do smlouvy psát text.
+  if (contractData?.id) {
+    openPdfFillModal(contractData.id, title, fileUrl, async () => {
+      let latestUrl = fileUrl
+      try {
+        const { data: fresh } = await sb.from('contracts').select('file_url').eq('id', contractData.id).maybeSingle()
+        if (fresh?.file_url) latestUrl = fresh.file_url
+      } catch(e) {}
+      if (latestUrl) openWorkerSignPlaceModal(contractData.id, title, latestUrl)
+    })
+  }
 }
 
 
@@ -15228,17 +15252,20 @@ const pdfFillState = {
   contractId: null, fileUrl: null, pdfBytes: null,
   pdfDoc: null, page: 1, total: 1, scale: 1.5,
   viewport: null, fontSize: 14,
-  fields: []
+  fields: [], onClose: null
 }
 window.pdfFillState = pdfFillState
 
-async function openPdfFillModal(contractId, title, fileUrl) {
-  if (!fileUrl) { showToast('❌ Smlouva nemá PDF'); return }
+// onClose: volitelný callback, zavolá se jak po uložení, tak po zavření bez uložení
+// (např. hned po nahrání smlouvy pokračuje na určení místa podpisu OSVČ).
+async function openPdfFillModal(contractId, title, fileUrl, onClose) {
+  if (!fileUrl) { showToast('❌ Smlouva nemá PDF'); if (typeof onClose === 'function') onClose(); return }
   pdfFillState.contractId = contractId
   pdfFillState.fileUrl = fileUrl
   pdfFillState.fields = []
   pdfFillState.page = 1
   pdfFillState.fontSize = 14
+  pdfFillState.onClose = typeof onClose === 'function' ? onClose : null
   document.getElementById('pdf-fill-title').textContent = title || 'Vyplnit smlouvu'
   document.getElementById('pdf-fill-fontsize').textContent = '14'
   const modal = document.getElementById('pdf-fill-modal')
@@ -15273,6 +15300,9 @@ function closePdfFillModal() {
   pdfFillState.fields = []
   // vyčisti textová pole
   document.querySelectorAll('.pdf-fill-field').forEach(el => el.remove())
+  const cb = pdfFillState.onClose
+  pdfFillState.onClose = null
+  if (cb) { try { cb() } catch(e) { console.warn('[pdfFill onClose]', e) } }
 }
 
 async function pdfFillRenderPage(pageNum) {
@@ -17727,7 +17757,7 @@ document.addEventListener('visibilitychange', () => {
           <canvas id="wsp-render-canvas" style="display:block;max-width:100%"></canvas>
           <div id="wsp-marker" style="display:none;position:absolute;pointer-events:auto;transform:translate(-50%,-50%);cursor:move;user-select:none;touch-action:none">
             <div style="width:200px;border-top:3px dashed #9c3b22;padding-top:5px;text-align:center">
-              <span style="font-size:11px;font-weight:800;color:#9c3b22;white-space:nowrap">✍ Zde se podepíše OSVČ</span>
+              <span style="font-size:11px;font-weight:800;color:#9c3b22;white-space:nowrap">✍ Podepište se na tento řádek</span>
             </div>
             <div style="font-size:9px;color:#666;text-align:center;margin-top:3px;white-space:nowrap">← táhněte pro upřesnění →</div>
           </div>
