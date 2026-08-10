@@ -1838,7 +1838,6 @@ button:not(.x-close) > svg:first-child{margin-right:6px}
         <div style="text-align:center;color:#c0392b;font-size:20px;line-height:1;margin-bottom:5px" aria-hidden="true">↓</div>
         <div id="sign-canvas-area" style="position:relative;aspect-ratio:1/1;width:100%;border:2px solid #211D1A;box-shadow:inset 0 0 0 3px #c0392b;border-radius:8px;overflow:hidden;margin-bottom:8px;min-height:160px">
           <canvas id="sign-canvas" style="display:block;width:100%;height:100%;touch-action:none;user-select:none"></canvas>
-          <div id="sign-canvas-hint" style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:#c0392b;font-size:13px;font-weight:700;pointer-events:none;text-align:center;padding:10px;line-height:1.4">Do tohoto pole se podepište</div>
         </div>
         <button onclick="clearWorkerSignCanvas()" id="sign-btn-clear" style="font-size:12px;padding:6px;border:1px solid #ddd;border-radius:6px;cursor:pointer;margin-bottom:10px">Vymazat podpis</button>
         <div id="worker-sig-pos-info" style="font-size:11px;color:#888;padding:7px 9px;background:#f0f0f0;border-radius:6px;margin-bottom:10px">Kliknete do PDF vlevo pro umisteni podpisu</div>
@@ -5883,17 +5882,28 @@ async function renderProvizeContent() {
   const [wStart, wEnd] = provizePeriodRange('week', anchor)
   const [mStart, mEnd] = provizePeriodRange('month', anchor)
 
-  const [{ data: workers }, { data: provRows }, { data: teams }, { data: companies }] = await Promise.all([
+  const [{ data: workers }, provResult, { data: teams }, { data: companies }] = await Promise.all([
     sb.from('profiles').select('id, full_name, hourly_rate_worker, team_id').in('role', ['osvec', 'partak']).eq('is_active', true).order('full_name'),
     sb.from('worker_commissions').select('worker_id, provize, payment_terms'),
     sb.from('teams').select('id, name, company_id'),
     sb.from('companies').select('id, name')
   ])
 
+  // Když ještě neproběhla migrace supabase-migrace-provize-splatnost.sql, sloupec payment_terms
+  // v tabulce neexistuje a celý select výše skončí chybou — BEZ retry by to smazalo i provize
+  // (celý dotaz vrátí prázdno), takže by se po každém přepnutí týdne/dne ukázaly samé nuly.
+  let provRows = provResult.data
+  let paymentTermsColumnMissing = false
+  if (provResult.error) {
+    paymentTermsColumnMissing = true
+    const retry = await sb.from('worker_commissions').select('worker_id, provize')
+    provRows = retry.data
+  }
+
   const provMap = {}, termsMap = {}
   ;(provRows || []).forEach(p => {
     if (p.provize != null) provMap[p.worker_id] = Number(p.provize)
-    termsMap[p.worker_id] = p.payment_terms || '7/14'
+    if (!paymentTermsColumnMissing) termsMap[p.worker_id] = p.payment_terms || '7/14'
   })
   const teamById = {}
   ;(teams || []).forEach(t => { teamById[t.id] = t })
@@ -5945,17 +5955,33 @@ async function renderProvizeContent() {
     ;(payRows || []).forEach(p => { payMap[p.worker_id] = p })
   } catch (e) { paymentsTableMissing = true }
 
+  // Splatnost = kód "dny_do_faktury/dny_do_splatnosti" (např. "7/14"). Faktura se vystavuje
+  // v sobotu daného týdne, splatnost je pak X dní po vystavení. Když ten den uplyne a
+  // pracovník ještě nemá zaškrtnuto "Uhrazeno", je po splatnosti.
+  function provizeDueInfo(terms) {
+    const days = parseInt((terms || '7/14').split('/')[1], 10) || 14
+    const invoiceDate = new Date(wStart)
+    invoiceDate.setDate(invoiceDate.getDate() + 5)  // sobota daného týdne
+    const due = new Date(invoiceDate)
+    due.setDate(due.getDate() + days)
+    const todayD = new Date(); todayD.setHours(0, 0, 0, 0)
+    return { due, overdue: due < todayD }
+  }
+
   const rows = (workers || []).map(w => {
     const hrs = byWorker[w.id] || { day: 0, week: 0, month: 0 }
     const rate = w.hourly_rate_worker || 0
     const prov = provMap[w.id] || 0
     const pay = payMap[w.id] || null
+    const paid = !!(pay && pay.paid)
+    const terms = termsMap[w.id] || '7/14'
+    const dueInfo = provizeDueInfo(terms)
     return {
       id: w.id, name: w.full_name, firm: firmOf(w), rate, prov,
-      terms: termsMap[w.id] || '7/14',
+      terms,
       hoursDay: hrs.day, hoursWeek: hrs.week, hoursMonth: hrs.month,
       commDay: prov * hrs.day, commWeek: prov * hrs.week, commMonth: prov * hrs.month,
-      paid: !!(pay && pay.paid)
+      paid, dueDate: dueInfo.due, overdue: !paid && dueInfo.overdue
     }
   })
 
@@ -5988,15 +6014,19 @@ async function renderProvizeContent() {
       fDay += r.commDay; fWeek += r.commWeek; fMonth += r.commMonth; if (r.paid) fPaidCount++
       window._provizeIndex[r.id] = { hoursDay: r.hoursDay, hoursWeek: r.hoursWeek, hoursMonth: r.hoursMonth, prov: r.prov, firmIdx }
       const termsOpts = TERMS_OPTIONS.map(t => `<option value="${t}" ${r.terms === t ? 'selected' : ''}>${t}</option>`).join('')
-      return `<tr style="${r.paid ? 'background:var(--green-l)' : ''}">
-        <td style="font-size:${isNoFirm ? '16px' : '14.5px'};font-weight:600">${r.name}</td>
+      const rowBg = r.paid ? 'background:var(--green-l)' : (r.overdue ? 'background:var(--red-l)' : '')
+      const dueLabel = paymentTermsColumnMissing
+        ? '<div style="font-size:10px;margin-top:3px;color:var(--amber)">⚠️ neukládá se (chybí migrace)</div>'
+        : `<div style="font-size:10px;margin-top:3px;font-weight:${r.overdue ? '700' : '400'};color:${r.overdue ? 'var(--red)' : 'var(--text3)'}">${r.overdue ? '⚠️ po splatnosti ' : 'splatnost '}${r.dueDate.toLocaleDateString('cs-CZ')}</div>`
+      return `<tr style="${rowBg}">
+        <td style="font-size:${isNoFirm ? '16px' : '14.5px'};font-weight:600">${r.name}${r.overdue ? ' <span style="font-size:11px;color:var(--red);font-weight:700">⚠️ nezaplaceno</span>' : ''}</td>
         <td style="text-align:right"><input type="number" step="0.01" value="${r.rate || ''}" placeholder="0" onchange="saveProvizeRate(this,'${r.id}')" style="width:80px;padding:6px 8px;border:1.5px solid var(--brd);border-radius:7px;font-size:14px;text-align:right;font-family:inherit"> €/h</td>
         <td style="text-align:right"><input type="number" step="0.01" value="${r.prov || ''}" placeholder="0" onchange="saveProvizeCommission(this,'${r.id}')" style="width:80px;padding:6px 8px;border:1.5px solid var(--amber);border-radius:7px;font-size:14px;text-align:right;font-family:inherit;background:#faf6ee"> €/h</td>
         <td style="text-align:right"><b id="pv-d-${r.id}" style="font-size:14px">${eur(r.commDay)}</b><div style="font-size:11px;color:var(--text3)">${r.hoursDay.toFixed(2)} h</div></td>
         <td style="text-align:right"><b id="pv-w-${r.id}" style="font-size:14px">${eur(r.commWeek)}</b><div style="font-size:11px;color:var(--text3)">${r.hoursWeek.toFixed(2)} h</div></td>
         <td style="text-align:right"><b id="pv-m-${r.id}" style="font-size:14px">${eur(r.commMonth)}</b><div style="font-size:11px;color:var(--text3)">${r.hoursMonth.toFixed(2)} h</div></td>
-        <td style="text-align:center"><input type="checkbox" ${r.paid ? 'checked' : ''} onchange="toggleProvizePaid(this,'${r.id}','week','${weekKey}')" style="width:21px;height:21px;cursor:pointer;accent-color:var(--green)"></td>
-        <td><select onchange="saveProvizeTerms(this,'${r.id}')" style="padding:6px 8px;border:1.5px solid var(--brd);border-radius:7px;font-size:13px;font-family:inherit">${termsOpts}</select></td>
+        <td style="text-align:center"><input type="checkbox" ${r.paid ? 'checked' : ''} ${paymentsTableMissing ? 'disabled title="Nejdřív spusťte migraci supabase-migrace-provize-platby.sql"' : ''} onchange="toggleProvizePaid(this,'${r.id}','week','${weekKey}')" style="width:21px;height:21px;cursor:${paymentsTableMissing ? 'not-allowed' : 'pointer'};accent-color:var(--green)"></td>
+        <td><select onchange="saveProvizeTerms(this,'${r.id}')" style="padding:6px 8px;border:1.5px solid var(--brd);border-radius:7px;font-size:13px;font-family:inherit">${termsOpts}</select>${dueLabel}</td>
       </tr>`
     }).join('')
     weekGrandTotal += fWeek; monthGrandTotal += fMonth
@@ -6058,7 +6088,10 @@ async function renderProvizeContent() {
           <div class="sc g"><div class="sc-lbl" style="font-size:12px">Firem</div><div class="sc-val" style="color:var(--green);font-size:24px">${firmNames.length}</div></div>
           <div class="sc g"><div class="sc-lbl" style="font-size:12px">Pracovníků</div><div class="sc-val" style="color:var(--green);font-size:24px">${rows.length}</div></div>
         </div>
-        ${paymentsTableMissing ? '<div style="margin-top:10px;font-size:13px;color:var(--amber)">⚠️ Sledování plateb (uhrazeno) zatím není zapnuté — spusťte migraci supabase-migrace-provize-platby.sql</div>' : ''}
+        ${(paymentsTableMissing || paymentTermsColumnMissing) ? `<div style="margin-top:10px;font-size:13px;color:var(--amber);line-height:1.6">${[
+          paymentsTableMissing ? '⚠️ Sledování plateb (uhrazeno) zatím není zapnuté — spusťte migraci <code>supabase-migrace-provize-platby.sql</code>' : '',
+          paymentTermsColumnMissing ? '⚠️ Kódy splatnosti (7/7, 7/10, 7/14, 14/14) zatím nejdou uložit — spusťte migraci <code>supabase-migrace-provize-splatnost.sql</code>' : ''
+        ].filter(Boolean).join('<br>')}</div>` : ''}
       </div>
     </div>
     ${firmsHtml || '<div style="text-align:center;color:var(--text3);padding:20px">Žádní pracovníci</div>'}
