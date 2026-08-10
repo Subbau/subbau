@@ -1387,10 +1387,12 @@ button:not(.x-close) > svg:first-child{margin-right:6px}
               </tbody>
             </table>
           </div>
+        </div>
 
-          <div class="card" style="margin-top:16px">
+        <div id="v-provize" class="view">
+          <div class="card">
             <div class="card-h">
-              <h4>🔒 Přístup k Provizím</h4>
+              <h4>🔒 Provize / Přístup</h4>
               <span style="font-size:12px;color:var(--text3)">Kdo se smí přihlásit do sekce Provize (email + vlastní heslo, nesouvisí s přihlášením do appky)</span>
             </div>
             <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px">
@@ -1405,9 +1407,6 @@ button:not(.x-close) > svg:first-child{margin-right:6px}
               </tbody>
             </table>
           </div>
-        </div>
-
-        <div id="v-provize" class="view">
           <div id="provize-lock" class="card" style="max-width:420px;margin:0 auto">
             <div class="card-h">
               <h4>🔒 Provize</h4>
@@ -5657,10 +5656,189 @@ async function loadProvize() {
   }
 }
 
+// ===== Provize: navigace obdobím (týden/měsíc), lze listovat zpětně =====
+let provizeMode = 'week'      // 'week' | 'month'
+let provizeAnchor = new Date()
+
+function provizePeriodRange(mode, anchor) {
+  if (mode === 'week') {
+    const s = mondayOf(anchor)
+    const e = new Date(s); e.setDate(s.getDate() + 6)
+    return [s, e]
+  }
+  const s = new Date(anchor.getFullYear(), anchor.getMonth(), 1)
+  const e = new Date(anchor.getFullYear(), anchor.getMonth() + 1, 0)
+  return [s, e]
+}
+function provizePeriodLabel(mode, anchor) {
+  if (mode === 'week') {
+    const kw = getKW(anchor)
+    const [s, e] = provizePeriodRange(mode, anchor)
+    return 'Týden ' + kw.week + '/' + kw.year + ' (' + s.toLocaleDateString('cs-CZ') + ' – ' + e.toLocaleDateString('cs-CZ') + ')'
+  }
+  return anchor.toLocaleDateString('cs-CZ', { month: 'long', year: 'numeric' })
+}
+function provizePeriodKey(mode, anchor) {
+  if (mode === 'week') { const kw = getKW(anchor); return kw.year + '-W' + String(kw.week).padStart(2, '0') }
+  return anchor.getFullYear() + '-M' + String(anchor.getMonth() + 1).padStart(2, '0')
+}
+function provizeSetMode(mode) { provizeMode = mode; renderProvizeContent() }
+function provizePrev() {
+  if (provizeMode === 'week') provizeAnchor.setDate(provizeAnchor.getDate() - 7)
+  else provizeAnchor.setMonth(provizeAnchor.getMonth() - 1)
+  provizeAnchor = new Date(provizeAnchor)
+  renderProvizeContent()
+}
+function provizeNext() {
+  if (provizeMode === 'week') provizeAnchor.setDate(provizeAnchor.getDate() + 7)
+  else provizeAnchor.setMonth(provizeAnchor.getMonth() + 1)
+  provizeAnchor = new Date(provizeAnchor)
+  renderProvizeContent()
+}
+function provizeToday() { provizeAnchor = new Date(); renderProvizeContent() }
+
+// Klíč firmy = company_id týmu (jinak název týmu, jinak "bez firmy") — stejná logika jako v kalendáři
+function provizeFirmOf(w, teamById, companyNameById) {
+  if (!w.team_id || !teamById[w.team_id]) return 'Bez firmy'
+  const t = teamById[w.team_id]
+  if (t.company_id && companyNameById[t.company_id]) return companyNameById[t.company_id]
+  return cleanTeamName(t.name) || 'Bez firmy'
+}
+
+async function saveProvizeRate(input, workerId) {
+  const val = parseFloat(input.value)
+  const rate = isNaN(val) ? null : val
+  const { error } = await sb.from('profiles').update({ hourly_rate_worker: rate }).eq('id', workerId)
+  if (error) { showToast('❌ Chyba: ' + error.message); return }
+  showToast('✅ Sazba uložena')
+  renderProvizeContent()
+}
+async function saveProvizeCommission(input, workerId) {
+  const val = parseFloat(input.value)
+  const provize = isNaN(val) ? null : val
+  const { error } = await sb.from('worker_commissions')
+    .upsert({ worker_id: workerId, provize, updated_at: new Date().toISOString() }, { onConflict: 'worker_id' })
+  if (error) { showToast('❌ Chyba: ' + error.message); return }
+  showToast('✅ Provize uložena')
+  renderProvizeContent()
+}
+async function toggleProvizePaid(checkbox, workerId, mode, periodKey) {
+  const tr = checkbox.closest('tr')
+  const paid = checkbox.checked
+  if (tr) tr.style.background = paid ? 'var(--green-l)' : ''
+  const { error } = await sb.from('provize_payments').upsert({
+    worker_id: workerId, period_type: mode, period_key: periodKey,
+    paid, paid_at: paid ? new Date().toISOString() : null,
+    updated_at: new Date().toISOString()
+  }, { onConflict: 'worker_id,period_type,period_key' })
+  if (error) {
+    checkbox.checked = !paid
+    if (tr) tr.style.background = !paid ? 'var(--green-l)' : ''
+    showToast(/relation .*provize_payments.* does not exist/i.test(error.message) ? '❌ Chybí tabulka provize_payments — spusťte migraci' : '❌ Chyba: ' + error.message)
+  }
+}
+async function saveProvizeDueDate(input, workerId, mode, periodKey) {
+  const due = input.value || null
+  const { error } = await sb.from('provize_payments').upsert({
+    worker_id: workerId, period_type: mode, period_key: periodKey,
+    due_date: due, updated_at: new Date().toISOString()
+  }, { onConflict: 'worker_id,period_type,period_key' })
+  if (error) showToast(/relation .*provize_payments.* does not exist/i.test(error.message) ? '❌ Chybí tabulka provize_payments — spusťte migraci' : '❌ Chyba: ' + error.message)
+  else showToast('✅ Splatnost uložena')
+}
+
+// Vygeneruje tiskový PDF report provize jedné firmy za týden nebo měsíc (podle aktuálně zvoleného období)
+async function generateProvizeFirmReport(firmName, mode) {
+  showToast('⏳ Připravuji report…')
+  try {
+    const anchor = new Date(provizeAnchor)
+    const [{ data: workers }, { data: provRows }, { data: teams }, { data: companies }] = await Promise.all([
+      sb.from('profiles').select('id, full_name, hourly_rate_worker, team_id').in('role', ['osvec', 'partak']).eq('is_active', true).order('full_name'),
+      sb.from('worker_commissions').select('worker_id, provize'),
+      sb.from('teams').select('id, name, company_id'),
+      sb.from('companies').select('id, name')
+    ])
+    const provMap = {}
+    ;(provRows || []).forEach(p => { if (p.provize != null) provMap[p.worker_id] = Number(p.provize) })
+    const teamById = {}
+    ;(teams || []).forEach(t => { teamById[t.id] = t })
+    const companyNameById = {}
+    ;(companies || []).forEach(c => { companyNameById[c.id] = c.name })
+
+    const members = (workers || []).filter(w => provizeFirmOf(w, teamById, companyNameById) === firmName)
+    if (!members.length) { showToast('❌ Firma nemá žádné pracovníky'); return }
+
+    const [rStart, rEnd] = provizePeriodRange(mode, anchor)
+    const startStr = localDateStr(rStart), endStr = localDateStr(rEnd)
+    const ids = members.map(w => w.id)
+    const { data: att } = await sb.from('attendance')
+      .select('worker_id, work_date, check_in, check_out, break_start, break_end, total_hours')
+      .in('worker_id', ids).gte('work_date', startStr).lte('work_date', endStr)
+
+    const nowStr2 = new Date().toTimeString().slice(0, 8)
+    function hoursOf(a) {
+      if (a.total_hours) return a.total_hours
+      if (a.check_in && !a.check_out) return calcHours(a.check_in, nowStr2, a.break_start, a.break_end)
+      return 0
+    }
+    const hoursByWorker = {}
+    ;(att || []).forEach(a => { hoursByWorker[a.worker_id] = (hoursByWorker[a.worker_id] || 0) + hoursOf(a) })
+
+    const eur = n => n.toLocaleString('cs-CZ', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + ' €'
+    let total = 0
+    const rowsHtml = members.map(w => {
+      const hrs = hoursByWorker[w.id] || 0
+      const prov = provMap[w.id] || 0
+      const comm = prov * hrs
+      total += comm
+      return `<tr>
+        <td style="padding:8px 10px;border:1px solid #ccc">${w.full_name}</td>
+        <td style="padding:8px 10px;border:1px solid #ccc;text-align:right">${hrs.toFixed(2)} h</td>
+        <td style="padding:8px 10px;border:1px solid #ccc;text-align:right">${prov ? prov.toFixed(2) + ' €/h' : '—'}</td>
+        <td style="padding:8px 10px;border:1px solid #ccc;text-align:right;font-weight:700">${eur(comm)}</td>
+      </tr>`
+    }).join('')
+
+    const periodLabel = provizePeriodLabel(mode, anchor)
+    const html = `<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Provize ${firmName} — ${periodLabel}</title>
+    <style>
+      *{box-sizing:border-box}
+      body{font-family:Arial,sans-serif;font-size:13px;color:#211D1A;margin:0;padding:24px}
+      table{width:100%;border-collapse:collapse;margin-top:14px}
+      thead th{background:#211D1A;color:#E8A13A;padding:8px 10px;text-align:left;border:1px solid #211D1A;font-size:12px}
+      tfoot td{padding:10px;border:1px solid #ccc;font-weight:800;background:#f3f3f3}
+      @page{size:A4 portrait;margin:14mm}
+      @media print{.no-print{display:none!important}}
+    </style></head><body>
+      <div style="border-bottom:3px solid #E8A13A;padding-bottom:10px;margin-bottom:6px">
+        <div style="font-size:11px;color:#888;letter-spacing:1px;text-transform:uppercase">SubBau s.r.o. — Provize</div>
+        <h1 style="font-size:20px;margin:2px 0">${firmName}</h1>
+        <div style="font-size:13px;color:#555">${mode === 'week' ? 'Týdenní' : 'Měsíční'} přehled provize · ${periodLabel}</div>
+      </div>
+      <table>
+        <thead><tr><th>Pracovník</th><th style="text-align:right">Hodiny</th><th style="text-align:right">Provize/h</th><th style="text-align:right">Odměna</th></tr></thead>
+        <tbody>${rowsHtml}</tbody>
+        <tfoot><tr><td colspan="3">Celkem — ${firmName}</td><td style="text-align:right">${eur(total)}</td></tr></tfoot>
+      </table>
+      <div style="margin-top:20px;font-size:10px;color:#999">Vygenerováno ${new Date().toLocaleString('cs-CZ')} · SubBau Provize</div>
+    </body></html>`
+    printInPage(html)
+  } catch (e) {
+    console.error('[provize report]', e)
+    showToast('❌ Chyba: ' + (e.message || e))
+  }
+}
+
 async function renderProvizeContent() {
   const el = document.getElementById('provize-content')
   if (!el) return
   el.innerHTML = '<div style="text-align:center;color:var(--text3);padding:30px">Načítám...</div>'
+
+  const anchor = provizeAnchor
+  const mode = provizeMode
+  const periodKey = provizePeriodKey(mode, anchor)
+  const [pStart, pEnd] = provizePeriodRange(mode, anchor)
+  const periodLabel = provizePeriodLabel(mode, anchor)
 
   const [{ data: workers }, { data: provRows }, { data: teams }, { data: companies }] = await Promise.all([
     sb.from('profiles').select('id, full_name, hourly_rate_worker, team_id').in('role', ['osvec', 'partak']).eq('is_active', true).order('full_name'),
@@ -5676,27 +5854,18 @@ async function renderProvizeContent() {
   const companyNameById = {}
   ;(companies || []).forEach(c => { companyNameById[c.id] = c.name })
 
-  // Klíč firmy = company_id týmu (jinak název týmu, jinak "bez firmy") — stejná logika jako v kalendáři
-  function firmOf(w) {
-    if (!w.team_id || !teamById[w.team_id]) return 'Bez firmy'
-    const t = teamById[w.team_id]
-    if (t.company_id && companyNameById[t.company_id]) return companyNameById[t.company_id]
-    return cleanTeamName(t.name) || 'Bez firmy'
-  }
+  function firmOf(w) { return provizeFirmOf(w, teamById, companyNameById) }
 
   const now = new Date()
   const todayStr = localDateStr(now)
-  const kw = getKW(now)
-  const weekStart = mondayOf(now)
-  const weekEnd = new Date(weekStart); weekEnd.setDate(weekStart.getDate() + 6)
-  const monthStart = new Date(now.getFullYear(), now.getMonth(), 1)
-  const monthEnd = new Date(now.getFullYear(), now.getMonth() + 1, 0)
-  // Načti dost dat na pokrytí měsíce i celého ISO týdne, i když přesahuje přes hranici měsíce
-  const fetchStart = localDateStr(weekStart < monthStart ? weekStart : monthStart)
-  const fetchEnd = localDateStr(weekEnd > monthEnd ? weekEnd : monthEnd)
+  // Rozsah dotazu: pokrýt vybrané období i dnešek (kvůli odznaku "Dnes")
+  const rangeStart = new Date(Math.min(pStart.getTime(), now.getTime()))
+  const rangeEnd = new Date(Math.max(pEnd.getTime(), now.getTime()))
+  const fetchStart = localDateStr(rangeStart)
+  const fetchEnd = localDateStr(rangeEnd)
 
   const { data: att } = await sb.from('attendance')
-    .select('worker_id, work_date, check_in, check_out, break_start, break_end, total_hours, kw, kw_year')
+    .select('worker_id, work_date, check_in, check_out, break_start, break_end, total_hours')
     .gte('work_date', fetchStart).lte('work_date', fetchEnd)
 
   const nowStr = now.toTimeString().slice(0, 8)
@@ -5706,25 +5875,41 @@ async function renderProvizeContent() {
     return 0
   }
 
+  const pStartStr = localDateStr(pStart), pEndStr = localDateStr(pEnd)
   const byWorker = {}
-  ;(workers || []).forEach(w => { byWorker[w.id] = { day: 0, week: 0, month: 0 } })
+  ;(workers || []).forEach(w => { byWorker[w.id] = { period: 0, today: 0 } })
   ;(att || []).forEach(a => {
     const bucket = byWorker[a.worker_id]
     if (!bucket) return
     const h = hoursOf(a)
-    if (a.work_date >= localDateStr(monthStart) && a.work_date <= localDateStr(monthEnd)) bucket.month += h
-    if (a.kw === kw.week && a.kw_year === kw.year) bucket.week += h
-    if (a.work_date === todayStr) bucket.day += h
+    if (a.work_date >= pStartStr && a.work_date <= pEndStr) bucket.period += h
+    if (a.work_date === todayStr) bucket.today += h
   })
 
+  // Platby (uhrazeno / splatnost) pro vybrané období — best-effort, tabulka nemusí ještě existovat
+  const payMap = {}
+  let paymentsTableMissing = false
+  try {
+    const { data: payRows, error: payErr } = await sb.from('provize_payments')
+      .select('worker_id, paid, due_date').eq('period_type', mode).eq('period_key', periodKey)
+    if (payErr) throw payErr
+    ;(payRows || []).forEach(p => { payMap[p.worker_id] = p })
+  } catch (e) { paymentsTableMissing = true }
+
+  const defaultDue = new Date(pEnd); defaultDue.setDate(defaultDue.getDate() + 14)
+  const defaultDueStr = localDateStr(defaultDue)
+
   const rows = (workers || []).map(w => {
-    const hrs = byWorker[w.id] || { day: 0, week: 0, month: 0 }
+    const hrs = byWorker[w.id] || { period: 0, today: 0 }
     const rate = w.hourly_rate_worker || 0
     const prov = provMap[w.id] || 0
+    const pay = payMap[w.id] || null
     return {
-      name: w.full_name, firm: firmOf(w), rate, prov,
-      weeklyPay: rate * hrs.week,
-      commDay: prov * hrs.day, commWeek: prov * hrs.week, commMonth: prov * hrs.month
+      id: w.id, name: w.full_name, firm: firmOf(w), rate, prov,
+      hours: hrs.period, comm: prov * hrs.period,
+      todayComm: prov * hrs.today,
+      paid: !!(pay && pay.paid),
+      due: (pay && pay.due_date) ? pay.due_date : defaultDueStr
     }
   })
 
@@ -5734,47 +5919,58 @@ async function renderProvizeContent() {
     byFirm.get(r.firm).push(r)
   })
 
-  let grandWeek = 0, grandMonth = 0
+  // "Bez firmy" vždy nakonec, ostatní podle abecedy
   const firmNames = [...byFirm.keys()].sort((a, b) => a.localeCompare(b, 'cs'))
+  const noFirmIdx = firmNames.indexOf('Bez firmy')
+  if (noFirmIdx !== -1) { firmNames.splice(noFirmIdx, 1); firmNames.push('Bez firmy') }
+
   const eur = n => n.toLocaleString('cs-CZ', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + ' €'
+  let grandTotal = 0
 
   const firmsHtml = firmNames.map(firm => {
     const members = byFirm.get(firm)
+    const isNoFirm = firm === 'Bez firmy'
     const gc = groupColor(firm, 'company')
-    let fDay = 0, fWeek = 0, fMonth = 0, fPay = 0
+    const safeFirm = firm.replace(/'/g, String.fromCharCode(39))
+    let fTotal = 0, fToday = 0, fPaidCount = 0
     const memberRows = members.map(r => {
-      fDay += r.commDay; fWeek += r.commWeek; fMonth += r.commMonth; fPay += r.weeklyPay
-      return `<tr>
-        <td>${r.name}</td>
-        <td style="text-align:right">${r.rate ? r.rate.toFixed(2) + ' €/h' : '—'}</td>
-        <td style="text-align:right">${r.prov ? r.prov.toFixed(2) + ' €/h' : '—'}</td>
-        <td style="text-align:right">${eur(r.weeklyPay)}</td>
-        <td style="text-align:right">${eur(r.commDay)}</td>
-        <td style="text-align:right">${eur(r.commWeek)}</td>
-        <td style="text-align:right"><b>${eur(r.commMonth)}</b></td>
+      fTotal += r.comm; fToday += r.todayComm; if (r.paid) fPaidCount++
+      return `<tr style="${r.paid ? 'background:var(--green-l)' : ''}">
+        <td style="font-size:${isNoFirm ? '16px' : '14.5px'};font-weight:600">${r.name}</td>
+        <td style="text-align:right"><input type="number" step="0.01" value="${r.rate || ''}" placeholder="0" onchange="saveProvizeRate(this,'${r.id}')" style="width:80px;padding:6px 8px;border:1.5px solid var(--brd);border-radius:7px;font-size:14px;text-align:right;font-family:inherit"> €/h</td>
+        <td style="text-align:right"><input type="number" step="0.01" value="${r.prov || ''}" placeholder="0" onchange="saveProvizeCommission(this,'${r.id}')" style="width:80px;padding:6px 8px;border:1.5px solid var(--amber);border-radius:7px;font-size:14px;text-align:right;font-family:inherit;background:#faf6ee"> €/h</td>
+        <td style="text-align:right">
+          <b style="font-size:16px">${eur(r.comm)}</b>
+          <div style="font-size:12px;color:var(--text3)">${r.hours.toFixed(2)} h</div>
+        </td>
+        <td style="text-align:center"><input type="checkbox" ${r.paid ? 'checked' : ''} onchange="toggleProvizePaid(this,'${r.id}','${mode}','${periodKey}')" style="width:21px;height:21px;cursor:pointer;accent-color:var(--green)"></td>
+        <td><input type="date" value="${r.due}" onchange="saveProvizeDueDate(this,'${r.id}','${mode}','${periodKey}')" style="padding:6px 8px;border:1.5px solid var(--brd);border-radius:7px;font-size:13px;font-family:inherit"></td>
       </tr>`
     }).join('')
-    grandWeek += fWeek; grandMonth += fMonth
+    grandTotal += fTotal
     return `
     <div class="card" style="border-left:6px solid ${gc.border};margin-bottom:16px">
-      <div class="card-h">
-        <h4 style="color:${gc.text}">🏢 ${firm}</h4>
-        <span style="font-size:12px;color:var(--text3)">${members.length} lidí</span>
+      <div class="card-h" style="flex-wrap:wrap;gap:10px">
+        <h4 style="color:${gc.text};font-size:${isNoFirm ? '18px' : '16px'}">🏢 ${firm}</h4>
+        <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+          <span style="font-size:13px;color:var(--text3)">${members.length} lidí · ${fPaidCount}/${members.length} uhrazeno</span>
+          <span style="font-size:13px;color:var(--amber);font-weight:700">Dnes: ${eur(fToday)}</span>
+          <button onclick="generateProvizeFirmReport('${safeFirm}','week')" style="font-size:12px;padding:6px 11px;border:1px solid var(--brd);border-radius:7px;cursor:pointer;background:#fff;font-family:inherit">📄 Týdenní provize</button>
+          <button onclick="generateProvizeFirmReport('${safeFirm}','month')" style="font-size:12px;padding:6px 11px;border:1px solid var(--brd);border-radius:7px;cursor:pointer;background:#fff;font-family:inherit">📄 Měsíční provize</button>
+        </div>
       </div>
       <div style="overflow-x:auto">
       <table>
         <thead><tr>
-          <th>Jméno</th><th style="text-align:right">Sazba</th><th style="text-align:right">Provize</th>
-          <th style="text-align:right">Odměna (týden)</th>
-          <th style="text-align:right">Naše provize (den)</th><th style="text-align:right">Naše provize (týden)</th><th style="text-align:right">Naše provize (měsíc)</th>
+          <th style="font-size:14px">Jméno</th><th style="text-align:right;font-size:14px">Sazba</th><th style="text-align:right;font-size:14px">Provize</th>
+          <th style="text-align:right;font-size:14px">Odměna${mode === 'week' ? ' (týden)' : ' (měsíc)'}</th>
+          <th style="text-align:center;font-size:14px">Uhrazeno</th><th style="font-size:14px">Splatnost</th>
         </tr></thead>
         <tbody>${memberRows}</tbody>
         <tfoot><tr style="font-weight:800;background:var(--bg)">
-          <td colspan="3">Součet — ${firm}</td>
-          <td style="text-align:right">${eur(fPay)}</td>
-          <td style="text-align:right">${eur(fDay)}</td>
-          <td style="text-align:right">${eur(fWeek)}</td>
-          <td style="text-align:right">${eur(fMonth)}</td>
+          <td colspan="3" style="font-size:15px">Součet — ${firm}</td>
+          <td style="text-align:right;font-size:16px">${eur(fTotal)}</td>
+          <td colspan="2" style="font-size:13px;color:var(--text3);text-align:center">${fPaidCount}/${members.length} uhrazeno</td>
         </tr></tfoot>
       </table>
       </div>
@@ -5782,14 +5978,28 @@ async function renderProvizeContent() {
   }).join('')
 
   el.innerHTML = `
-    <div class="card" style="background:#211D1A;color:#fff;margin-bottom:16px">
-      <div class="card-h" style="border:none">
-        <h4 style="color:#E8A13A">Všechny firmy dohromady</h4>
-        <span style="font-size:12px;color:#bbb">KW${kw.week}/${kw.year} · ${now.toLocaleDateString('cs-CZ', { month: 'long', year: 'numeric' })}</span>
+    <div class="card" style="margin-bottom:16px">
+      <div class="card-h" style="flex-wrap:wrap;gap:12px">
+        <h4 style="font-size:17px">📊 Všechny firmy dohromady</h4>
+        <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+          <div style="display:flex;border:1px solid var(--brd);border-radius:8px;overflow:hidden">
+            <button onclick="provizeSetMode('week')" style="padding:7px 15px;border:none;cursor:pointer;font-family:inherit;font-size:14px;font-weight:700;background:${mode === 'week' ? '#211D1A' : '#fff'};color:${mode === 'week' ? '#E8A13A' : 'var(--text)'}">Týden</button>
+            <button onclick="provizeSetMode('month')" style="padding:7px 15px;border:none;border-left:1px solid var(--brd);cursor:pointer;font-family:inherit;font-size:14px;font-weight:700;background:${mode === 'month' ? '#211D1A' : '#fff'};color:${mode === 'month' ? '#E8A13A' : 'var(--text)'}">Měsíc</button>
+          </div>
+          <div style="display:flex;align-items:center;border:1px solid var(--brd);border-radius:8px;overflow:hidden">
+            <button onclick="provizePrev()" style="padding:7px 13px;border:none;cursor:pointer;background:#fff;font-family:inherit;font-size:15px">◀</button>
+            <button onclick="provizeToday()" style="padding:7px 13px;border:none;border-left:1px solid var(--brd);border-right:1px solid var(--brd);cursor:pointer;background:#fff;font-family:inherit;font-size:13px;font-weight:600">Dnes</button>
+            <button onclick="provizeNext()" style="padding:7px 13px;border:none;cursor:pointer;background:#fff;font-family:inherit;font-size:15px">▶</button>
+          </div>
+        </div>
       </div>
-      <div style="display:flex;gap:30px;flex-wrap:wrap">
-        <div><div style="font-size:11px;color:#bbb">Naše provize — tento týden</div><div style="font-size:24px;font-weight:800;color:#E8A13A">${eur(grandWeek)}</div></div>
-        <div><div style="font-size:11px;color:#bbb">Naše provize — tento měsíc</div><div style="font-size:24px;font-weight:800;color:#E8A13A">${eur(grandMonth)}</div></div>
+      <div style="padding:4px 16px 16px">
+        <div style="font-size:14px;color:var(--text2);margin-bottom:10px;font-weight:600">${periodLabel}</div>
+        <div class="stats" style="grid-template-columns:repeat(2,1fr);gap:12px;margin-bottom:0">
+          <div class="sc b"><div class="sc-lbl" style="font-size:12px">Naše provize — vybrané období</div><div class="sc-val" style="color:var(--blue);font-size:27px">${eur(grandTotal)}</div></div>
+          <div class="sc g"><div class="sc-lbl" style="font-size:12px">Firem / pracovníků</div><div class="sc-val" style="color:var(--green);font-size:27px">${firmNames.length} / ${rows.length}</div></div>
+        </div>
+        ${paymentsTableMissing ? '<div style="margin-top:10px;font-size:13px;color:var(--amber)">⚠️ Sledování plateb (uhrazeno/splatnost) zatím není zapnuté — spusťte migraci supabase-migrace-provize-platby.sql</div>' : ''}
       </div>
     </div>
     ${firmsHtml || '<div style="text-align:center;color:var(--text3);padding:20px">Žádní pracovníci</div>'}
@@ -11722,8 +11932,8 @@ function sv(name, navEl) {
     activeChatWorkerId = null
   }
   if(name === 'zpravy') { loadNotifWorkers(); loadNotifHistory() }
-  if(name === 'pristupy') { loadAccess(); loadProvizeAccessList() }
-  if(name === 'provize') { loadProvize() }
+  if(name === 'pristupy') { loadAccess() }
+  if(name === 'provize') { loadProvize(); loadProvizeAccessList() }
   if(name === 'smlouvy') { loadAdminContracts() }
   if(name === 'faktury') { loadCompanies() }
   if(name === 'tymy') { loadTeams() }
