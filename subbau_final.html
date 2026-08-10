@@ -91,6 +91,8 @@ body{font-family:-apple-system,'Segoe UI',sans-serif;background:var(--bg);color:
 label{font-size:12px;font-weight:600;color:var(--text2);display:block;margin-bottom:5px}
 input,select,textarea{width:100%;padding:11px 14px;border:1.5px solid var(--brd);border-radius:10px;font-size:15px;color:var(--text);background:var(--bg);outline:none;font-family:inherit;transition:border-color .15s;-webkit-appearance:none}
 input:focus,select:focus{border-color:var(--blue-m);background:#fff}
+/* Checkboxy a radio nesmí dědit width:100%/padding/appearance:none z pravidla výše — jinak zmizí nativní fajfka a zůstane jen prázdný obdélník (viz "Uhrazeno" v Provizích) */
+input[type=checkbox],input[type=radio]{width:auto;padding:0;border-radius:4px;-webkit-appearance:checkbox;appearance:auto}
 .btn-login{width:100%;padding:15px;background:#9C3B22;color:#fff;border:none;border-radius:12px;font-size:16px;font-weight:800;cursor:pointer;font-family:inherit;transition:background .15s;letter-spacing:-0.2px}
 .btn-login:hover{background:#e6b800}
 .btn-pri{padding:9px 16px;background:#9C3B22;color:#fff;border:none;border-radius:8px;font-size:13px;font-weight:600;cursor:pointer;font-family:inherit}
@@ -5599,7 +5601,10 @@ async function loadProvizeAccessList() {
     <tr>
       <td>${r.email}</td>
       <td style="font-size:12px;color:var(--text3)">${new Date(r.created_at).toLocaleDateString('cs-CZ')}</td>
-      <td style="text-align:right"><button onclick="deleteProvizeAccess('${r.id}','${r.email.replace(/'/g, String.fromCharCode(39))}')" style="padding:5px 10px;font-size:11px;background:none;border:1px solid var(--red);color:var(--red);border-radius:6px;cursor:pointer;font-family:inherit">Odebrat</button></td>
+      <td style="text-align:right;white-space:nowrap">
+        <button onclick="openEditProvizeAccessModal('${r.id}','${r.email.replace(/'/g, String.fromCharCode(39))}')" style="padding:5px 10px;font-size:11px;background:var(--amber-l);border:1px solid var(--amber);color:#9a6b15;border-radius:6px;cursor:pointer;font-family:inherit;font-weight:700;margin-right:6px">✏️ Změnit e-mail / heslo</button>
+        <button onclick="deleteProvizeAccess('${r.id}','${r.email.replace(/'/g, String.fromCharCode(39))}')" style="padding:5px 10px;font-size:11px;background:none;border:1px solid var(--red);color:var(--red);border-radius:6px;cursor:pointer;font-family:inherit">Odebrat</button>
+      </td>
     </tr>`).join('')
 }
 
@@ -6131,10 +6136,25 @@ async function sendPasswordReset(email, name) {
 // Vyžaduje serverless funkci /api/admin-update-worker (service_role klíč
 // nesmí být v prohlížeči), viz komentář v tom souboru.
 function openEditAccessModal(workerId, email, name) {
+  document.getElementById('edit-access-mode').value = 'worker'
   document.getElementById('edit-access-id').value = workerId
   document.getElementById('edit-access-email').value = email || ''
   document.getElementById('edit-access-pwd').value = ''
   document.getElementById('edit-access-name').textContent = name || ''
+  document.getElementById('edit-access-note').textContent = 'Pracovník se pak musí přihlašovat novým e-mailem/heslem. Nic se mu automaticky neposílá — sdělte mu nové údaje sami.'
+  document.getElementById('edit-access-err').style.display = 'none'
+  document.getElementById('edit-access-modal').style.display = 'flex'
+}
+
+// Stejný modal, ale pro záznam v provize_access (samostatné přihlášení k sekci
+// Provize — e-mail + heslo, nemá nic společného se Supabase Auth účtem pracovníka).
+function openEditProvizeAccessModal(id, email) {
+  document.getElementById('edit-access-mode').value = 'provize'
+  document.getElementById('edit-access-id').value = id
+  document.getElementById('edit-access-email').value = email || ''
+  document.getElementById('edit-access-pwd').value = ''
+  document.getElementById('edit-access-name').textContent = 'Přístup k sekci Provize'
+  document.getElementById('edit-access-note').textContent = 'Touto změnou se upraví jen samostatné přihlášení k sekci Provize (e-mail + heslo), ne přihlašovací účet pracovníka do appky.'
   document.getElementById('edit-access-err').style.display = 'none'
   document.getElementById('edit-access-modal').style.display = 'flex'
 }
@@ -6144,6 +6164,7 @@ function closeEditAccessModal() {
 }
 
 async function saveEditAccess() {
+  const mode = document.getElementById('edit-access-mode').value || 'worker'
   const id = document.getElementById('edit-access-id').value
   const email = document.getElementById('edit-access-email').value.trim()
   const pwd = document.getElementById('edit-access-pwd').value.trim()
@@ -6153,10 +6174,32 @@ async function saveEditAccess() {
 
   if (!email && !pwd) { err.textContent = 'Vyplňte nový e-mail nebo nové heslo.'; err.style.display = 'block'; return }
   if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) { err.textContent = 'Neplatný formát e-mailu.'; err.style.display = 'block'; return }
-  if (pwd && pwd.length < 6) { err.textContent = 'Heslo musí mít alespoň 6 znaků.'; err.style.display = 'block'; return }
+  const minPwdLen = mode === 'provize' ? 4 : 6
+  if (pwd && pwd.length < minPwdLen) { err.textContent = 'Heslo musí mít alespoň ' + minPwdLen + ' znaky.'; err.style.display = 'block'; return }
 
   btn.disabled = true
   btn.textContent = 'Ukládám...'
+
+  if (mode === 'provize') {
+    try {
+      const upd = {}
+      if (email) upd.email = email.toLowerCase()
+      if (pwd) upd.password_hash = await sha256Hex(pwd)
+      const { error } = await sb.from('provize_access').update(upd).eq('id', id)
+      if (error) throw new Error(error.message)
+      showToast('✅ Přístup k Provizím změněn')
+      closeEditAccessModal()
+      loadProvizeAccessList()
+    } catch (e) {
+      err.textContent = 'Chyba: ' + e.message
+      err.style.display = 'block'
+    } finally {
+      btn.disabled = false
+      btn.textContent = 'Uložit změny'
+    }
+    return
+  }
+
   try {
     const { data: sessionData } = await sb.auth.getSession()
     const token = sessionData?.session?.access_token
@@ -18828,6 +18871,7 @@ document.addEventListener('visibilitychange', () => {
       <button class="x-close" onclick="closeEditAccessModal()" style="background:none;border:none;cursor:pointer;color:var(--text2);display:inline-flex;align-items:center;justify-content:center"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:22px;height:22px;display:block"><path d="M18 6L6 18M6 6l12 12"/></svg></button>
     </div>
     <div id="edit-access-name" style="font-size:13px;color:var(--text2);margin-bottom:16px"></div>
+    <input type="hidden" id="edit-access-mode" value="worker">
     <input type="hidden" id="edit-access-id">
     <div class="fg">
       <label>Nový přihlašovací e-mail</label>
@@ -18842,7 +18886,7 @@ document.addEventListener('visibilitychange', () => {
       <button class="btn-sec" onclick="closeEditAccessModal()">Zrušit</button>
       <button class="btn-pri" id="edit-access-save-btn" onclick="saveEditAccess()" style="flex:1">Uložit změny</button>
     </div>
-    <p style="font-size:11px;color:var(--text3);margin-top:12px;line-height:1.5">Pracovník se pak musí přihlašovat novým e-mailem/heslem. Nic se mu automaticky neposílá — sdělte mu nové údaje sami.</p>
+    <p id="edit-access-note" style="font-size:11px;color:var(--text3);margin-top:12px;line-height:1.5">Pracovník se pak musí přihlašovat novým e-mailem/heslem. Nic se mu automaticky neposílá — sdělte mu nové údaje sami.</p>
   </div>
 </div>
 
