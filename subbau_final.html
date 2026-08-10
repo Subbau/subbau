@@ -74,7 +74,7 @@ body{font-family:-apple-system,'Segoe UI',sans-serif;background:var(--bg);color:
 .lf>p{font-size:13px;color:var(--text2);margin-bottom:24px}
 .fg{margin-bottom:14px}
  #login label{font-size:12px;font-weight:500;color:#6B5040}
-#login input{background:#fff;border:1.5px solid #DDD4C8;border-radius:10px}
+#login input{background:#fff;border:1.5px solid #DDD4C8;border-radius:10px;font-size:16px}
 #login input:focus{border-color:#C4573A;background:#fff}
 #login .lf h3{font-size:22px;font-weight:500;color:#2D1A06}
 #login .lf>p{font-size:13px;color:#9B8878;margin-bottom:28px}
@@ -1251,7 +1251,7 @@ button:not(.x-close) > svg:first-child{margin-right:6px}
                 <input type="text" id="team-search" placeholder="🔍 Hledat skupinu podle názvu..." oninput="filterTeams()" style="width:100%;padding:9px 12px;border:1.5px solid var(--brd);border-radius:8px;font-size:13px;font-family:inherit">
                 <input type="text" id="team-worker-search" placeholder="👷 Hledat pracovníka (zobrazí jeho skupinu)..." oninput="filterTeams()" style="width:100%;padding:9px 12px;border:1.5px solid var(--brd);border-radius:8px;font-size:13px;font-family:inherit">
               </div>
-              <div id="teams-list" style="display:flex;flex-direction:column;gap:12px;margin-top:8px">
+              <div id="teams-list" style="display:flex;flex-direction:column;gap:18px;margin-top:8px">
                 <div style="text-align:center;color:var(--text3);padding:20px">Načítám skupiny...</div>
               </div>
             </div>
@@ -3633,15 +3633,24 @@ async function saveAdminSignatureMemory() {
   }
   const okLocal = lsSet(ADMIN_SIG_KEY, dataUrl)
   let okCloud = false
+  let cloudErrMsg = ''
+  const cloudAttempted = !!(blob && typeof currentUser !== 'undefined' && currentUser?.id)
   try {
-    if (blob && typeof currentUser !== 'undefined' && currentUser?.id) {
+    if (cloudAttempted) {
       const { error } = await sb.storage.from('contracts').upload(adminSigStoragePath(), blob, { contentType: 'image/png', upsert: true })
       okCloud = !error
-      if (error) console.warn('[admin sig] cloud upload:', error.message)
+      if (error) { cloudErrMsg = error.message; console.warn('[admin sig] cloud upload:', error.message) }
     }
-  } catch(e) { console.warn('[admin sig] cloud upload selhal:', e?.message) }
-  if (!okLocal && !okCloud) { showToast('❌ Podpis se nepodařilo uložit'); refreshAdminSavedSigBtn(); return }
-  showToast(okCloud ? '✅ Podpis uložen — dostupný na všech zařízeních' : '✅ Podpis uložen v tomto zařízení')
+  } catch(e) { cloudErrMsg = e?.message || 'neznámá chyba'; console.warn('[admin sig] cloud upload selhal:', e?.message) }
+  if (!okLocal && !okCloud) { showToast('❌ Podpis se nepodařilo uložit' + (cloudErrMsg ? ': ' + cloudErrMsg : '')); refreshAdminSavedSigBtn(); return }
+  if (okCloud) {
+    showToast('✅ Podpis uložen — dostupný na všech zařízeních')
+  } else if (cloudAttempted) {
+    // Lokálně uloženo OK, ale synchronizace do cloudu selhala — na jiném zařízení podpis nebude vidět.
+    showToast('⚠️ Podpis uložen jen v tomto zařízení — sync do cloudu selhal' + (cloudErrMsg ? ': ' + cloudErrMsg : '') + '. Zkuste uložit znovu.')
+  } else {
+    showToast('✅ Podpis uložen v tomto zařízení')
+  }
   refreshAdminSavedSigBtn()
 }
 
@@ -3698,7 +3707,9 @@ async function refreshAdminSavedSigBtn() {
     if (!data?.publicUrl) return
     const resp = await fetch(data.publicUrl, { method: 'HEAD', cache: 'no-store' })
     if (resp.ok) btn.style.display = 'inline-block'
-  } catch(e) { /* offline nebo podpis zatím neexistuje — tlačítko zůstane skryté */ }
+    // 404 = podpis z jiného zařízení zatím nebyl nahrán do cloudu — tlačítko zůstane skryté, to je v pořádku.
+    else if (resp.status !== 404) console.warn('[admin sig] HEAD check neočekávaný status:', resp.status)
+  } catch(e) { console.warn('[admin sig] HEAD check selhal (offline?):', e?.message) }
 }
 
 function closeAdminSignModal() {
@@ -3751,10 +3762,12 @@ async function submitAdminSignatureWithPlacement() {
   try {
     // 1. Získej podpis jako PNG bytes
     const sigBlob = await new Promise(r => canvas.toBlob(r, 'image/png'))
+    if (!sigBlob) throw new Error('Podpis se nepodařilo převést na obrázek (zkuste to znovu)')
     const sigBytes = await sigBlob.arrayBuffer()
 
     // 2. Načti originální PDF
-    const pdfResponse = await fetch(pdfSignState.fileUrl)
+    const pdfResponse = await fetch(pdfSignState.fileUrl, { cache: 'no-store' })
+    if (!pdfResponse.ok) throw new Error(`Nepodařilo se stáhnout originální PDF (HTTP ${pdfResponse.status}) — zkontrolujte připojení a zkuste to znovu`)
     const pdfBytes = await pdfResponse.arrayBuffer()
 
     // 3. pdf-lib: embed podpis do PDF
@@ -8255,7 +8268,7 @@ function renderTeams() {
     div.innerHTML = shownTeams.map(t => {
       let members = workers.filter(w => w.team_id === t.id)
       // při hledání pracovníka zvýrazni/ukaž shodu, ale stejně ukaž všechny členy skupiny
-      return `<div style="border:1.5px solid var(--brd);border-radius:12px;padding:14px">
+      return `<div style="background:#fff;border:1.5px solid var(--brd);border-radius:12px;padding:14px;box-shadow:0 1px 4px rgba(0,0,0,0.07)">
         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
           <div>
             <div style="font-size:15px;font-weight:800">${cleanTeamName(t.name)}</div>
@@ -8430,29 +8443,20 @@ async function generateTeamAttendancePdf(teamId, teamName) {
       const adj = (r.check_in && r.check_out) ? applyAttendanceRules(r) : null
       const ci = adj?.checkIn || fmt(r.check_in)
       const co = adj?.checkOut || fmt(r.check_out)
-      const bs = r.break_start?.slice(0,5) || ''
-      const be = r.break_end?.slice(0,5) || ''
-      const bs2 = r.break2_start?.slice(0,5) || ''
-      const be2 = r.break2_end?.slice(0,5) || ''
-      const brk = (bs && be) ? `${bs}–${be}` : '—'
-      const brk2 = (bs2 && be2) ? `${bs2}–${be2}` : ''
+      const allBreaks = attAllBreaks(r)
+      // Pauza kratší než 30 min se započítává jako plných 30 min (stejně jako u výpočtu hodin)
       let brkLabel = ''
-      if (bs && be) {
-        const [bh,bm] = bs.split(':').map(Number)
-        const [eh,em] = be.split(':').map(Number)
-        let mins = (eh*60+em) - (bh*60+bm)
-        if (mins < 0) mins += 24*60
-        // Pauza kratší než 30 min se započítává jako plných 30 min (stejně jako u výpočtu hodin)
-        const counted = mins > 0 && mins < 30 ? 30 : mins
-        let total = counted
-        if (bs2 && be2) {
-          const [bh2,bm2] = bs2.split(':').map(Number)
-          const [eh2,em2] = be2.split(':').map(Number)
-          let mins2 = (eh2*60+em2) - (bh2*60+bm2)
-          if (mins2 < 0) mins2 += 24*60
-          total += Math.max(0, mins2)
-        }
-        brkLabel = total + ' min'
+      {
+        let total = 0
+        allBreaks.forEach(b => {
+          if (!b.bs || !b.be) return
+          const [bh,bm] = b.bs.split(':').map(Number)
+          const [eh,em] = b.be.split(':').map(Number)
+          let mins = (eh*60+em) - (bh*60+bm)
+          if (mins < 0) mins += 24*60
+          if (mins > 0) total += (mins < 30 ? 30 : mins)
+        })
+        if (total > 0) brkLabel = total + ' min'
       }
       const dt = new Date(r.work_date + 'T00:00:00')
       const wd = dt.getDay()
@@ -8470,8 +8474,7 @@ async function generateTeamAttendancePdf(teamId, teamName) {
         <td style="padding:6px 5px;border:1px solid #999;vertical-align:top;width:52px;text-align:center;font-size:12px;font-weight:700">${ci}</td>
         <td style="padding:6px 5px;border:1px solid #999;vertical-align:top;width:52px;text-align:center;font-size:12px;font-weight:700">${co}</td>
         <td style="padding:6px 5px;border:1px solid #999;vertical-align:top;width:74px;text-align:center;font-size:10px">
-          <div>${brk}</div>
-          ${brk2 ? `<div style="font-size:9px">${brk2}</div>` : ''}
+          ${allBreaks.length ? allBreaks.map(b => `<div>${b.bs}–${b.be||'?'}</div>`).join('') : '<div>—</div>'}
           ${brkLabel ? `<div style="color:#888;font-size:9px">${brkLabel}</div>` : ''}
         </td>
         <td style="padding:6px 5px;border:1px solid #999;vertical-align:top;width:52px;text-align:center;font-size:13px;font-weight:800">${hh}</td>
@@ -8530,12 +8533,16 @@ async function generateTeamAttendancePdf(teamId, teamName) {
     @page{size:A4 portrait;margin:12mm}
     @media print{.no-print{display:none!important}}
   </style></head><body>
-  <div style="border-bottom:2px solid #211D1A;padding-bottom:8px;margin-bottom:14px">
-    <h1>Weekly Report</h1>
-    <div style="font-size:10px;color:#666">Stundenübersicht · Přehled hodin</div>
-    <div style="font-size:9px;color:#999;margin-top:2px">🇬🇧 English · 🇩🇪 Deutsch · 🇨🇿 Čeština</div>
-    <div style="font-size:13px;font-weight:800;margin-top:6px;color:#211D1A">👥 ${(teamName||'Tým').replace(/</g,'&lt;')}</div>
-    <div style="margin:4px 0 0;font-size:11px;color:#444">${periodLabel} &nbsp;|&nbsp; ${workerCount} prac. · workers &nbsp;|&nbsp; Total · Gesamt · Celkem: <b>${grandTotal.toFixed(2)} h</b></div>
+  <div style="background:#211D1A;color:#fff;padding:16px 18px;margin-bottom:16px;border-radius:6px">
+    <h1 style="color:#fff">Weekly Report</h1>
+    <div style="font-size:10px;color:#bbb;margin-top:2px">Stundenübersicht · Přehled hodin</div>
+    <div style="font-size:9px;color:#888;margin-top:2px">🇬🇧 English · 🇩🇪 Deutsch · 🇨🇿 Čeština</div>
+    <div style="font-size:13px;font-weight:800;margin-top:8px;color:#E8A13A">👥 ${(teamName||'Tým').replace(/</g,'&lt;')}</div>
+    <div style="margin:4px 0 0;font-size:11px;color:#ccc">${periodLabel} &nbsp;|&nbsp; ${workerCount} prac. · workers</div>
+    <div style="text-align:center;margin-top:12px;padding-top:12px;border-top:1px solid rgba(255,255,255,.2)">
+      <div style="font-size:10px;letter-spacing:.5px;color:#ccc">Total hours · Gesamtstunden · Celkem odpracováno</div>
+      <div style="font-size:24px;font-weight:800;margin-top:3px">${grandTotal.toFixed(2)} h</div>
+    </div>
   </div>
   ${sections}
   <div style="margin-top:14px;font-size:9px;color:#aaa">${new Date().toLocaleString('cs-CZ')} | SubBau Attendance System</div>
@@ -12636,29 +12643,20 @@ async function generateAttendanceExport() {
       const adj = (r.check_in && r.check_out) ? applyAttendanceRules(r) : null
       const ci = adj?.checkIn || fmt(r.check_in)
       const co = adj?.checkOut || fmt(r.check_out)
-      const bs = r.break_start?.slice(0,5) || ''
-      const be = r.break_end?.slice(0,5) || ''
-      const bs2 = r.break2_start?.slice(0,5) || ''
-      const be2 = r.break2_end?.slice(0,5) || ''
-      const brk = (bs && be) ? `${bs}–${be}` : '—'
-      const brk2 = (bs2 && be2) ? `${bs2}–${be2}` : ''
+      const allBreaks = attAllBreaks(r)
+      // Pauza kratší než 30 min se započítává jako plných 30 min (stejně jako u výpočtu hodin)
       let brkLabel = ''
-      if (bs && be) {
-        const [bh,bm] = bs.split(':').map(Number)
-        const [eh,em] = be.split(':').map(Number)
-        let mins = (eh*60+em) - (bh*60+bm)
-        if (mins < 0) mins += 24*60
-        // Pauza kratší než 30 min se započítává jako plných 30 min (stejně jako u výpočtu hodin)
-        const counted = mins > 0 && mins < 30 ? 30 : mins
-        let total = counted
-        if (bs2 && be2) {
-          const [bh2,bm2] = bs2.split(':').map(Number)
-          const [eh2,em2] = be2.split(':').map(Number)
-          let mins2 = (eh2*60+em2) - (bh2*60+bm2)
-          if (mins2 < 0) mins2 += 24*60
-          total += Math.max(0, mins2)
-        }
-        brkLabel = total + ' min'
+      {
+        let total = 0
+        allBreaks.forEach(b => {
+          if (!b.bs || !b.be) return
+          const [bh,bm] = b.bs.split(':').map(Number)
+          const [eh,em] = b.be.split(':').map(Number)
+          let mins = (eh*60+em) - (bh*60+bm)
+          if (mins < 0) mins += 24*60
+          if (mins > 0) total += (mins < 30 ? 30 : mins)
+        })
+        if (total > 0) brkLabel = total + ' min'
       }
       const dt = new Date(r.work_date + 'T00:00:00')
       const wd = dt.getDay()
@@ -12676,8 +12674,7 @@ async function generateAttendanceExport() {
         <td style="padding:6px 5px;border:1px solid #999;vertical-align:top;width:52px;text-align:center;font-size:12px;font-weight:700">${ci}</td>
         <td style="padding:6px 5px;border:1px solid #999;vertical-align:top;width:52px;text-align:center;font-size:12px;font-weight:700">${co}</td>
         <td style="padding:6px 5px;border:1px solid #999;vertical-align:top;width:74px;text-align:center;font-size:10px">
-          <div>${brk}</div>
-          ${brk2 ? `<div style="font-size:9px">${brk2}</div>` : ''}
+          ${allBreaks.length ? allBreaks.map(b => `<div>${b.bs}–${b.be||'?'}</div>`).join('') : '<div>—</div>'}
           ${brkLabel ? `<div style="color:#888;font-size:9px">${brkLabel}</div>` : ''}
         </td>
         <td style="padding:6px 5px;border:1px solid #999;vertical-align:top;width:52px;text-align:center;font-size:13px;font-weight:800">${hh}</td>
@@ -13420,12 +13417,7 @@ async function exportWorkerKW(workerId, workerName, week, year, lang, foreman, r
     const adj2 = (r.check_in && r.check_out) ? applyAttendanceRules(r) : null
     const ci = adj2?.checkIn || r.check_in?.slice(0,5) || '—'
     const co = adj2?.checkOut || r.check_out?.slice(0,5) || (isRunning ? '▶ probíhá' : '—')
-    const bs = r.break_start?.slice(0,5) || ''
-    const be = r.break_end?.slice(0,5) || ''
-    const bs2 = r.break2_start?.slice(0,5) || ''
-    const be2 = r.break2_end?.slice(0,5) || ''
-    const brk = (bs && be) ? `${bs}–${be}` : ''
-    const brk2 = (bs2 && be2) ? `${bs2}–${be2}` : ''
+    const allBreaks = attAllBreaks(r)
     const site = attDisplaySite(r)
     const descRaw = (r.work_description||'').trim()
     const descHtml = (descRaw && descRaw !== '—' && _descToTrans[descRaw]) ? renderWork3(_descToTrans[descRaw]) : '—'
@@ -13437,8 +13429,7 @@ async function exportWorkerKW(workerId, workerName, week, year, lang, foreman, r
       </td>
       <td style="padding:5px 7px;border:1px solid #ccc;vertical-align:top;width:118px;font-size:10px">
         <div><b>${ci}</b> – <b>${co}</b></div>
-        ${brk ? `<div style="color:#888;font-size:9px">${brk}</div>` : ''}
-        ${brk2 ? `<div style="color:#888;font-size:9px">${brk2}</div>` : ''}
+        ${allBreaks.map(b => `<div style="color:#888;font-size:9px">${b.bs}–${b.be||'?'}</div>`).join('')}
         <div style="margin-top:1px;font-weight:700">${h} h</div>
       </td>
       <td style="padding:5px 7px;border:1px solid #ccc;vertical-align:top">
@@ -17015,6 +17006,20 @@ function applyAttendanceRules(record) {
     hours,
     flags
   }
+}
+
+// Vrátí VŠECHNY přestávky záznamu pro zobrazení (na rozdíl od break_start/break_end,
+// které po víc přestávkách za směnu drží jen tu poslední).
+// Přednost: pole breaks (mobilní appka), jinak break_start/end + break2_start/end (ruční zápis).
+function attAllBreaks(r) {
+  const out = []
+  if (Array.isArray(r.breaks) && r.breaks.length) {
+    r.breaks.forEach(b => { if (b && b.bs) out.push({ bs: b.bs.slice(0,5), be: b.be ? b.be.slice(0,5) : null }) })
+  } else {
+    if (r.break_start) out.push({ bs: r.break_start.slice(0,5), be: r.break_end ? r.break_end.slice(0,5) : null })
+    if (r.break2_start) out.push({ bs: r.break2_start.slice(0,5), be: r.break2_end ? r.break2_end.slice(0,5) : null })
+  }
+  return out
 }
 
 // Helper pro zobrazení s příznakem
