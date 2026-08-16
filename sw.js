@@ -2,7 +2,7 @@
 // Strategie: NETWORK-FIRST — vždy zkusí stáhnout aktuální verzi z internetu,
 // a jen když není síť, sáhne do cache. Tím appka nikdy nedrží "starou verzi".
 // Verzi zvyš při každém větším nasazení (nebo klidně datum).
-const CACHE = 'subbau-v37';
+const CACHE = 'subbau-v38';
 
 self.addEventListener('install', (event) => {
   // Nová verze se má aktivovat hned, nečekat na zavření všech karet
