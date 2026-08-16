@@ -2465,6 +2465,17 @@ button:not(.x-close) > svg:first-child{margin-right:6px}
             <input type="text" id="wd-inv-supplier-addr" placeholder="Ulice, město, PSČ" style="width:100%;font-size:12px;padding:8px;border:1.5px solid var(--brd);border-radius:8px;font-family:inherit">
             <div style="font-size:11px;color:var(--text3);margin-top:4px">Uloží se pracovníkovi do profilu, takže se použije i na dalších fakturách.</div>
           </div>
+          <!-- IČO a DIČ pracovníka — na faktuře musí být vždy IČO, DIČ když ho má -->
+          <div class="g2" style="gap:8px">
+            <div class="fg" style="margin-bottom:8px">
+              <label style="font-size:11px">IČO pracovníka</label>
+              <input type="text" id="wd-inv-supplier-ic" placeholder="12345678" style="width:100%;font-size:12px;padding:8px;border:1.5px solid var(--brd);border-radius:8px;font-family:inherit">
+            </div>
+            <div class="fg" style="margin-bottom:8px">
+              <label style="font-size:11px">DIČ pracovníka <span style="color:var(--text3);font-weight:400">(má-li)</span></label>
+              <input type="text" id="wd-inv-supplier-dic" placeholder="CZ12345678" style="width:100%;font-size:12px;padding:8px;border:1.5px solid var(--brd);border-radius:8px;font-family:inherit">
+            </div>
+          </div>
           <div id="wd-inv-hours" style="background:var(--bg);border-radius:8px;padding:8px 10px;font-size:12px;color:var(--text2);margin-bottom:10px">Vyberte týden…</div>
           <button onclick="generateInvoiceAdmin()" class="btn-pri" style="width:100%;font-size:13px;padding:10px"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:1em;height:1em;flex-shrink:0;vertical-align:-2px"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/></svg> Vytvořit fakturu</button>
         </div>
@@ -13616,6 +13627,8 @@ async function loadWorkerInvoiceCustomer(profile) {
   setVal('wd-inv-cust-addr', profile.invoice_customer_address)
   // Adresa dodavatele (OSVČ) — stejné pole, jaké má pracovník v mobilu pod „Fakturační adresa“
   setVal('wd-inv-supplier-addr', profile.locality)
+  setVal('wd-inv-supplier-ic', profile.ic)
+  setVal('wd-inv-supplier-dic', profile.dic)
   // Pokud aktuální odběratel odpovídá některé firmě, předvyber ji v dropdownu
   if (sel && profile.invoice_customer_name) {
     const match = _workerCustCompanies.find(c => (c.name||'') === profile.invoice_customer_name)
@@ -15593,7 +15606,8 @@ async function generateInvoiceMob(lang = 'en', override = null) {
   const workerName = (isSroSupplier && prof.company_name) ? prof.company_name : (prof.full_name || '')
   const workerAddr = prof.locality || ''
   const workerIC = prof.ic || ''
-  const workerVat = prof.is_vat_payer ? (prof.dic || '') : ''
+  // DIČ tiskneme vždy, když ho pracovník má — i když není označený jako plátce DPH
+  const workerVat = prof.dic || ''
   const isVatPayer = !!prof.is_vat_payer
 
   // Odběratel: 1) živě z firmy navázané na tým v tomto týdnu, 2) záloha z profilu
@@ -15713,7 +15727,7 @@ function renderInvoice(d, lang = 'en') {
           <div style="font-size:7pt;font-weight:700;text-transform:uppercase;color:#C4573A;letter-spacing:1px;margin-bottom:6px">${L.supplier}</div>
           <div style="font-size:12pt;font-weight:800;margin-bottom:3px">${d.workerName}</div>
           ${d.workerAddr ? `<div style="font-size:9pt;color:#5a5a5a;margin-bottom:2px">${d.workerAddr}</div>` : ''}
-          ${d.workerIC ? `<div style="font-size:9pt;color:#5a5a5a">${L.id}: <b style="color:#211D1A">${d.workerIC}</b></div>` : ''}
+          <div style="font-size:9pt;color:#5a5a5a">${L.id}: <b style="color:#211D1A">${d.workerIC || '—'}</b></div>
           ${d.workerVat ? `<div style="font-size:9pt;color:#5a5a5a">${L.vatId}: <b style="color:#211D1A">${d.workerVat}</b></div>` : ''}
           <div style="display:inline-block;font-size:7.5pt;color:#8a8a8a;margin-top:6px;background:#f6f4ef;padding:3px 9px;border-radius:20px">${L.vatNote}</div>
         </td>
@@ -18661,11 +18675,17 @@ async function generateInvoiceAdmin() {
   // ať ji má i příště a vidí ji i on sám v mobilu. Ukládá se před načtením
   // profilu, aby se nová hodnota rovnou promítla do faktury.
   const supplierAddr = document.getElementById('wd-inv-supplier-addr')?.value.trim() || ''
-  if (supplierAddr) {
-    const { error: addrErr } = await sb.from('profiles')
-      .update({ locality: supplierAddr }).eq('id', currentWorkerId)
-    if (addrErr) { showToast('❌ Adresu se nepodařilo uložit: ' + addrErr.message); return }
-  }
+  const supplierIc = document.getElementById('wd-inv-supplier-ic')?.value.trim() || ''
+  const supplierDic = document.getElementById('wd-inv-supplier-dic')?.value.trim() || ''
+  const supplierUpd = {}
+  if (supplierAddr) supplierUpd.locality = supplierAddr
+  if (supplierIc) supplierUpd.ic = supplierIc
+  // DIČ jde i vymazat (prázdné pole = pracovník DIČ nemá)
+  supplierUpd.dic = supplierDic || null
+  const { error: addrErr } = await sb.from('profiles')
+    .update(supplierUpd).eq('id', currentWorkerId)
+  if (addrErr) { showToast('❌ Údaje pracovníka se nepodařilo uložit: ' + addrErr.message); return }
+  if (!supplierIc) { showToast('⚠️ Vyplňte IČO pracovníka — na faktuře musí být'); return }
 
   // Profil načti čerstvý — ať faktura obsahuje aktuální fakturační údaje i odběratele
   const { data: prof } = await sb.from('profiles').select('*').eq('id', currentWorkerId).maybeSingle()
