@@ -2104,9 +2104,9 @@ button:not(.x-close) > svg:first-child{margin-right:6px}
           </select>
         </div>
         <div class="fg" style="margin-bottom:12px">
-          <label style="font-size:12px">Poznámka na faktuře (Reverse charge)</label>
-          <textarea id="inv-note" rows="2" placeholder="např. Reverse charge — daň odvádí příjemce" style="width:100%;padding:8px;border:1px solid var(--brd);border-radius:8px;font-size:13px;font-family:inherit;resize:vertical"></textarea>
-          <div style="font-size:11px;color:var(--text3);margin-top:4px">Zobrazí se pod položkou na faktuře. Text si můžete upravit — zapamatuje se do příště. Prázdné pole = poznámka se nezobrazí.</div>
+          <label style="font-size:12px">Položka na faktuře</label>
+          <input type="text" id="inv-item" placeholder="Campetery week service" style="width:100%;padding:8px;border:1px solid var(--brd);border-radius:8px;font-size:13px;font-family:inherit">
+          <div style="font-size:11px;color:var(--text3);margin-top:4px">Popis plnění na faktuře. Text si můžete přepsat — zapamatuje se do příště.</div>
         </div>
         <div id="inv-customer-info" style="background:var(--bg);border-radius:8px;padding:8px 10px;margin-bottom:12px;font-size:11px;color:var(--text2)">
           <div style="font-weight:700;font-size:12px;margin-bottom:2px">Fakturuje se:</div>
@@ -15374,6 +15374,10 @@ async function resetDocAlerts() {
 
 
 // ============ GENERÁTOR FAKTUR ============
+// Předvyplněný text položky na faktuře. OSVČ si ho může kdykoli přepsat,
+// vlastní verze se pak pamatuje do příště (localStorage per uživatel).
+const INVOICE_ITEM_DEFAULT = 'Campetery week service'
+
 async function generateInvoiceMob(lang = 'en') {
   if (!currentUser || !currentProfile) { showToast('❌ Nejste přihlášeni'); return }
 
@@ -15382,10 +15386,10 @@ async function generateInvoiceMob(lang = 'en') {
   const swift = document.getElementById('inv-swift').value.trim()
   const rate = parseFloat(document.getElementById('inv-rate').value) || 0
   const dueDays = parseInt(document.getElementById('inv-due')?.value || '14')
-  // Poznámka na faktuře (typicky Reverse charge) — co si OSVČ napíše, to se
-  // zobrazí na faktuře a zapamatuje se do příště na tomhle zařízení.
-  const invoiceNote = (document.getElementById('inv-note')?.value || '').trim()
-  lsSet('inv_note_' + currentUser.id, invoiceNote)
+  // Položka na faktuře — předvyplněná, ale OSVČ si ji může přepsat. Co si
+  // napíše, to je popis plnění a zapamatuje se do příště na tomhle zařízení.
+  const invoiceItem = (document.getElementById('inv-item')?.value || '').trim() || INVOICE_ITEM_DEFAULT
+  lsSet('inv_item_' + currentUser.id, invoiceItem)
 
   if (!weekSel?.value) { showToast('⚠️ Vyberte týden'); return }
   if (!iban) { showToast('⚠️ Zadejte IBAN'); return }
@@ -15477,9 +15481,10 @@ async function generateInvoiceMob(lang = 'en') {
   }
   const profDe = profDE_map[currentProfile.profession] || 'Bauarbeiten'
   const profCz = currentProfile.profession || 'Stavební práce'
-  // Trojjazyčný popis plnění: CZ (hlavní) + DE · EN pod tím
-  const serviceDesc = `${profCz} — týden/Woche/week ${week}/${year}`
-  const serviceDescSub = `${profDe} · ${profEn}`
+  // Popis plnění = položka, kterou si OSVČ napsala (nebo předvyplněná).
+  // Pod ní zůstává jen týden — profese už se na fakturu netiskne.
+  const serviceDesc = invoiceItem
+  const serviceDescSub = `týden/Woche/week ${week}/${year}`
 
   // Jméno na faktuře: u s.r.o. název firmy, jinak jméno osoby
   const isSroSupplier = currentProfile.supplier_type === 'sro'
@@ -15511,7 +15516,6 @@ async function generateInvoiceMob(lang = 'en') {
     iban: iban.replace(/\s+/g,'').replace(/(.{4})/g,'$1 ').trim(),
     swift, dueDays,
     serviceDesc, serviceDescSub, totalHours, rate, totalAmount, week, year,
-    invoiceNote,
     customer: customerData
   }, lang)
 }
@@ -15536,12 +15540,10 @@ function renderInvoice(d, lang = 'en') {
   const varSymbol = d.invoiceNum
   const constSymbol = '0308'
 
-  // Poznámka pod položkou (typicky Reverse charge). Když si ji OSVČ smaže,
-  // na faktuře se vůbec nezobrazí. Bez zadání použijeme výchozí text.
+  // Položku si píše OSVČ ručně — do HTML faktury ji pouštíme jen ošetřenou.
   const escHtml = s => String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
-  const invNote = (d.invoiceNote === undefined || d.invoiceNote === null)
-    ? 'REVERSE CHARGE'
-    : (d.invoiceNote.trim() ? escHtml(d.invoiceNote.trim()) : '')
+  const itemDesc = escHtml(d.serviceDesc || INVOICE_ITEM_DEFAULT)
+  const itemDescSub = d.serviceDescSub ? escHtml(d.serviceDescSub) : ''
 
   // Trojjazyčné popisky (CZ · DE · EN) — výstup je vždy 3jazyčný
   const L = {
@@ -15558,7 +15560,6 @@ function renderInvoice(d, lang = 'en') {
     variable: 'Variabilní symbol · Verwendungszweck · Variable symbol',
     constant: 'Konstantní symbol · Konst. Symbol · Constant symbol',
     forPayment: 'K úhradě · Zu zahlen · For payment',
-    reverseCharge: 'REVERSE CHARGE',
     deliveryName: 'Popis plnění · Leistungsbeschreibung · Description',
     qty: 'Množství · Menge · Quantity',
     unit: 'Jedn. · Einh. · Unit',
@@ -15648,16 +15649,11 @@ function renderInvoice(d, lang = 'en') {
         </thead>
         <tbody>
           <tr style="border-bottom:1px solid #ececec">
-            <td style="padding:11px 8px 11px 0;font-size:10pt;font-weight:600">${d.serviceDesc}${d.serviceDescSub ? `<div style="font-size:8pt;font-weight:400;color:#9a9a9a;margin-top:2px">${d.serviceDescSub}</div>` : ''}</td>
+            <td style="padding:11px 8px 11px 0;font-size:10pt;font-weight:600">${itemDesc}${itemDescSub ? `<div style="font-size:8pt;font-weight:400;color:#9a9a9a;margin-top:2px">${itemDescSub}</div>` : ''}</td>
             <td style="padding:11px 8px;text-align:center;font-size:9.5pt;white-space:nowrap">${d.totalHours.toFixed(2)} h</td>
             <td style="padding:11px 8px;text-align:right;font-size:9.5pt;white-space:nowrap">${d.rate.toFixed(2)} €</td>
             <td style="padding:11px 0 11px 8px;text-align:right;font-size:10pt;font-weight:700;white-space:nowrap">${d.totalAmount.toFixed(2)} €</td>
           </tr>
-          ${invNote ? `<tr>
-            <td colspan="4" style="padding:8px 0 0">
-              <span style="display:inline-block;font-size:7.5pt;font-weight:700;color:#8B5930;background:#f6f0e9;padding:3px 10px;border-radius:20px;letter-spacing:.5px;white-space:pre-line">${invNote}</span>
-            </td>
-          </tr>` : ''}
         </tbody>
       </table>
     </div>
@@ -15859,11 +15855,11 @@ async function loadInvoiceWeeks() {
   const swiftEl = document.getElementById('inv-swift')
   if (swiftEl && !swiftEl.value && currentProfile?.invoice_swift) swiftEl.value = currentProfile.invoice_swift
 
-  // Poznámka na faktuře (Reverse charge) — vrať naposledy použitou, jinak výchozí
-  const noteEl = document.getElementById('inv-note')
-  if (noteEl && !noteEl.value) {
-    const saved = lsGet('inv_note_' + currentUser.id)
-    noteEl.value = (saved === null || saved === undefined) ? 'REVERSE CHARGE' : saved
+  // Položka na faktuře — vrať naposledy použitou, jinak předvyplněnou výchozí
+  const itemEl = document.getElementById('inv-item')
+  if (itemEl && !itemEl.value) {
+    const saved = lsGet('inv_item_' + currentUser.id)
+    itemEl.value = (saved === null || saved === undefined || saved === '') ? INVOICE_ITEM_DEFAULT : saved
   }
 }
 
