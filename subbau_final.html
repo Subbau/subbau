@@ -2251,6 +2251,28 @@ button:not(.x-close) > svg:first-child{margin-right:6px}
             <input type="number" id="wd-rate" placeholder="0" style="width:120px;padding:6px 10px;border:1.5px solid var(--brd);border-radius:7px;font-size:13px">
           </div>
         </div>
+        <!-- DPH a identifikace na faktuře — může nastavit admin i sám pracovník ve svém profilu -->
+        <div style="border:1.5px solid var(--brd);border-radius:10px;padding:12px 14px;margin-top:14px">
+          <div style="font-size:12px;font-weight:700;margin-bottom:3px">🧾 DPH a údaje na faktuře</div>
+          <p style="font-size:11px;color:var(--text2);margin:0 0 10px">Zobrazí se na faktuře pracovníka. Stejné údaje si může upravit i on sám v aplikaci.</p>
+          <div class="g2" style="gap:8px">
+            <div class="fg" style="margin-bottom:0">
+              <label style="font-size:11px;color:var(--text3)">Plátce DPH</label>
+              <select id="wd-vat-payer" onchange="toggleWdDic()" style="width:100%;padding:6px 10px;border:1.5px solid var(--brd);border-radius:7px;font-size:13px;font-family:inherit">
+                <option value="no">Neplátce DPH</option>
+                <option value="yes">Plátce DPH</option>
+              </select>
+            </div>
+            <div class="fg" style="margin-bottom:0">
+              <label style="font-size:11px;color:var(--text3)">IČO</label>
+              <input type="text" id="wd-ic" placeholder="12345678" style="width:100%;padding:6px 10px;border:1.5px solid var(--brd);border-radius:7px;font-size:13px">
+            </div>
+          </div>
+          <div class="fg" id="wd-dic-wrap" style="margin-top:8px;margin-bottom:0;display:none">
+            <label style="font-size:11px;color:var(--text3)">DIČ</label>
+            <input type="text" id="wd-dic" placeholder="CZ12345678" style="width:100%;padding:6px 10px;border:1.5px solid var(--brd);border-radius:7px;font-size:13px">
+          </div>
+        </div>
         <div class="g2" style="gap:8px;margin-top:12px">
           <div class="fg" style="margin-bottom:0">
             <label style="font-size:11px;color:var(--text3)">Spolupráce od</label>
@@ -5927,8 +5949,22 @@ async function saveProvizeTerms(select, workerId) {
   const terms = select.value
   const { error } = await sb.from('worker_commissions')
     .upsert({ worker_id: workerId, payment_terms: terms, updated_at: new Date().toISOString() }, { onConflict: 'worker_id' })
-  if (error) showToast(/payment_terms/i.test(error.message) ? '❌ Chybí sloupec payment_terms — spusťte migraci supabase-migrace-provize-splatnost.sql' : '❌ Chyba: ' + error.message)
-  else showToast('✅ Splatnost uložena')
+  if (error) {
+    showToast(/payment_terms/i.test(error.message) ? '❌ Chybí sloupec payment_terms — spusťte migraci supabase-migrace-provize-splatnost.sql' : '❌ Chyba: ' + error.message)
+    return
+  }
+  // Dny splatnosti přepiš i do profilu — z něj je bere faktura.
+  // Tabulku worker_commissions pracovník číst nesmí (je v ní provize SubBau).
+  const days = parseInt((terms || '7/14').split('/')[1], 10)
+  if (!isNaN(days)) {
+    const { error: pErr } = await sb.from('profiles').update({ invoice_due_days: days }).eq('id', workerId)
+    if (pErr) {
+      console.warn('[provize] splatnost se nepropsala do profilu:', pErr.message)
+      showToast('⚠️ Splatnost uložena, ale nepropsala se do faktury — spusťte migraci supabase-migrace-splatnost-faktura.sql')
+      return
+    }
+  }
+  showToast('✅ Splatnost uložena — propíše se i do faktury')
 }
 
 // Vygeneruje tiskový PDF report provize jedné firmy za týden nebo měsíc (podle aktuálně zvoleného období)
@@ -12552,6 +12588,46 @@ function profLabel(code) {
   return PROFESSION_LABELS[code] || code
 }
 
+// Anglický popis práce podle profese — používá se jako předvyplněná položka faktury.
+// Klíče jsou stejné kódy jako v PROFESSION_LABELS (to, co je uložené v profiles.profession).
+const PROFESSION_INVOICE_EN = {
+  svarecelektroda: 'Welding service (electrode 111)',
+  svarecmigmag: 'Welding service (MIG/MAG 135/136/138)',
+  pokryvacrovne: 'Roofing service (flat and pitched roofs)',
+  pokryvacbitumen: 'Roofing service (bitumen)',
+  pokryvacfolie: 'Roofing service (membrane)',
+  'pomocnystrechař': 'Roofing assistance service',
+  pomocnystrechar: 'Roofing assistance service',
+  tesar: 'Carpentry service',
+  pomocnytesar: 'Carpentry assistance service',
+  drevostavby: 'Timber frame construction service',
+  topenar: 'Heating installation service',
+  instalater: 'Plumbing service',
+  vzduchotechnik: 'HVAC installation service',
+  montazdveri: 'Door and window installation service',
+  solarni: 'Solar panel installation service',
+  elektrikar: 'Electrical installation service',
+  pomocnyelektrikar: 'Electrical assistance service',
+  zednik: 'Bricklaying service',
+  zednikklinker: 'Bricklaying service (klinker)',
+  obkladac: 'Tiling service',
+  omitkar: 'Plastering service',
+  fasadnik: 'Facade service',
+  sadrokartonar: 'Drywall service',
+  pokladaczamkdlazby: 'Paving service',
+  klempar: 'Sheet metal roofing service',
+  lesenar: 'Scaffolding service',
+  lesar: 'Scaffolding service',
+  jerabnik: 'Crane operating service',
+  bagrista: 'Excavator operating service',
+  malirskoice: 'Painting service',
+  pomocneprace: 'General construction service'
+}
+// Předvyplněná položka faktury podle profese (anglicky). Pracovník i admin ji můžou přepsat.
+function defaultInvoiceItem(profession) {
+  return PROFESSION_INVOICE_EN[profession] || 'Construction service'
+}
+
 function getKW(date=new Date()) {
   const d=new Date(Date.UTC(date.getFullYear(),date.getMonth(),date.getDate()))
   const day=d.getUTCDay()||7; d.setUTCDate(d.getUTCDate()+4-day)
@@ -15508,6 +15584,9 @@ async function resetDocAlerts() {
 // ============ GENERÁTOR FAKTUR ============
 // Předvyplněný text položky na faktuře. OSVČ si ho může kdykoli přepsat,
 // vlastní verze se pak pamatuje do příště (localStorage per uživatel).
+// Starý pevný text položky. Dnes se položka bere z profese (defaultInvoiceItem).
+// Necháváme ho tu proto, abychom poznali, že si pracovník položku nikdy nepřepsal,
+// a mohli mu místo něj nabídnout popis podle jeho profese.
 const INVOICE_ITEM_DEFAULT = 'Carpentery service week'
 
 // Vygeneruje fakturu. Bez parametru `override` bere údaje z formuláře OSVČ
@@ -15521,12 +15600,16 @@ async function generateInvoiceMob(lang = 'en', override = null) {
   const iban = override ? (override.iban || '') : document.getElementById('inv-iban').value.trim()
   const swift = override ? (override.swift || '') : document.getElementById('inv-swift').value.trim()
   const rate = override ? (parseFloat(override.rate) || 0) : (parseFloat(document.getElementById('inv-rate').value) || 0)
-  const dueDays = override ? (parseInt(override.dueDays) || 14) : parseInt(document.getElementById('inv-due')?.value || '14')
-  // Položka na faktuře — předvyplněná, ale dá se přepsat. Co je v poli,
-  // to je popis plnění; u OSVČ se navíc zapamatuje do příště na tomhle zařízení.
+  // Splatnost určuje SubBau v sekci Provize (profiles.invoice_due_days).
+  // Admin ji ve svém formuláři může přepsat, pracovník ne.
+  const dueDays = override
+    ? (parseInt(override.dueDays) || parseInt(prof.invoice_due_days) || 14)
+    : (parseInt(prof.invoice_due_days) || parseInt(document.getElementById('inv-due')?.value || '14'))
+  // Položka na faktuře — předvyplněná anglicky podle profese, ale dá se přepsat.
+  // Co je v poli, to je popis plnění; u OSVČ se zapamatuje do příště na tomhle zařízení.
   const invoiceItem = override
-    ? ((override.item || '').trim() || INVOICE_ITEM_DEFAULT)
-    : ((document.getElementById('inv-item')?.value || '').trim() || INVOICE_ITEM_DEFAULT)
+    ? ((override.item || '').trim() || defaultInvoiceItem(prof.profession))
+    : ((document.getElementById('inv-item')?.value || '').trim() || defaultInvoiceItem(prof.profession))
   if (!override) lsSet('inv_item_' + workerId, invoiceItem)
 
   let week, year
@@ -15559,73 +15642,7 @@ async function generateInvoiceMob(lang = 'en', override = null) {
   const fmt = d => d.toLocaleDateString('en-GB').replace(/\//g, '.')
   const invoiceNum = `${year}${week.toString().padStart(2,'0')}`
 
-  // Profese v angličtině
-  const profEN = {
-    'Svářeč — elektroda (111)': 'Welder electrode (111)',
-    'Svářeč — MIG/MAG (135/136/138)': 'Welder MIG/MAG (135/136/138)',
-    'Pokrývač — rovné i šikmé střechy': 'Roofer flat and pitched roofs',
-    'Pokrývač — bitumen': 'Roofer bitumen',
-    'Pokrývač — fólie': 'Roofer membrane',
-    'Pomocný střechař': 'Roofing assistant',
-    'Tesař': 'Carpenter',
-    'Pomocný tesař': 'Carpentry assistant',
-    'Dřevostavby': 'Timber frame construction',
-    'Topenář': 'Heating engineer',
-    'Instalatér': 'Plumber',
-    'Vzduchotechnik': 'HVAC technician',
-    'Montáž dveří a oken': 'Door and window installation',
-    'Instalace solárních panelů': 'Solar panel installation',
-    'Elektrikář': 'Electrician',
-    'Pomocný elektrikář': 'Electrician assistant',
-    'Zedník': 'Bricklayer',
-    'Zedník — klinker': 'Bricklayer klinker',
-    'Obkladač': 'Tiler',
-    'Omítkář': 'Plasterer',
-    'Fasádník': 'Facade worker',
-    'Sádrokartonář': 'Drywaller',
-    'Pokladač zámkové dlažby': 'Paving installer',
-    'Klempíř (střechař)': 'Sheet metal worker',
-    'Lešenář': 'Scaffolder',
-    'Jeřábník': 'Crane operator',
-    'Bagrista': 'Excavator operator',
-    'Malíř': 'Painter',
-    'Pomocné práce na stavbě': 'General construction worker',
-  }
-  const profEn = profEN[prof.profession] || 'Construction work'
-  // Profese německy
-  const profDE_map = {
-    'Svářeč — elektroda (111)': 'Schweißer Elektrode (111)',
-    'Svářeč — MIG/MAG (135/136/138)': 'Schweißer MIG/MAG (135/136/138)',
-    'Pokrývač — rovné i šikmé střechy': 'Dachdecker Flach- und Steildächer',
-    'Pokrývač — bitumen': 'Dachdecker Bitumen',
-    'Pokrývač — fólie': 'Dachdecker Folie',
-    'Pomocný střechař': 'Dachdeckerhelfer',
-    'Tesař': 'Zimmermann',
-    'Pomocný tesař': 'Zimmermannhelfer',
-    'Dřevostavby': 'Holzbau',
-    'Topenář': 'Heizungsbauer',
-    'Instalatér': 'Installateur',
-    'Vzduchotechnik': 'Lüftungstechniker',
-    'Montáž dveří a oken': 'Tür- und Fenstermontage',
-    'Instalace solárních panelů': 'Solaranlagen-Montage',
-    'Elektrikář': 'Elektriker',
-    'Pomocný elektrikář': 'Elektrikerhelfer',
-    'Zedník': 'Maurer',
-    'Zedník — klinker': 'Maurer Klinker',
-    'Obkladač': 'Fliesenleger',
-    'Omítkář': 'Putzer',
-    'Fasádník': 'Fassadenbauer',
-    'Sádrokartonář': 'Trockenbauer',
-    'Pokladač zámkové dlažby': 'Pflasterer',
-    'Klempíř (střechař)': 'Spengler',
-    'Lešenář': 'Gerüstbauer',
-    'Jeřábník': 'Kranführer',
-    'Bagrista': 'Baggerführer',
-    'Malíř': 'Maler',
-    'Pomocné práce na stavbě': 'Bauhelfer',
-  }
-  const profDe = profDE_map[prof.profession] || 'Bauarbeiten'
-  const profCz = prof.profession || 'Stavební práce'
+  // Popis práce v angličtině řeší defaultInvoiceItem() — mapa PROFESSION_INVOICE_EN nahoře.
   // Popis plnění = položka, kterou si OSVČ napsala (nebo předvyplněná).
   // Pod ní zůstává jen týden — profese už se na fakturu netiskne.
   const serviceDesc = invoiceItem
@@ -15710,7 +15727,12 @@ function renderInvoice(d, lang = 'en') {
     unit: 'Jedn. · Einh. · Unit',
     unitPrice: 'Jedn. cena · Einzelpreis · Unit price',
     total: 'Celkem · Gesamt · Total',
-    vatNote: d.isVatPayer ? 'Plátce DPH · USt-pflichtig · VAT-payer' : 'Neplátce DPH · Kein USt · Not a VAT-payer',
+    vatNote: d.isVatPayer ? 'Plátce DPH · USt-pflichtig · VAT payer' : 'Neplátce DPH · Kein USt · Not VAT registered',
+    vatRow: 'DPH · USt · VAT',
+    // Obojí se fakturuje bez DPH: neplátce ji neúčtuje, u plátce ji odvádí odběratel (B2B v EU)
+    vatReason: d.isVatPayer
+      ? 'Přenesená daňová povinnost · Reverse charge · Steuerschuldnerschaft des Leistungsempfängers'
+      : 'Dodavatel není plátcem DPH · Supplier is not VAT registered · Lieferant ist kein USt-Zahler',
     stampSign: 'Razítko a podpis · Stempel und Unterschrift · Stamp and signature',
     totalAmount: 'Celková částka · Gesamtbetrag · Total amount',
     exchangeRate: 'Kurz · Kurs · Rate',
@@ -15753,7 +15775,7 @@ function renderInvoice(d, lang = 'en') {
           ${d.workerAddr ? `<div style="font-size:9pt;color:#5a5a5a;margin-bottom:2px">${d.workerAddr}</div>` : ''}
           ${d.workerIC ? `<div style="font-size:9pt;color:#5a5a5a">${L.id}: <b style="color:#211D1A">${d.workerIC}</b></div>` : ''}
           ${d.workerVat ? `<div style="font-size:9pt;color:#5a5a5a">${L.vatId}: <b style="color:#211D1A">${d.workerVat}</b></div>` : ''}
-          <div style="display:inline-block;font-size:7.5pt;color:#8a8a8a;margin-top:6px;background:#f6f4ef;padding:3px 9px;border-radius:20px">${L.vatNote}</div>
+          <div style="display:inline-block;font-size:8pt;font-weight:700;margin-top:6px;padding:3px 10px;border-radius:20px;${d.isVatPayer ? 'color:#1a56a0;background:#e8f0fb;border:1px solid #b8cdec' : 'color:#7a6a55;background:#f6f4ef;border:1px solid #e0d8c9'}">${L.vatNote}</div>
         </td>
         <td style="width:50%;vertical-align:top;padding:15px 30px 15px 16px;border-left:1px solid #ececec">
           <div style="font-size:7pt;font-weight:700;text-transform:uppercase;color:#9a9a9a;letter-spacing:1px;margin-bottom:6px">${L.customer}</div>
@@ -15809,6 +15831,13 @@ function renderInvoice(d, lang = 'en') {
         <tr>
           <td style="padding:5px 0;font-size:9pt;color:#5a5a5a">${L.totalAmount}</td>
           <td style="padding:5px 0;font-size:9pt;text-align:right;font-weight:600">${d.totalAmount.toFixed(2)} €</td>
+        </tr>
+        <tr>
+          <td style="padding:5px 0;font-size:9pt;color:#5a5a5a">${L.vatRow}</td>
+          <td style="padding:5px 0;font-size:9pt;text-align:right;font-weight:600">0,00 €</td>
+        </tr>
+        <tr>
+          <td colspan="2" style="padding:0 0 5px;font-size:7.5pt;color:#9a9a9a;line-height:1.35">${L.vatReason}</td>
         </tr>
         <tr>
           <td style="padding:5px 0;font-size:8pt;color:#9a9a9a">${totalCZK} CZK</td>
@@ -16000,12 +16029,47 @@ async function loadInvoiceWeeks() {
   const swiftEl = document.getElementById('inv-swift')
   if (swiftEl && !swiftEl.value && currentProfile?.invoice_swift) swiftEl.value = currentProfile.invoice_swift
 
-  // Položka na faktuře — vrať naposledy použitou, jinak předvyplněnou výchozí
+  // Položka na faktuře — anglicky podle profese. Pokud si ji pracovník přepsal, drží se jeho verze.
   const itemEl = document.getElementById('inv-item')
   if (itemEl && !itemEl.value) {
+    const byProf = defaultInvoiceItem(currentProfile?.profession)
     const saved = lsGet('inv_item_' + currentUser.id)
-    itemEl.value = (saved === null || saved === undefined || saved === '') ? INVOICE_ITEM_DEFAULT : saved
+    // Prázdné nebo ještě starý pevný text → dosaď popis podle profese
+    itemEl.value = (!saved || saved === INVOICE_ITEM_DEFAULT) ? byProf : saved
+    itemEl.placeholder = byProf
   }
+
+  // Splatnost nastavuje SubBau v sekci Provize — OSVČ ji jen vidí, needituje
+  applyInvoiceDueFromProfile('inv-due', currentProfile, true)
+}
+
+// Předvyplní splatnost podle toho, co má SubBau nastavené v sekci Provize.
+// lock=true → pole se zamkne (pracovník splatnost neurčuje).
+function applyInvoiceDueFromProfile(selectId, profile, lock) {
+  const sel = document.getElementById(selectId)
+  if (!sel) return
+  const days = profile?.invoice_due_days
+  if (days != null && days !== '') {
+    const val = String(days)
+    // Když sazba splatnosti není mezi nabízenými, přidej ji, ať se nastavení neztratí
+    if (!Array.from(sel.options).some(o => o.value === val)) {
+      sel.insertAdjacentHTML('beforeend', `<option value="${val}">${val} dní</option>`)
+    }
+    sel.value = val
+  }
+  if (!lock) return
+  const known = days != null && days !== ''
+  sel.disabled = known
+  sel.style.background = known ? '#f1efe9' : ''
+  sel.style.color = known ? '#555' : ''
+  let note = document.getElementById(selectId + '-note')
+  if (!note) {
+    note = document.createElement('div')
+    note.id = selectId + '-note'
+    note.style.cssText = 'font-size:11px;color:var(--text3);margin-top:4px'
+    sel.parentElement.appendChild(note)
+  }
+  note.textContent = known ? 'Splatnost nastavuje SubBau.' : ''
 }
 
 
@@ -17852,6 +17916,10 @@ async function openWorkerModal(id) {
   document.getElementById('wd-role').textContent = {admin:'Admin',osvec:'OSVČ',partak:'Parťák',klient:'Klient'}[w.role] || w.role
   const wdBt = document.getElementById('wd-business-type')
   if (wdBt) wdBt.value = w.business_type || (w.is_osvec === false ? 'sro' : 'osvec')
+  const wdVat = document.getElementById('wd-vat-payer'); if (wdVat) wdVat.value = w.is_vat_payer ? 'yes' : 'no'
+  const wdIc = document.getElementById('wd-ic'); if (wdIc) wdIc.value = w.ic || ''
+  const wdDic = document.getElementById('wd-dic'); if (wdDic) wdDic.value = w.dic || ''
+  toggleWdDic()
   document.getElementById('wd-status').innerHTML = `<span class="pill ${w.is_active?'pg':'pr'}">${w.is_active?'Aktivní':'Neaktivní'}</span>`
   document.getElementById('wd-rate').value = w.hourly_rate_worker || ''
   // Provize (marže SubBau) se teď spravuje jen v sekci Provize, ne na kartě pracovníka
@@ -18715,7 +18783,14 @@ async function loadWdInvoiceForm(profile) {
   const sw = document.getElementById('wd-inv-swift'); if (sw) sw.value = profile?.invoice_swift || ''
   const rt = document.getElementById('wd-inv-rate'); if (rt) rt.value = profile?.hourly_rate_worker || ''
   const it = document.getElementById('wd-inv-item')
-  if (it) it.value = lsGet('inv_item_' + currentWorkerId) || INVOICE_ITEM_DEFAULT
+  if (it) {
+    const byProf = defaultInvoiceItem(profile?.profession)
+    const saved = lsGet('inv_item_' + currentWorkerId)
+    it.value = (!saved || saved === INVOICE_ITEM_DEFAULT) ? byProf : saved
+    it.placeholder = byProf
+  }
+  // Splatnost se bere z Provizí (admin ji tam nastavuje), tady ji ještě může přepsat
+  applyInvoiceDueFromProfile('wd-inv-due', profile, false)
 
   const { data } = await sb.from('attendance')
     .select('kw, kw_year, total_hours')
@@ -18824,28 +18899,43 @@ async function saveWorkerProfile() {
   const germanLevel = document.getElementById('wd-german')?.value || null
   const englishLevel = document.getElementById('wd-english')?.value || null
   const hasCar = document.getElementById('wd-car')?.value === 'yes'
+  const isVatPayer = document.getElementById('wd-vat-payer')?.value === 'yes'
+  const ic = document.getElementById('wd-ic')?.value.trim() || null
+  // DIČ dává smysl jen u plátce — u neplátce ho z faktury vyhodíme
+  const dic = isVatPayer ? (document.getElementById('wd-dic')?.value.trim() || null) : null
+  const zaklad = {
+    full_name: fullName,
+    hourly_rate_worker: rate,
+    cooperation_start: coopStart || null,
+    cooperation_end: coopEnd || null,
+    email: email,
+    phone: phone,
+    business_type: businessType,
+    is_osvec: businessType === 'osvec',
+    profession: profession,
+    german_level: germanLevel,
+    english_level: englishLevel,
+    has_car: hasCar
+  }
+  const dphPole = { is_vat_payer: isVatPayer, ic: ic, dic: dic }
   window.zapisProbiha = true
   let error
+  let dphNeulozeno = false
   try {
-    ;({ error } = await sb.from('profiles').update({
-      full_name: fullName,
-      hourly_rate_worker: rate,
-      cooperation_start: coopStart || null,
-      cooperation_end: coopEnd || null,
-      email: email,
-      phone: phone,
-      business_type: businessType,
-      is_osvec: businessType === 'osvec',
-      profession: profession,
-      german_level: germanLevel,
-      english_level: englishLevel,
-      has_car: hasCar
-    }).eq('id',currentWorkerId))
+    ;({ error } = await sb.from('profiles').update({ ...zaklad, ...dphPole }).eq('id', currentWorkerId))
+    // Kdyby v databázi chyběl některý sloupec k DPH, ať kvůli tomu nespadne
+    // uložení zbytku profilu (jméno, sazba, profese…) — ulož aspoň základ.
+    if (error && /column|schema cache/i.test(error.message || '')) {
+      console.warn('[profil] DPH pole se neuložila:', error.message)
+      dphNeulozeno = true
+      ;({ error } = await sb.from('profiles').update(zaklad).eq('id', currentWorkerId))
+    }
     // Provize (marže SubBau) se teď spravuje jen v sekci Provize, ne na kartě pracovníka
   } finally {
     window.zapisProbiha = false
   }
   if(error){showToast('Chyba: '+error.message);return}
+  if (dphNeulozeno) showToast('⚠️ Profil uložen, ale údaje k DPH ne — v databázi chybí sloupce is_vat_payer / ic / dic')
   showToast('✅ Profil uložen')
   // Aktualizuj hlavičku modalu (jméno, iniciály) i lokální cache pracovníků
   const wdNameEl = document.getElementById('wd-name')
@@ -18856,10 +18946,23 @@ async function saveWorkerProfile() {
   if (wdAvatarInitEl && wdAvatarInitEl.style.display !== 'none') {
     wdAvatarInitEl.textContent = fullName.split(' ').map(n=>n[0]).join('').slice(0,2).toUpperCase()
   }
-  if (currentWorkerProfile) currentWorkerProfile.full_name = fullName
+  if (currentWorkerProfile) {
+    // Ať faktura vystavená hned po uložení pracuje s novými údaji
+    Object.assign(currentWorkerProfile, {
+      full_name: fullName, profession, is_vat_payer: isVatPayer, ic, dic,
+      hourly_rate_worker: rate, business_type: businessType
+    })
+  }
   const wIdx = (_workersCache||[]).find(w => String(w.id) === String(currentWorkerId))
   if (wIdx) wIdx.full_name = fullName
   loadWorkers()
+}
+
+// DIČ se ukazuje jen když je pracovník plátce DPH
+function toggleWdDic() {
+  const isVat = document.getElementById('wd-vat-payer')?.value === 'yes'
+  const wrap = document.getElementById('wd-dic-wrap')
+  if (wrap) wrap.style.display = isVat ? 'block' : 'none'
 }
 
 async function saveWorkerNotes() {
