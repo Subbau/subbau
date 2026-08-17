@@ -1629,11 +1629,11 @@ button:not(.x-close) > svg:first-child{margin-right:6px}
             <option value="other">📎 Jiný dokument</option>
           </select>
         </div>
-        <!-- Platnost dokladu — hlídáme ji a měsíc předem upozorníme -->
-        <div class="fg" style="margin-bottom:10px">
-          <label>Platnost do <span id="upload-valid-req" style="color:var(--red);font-weight:700">*</span></label>
-          <input type="date" id="upload-valid-until" class="reg-date-input" onchange="onUploadValidChange()">
-          <div id="upload-valid-hint" style="font-size:11.5px;color:var(--text2);margin-top:5px;line-height:1.45">Opište datum konce platnosti z dokladu. Měsíc předem vám sami připomeneme, že vyprší.</div>
+        <!-- Platnost dokladu zadává jen SubBau (admin) — pracovník ji nevyplňuje.
+             Jakmile ji admin doplní, uvidí ji pracovník u dokladu níže v seznamu. -->
+        <div style="display:flex;align-items:flex-start;gap:9px;padding:11px 13px;background:var(--bg);border:1px solid var(--brd);border-radius:10px;margin-bottom:10px">
+          <svg viewBox="0 0 24 24" fill="none" stroke="#9c3b22" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:17px;height:17px;flex-shrink:0;margin-top:1px"><rect x="3" y="4" width="18" height="18" rx="2"/><path d="M16 2v4M8 2v4M3 10h18"/></svg>
+          <div style="font-size:11.5px;color:var(--text2);line-height:1.45">Platnost dokladu doplní SubBau. Vy jen nahrajte doklad — o blížícím se konci platnosti vás pak sami upozorníme.</div>
         </div>
         <!-- PRŮVODCE: jedna strana na obrazovku, ne obě pod sebou.
              Kroky drží proměnná uploadStep, vykresluje je renderUploadStep(). -->
@@ -7184,7 +7184,7 @@ async function loadKWData() {
       let d = new Date(v.date_from < _wkStartStr ? _wkStartStr : v.date_from)
       const end = new Date(v.date_to > _wkEndStr ? _wkEndStr : v.date_to)
       const t = absType(v)
-      while (d <= end) { vacDays[v.worker_id + '|' + localDateStr(d)] = { note: v.note || '', type: t }; d.setDate(d.getDate()+1) }
+      while (d <= end) { vacDays[v.worker_id + '|' + localDateStr(d)] = { note: absNote(v), type: t }; d.setDate(d.getDate()+1) }
     })
   } catch(e) { /* tabulka dovolených nemusí být dostupná */ }
 
@@ -7731,6 +7731,8 @@ async function deleteDocument(docId) {
 }
 
 let _docsCache = []
+// U kterého dokladu má admin právě otevřené pole na datum platnosti (null = žádný).
+let _docValidityEditId = null
 const _docLabels = {op:'Občanský průkaz',pas:'Cestovní pas',zivnost:'Živnostenské oprávnění',gewerbeschein:'Živnostenské oprávnění',a1:'Potvrzení A1',freistellung:'Freistellung',other:'Jiný dokument'}
 async function loadDocuments() {
   const { data } = await sb.from('documents').select('*, worker:profiles!worker_id(full_name)').order('uploaded_at',{ascending:false})
@@ -7868,7 +7870,7 @@ function renderDocuments() {
       <td><b>${d.worker?.full_name||'—'}</b></td>
       <td>${docLabels[d.doc_type]||d.doc_type}</td>
       <td style="font-size:12px">${d.file_name}</td>
-      <td>${validityBadgeHtml(d.valid_until, 'sm')}</td>
+      <td>${docValidityCellHtml(d)}</td>
       <td><span class="pill ${d.status==='ok'?'pg':d.status==='unreadable'||d.status==='expired'||d.status==='rejected'?'pr':'pa'}">${({ok:'V pořádku',pending:'Čeká na kontrolu',unreadable:'Nečitelný',expired:'Propadlý',rejected:'Zamítnutý'})[d.status]||d.status}</span></td>
       <td>
         <div style="display:flex;gap:4px;flex-wrap:wrap">
@@ -7889,6 +7891,134 @@ async function approveDoc(id) {
 async function requestReupload(id) {
   await sb.from('documents').update({ status:'unreadable' }).eq('id',id)
   showToast('📧 Pracovník byl upozorněn'); loadDocuments()
+}
+
+// ---------------------------------------------------------------------------
+// PLATNOST U UŽ NAHRANÉHO DOKLADU (admin)
+// Starší doklady datum platnosti nemají (nahrávaly se, než se začalo hlídat),
+// a u nových se občas přečte špatně. Admin si ho proto může kdykoli doplnit
+// nebo přepsat přímo v tabulce – jakmile datum je, appka měsíc předem
+// (DOC_EXPIRY_WARN_DAYS) upozorní na dashboardu i pracovníka na mobilu.
+// ---------------------------------------------------------------------------
+function docValidityCellHtml(d) {
+  const btn = 'font-size:11px;padding:3px 8px;border-radius:6px;cursor:pointer;font-family:inherit;font-weight:600'
+  if (_docValidityEditId === d.id) {
+    return `<div style="display:flex;gap:4px;align-items:center;flex-wrap:wrap">
+      <input type="date" id="doc-valid-input" value="${String(d.valid_until||'').slice(0,10)}"
+        style="font-size:11.5px;padding:3px 6px;border:1px solid var(--brd);border-radius:6px;font-family:inherit">
+      <button onclick="saveDocValidity('${d.id}')" style="${btn};border:1px solid var(--green);background:var(--green-l);color:var(--green)">Uložit</button>
+      <button onclick="cancelEditDocValidity()" style="${btn};border:1px solid var(--brd);background:none;color:var(--text3)">Zrušit</button>
+    </div>`
+  }
+  const label = d.valid_until ? 'Upravit' : '+ Doplnit platnost'
+  return `<div style="display:flex;gap:5px;align-items:center;flex-wrap:wrap">
+    ${validityBadgeHtml(d.valid_until, 'sm')}
+    <button onclick="startEditDocValidity('${d.id}')" title="Nastavit nebo přepsat datum konce platnosti — měsíc předem se to připomene"
+      style="${btn};border:1px solid var(--blue);background:var(--bg2);color:var(--blue)">${label}</button>
+  </div>`
+}
+
+function startEditDocValidity(id) {
+  _docValidityEditId = id
+  renderDocuments()
+  const inp = document.getElementById('doc-valid-input')
+  if (inp) { inp.focus(); if (inp.showPicker) { try { inp.showPicker() } catch(e) {} } }
+}
+
+function cancelEditDocValidity() {
+  _docValidityEditId = null
+  renderDocuments()
+}
+
+// Zapíše datum platnosti k dokladu. Vrací true, když se uložení povedlo.
+// Používá to tabulka Dokumenty i karta pracovníka, ať se to chová všude stejně.
+async function applyDocValidity(id, workerId, docType, value) {
+  if (value) {
+    const end = new Date(value + 'T00:00:00')
+    if (isNaN(end)) { showToast('❌ Datum platnosti není platné'); return false }
+    // Odchytí překlep v roce (2205 místo 2025) – jinak by se doklad nikdy nepřipomněl.
+    if (end.getFullYear() < 2000 || end.getFullYear() > 2100) { showToast('❌ Zkontrolujte rok u data platnosti'); return false }
+  } else if (docNeedsValidity(docType)) {
+    if (!confirm('Bez data platnosti u tohoto dokladu neupozorníme na konec platnosti.\nOpravdu datum smazat?')) return false
+  }
+
+  const { error } = await sb.from('documents').update({ valid_until: value || null }).eq('id', id)
+  if (error) {
+    showToast(/valid_until|column/i.test(error.message)
+      ? '❌ Chybí sloupec valid_until — spusťte migraci supabase-migrace-platnost-dokladu.sql'
+      : '❌ Chyba: ' + error.message)
+    return false
+  }
+
+  // Nová platnost = hlídáme znovu. Dřív skrytá upozornění k tomuhle dokladu proto
+  // zrušíme – jinak by měsíc předem nic nenaskočilo (skrytí se pamatuje podle klíče).
+  if (workerId) {
+    const keys = [workerId+'|expiring|'+id, workerId+'|expired|'+id, workerId+'|novalid|'+id]
+    if (window._docAlertDismissed) keys.forEach(k => window._docAlertDismissed.delete(k))
+    try { await sb.from('doc_alert_dismissals').delete().in('dismiss_key', keys) } catch(e) {}
+  }
+
+  const v = docValidity(value)
+  showToast(!value ? '🗑 Datum platnosti smazáno'
+    : v.expired ? `⚠️ Uloženo — doklad je propadlý (${v.dateCz}), vyžádejte nový`
+    : v.warn ? `⚠️ Uloženo — platnost končí za ${v.daysLeft} ${v.dayWord} (${v.dateCz})`
+    : `✅ Platí do ${v.dateCz} — měsíc předem se to samo připomene`)
+
+  if (typeof loadDocumentAlertsStat === 'function') loadDocumentAlertsStat()
+  return true
+}
+
+// Uložení z tabulky Dokumenty
+async function saveDocValidity(id) {
+  const doc = _docsCache.find(d => d.id === id)
+  const value = (document.getElementById('doc-valid-input')?.value || '').trim()
+  const ok = await applyDocValidity(id, doc?.worker_id, doc?.doc_type, value)
+  if (!ok) return
+  _docValidityEditId = null
+  await loadDocuments()
+}
+
+// ---------------------------------------------------------------------------
+// Totéž na kartě pracovníka (záložka Dokumenty ve detailu) – tam admin chodí
+// nejčastěji, takže datum platnosti se dá doplnit i odtud.
+// ---------------------------------------------------------------------------
+let _wdValidityEditId = null
+
+function wdDocValidityHtml(d, workerId) {
+  const btn = 'font-size:11.5px;padding:4px 9px;border-radius:8px;cursor:pointer;font-family:inherit;font-weight:700'
+  if (_wdValidityEditId === d.id) {
+    return `<span style="display:inline-flex;gap:4px;align-items:center;flex-wrap:wrap">
+      <input type="date" id="wd-valid-input" value="${String(d.valid_until||'').slice(0,10)}"
+        style="font-size:11.5px;padding:4px 7px;border:1px solid var(--brd);border-radius:8px;font-family:inherit">
+      <button onclick="saveWdDocValidity('${d.id}','${workerId}','${d.doc_type}')" style="${btn};border:none;background:#3f7d54;color:#fff">Uložit</button>
+      <button onclick="cancelEditWdDocValidity('${workerId}')" style="${btn};border:1px solid var(--brd);background:#fff;color:#9a9082">Zrušit</button>
+    </span>`
+  }
+  return `${validityBadgeHtml(d.valid_until)}
+    <button onclick="startEditWdDocValidity('${d.id}','${workerId}')" title="Nastavit nebo přepsat datum konce platnosti — měsíc předem se to připomene"
+      style="${btn};border:1.5px solid #211D1A;background:#fff;color:#211D1A">${d.valid_until ? 'Upravit platnost' : '+ Doplnit platnost'}</button>`
+}
+
+async function startEditWdDocValidity(id, workerId) {
+  _wdValidityEditId = id
+  await loadWdDocs(workerId)
+  const inp = document.getElementById('wd-valid-input')
+  if (inp) { inp.focus(); if (inp.showPicker) { try { inp.showPicker() } catch(e) {} } }
+}
+
+async function cancelEditWdDocValidity(workerId) {
+  _wdValidityEditId = null
+  await loadWdDocs(workerId)
+}
+
+async function saveWdDocValidity(id, workerId, docType) {
+  const value = (document.getElementById('wd-valid-input')?.value || '').trim()
+  const ok = await applyDocValidity(id, workerId, docType, value)
+  if (!ok) return
+  _wdValidityEditId = null
+  await loadWdDocs(workerId)
+  // Tabulka Dokumenty může být otevřená na pozadí – ať v ní datum nezůstane staré.
+  if (_docsCache.length) loadDocuments()
 }
 
 // ============ CHAT ============
@@ -11038,34 +11168,6 @@ function validateValidUntil(type, value) {
   return ''
 }
 
-// Živá kontrola v mobilním formuláři pracovníka
-function onUploadValidChange() {
-  const type = document.getElementById('upload-doc-type')?.value || 'op'
-  const inp = document.getElementById('upload-valid-until')
-  const hint = document.getElementById('upload-valid-hint')
-  if (!inp || !hint) return
-  const err = validateValidUntil(type, inp.value)
-  if (err && inp.value) {
-    inp.style.borderColor = '#c0392b'
-    hint.textContent = err
-    hint.style.color = '#c0392b'
-    return
-  }
-  inp.style.borderColor = ''
-  hint.style.color = ''
-  if (!inp.value) {
-    hint.textContent = docNeedsValidity(type)
-      ? 'Opište datum konce platnosti z dokladu. Měsíc předem vám sami připomeneme, že vyprší.'
-      : 'Nepovinné — vyplňte, pokud doklad má konec platnosti.'
-    return
-  }
-  const days = Math.ceil((new Date(inp.value + 'T00:00:00') - new Date().setHours(0,0,0,0)) / 86400000)
-  hint.textContent = days <= DOC_EXPIRY_WARN_DAYS
-    ? '⚠️ Doklad platí už jen ' + days + ' dní — počítejte s výměnou.'
-    : '✅ Doklad platí ještě ' + days + ' dní.'
-  hint.style.color = days <= DOC_EXPIRY_WARN_DAYS ? '#9a6b15' : '#2f6b45'
-}
-
 function onDocTypeChange() {
   uploadStep = 1
   scanPages = []
@@ -11074,8 +11176,6 @@ function onDocTypeChange() {
   ;['upload-cam','upload-file','upload-cam-2','upload-file-2'].forEach(id => {
     const el = document.getElementById(id); if (el) el.value = ''
   })
-  updateValidityRequiredMark('upload-doc-type', 'upload-valid-req', 'upload-valid-hint')
-  onUploadValidChange()
   renderUploadStep()
 }
 
@@ -11283,8 +11383,6 @@ function resetUploadForm() {
   if (prog) prog.style.display = 'none'
   const shot = document.getElementById('upload-shot')
   if (shot) shot.style.display = 'none'
-  const vu = document.getElementById('upload-valid-until')
-  if (vu) { vu.value = ''; vu.style.borderColor = '' }
 }
 
 // Z vyfocených stránek složí jedno PDF (knihovna se načte až tady).
@@ -12029,15 +12127,8 @@ async function uploadDocument() {
 
   const docType = document.getElementById('upload-doc-type').value
 
-  // Platnost dokladu — bez ní bychom neměli co hlídat a nikdo by se nedozvěděl,
-  // že doklad propadá. U dokladů, které vyprší, je proto povinná.
-  const validInput = document.getElementById('upload-valid-until')
-  const validErr = validateValidUntil(docType, validInput?.value)
-  if (validErr) {
-    showToast('⚠️ ' + validErr)
-    if (validInput) { validInput.style.borderColor = '#c0392b'; validInput.focus() }
-    return
-  }
+  // Platnost dokladu pracovník nezadává — doplní ji admin v sekci Dokumenty.
+  // Když ji přečte automatická kontrola dokladu, uloží se rovnou (admin ji může přepsat).
 
   // Vyfocené stránky nejdřív složíme do jednoho PDF – do databáze pak jde PDF,
   // stejně jako když člověk nahraje hotový sken.
@@ -12065,9 +12156,9 @@ async function uploadDocument() {
 
   // 1. AI kontrola přední strany (čitelnost, typ, platnost)
   const check = await checkDocumentReadability(selectedFile, docType)
-  // Platnost bereme z pole, které pracovník vyplnil; když je prázdné (nepovinné
-  // typy), zkusíme aspoň datum, které přečetla automatická kontrola dokladu.
-  const validUntil = (validInput?.value || '').trim() || check.validUntil || null
+  // Platnost bereme jen z automatické kontroly dokladu (pokud ji přečte).
+  // Když ji nepřečte, zůstane prázdná a doplní ji admin v sekci Dokumenty.
+  const validUntil = check.validUntil || null
 
   if (!check.readable) {
     // Dokument je nečitelný — zobraz chybu a zastav
@@ -12298,7 +12389,7 @@ function loadMobProfil(profile) {
   const rateEl = document.getElementById('inv-rate')
   if (rateEl) {
     const adminRate = profile.hourly_rate_worker
-    if (adminRate != null && adminRate !== '' && Number(adminRate) > 0) {
+    if (isRateFromProvize(profile)) {
       rateEl.value = adminRate
       rateEl.readOnly = true
       rateEl.style.background = '#f1efe9'
@@ -12330,6 +12421,14 @@ function loadMobProfil(profile) {
 // === Fakturační údaje OSVČ ===
 function escAttr(s) { return String(s == null ? '' : s).replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;').replace(/>/g,'&gt;') }
 
+// Hodinovou sazbu určuje SubBau v sekci Provize (uloží se do profiles.hourly_rate_worker).
+// Když ji tam admin nastavil, pracovník ji nesmí přepsat — jinak by mu faktura
+// nesouhlasila s tím, co je domluvené, a rozpadl by se výpočet provize.
+function isRateFromProvize(profile) {
+  const r = profile?.hourly_rate_worker
+  return r != null && r !== '' && Number(r) > 0
+}
+
 function loadMobFaktura(profile) {
   const card = document.getElementById('mob-faktura-card')
   if (!card) return
@@ -12351,7 +12450,8 @@ function loadMobFaktura(profile) {
       ${row('IBAN', escAttr(profile.invoice_iban))}
       ${row('SWIFT / BIC', escAttr(profile.invoice_swift))}
       ${row('Hodinovka', profile.hourly_rate_worker ? profile.hourly_rate_worker + ' € / h' : '—')}
-      <p style="font-size:11px;color:var(--text3);margin-top:10px;line-height:1.5">Tyto údaje se automaticky doplní do faktury. Před stažením je můžete v generátoru ještě upravit.</p>
+      ${row('Splatnost', profile.invoice_due_days ? profile.invoice_due_days + ' dní' : '—')}
+      <p style="font-size:11px;color:var(--text3);margin-top:10px;line-height:1.5">Tyto údaje se automaticky doplní do faktury.${isRateFromProvize(profile) ? ' Hodinovou sazbu a splatnost nastavuje SubBau — ty měnit nejdou.' : ''}</p>
     </div>`
 }
 
@@ -12359,6 +12459,7 @@ function editMyFaktura() {
   const p = currentProfile || {}
   const isSro = p.supplier_type === 'sro'
   const isVat = !!p.is_vat_payer
+  const rateLocked = isRateFromProvize(p)
   _fkType = isSro ? 'sro' : 'osoba'
   _fkVat = isVat
   const card = document.getElementById('mob-faktura-card')
@@ -12410,8 +12511,8 @@ function editMyFaktura() {
 
     <div style="margin-bottom:16px">
       <label style="font-size:12px;color:var(--text3);display:block;margin-bottom:4px">Hodinová sazba (€ / h)</label>
-      <input type="number" id="fk-rate" value="${p.hourly_rate_worker != null ? p.hourly_rate_worker : ''}" placeholder="18" style="width:100%;padding:10px;border:1.5px solid var(--brd);border-radius:8px;font-size:16px;box-sizing:border-box">
-      <div style="font-size:11px;color:var(--text3);margin-top:4px">Pokud sazbu nastavil SubBau, ponechte beze změny.</div>
+      <input type="number" id="fk-rate" value="${p.hourly_rate_worker != null ? p.hourly_rate_worker : ''}" placeholder="18" ${rateLocked ? 'readonly' : ''} style="width:100%;padding:10px;border:1.5px solid var(--brd);border-radius:8px;font-size:16px;box-sizing:border-box${rateLocked ? ';background:#f1efe9;color:#555' : ''}">
+      <div style="font-size:11px;color:var(--text3);margin-top:4px">${rateLocked ? 'Sazbu nastavuje SubBau — změnit ji tady nejde.' : 'Sazbu vám obvykle nastaví SubBau. Zadejte ji jen když je pole prázdné.'}</div>
     </div>
 
     <div style="display:flex;gap:8px">
@@ -12452,7 +12553,8 @@ async function saveMyFaktura() {
     invoice_iban: val('fk-iban'),
     invoice_swift: val('fk-swift')
   }
-  if (rate != null && !isNaN(rate)) upd.hourly_rate_worker = rate
+  // Sazbu ukládáme jen tehdy, když ji SubBau ještě nenastavil. Jinak platí ta z Provizí.
+  if (!isRateFromProvize(currentProfile) && rate != null && !isNaN(rate)) upd.hourly_rate_worker = rate
   const { error } = await sb.from('profiles').update(upd).eq('id', currentUser.id)
   if (error) { showToast('❌ Chyba: ' + error.message); return }
   if (currentProfile) Object.assign(currentProfile, upd)
@@ -12782,44 +12884,52 @@ function profLabel(code) {
   return PROFESSION_LABELS[code] || code
 }
 
-// Anglický popis práce podle profese — používá se jako předvyplněná položka faktury.
+// Popis práce podle profese ve třech jazycích — předvyplněná položka faktury.
 // Klíče jsou stejné kódy jako v PROFESSION_LABELS (to, co je uložené v profiles.profession).
-const PROFESSION_INVOICE_EN = {
-  svarecelektroda: 'Welding service (electrode 111)',
-  svarecmigmag: 'Welding service (MIG/MAG 135/136/138)',
-  pokryvacrovne: 'Roofing service (flat and pitched roofs)',
-  pokryvacbitumen: 'Roofing service (bitumen)',
-  pokryvacfolie: 'Roofing service (membrane)',
-  'pomocnystrechař': 'Roofing assistance service',
-  pomocnystrechar: 'Roofing assistance service',
-  tesar: 'Carpentry service',
-  pomocnytesar: 'Carpentry assistance service',
-  drevostavby: 'Timber frame construction service',
-  topenar: 'Heating installation service',
-  instalater: 'Plumbing service',
-  vzduchotechnik: 'HVAC installation service',
-  montazdveri: 'Door and window installation service',
-  solarni: 'Solar panel installation service',
-  elektrikar: 'Electrical installation service',
-  pomocnyelektrikar: 'Electrical assistance service',
-  zednik: 'Bricklaying service',
-  zednikklinker: 'Bricklaying service (klinker)',
-  obkladac: 'Tiling service',
-  omitkar: 'Plastering service',
-  fasadnik: 'Facade service',
-  sadrokartonar: 'Drywall service',
-  pokladaczamkdlazby: 'Paving service',
-  klempar: 'Sheet metal roofing service',
-  lesenar: 'Scaffolding service',
-  lesar: 'Scaffolding service',
-  jerabnik: 'Crane operating service',
-  bagrista: 'Excavator operating service',
-  malirskoice: 'Painting service',
-  pomocneprace: 'General construction service'
+// Proč trojjazyčně: fakturu čte německý odběratel i český finanční úřad. Popis
+// plnění musí být oběma srozumitelný, jinak ho úřad může zpochybnit.
+const PROFESSION_INVOICE = {
+  svarecelektroda:    { en:'Welding work (electrode 111)',            de:'Schweißarbeiten (Elektrode 111)',            cs:'Svářečské práce (elektroda 111)' },
+  svarecmigmag:       { en:'Welding work (MIG/MAG 135/136/138)',      de:'Schweißarbeiten (MIG/MAG 135/136/138)',      cs:'Svářečské práce (MIG/MAG 135/136/138)' },
+  pokryvacrovne:      { en:'Roofing work (flat and pitched roofs)',   de:'Dachdeckerarbeiten (Flach- und Steildach)',  cs:'Pokrývačské práce (ploché a šikmé střechy)' },
+  pokryvacbitumen:    { en:'Roofing work (bitumen)',                  de:'Dachdeckerarbeiten (Bitumen)',               cs:'Pokrývačské práce (bitumen)' },
+  pokryvacfolie:      { en:'Roofing work (membrane)',                 de:'Dachdeckerarbeiten (Folienabdichtung)',      cs:'Pokrývačské práce (fólie)' },
+  'pomocnystrechař':  { en:'Roofing assistance work',                 de:'Dachdecker-Hilfsarbeiten',                   cs:'Pomocné pokrývačské práce' },
+  pomocnystrechar:    { en:'Roofing assistance work',                 de:'Dachdecker-Hilfsarbeiten',                   cs:'Pomocné pokrývačské práce' },
+  tesar:              { en:'Carpentry work',                          de:'Zimmererarbeiten',                           cs:'Tesařské práce' },
+  pomocnytesar:       { en:'Carpentry assistance work',               de:'Zimmerer-Hilfsarbeiten',                     cs:'Pomocné tesařské práce' },
+  drevostavby:        { en:'Timber frame construction work',          de:'Holzrahmenbauarbeiten',                      cs:'Práce na dřevostavbách' },
+  topenar:            { en:'Heating installation work',               de:'Heizungsinstallationsarbeiten',              cs:'Montáž topení' },
+  instalater:         { en:'Plumbing work',                           de:'Sanitärinstallationsarbeiten',               cs:'Instalatérské práce' },
+  vzduchotechnik:     { en:'Ventilation installation work',           de:'Lüftungsinstallationsarbeiten',              cs:'Montáž vzduchotechniky' },
+  montazdveri:        { en:'Door and window installation work',       de:'Türen- und Fenstermontage',                  cs:'Montáž dveří a oken' },
+  solarni:            { en:'Solar panel installation work',           de:'Photovoltaik-Montagearbeiten',               cs:'Montáž fotovoltaiky' },
+  elektrikar:         { en:'Electrical installation work',            de:'Elektroinstallationsarbeiten',               cs:'Elektroinstalační práce' },
+  pomocnyelektrikar:  { en:'Electrical assistance work',              de:'Elektro-Hilfsarbeiten',                      cs:'Pomocné elektroinstalační práce' },
+  zednik:             { en:'Bricklaying work',                        de:'Maurerarbeiten',                             cs:'Zednické práce' },
+  zednikklinker:      { en:'Bricklaying work (klinker)',              de:'Maurerarbeiten (Klinker)',                   cs:'Zednické práce (klinker)' },
+  obkladac:           { en:'Tiling work',                             de:'Fliesenlegerarbeiten',                       cs:'Obkladačské práce' },
+  omitkar:            { en:'Plastering work',                         de:'Putzarbeiten',                               cs:'Omítkářské práce' },
+  fasadnik:           { en:'Facade work',                             de:'Fassadenarbeiten',                           cs:'Fasádnické práce' },
+  sadrokartonar:      { en:'Drywall work',                            de:'Trockenbauarbeiten',                         cs:'Sádrokartonářské práce' },
+  pokladaczamkdlazby: { en:'Paving work',                             de:'Pflasterarbeiten',                           cs:'Pokládka zámkové dlažby' },
+  klempar:            { en:'Sheet metal roofing work',                de:'Spenglerarbeiten (Dach)',                    cs:'Klempířské práce (střecha)' },
+  lesenar:            { en:'Scaffolding work',                        de:'Gerüstbauarbeiten',                          cs:'Lešenářské práce' },
+  lesar:              { en:'Scaffolding work',                        de:'Gerüstbauarbeiten',                          cs:'Lešenářské práce' },
+  jerabnik:           { en:'Crane operating work',                    de:'Kranführerarbeiten',                         cs:'Obsluha jeřábu' },
+  bagrista:           { en:'Excavator operating work',                de:'Baggerarbeiten',                             cs:'Zemní práce bagrem' },
+  malirskoice:        { en:'Painting work',                           de:'Malerarbeiten',                              cs:'Malířské práce' },
+  pomocneprace:       { en:'General construction work',               de:'Bauhilfsarbeiten',                           cs:'Pomocné stavební práce' }
+}
+const INVOICE_ITEM_FALLBACK = { en:'Construction work', de:'Bauarbeiten', cs:'Stavební práce' }
+
+// Popis plnění ve všech třech jazycích (pro fakturu)
+function invoiceItemLangs(profession) {
+  return PROFESSION_INVOICE[profession] || INVOICE_ITEM_FALLBACK
 }
 // Předvyplněná položka faktury podle profese (anglicky). Pracovník i admin ji můžou přepsat.
 function defaultInvoiceItem(profession) {
-  return PROFESSION_INVOICE_EN[profession] || 'Construction service'
+  return invoiceItemLangs(profession).en
 }
 
 function getKW(date=new Date()) {
@@ -15732,6 +15842,17 @@ async function loadDocumentAlertsStat() {
       }
     })
 
+    // 5. Nahraný doklad, u kterého datum platnosti chybí — nemáme co hlídat.
+    //    Admin ho doplní v Dokumentech tlačítkem „+ Doplnit platnost".
+    myDocs.filter(d => !d.valid_until && docNeedsValidity(d.doc_type)
+      && d.status !== 'rejected' && d.status !== 'unreadable').forEach(d => {
+      workerAlerts.push({
+        key: w.id+'|novalid|'+d.id,
+        msg: `📅 Doplňte platnost: ${typeLabels[d.doc_type]||d.doc_type} — bez data neupozorníme na její konec`,
+        color: 'var(--amber)'
+      })
+    })
+
     // Odfiltruj vykřížkované položky
     const visible = workerAlerts.filter(a => !dismissed.has(a.key))
     if (visible.length > 0) {
@@ -15854,11 +15975,19 @@ async function generateInvoiceMob(lang = 'en', override = null) {
   const fmt = d => d.toLocaleDateString('en-GB').replace(/\//g, '.')
   const invoiceNum = `${year}${week.toString().padStart(2,'0')}`
 
-  // Popis práce v angličtině řeší defaultInvoiceItem() — mapa PROFESSION_INVOICE_EN nahoře.
-  // Popis plnění = položka, kterou si OSVČ napsala (nebo předvyplněná).
-  // Pod ní zůstává jen týden — profese už se na fakturu netiskne.
+  // Popis plnění pro finanční úřad: CO se dělalo, KDY (přesné období) a KOLIK hodin.
+  // Hlavní řádek anglicky (čte ho německý odběratel), pod ním překlad DE · CZ.
+  // Když si pracovník napsal vlastní text, překlad nepřidáváme — necháme jeho slova.
+  const itemLangs = invoiceItemLangs(prof.profession)
   const serviceDesc = invoiceItem
-  const serviceDescSub = `týden/Woche/week ${week}/${year}`
+  const serviceDescTrans = (invoiceItem === itemLangs.en) ? `${itemLangs.de} · ${itemLangs.cs}` : ''
+  // Období plnění = celý fakturovaný týden (pondělí–neděle). Na faktuře musí být
+  // konkrétní data, ne jen číslo týdne — finanční úřad podle nich určuje zdaňovací období.
+  const wkStart = getWeekStartDate(parseInt(week), parseInt(year))
+  const wkEnd = new Date(wkStart); wkEnd.setDate(wkStart.getDate() + 6)
+  const dmy = d => String(d.getDate()).padStart(2,'0') + '.' + String(d.getMonth()+1).padStart(2,'0') + '.' + d.getFullYear()
+  const periodFrom = dmy(wkStart), periodTo = dmy(wkEnd)
+  const serviceDescSub = `KW ${week}/${year} · ${periodFrom} – ${periodTo}`
 
   // Jméno na faktuře: u s.r.o. název firmy, jinak jméno osoby
   const isSroSupplier = prof.supplier_type === 'sro'
@@ -15889,7 +16018,8 @@ async function generateInvoiceMob(lang = 'en', override = null) {
     workerPhone: prof.phone || null,
     iban: iban.replace(/\s+/g,'').replace(/(.{4})/g,'$1 ').trim(),
     swift, dueDays,
-    serviceDesc, serviceDescSub, totalHours, rate, totalAmount, week, year,
+    serviceDesc, serviceDescTrans, serviceDescSub, periodFrom, periodTo,
+    totalHours, rate, totalAmount, week, year,
     customer: customerData
   }, lang)
 }
@@ -15916,7 +16046,8 @@ function renderInvoice(d, lang = 'en') {
 
   // Položku si píše OSVČ ručně — do HTML faktury ji pouštíme jen ošetřenou.
   const escHtml = s => String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
-  const itemDesc = escHtml(d.serviceDesc || INVOICE_ITEM_DEFAULT)
+  const itemDesc = escHtml(d.serviceDesc || INVOICE_ITEM_FALLBACK.en)
+  const itemDescTrans = d.serviceDescTrans ? escHtml(d.serviceDescTrans) : ''
   const itemDescSub = d.serviceDescSub ? escHtml(d.serviceDescSub) : ''
 
   // Trojjazyčné popisky (CZ · DE · EN) — výstup je vždy 3jazyčný
@@ -15928,6 +16059,8 @@ function renderInvoice(d, lang = 'en') {
     contactInfo: 'Kontakt · Kontakt · Contact',
     dateIssue: 'Datum vystavení · Ausstellungsdatum · Date of issue',
     dueDate: 'Datum splatnosti · Fälligkeitsdatum · Due date',
+    // Období plnění — pro finanční úřad zásadní údaj (kdy byla práce odvedena)
+    supplyPeriod: 'Období plnění · Leistungszeitraum · Period of supply',
     paymentInfo: 'Platební informace · Zahlungsinformationen · Payment Information',
     paymentMethod: 'Způsob platby · Zahlungsart · Payment method',
     bankTransfer: 'Bankovním převodem · Banküberweisung · Bank transfer',
@@ -16006,11 +16139,13 @@ function renderInvoice(d, lang = 'en') {
           <div style="font-weight:700;font-size:10pt">${d.today}</div>
         </td>
         <td style="padding:9px 16px;vertical-align:middle;border-left:1px solid #ececec">
-          <span style="font-size:7.5pt;color:#9a9a9a">${L.dueDate}</span>
-          <div style="font-weight:700;font-size:10pt;color:#C4573A">${d.dueDate}</div>
+          <span style="font-size:7.5pt;color:#9a9a9a">${L.supplyPeriod}</span>
+          <div style="font-weight:700;font-size:10pt">${d.periodFrom && d.periodTo ? d.periodFrom + ' – ' + d.periodTo : '—'}</div>
         </td>
         <td style="padding:9px 30px 9px 16px;vertical-align:middle;border-left:1px solid #ececec;text-align:right">
-          <span style="font-size:7.5pt;color:#9a9a9a">${L.dueDays}</span>
+          <span style="font-size:7.5pt;color:#9a9a9a">${L.dueDate}</span>
+          <div style="font-weight:700;font-size:10pt;color:#C4573A">${d.dueDate}</div>
+          <div style="font-size:7pt;color:#9a9a9a;margin-top:1px">${L.dueDays}</div>
         </td>
       </tr>
     </table>
@@ -16028,7 +16163,7 @@ function renderInvoice(d, lang = 'en') {
         </thead>
         <tbody>
           <tr style="border-bottom:1px solid #ececec">
-            <td style="padding:11px 8px 11px 0;font-size:10pt;font-weight:600">${itemDesc}${itemDescSub ? `<div style="font-size:8pt;font-weight:400;color:#9a9a9a;margin-top:2px">${itemDescSub}</div>` : ''}</td>
+            <td style="padding:11px 8px 11px 0;font-size:10pt;font-weight:600">${itemDesc}${itemDescTrans ? `<div style="font-size:8.5pt;font-weight:500;color:#5a5a5a;margin-top:2px">${itemDescTrans}</div>` : ''}${itemDescSub ? `<div style="font-size:8pt;font-weight:400;color:#9a9a9a;margin-top:2px">${itemDescSub}</div>` : ''}</td>
             <td style="padding:11px 8px;text-align:center;font-size:9.5pt;white-space:nowrap">${d.totalHours.toFixed(2)} h</td>
             <td style="padding:11px 8px;text-align:right;font-size:9.5pt;white-space:nowrap">${d.rate.toFixed(2)} €</td>
             <td style="padding:11px 0 11px 8px;text-align:right;font-size:10pt;font-weight:700;white-space:nowrap">${d.totalAmount.toFixed(2)} €</td>
@@ -17911,9 +18046,27 @@ const ABSENCE = {
     icon: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:15px;height:15px;flex-shrink:0"><circle cx="12" cy="12" r="9"/><path d="M12 8v8M8 12h8"/></svg>'
   }
 }
-// Bezpečné čtení druhu — starší záznamy sloupec `type` nemají, ty jsou dovolená
-function absType(v) { return (v && v.type === 'nemoc') ? 'nemoc' : 'dovolena' }
+// Bezpečné čtení druhu. Když v databázi sloupec `type` ještě není (neproběhla
+// migrace supabase-migrace-nemoc.sql), nemoc se uloží s poznámkou začínající
+// "Nemoc" (viz insertAbsence) — odsud ji poznáme, aby se i tak zobrazila jako
+// nemoc a ne jako dovolená. Vzor je záměrně přísný, ať se dovolená s poznámkou
+// typu „Nemocná manželka" nespletla s nemocí.
+const _ABS_NOTE_SICK = /^Nemoc(\s—\s|$)/
+function absType(v) {
+  if (!v) return 'dovolena'
+  if (v.type === 'nemoc') return 'nemoc'
+  if (!v.type && _ABS_NOTE_SICK.test(String(v.note || '').trim())) return 'nemoc'
+  return 'dovolena'
+}
 function absInfo(v) { return ABSENCE[absType(v)] }
+// Poznámka k zobrazení — u nemoci bez sloupce `type` odřízne prefix "Nemoc — ",
+// ať se vedle odznaku „Nemoc" nepíše to samé ještě jednou.
+function absNote(v) {
+  const n = String((v && v.note) || '').trim()
+  if (!n) return ''
+  if (v && !v.type && _ABS_NOTE_SICK.test(n)) return n.replace(_ABS_NOTE_SICK, '').trim()
+  return n
+}
 
 // Vybraný druh v mobilním formuláři pracovníka
 let _vacType = 'dovolena'
@@ -17990,7 +18143,7 @@ async function loadMobVacations() {
         <div style="min-width:0">
           <div style="display:inline-flex;align-items:center;gap:5px;background:#fff;border:1px solid ${info.color};color:${info.color};font-size:11px;font-weight:800;padding:3px 9px;border-radius:20px;margin-bottom:6px">${info.icon}${info.label}</div>
           <div style="font-size:13px;font-weight:700">${czd(v.date_from)} → ${czd(v.date_to)}</div>
-          <div style="font-size:12px;color:var(--text2);margin-top:2px">${days} ${days===1?'den':'dní'}${v.note?' · '+v.note:''}</div>
+          <div style="font-size:12px;color:var(--text2);margin-top:2px">${days} ${days===1?'den':'dní'}${absNote(v)?' · '+absNote(v):''}</div>
           <div style="font-size:11px;color:${color};margin-top:3px">${stav}</div>
         </div>
         ${!isPast ? `<button onclick="deleteVacation('${v.id}','${t}')" style="flex-shrink:0;padding:4px 10px;background:none;border:1px solid var(--red);border-radius:6px;color:var(--red);font-size:11px;cursor:pointer;font-family:inherit">Smazat</button>` : ''}
@@ -18105,7 +18258,7 @@ async function loadWdVacations() {
           <div style="min-width:0">
             <div style="display:inline-flex;align-items:center;gap:5px;background:${info.bg};border:1px solid ${info.color};color:${info.color};font-size:10.5px;font-weight:800;padding:2px 8px;border-radius:20px;margin-bottom:4px">${info.icon}${info.label}</div>
             <div style="font-weight:600;font-size:13px">${cz(v.date_from)} → ${cz(v.date_to)}</div>
-            <div style="font-size:12px;color:var(--text2)">${days} ${days===1?'den':'dní'}${v.note?' · '+v.note:''}</div>
+            <div style="font-size:12px;color:var(--text2)">${days} ${days===1?'den':'dní'}${absNote(v)?' · '+absNote(v):''}</div>
           </div>
           <div style="display:flex;align-items:center;gap:8px;flex-shrink:0">
             <span class="pill ${isNow?'pb':isPast?'pq':'pg'}">${isNow?'Probíhá':isPast?'Proběhla':'Naplánována'}</span>
@@ -18875,7 +19028,7 @@ async function loadWdDocs(id) {
         <div style="font-size:11.5px;color:#9a9082;margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${d.file_name||'—'}</div>
         <div style="display:flex;flex-wrap:wrap;gap:5px;margin-top:7px">
           <span style="display:inline-flex;align-items:center;background:${col.bg};color:${col.c};border:1px solid ${col.b};font-size:11px;font-weight:800;padding:3px 9px;border-radius:14px">${si.label}</span>
-          ${validityBadgeHtml(d.valid_until)}
+          ${wdDocValidityHtml(d, wid)}
         </div>
       </div>
     </div>
