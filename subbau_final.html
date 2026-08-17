@@ -4602,8 +4602,11 @@ function showAdmin(profile) {
   updateAdminChatBadge()
   if (window._adminChatBadgeInt) clearInterval(window._adminChatBadgeInt)
   window._adminChatBadgeInt = setInterval(updateAdminChatBadge, 20000)
-  // Automaticky kontroluj nové čekající registrace každých 30 s (žádné ruční obnovování)
+  // Automaticky kontroluj nové čekající registrace každých 30 s (žádné ruční obnovování).
+  // Hned po přihlášení si zapamatuj současný stav, ať se hlásí opravdu jen nové registrace.
+  _lastPendingCount = null
   if (window._adminPendingInt) clearInterval(window._adminPendingInt)
+  refreshPendingRegistrations()
   window._adminPendingInt = setInterval(refreshPendingRegistrations, 30000)
   // Spusť živou aktualizaci admin dat (realtime) — vše se obnovuje samo, bez načítání stránky
   startAdminRealtime()
@@ -4649,9 +4652,16 @@ function _onAdminDbChange(table, payload) {
       case 'chat_messages':   // nová zpráva — jen když ji poslal pracovník, ne admin
         if (payload?.new && payload.new.sender_role !== 'admin') notify = true
         break
-      case 'profiles':        // nová registrace pracovníka — jen když čeká na schválení
-        if (!payload?.new || payload.new.registration_status === 'pending') notify = true
+      case 'profiles': {
+        // Nová registrace pracovníka. Někdy se profil uloží bez pole
+        // registration_status (chybí sloupec) — pak ho poznáme podle toho,
+        // že účet ještě není aktivní. Jinak by upozornění vůbec nepřišlo.
+        const p = payload?.new
+        const cekaNaSchvaleni = !p || p.registration_status === 'pending' ||
+          ((p.registration_status == null) && p.is_active !== true)
+        if (cekaNaSchvaleni) upozorniNaRegistraci(p?.full_name)
         break
+      }
     }
   } else if (isUpdate && table === 'attendance') {
     // ODCHOD nebo PŘESTÁVKA: pole se změnilo z prázdného na vyplněné.
@@ -4823,6 +4833,20 @@ function playAdminBeep() {
       doBeeps()
     }
   } catch(e) { _pendingBeep = true; console.warn('[admin beep]', e?.message) }
+}
+
+// Upozornění na novou registraci: pípnutí + hláška na obrazovce.
+// Registraci hlásí dvě cesty (živé spojení a kontrola každých 30 s), takže
+// upozorníme nejvýš jednou za 15 s — jinak by admin slyšel pípnutí dvakrát.
+let _posledniUpozorneniRegistrace = 0
+function upozorniNaRegistraci(jmeno) {
+  const ted = Date.now()
+  if (ted - _posledniUpozorneniRegistrace < 15000) return
+  _posledniUpozorneniRegistrace = ted
+  playAdminBeep()
+  try {
+    showToast(jmeno ? ('🔔 Nová registrace: ' + jmeno) : '🔔 Nová registrace ke schválení!')
+  } catch(e) {}
 }
 
 // Přepnutí zvuku (volané z tlačítka v UI)
@@ -6597,10 +6621,12 @@ async function refreshPendingRegistrations() {
       loadPendingRegistrationsPage()
     }
 
-    // Upozorni jen když PŘIBYLA nová registrace (ne při prvním načtení)
+    // Upozorni jen když PŘIBYLA nová registrace (ne při prvním načtení).
+    // Tohle je záloha pro případ, že by živé spojení registraci nezachytilo.
     const count = pendingWorkersRaw?.length || 0
     if (_lastPendingCount !== null && count > _lastPendingCount) {
-      showToast('🔔 Nová registrace ke schválení!')
+      const nejnovejsi = pendingWorkersRaw && pendingWorkersRaw[0]
+      upozorniNaRegistraci(nejnovejsi?.full_name)
     }
     _lastPendingCount = count
   } catch(e) { /* ticho — jen automatické obnovení */ }
