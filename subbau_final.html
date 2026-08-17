@@ -1128,7 +1128,7 @@ button:not(.x-close) > svg:first-child{margin-right:6px}
               </div>
             </div>
             <table>
-              <thead><tr><th>Pracovník</th><th>Typ dokumentu</th><th>Soubor</th><th>Stav</th><th>Akce</th></tr></thead>
+              <thead><tr><th>Pracovník</th><th>Typ dokumentu</th><th>Soubor</th><th>Platnost</th><th>Stav</th><th>Akce</th></tr></thead>
               <tbody id="docs-table">
                 <tr><td colspan="6" style="text-align:center;color:var(--text3);padding:20px">Načítám dokumenty...</td></tr>
               </tbody>
@@ -1628,6 +1628,12 @@ button:not(.x-close) > svg:first-child{margin-right:6px}
             <option value="freistellung">📄 Freistellung</option>
             <option value="other">📎 Jiný dokument</option>
           </select>
+        </div>
+        <!-- Platnost dokladu — hlídáme ji a měsíc předem upozorníme -->
+        <div class="fg" style="margin-bottom:10px">
+          <label>Platnost do <span id="upload-valid-req" style="color:var(--red);font-weight:700">*</span></label>
+          <input type="date" id="upload-valid-until" class="reg-date-input" onchange="onUploadValidChange()">
+          <div id="upload-valid-hint" style="font-size:11.5px;color:var(--text2);margin-top:5px;line-height:1.45">Opište datum konce platnosti z dokladu. Měsíc předem vám sami připomeneme, že vyprší.</div>
         </div>
         <!-- PRŮVODCE: jedna strana na obrazovku, ne obě pod sebou.
              Kroky drží proměnná uploadStep, vykresluje je renderUploadStep(). -->
@@ -4755,6 +4761,11 @@ function _onAdminDbChange(table, payload) {
     case 'site_photos':
       if (view === 'fotky') _debouncedRefresh('fotky', loadSitePhotosAdmin)
       break
+    case 'doc_alert_dismissals':
+      // Jiný admin něco odložil/skryl → propiš to hned i sem
+      _debouncedRefresh('pendingreg', refreshPendingRegistrations)
+      if (view === 'dashboard') _debouncedRefresh('docstat', loadDocumentAlertsStat)
+      break
   }
 }
 
@@ -4941,7 +4952,7 @@ function startAdminRealtime() {
   if (_rtRetryTimer) { clearTimeout(_rtRetryTimer); _rtRetryTimer = null }
   // Nezakládej duplicitní kanál
   if (adminRealtimeSub) { try { sb.removeChannel(adminRealtimeSub) } catch(e) {} adminRealtimeSub = null }
-  const tables = ['profiles','documents','teams','team_assignments','subteams','companies','contracts','attendance','notifications','announcements','site_photos','chat_messages']
+  const tables = ['profiles','documents','teams','team_assignments','subteams','companies','contracts','attendance','notifications','announcements','site_photos','chat_messages','doc_alert_dismissals']
   // Nový název kanálu při každém pokusu — server si po výpadku někdy drží ten starý
   let ch = sb.channel('admin-live-' + Date.now())
   tables.forEach(t => {
@@ -6426,7 +6437,7 @@ async function approveWorkerRegistration(workerId, workerName) {
   if (!confirm('Schválit přístup pro ' + workerName + '?')) return
   const { error } = await sb.from('profiles').update({ is_active: true, registration_status: 'approved' }).eq('id', workerId)
   if (error) { showToast('Chyba: ' + error.message); return }
-  lsRemove('pending_reg_dismissed_' + workerId)
+  await clearPendingRegDismissal(workerId)
   forgetPendingRegSeen(workerId)
   showToast('✅ Přístup schválen: ' + workerName)
   loadDashboard()
@@ -6437,16 +6448,45 @@ async function rejectWorkerRegistration(workerId, workerName) {
   if (!confirm('Zamítnout registraci pro ' + workerName + '? Profil bude smazán.')) return
   const { error } = await sb.from('profiles').delete().eq('id', workerId)
   if (error) { showToast('Chyba: ' + error.message); return }
-  lsRemove('pending_reg_dismissed_' + workerId)
+  await clearPendingRegDismissal(workerId)
   forgetPendingRegSeen(workerId)
   showToast('❌ Registrace zamítnuta: ' + workerName)
   loadDashboard()
   if (document.getElementById('v-cekajici-registrace')?.classList.contains('on')) loadPendingRegistrationsPage()
 }
 
+// Odložené registrace se ukládají do databáze (sdílená tabulka doc_alert_dismissals),
+// takže když je odloží jeden admin, je to odložené pro všechny adminy i na všech
+// zařízeních. Prohlížeč si drží jen kopii pro případ, že by databáze byla nedostupná.
+const PREG_KEY_PREFIX = 'preg|'
+window._pendingRegDismissed = window._pendingRegDismissed || new Set()
+
+async function loadPendingRegDismissals() {
+  try {
+    const { data, error } = await sb.from('doc_alert_dismissals')
+      .select('dismiss_key').like('dismiss_key', PREG_KEY_PREFIX + '%')
+    if (error) throw error
+    window._pendingRegDismissed = new Set((data || []).map(r => String(r.dismiss_key).slice(PREG_KEY_PREFIX.length)))
+    return true
+  } catch (e) {
+    // Tabulka nemusí existovat — pak zůstane aspoň lokální odložení v tomto prohlížeči
+    console.warn('[registrace] odložené se nenačetly ze společné databáze:', e?.message)
+    return false
+  }
+}
+
 // Je tahle registrace na dashboardu už odložená? (ať se znova nesvítí, dokud nepřijde nová)
 function isPendingRegDismissed(workerId) {
+  if (window._pendingRegDismissed && window._pendingRegDismissed.has(workerId)) return true
   return lsGet('pending_reg_dismissed_' + workerId) === '1'
+}
+
+// Registrace se vyřídila (schválena/zamítnuta) → odložení už nepotřebujeme
+async function clearPendingRegDismissal(workerId) {
+  if (window._pendingRegDismissed) window._pendingRegDismissed.delete(workerId)
+  lsRemove('pending_reg_dismissed_' + workerId)
+  try { await sb.from('doc_alert_dismissals').delete().eq('dismiss_key', PREG_KEY_PREFIX + workerId) }
+  catch (e) { console.warn('[registrace] úklid odložení:', e?.message) }
 }
 
 // Které registrace už admin VIDĚL (otevřel sekci Čekající registrace). Odznak v menu
@@ -6470,9 +6510,22 @@ function unseenPendingCount(list) {
 }
 
 // Odloží registraci z dashboardové bubliny a hodí admina do sekce Čekající registrace,
-// kde ji může kdykoli schválit nebo zamítnout. Nic v DB se neděje — jen se to schová z výpisu.
-function postponePendingReg(workerId) {
+// kde ji může kdykoli schválit nebo zamítnout. Odložení platí pro všechny adminy
+// a všechna zařízení — uloží se do sdílené databáze.
+async function postponePendingReg(workerId) {
+  if (window._pendingRegDismissed) window._pendingRegDismissed.add(workerId)
   lsSet('pending_reg_dismissed_' + workerId, '1')
+  let sdileno = false
+  try {
+    const { error } = await sb.from('doc_alert_dismissals')
+      .insert({ dismiss_key: PREG_KEY_PREFIX + workerId, dismissed_by: currentUser?.id || null })
+    // Duplicita = někdo jiný to už odložil, což je v pořádku
+    sdileno = !error || error.code === '23505'
+    if (error && error.code !== '23505') throw error
+  } catch (e) { console.warn('[registrace] odložení se neuložilo do databáze:', e?.message) }
+  showToast(sdileno
+    ? '✅ Odloženo — neuvidí to ani ostatní admini'
+    : '⚠️ Odloženo jen v tomto zařízení — ostatním adminům se registrace zobrazí dál')
   loadDashboard()
   openPendingRegistrationsView()
 }
@@ -6599,6 +6652,7 @@ async function loadDashboard() {
     .eq('registration_status', 'pending')
     .order('created_at', { ascending: false })
 
+  await loadPendingRegDismissals()   // co odložili ostatní admini
   updatePendingRegBadge(unseenPendingCount(pendingWorkersRaw))
   renderPendingRegDashboardBlock((pendingWorkersRaw || []).filter(w => !isPendingRegDismissed(w.id)))
 
@@ -6662,6 +6716,7 @@ async function refreshPendingRegistrations() {
       .eq('registration_status', 'pending')
       .order('created_at', { ascending: false })
 
+    await loadPendingRegDismissals()   // ať se propíše, co odložil jiný admin
     updatePendingRegBadge(unseenPendingCount(pendingWorkersRaw))
     renderPendingRegDashboardBlock((pendingWorkersRaw || []).filter(w => !isPendingRegDismissed(w.id)))
 
@@ -7099,12 +7154,12 @@ async function loadKWData() {
   const [week, year] = val.split('-').map(Number)
   const tbody = document.getElementById('kw-table')
 
-  // Načti aktivní pracovníky s povolenou docházkou (bez docházky = jen v Přístupech)
+  // Všichni aktivní pracovníci — i ti se zablokovanou docházkou.
+  // (Jinak by z přehledu zmizely i hodiny, které stihli odpracovat před zablokováním.)
   const { data: allWorkers } = await sb.from('profiles')
-    .select('id, full_name, profession, team_id, subteam_id')
+    .select('id, full_name, profession, team_id, subteam_id, can_track_hours')
     .in('role', ['osvec', 'partak'])
     .eq('is_active', true)
-    .or('can_track_hours.is.null,can_track_hours.eq.true')
     .order('full_name')
 
   // Názvy skupin (firem) a podskupin
@@ -7145,6 +7200,7 @@ async function loadKWData() {
     workers[w.id] = { id: w.id, name: w.full_name, prof: w.profession,
       firm: w.team_id ? (kwTeamName[w.team_id] || '') : '',
       sub: w.subteam_id ? (kwSubteamById[w.subteam_id]?.name || '') : '',
+      blocked: w.can_track_hours === false,
       days:{}, total:0 }
   })
 
@@ -7256,7 +7312,7 @@ async function loadKWData() {
 
   const kwHtml = list.map(w=>`
     <tr style="cursor:pointer;height:56px" class="kw-row" data-id="${w.id||''}" data-name="${(w.name||'').replace(/"/g,'&quot;')}">
-      <td style="vertical-align:middle;overflow:hidden"><b>${w.name}</b>${(w.firm||w.sub)?`<div style="margin-top:3px">${groupCellHtml(w.firm, w.sub)}</div>`:''}</td><td style="font-size:12px;vertical-align:middle">${profLabel(w.prof)||''}</td>
+      <td style="vertical-align:middle;overflow:hidden"><b>${w.name}</b>${w.blocked?' <span style="font-size:10px;font-weight:700;background:var(--red-l);color:var(--red);border:1px solid #e8c4ba;padding:1px 6px;border-radius:8px;white-space:nowrap" title="Pracovník má dočasně zablokované zapisování docházky">🚫 docházka zablokovaná</span>':''}${(w.firm||w.sub)?`<div style="margin-top:3px">${groupCellHtml(w.firm, w.sub)}</div>`:''}</td><td style="font-size:12px;vertical-align:middle">${profLabel(w.prof)||''}</td>
       ${dayCell(w,1)}${dayCell(w,2)}${dayCell(w,3)}${dayCell(w,4)}${dayCell(w,5)}${dayCell(w,6)}${dayCell(w,7)}
       <td style="vertical-align:middle"><b style="color:var(--blue)">${w.total.toFixed(1)}h</b></td>
     </tr>`).join('')
@@ -7812,6 +7868,7 @@ function renderDocuments() {
       <td><b>${d.worker?.full_name||'—'}</b></td>
       <td>${docLabels[d.doc_type]||d.doc_type}</td>
       <td style="font-size:12px">${d.file_name}</td>
+      <td>${validityBadgeHtml(d.valid_until, 'sm')}</td>
       <td><span class="pill ${d.status==='ok'?'pg':d.status==='unreadable'||d.status==='expired'||d.status==='rejected'?'pr':'pa'}">${({ok:'V pořádku',pending:'Čeká na kontrolu',unreadable:'Nečitelný',expired:'Propadlý',rejected:'Zamítnutý'})[d.status]||d.status}</span></td>
       <td>
         <div style="display:flex;gap:4px;flex-wrap:wrap">
@@ -10829,12 +10886,16 @@ async function loadMobDocs() {
     return
   }
 
-  // Upozornění jen na odmítnuté/nečitelné (platnost neřešíme)
+  // Upozornění: odmítnuté doklady + doklady, kterým končí (nebo skončila) platnost
   const warnings = []
   data.forEach(d => {
     if (d.status === 'unreadable' || d.status === 'rejected') {
       warnings.push(`${typeLabels[d.doc_type]||d.doc_type} — nahrajte znovu`)
+      return
     }
+    const v = docValidity(d.valid_until)
+    if (v.expired) warnings.push(`${typeLabels[d.doc_type]||d.doc_type} — propadl ${v.dateCz}, nahrajte nový`)
+    else if (v.warn) warnings.push(`${typeLabels[d.doc_type]||d.doc_type} — platí už jen ${v.daysLeft} ${v.dayWord} (do ${v.dateCz})`)
   })
 
   let warningHtml = ''
@@ -10867,7 +10928,10 @@ async function loadMobDocs() {
         <div style="flex:1;min-width:0">
           <div style="font-size:14px;font-weight:800;color:#211D1A;line-height:1.25">${typeLabels[d.doc_type]||d.doc_type}</div>
           <div style="font-size:11.5px;color:#9a9082;margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${d.file_name||''}${d.uploaded_at?' · '+fmtDate(d.uploaded_at):''}</div>
-          <div style="display:inline-flex;align-items:center;gap:5px;background:${col.bg};color:${col.c};border:1px solid ${col.b};font-size:11px;font-weight:800;padding:3px 9px;border-radius:14px;margin-top:7px">${stIco}<span>${statusText}</span></div>
+          <div style="display:flex;flex-wrap:wrap;gap:5px;margin-top:7px">
+            <span style="display:inline-flex;align-items:center;gap:5px;background:${col.bg};color:${col.c};border:1px solid ${col.b};font-size:11px;font-weight:800;padding:3px 9px;border-radius:14px">${stIco}<span>${statusText}</span></span>
+            ${!isRejected ? validityBadgeHtml(d.valid_until) : ''}
+          </div>
         </div>
         ${d.file_url ? `<a href="${d.file_url}" target="_blank" style="flex-shrink:0;display:flex;align-items:center;justify-content:center;width:36px;height:36px;border:1.5px solid #211D1A;border-radius:10px;color:#211D1A;text-decoration:none" title="Zobrazit"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:17px;height:17px"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg></a>` : ''}
       </div>
@@ -10905,6 +10969,103 @@ function docTypeHasSecondSide() {
   return (document.getElementById('upload-doc-type')?.value || 'op') === 'op'
 }
 
+// ---------------------------------------------------------------------------
+// PLATNOST DOKLADŮ
+// U dokladů, které propadají (občanka, pas, A1, Freistellung), musí být datum
+// vyplněné — jinak nemáme co hlídat a nikdo se včas nedozví, že platnost končí.
+// U živnosťáku a "jiného dokumentu" je datum nepovinné, ty obvykle nevyprší.
+// ---------------------------------------------------------------------------
+const DOC_VALIDITY_REQUIRED = ['op', 'pas', 'a1', 'freistellung', 'ridicak']
+// Kolik dní předem upozorňujeme na blížící se konec platnosti
+const DOC_EXPIRY_WARN_DAYS = 30
+
+function docNeedsValidity(type) { return DOC_VALIDITY_REQUIRED.includes(type) }
+
+// Spočítá, jak je na tom doklad s platností. Používá se v seznamech dokladů
+// u pracovníka i u admina, ať to všude ukazuje totéž.
+function docValidity(validUntil) {
+  if (!validUntil) return { has: false, expired: false, warn: false }
+  const midnight = new Date(); midnight.setHours(0, 0, 0, 0)
+  const end = new Date(String(validUntil).slice(0, 10) + 'T00:00:00')
+  if (isNaN(end)) return { has: false, expired: false, warn: false }
+  const daysLeft = Math.round((end - midnight) / 86400000)
+  const dayWord = daysLeft === 1 ? 'den' : (daysLeft >= 2 && daysLeft <= 4 ? 'dny' : 'dní')
+  return {
+    has: true,
+    daysLeft,
+    dayWord,
+    dateCz: end.toLocaleDateString('cs-CZ'),
+    expired: daysLeft < 0,
+    warn: daysLeft >= 0 && daysLeft <= DOC_EXPIRY_WARN_DAYS
+  }
+}
+
+// Barevný odznak s platností dokladu (zelený / oranžový / červený)
+function validityBadgeHtml(validUntil, size) {
+  const v = docValidity(validUntil)
+  const fs = size === 'sm' ? '10.5px' : '11px'
+  if (!v.has) {
+    return `<span style="display:inline-flex;align-items:center;gap:4px;background:var(--bg);color:var(--text3);border:1px solid var(--brd);font-size:${fs};font-weight:700;padding:3px 8px;border-radius:14px">Platnost neuvedena</span>`
+  }
+  const c = v.expired ? { c: '#9c3b22', b: '#9c3b22', bg: '#f7e9e5' }
+    : v.warn ? { c: '#9a6b15', b: '#e8a13a', bg: '#faf0dc' }
+    : { c: '#2f6b45', b: '#3f7d54', bg: '#e6f0e9' }
+  const txt = v.expired ? `Propadlý ${v.dateCz}`
+    : v.warn ? `Platí do ${v.dateCz} · zbývá ${v.daysLeft} ${v.dayWord}`
+    : `Platí do ${v.dateCz}`
+  return `<span style="display:inline-flex;align-items:center;gap:5px;background:${c.bg};color:${c.c};border:1px solid ${c.b};font-size:${fs};font-weight:700;padding:3px 9px;border-radius:14px">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:12px;height:12px;flex-shrink:0"><rect x="3" y="4" width="18" height="18" rx="2"/><path d="M16 2v4M8 2v4M3 10h18"/></svg>${txt}</span>`
+}
+
+// Ukáže/schová hvězdičku u pole "Platnost do" podle typu dokladu
+function updateValidityRequiredMark(typeSelId, starId, hintId) {
+  const type = document.getElementById(typeSelId)?.value || ''
+  const req = docNeedsValidity(type)
+  const star = document.getElementById(starId)
+  if (star) star.style.display = req ? 'inline' : 'none'
+  const hint = document.getElementById(hintId)
+  if (hint && !req) hint.textContent = 'Nepovinné — vyplňte, pokud doklad má konec platnosti.'
+}
+
+// Kontrola zadaného data platnosti. Vrací chybovou hlášku, nebo '' když je vše OK.
+function validateValidUntil(type, value) {
+  const v = (value || '').trim()
+  if (!v) return docNeedsValidity(type) ? 'Vyplňte datum konce platnosti dokladu.' : ''
+  const d = new Date(v + 'T00:00:00')
+  if (isNaN(d)) return 'Datum platnosti není platné.'
+  const today = new Date(); today.setHours(0, 0, 0, 0)
+  if (d < today) return 'Doklad je již propadlý — nahrajte prosím platný doklad.'
+  return ''
+}
+
+// Živá kontrola v mobilním formuláři pracovníka
+function onUploadValidChange() {
+  const type = document.getElementById('upload-doc-type')?.value || 'op'
+  const inp = document.getElementById('upload-valid-until')
+  const hint = document.getElementById('upload-valid-hint')
+  if (!inp || !hint) return
+  const err = validateValidUntil(type, inp.value)
+  if (err && inp.value) {
+    inp.style.borderColor = '#c0392b'
+    hint.textContent = err
+    hint.style.color = '#c0392b'
+    return
+  }
+  inp.style.borderColor = ''
+  hint.style.color = ''
+  if (!inp.value) {
+    hint.textContent = docNeedsValidity(type)
+      ? 'Opište datum konce platnosti z dokladu. Měsíc předem vám sami připomeneme, že vyprší.'
+      : 'Nepovinné — vyplňte, pokud doklad má konec platnosti.'
+    return
+  }
+  const days = Math.ceil((new Date(inp.value + 'T00:00:00') - new Date().setHours(0,0,0,0)) / 86400000)
+  hint.textContent = days <= DOC_EXPIRY_WARN_DAYS
+    ? '⚠️ Doklad platí už jen ' + days + ' dní — počítejte s výměnou.'
+    : '✅ Doklad platí ještě ' + days + ' dní.'
+  hint.style.color = days <= DOC_EXPIRY_WARN_DAYS ? '#9a6b15' : '#2f6b45'
+}
+
 function onDocTypeChange() {
   uploadStep = 1
   scanPages = []
@@ -10913,6 +11074,8 @@ function onDocTypeChange() {
   ;['upload-cam','upload-file','upload-cam-2','upload-file-2'].forEach(id => {
     const el = document.getElementById(id); if (el) el.value = ''
   })
+  updateValidityRequiredMark('upload-doc-type', 'upload-valid-req', 'upload-valid-hint')
+  onUploadValidChange()
   renderUploadStep()
 }
 
@@ -11120,6 +11283,8 @@ function resetUploadForm() {
   if (prog) prog.style.display = 'none'
   const shot = document.getElementById('upload-shot')
   if (shot) shot.style.display = 'none'
+  const vu = document.getElementById('upload-valid-until')
+  if (vu) { vu.value = ''; vu.style.borderColor = '' }
 }
 
 // Z vyfocených stránek složí jedno PDF (knihovna se načte až tady).
@@ -11864,6 +12029,16 @@ async function uploadDocument() {
 
   const docType = document.getElementById('upload-doc-type').value
 
+  // Platnost dokladu — bez ní bychom neměli co hlídat a nikdo by se nedozvěděl,
+  // že doklad propadá. U dokladů, které vyprší, je proto povinná.
+  const validInput = document.getElementById('upload-valid-until')
+  const validErr = validateValidUntil(docType, validInput?.value)
+  if (validErr) {
+    showToast('⚠️ ' + validErr)
+    if (validInput) { validInput.style.borderColor = '#c0392b'; validInput.focus() }
+    return
+  }
+
   // Vyfocené stránky nejdřív složíme do jednoho PDF – do databáze pak jde PDF,
   // stejně jako když člověk nahraje hotový sken.
   if (scanPages.length) {
@@ -11890,7 +12065,9 @@ async function uploadDocument() {
 
   // 1. AI kontrola přední strany (čitelnost, typ, platnost)
   const check = await checkDocumentReadability(selectedFile, docType)
-  const validUntil = check.validUntil || null
+  // Platnost bereme z pole, které pracovník vyplnil; když je prázdné (nepovinné
+  // typy), zkusíme aspoň datum, které přečetla automatická kontrola dokladu.
+  const validUntil = (validInput?.value || '').trim() || check.validUntil || null
 
   if (!check.readable) {
     // Dokument je nečitelný — zobraz chybu a zastav
@@ -15508,8 +15685,9 @@ async function loadDocumentAlertsStat() {
   // Perzistentně přes tabulku doc_alert_dismissals; fallback = session (okno).
   let dismissed = new Set()
   try {
+    // Ve stejné tabulce jsou i odložené registrace (prefix "preg|") — ty sem nepatří
     const { data: dis, error: disErr } = await sb.from('doc_alert_dismissals').select('dismiss_key')
-    if (!disErr && dis) dismissed = new Set(dis.map(x => x.dismiss_key))
+    if (!disErr && dis) dismissed = new Set(dis.map(x => x.dismiss_key).filter(k => !String(k).startsWith(PREG_KEY_PREFIX)))
     else if (disErr) dismissed = window._docAlertDismissed || new Set()
   } catch(e) { dismissed = window._docAlertDismissed || new Set() }
   window._docAlertDismissed = dismissed
@@ -15539,6 +15717,19 @@ async function loadDocumentAlertsStat() {
     // 3. Nečitelné / odmítnuté dokumenty
     myDocs.filter(d => d.status === 'unreadable' || d.status === 'rejected').forEach(d => {
       workerAlerts.push({ key: w.id+'|unreadable|'+d.id, msg: `❌ Nahrát znovu: ${typeLabels[d.doc_type]||d.doc_type}`, color: 'var(--red)' })
+    })
+
+    // 4. Končící a propadlá platnost dokladů (hlásíme měsíc předem)
+    const midnight = new Date(); midnight.setHours(0, 0, 0, 0)
+    myDocs.filter(d => d.valid_until && d.status !== 'rejected' && d.status !== 'unreadable').forEach(d => {
+      const daysLeft = Math.round((new Date(d.valid_until + 'T00:00:00') - midnight) / 86400000)
+      const label = typeLabels[d.doc_type] || d.doc_type
+      const dateCz = new Date(d.valid_until + 'T00:00:00').toLocaleDateString('cs-CZ')
+      if (daysLeft < 0) {
+        workerAlerts.push({ key: w.id+'|expired|'+d.id, msg: `❌ Propadlý doklad: ${label} — platnost skončila ${dateCz}`, color: 'var(--red)' })
+      } else if (daysLeft <= DOC_EXPIRY_WARN_DAYS) {
+        workerAlerts.push({ key: w.id+'|expiring|'+d.id, msg: `⏳ Končí platnost: ${label} — za ${daysLeft} ${daysLeft === 1 ? 'den' : (daysLeft < 5 ? 'dny' : 'dní')} (${dateCz})`, color: 'var(--amber)' })
+      }
     })
 
     // Odfiltruj vykřížkované položky
@@ -15593,7 +15784,11 @@ async function dismissDocAlert(key) {
 // Vrať zpět všechna skrytá upozornění
 async function resetDocAlerts() {
   window._docAlertDismissed = new Set()
-  try { await sb.from('doc_alert_dismissals').delete().neq('dismiss_key', '') } catch(e) {}
+  // Odložené registrace (prefix "preg|") jsou ve stejné tabulce — ty nechat být
+  try {
+    await sb.from('doc_alert_dismissals').delete()
+      .neq('dismiss_key', '').not('dismiss_key', 'like', PREG_KEY_PREFIX + '%')
+  } catch(e) {}
   loadDocumentAlertsStat()
 }
 
@@ -18514,6 +18709,11 @@ function openUploadForWorker() {
           <option value="other">Jiny dokument</option>
         </select>
       </div>
+      <div class="fg" style="margin-bottom:12px">
+        <label style="font-size:12px;color:var(--text3)">Platnost do <span id="admin-valid-req" style="color:var(--red);font-weight:700">*</span></label>
+        <input type="date" id="admin-upload-valid-until" style="width:100%;padding:10px;border:1.5px solid var(--brd);border-radius:8px;font-size:14px;font-family:inherit">
+        <div id="admin-valid-hint" style="font-size:11px;color:var(--text3);margin-top:4px;line-height:1.4">Opište datum z dokladu. Měsíc před vypršením se to objeví na dashboardu a pracovníkovi přijde upozornění.</div>
+      </div>
       <!-- Přední strana: na osobní schůzce se doklad fotí rovnou telefonem,
            proto je u občanky velké tlačítko Vyfotit. Výběr souboru zůstává vždy. -->
       <div id="admin-upload-side1" class="fg" style="margin-bottom:10px">
@@ -18543,6 +18743,7 @@ function openUploadForWorker() {
       </div>
     </div>`
   document.body.appendChild(div)
+  adminDocTypeChange()   // nastaví povinnost pole "Platnost do" podle typu dokladu
 }
 
 function closeUploadForWorker() {
@@ -18553,6 +18754,7 @@ function closeUploadForWorker() {
 }
 
 function adminDocTypeChange() {
+  updateValidityRequiredMark('admin-upload-doc-type', 'admin-valid-req', 'admin-valid-hint')
   const t = document.getElementById('admin-upload-doc-type')?.value
   const multiside = ['op','zivnost','gewerbeschein']
   document.getElementById('admin-upload-side2').style.display = multiside.includes(t) ? 'block' : 'none'
@@ -18583,9 +18785,20 @@ async function uploadDocumentForWorker() {
   if (!uploadingForWorkerId) { showToast('Chyba: zadny pracovnik'); return }
   if (!adminUploadFile1) { showToast('Vyberte soubor'); return }
   const st = document.getElementById('admin-upload-status')
-  if (st) { st.style.display='block'; st.style.background='#e8f5e9'; st.style.color='#2e7d32'; st.textContent='Nahravam...' }
 
   const docType = document.getElementById('admin-upload-doc-type')?.value || 'other'
+  // Platnost dokladu — bez ní nemáme co hlídat a upozornění nikdy nepřijde
+  const validInputA = document.getElementById('admin-upload-valid-until')
+  const validUntilA = (validInputA?.value || '').trim() || null
+  const validErrA = validateValidUntil(docType, validUntilA)
+  if (validErrA) {
+    if (st) { st.style.display='block'; st.style.background='#ffebee'; st.style.color='#c62828'; st.textContent = validErrA }
+    if (validInputA) { validInputA.style.borderColor = '#c0392b'; validInputA.focus() }
+    return
+  }
+  if (validInputA) validInputA.style.borderColor = ''
+  if (st) { st.style.display='block'; st.style.background='#e8f5e9'; st.style.color='#2e7d32'; st.textContent='Nahravam...' }
+
   const MULTI = ['op','zivnost','gewerbeschein']
   const safeName1 = adminUploadFile1.name.normalize('NFD').replace(/[̀-ͯ]/g,'').replace(/[^a-zA-Z0-9._-]/g,'_').toLowerCase()
   const fp1 = uploadingForWorkerId + '/' + Date.now() + '_' + safeName1
@@ -18600,6 +18813,7 @@ async function uploadDocumentForWorker() {
     file_name: adminUploadFile1.name + ' (strana 1)',
     file_path: fp1,
     file_url: url1?.publicUrl,
+    valid_until: validUntilA,
     status: 'ok',  // Admin nahrava = hned OK
     uploaded_by: currentUser?.id,
     uploaded_at: new Date().toISOString()
@@ -18617,6 +18831,7 @@ async function uploadDocumentForWorker() {
         worker_id: uploadingForWorkerId, doc_type: docType,
         file_name: adminUploadFile2.name + ' (strana 2)',
         file_path: fp2, file_url: url2?.publicUrl,
+        valid_until: validUntilA,
         status: 'ok', uploaded_by: currentUser?.id, uploaded_at: new Date().toISOString()
       })
     }
@@ -18658,7 +18873,10 @@ async function loadWdDocs(id) {
       <div style="flex:1;min-width:0">
         <div style="font-size:14px;font-weight:800;color:#211D1A;line-height:1.25">${types[d.doc_type]||d.doc_type}</div>
         <div style="font-size:11.5px;color:#9a9082;margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${d.file_name||'—'}</div>
-        <div style="display:inline-flex;align-items:center;gap:5px;background:${col.bg};color:${col.c};border:1px solid ${col.b};font-size:11px;font-weight:800;padding:3px 9px;border-radius:14px;margin-top:7px">${si.label}</div>
+        <div style="display:flex;flex-wrap:wrap;gap:5px;margin-top:7px">
+          <span style="display:inline-flex;align-items:center;background:${col.bg};color:${col.c};border:1px solid ${col.b};font-size:11px;font-weight:800;padding:3px 9px;border-radius:14px">${si.label}</span>
+          ${validityBadgeHtml(d.valid_until)}
+        </div>
       </div>
     </div>
     <div style="display:flex;align-items:center;gap:7px;flex-wrap:wrap">
