@@ -10471,23 +10471,26 @@ async function checkPendingWorkLog() {
   if (currentProfile && currentProfile.role === 'admin') return
   _workLogPromptBusy = true
   try {
-    const od = new Date(); od.setDate(od.getDate() - 7)   // dozadu jen týden, ať to nestraší donekonečna
+    // Vynucuje se jen dnešek — starší dny se zpětně nepřipomínají, aby pracovníka
+    // ráno neblokoval den, který už neuzavře (dozadu to řeší admin ručně).
     const { data, error } = await sb.from('attendance')
       .select('id, work_date, check_in, check_out, total_hours, construction_site, work_description, location_address')
       .eq('worker_id', currentUser.id)
-      .gte('work_date', localDateStr(od))
+      .eq('work_date', localDateStr())
       .not('check_in', 'is', null)
       .not('check_out', 'is', null)
-      .order('work_date', { ascending: true })
+      .order('check_in', { ascending: true })
     if (error) {
       // Chybí sloupec v databázi → vynucování vypni, ať to appku neblokuje
       if (/column|schema cache/i.test(error.message || '')) _workDescColumnMissing = true
       else console.warn('[zápis práce] kontrola selhala:', error.message)
       return
     }
-    // Jen uzavřené směny (mají příchod i odchod) — rozdělaná směna ani záznam
-    // druhé stavby se neřeší. Filtr držíme i tady, ať to nestojí jen na databázi.
-    const chybi = (data || []).find(r => r.check_in && r.check_out &&
+    // Jen dnešní uzavřené směny (mají příchod i odchod) — starší dny, rozdělaná
+    // směna ani záznam druhé stavby se neřeší. Filtr držíme i tady, ať to
+    // nestojí jen na databázi.
+    const dnes = localDateStr()
+    const chybi = (data || []).find(r => r.work_date === dnes && r.check_in && r.check_out &&
       (!(r.construction_site || '').trim() || !(r.work_description || '').trim()))
     if (!chybi) return
     pendingCheckout = {
