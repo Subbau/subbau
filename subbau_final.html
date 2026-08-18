@@ -1637,17 +1637,28 @@ button:not(.x-close) > svg:first-child{margin-right:6px}
       <!-- Upload formulář -->
       <div class="mob-card" id="upload-form-card" style="display:none">
         <div class="mob-card-title"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:18px;height:18px;flex-shrink:0;vertical-align:-3px;margin-right:7px"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="M17 8l-5-5-5 5"/><path d="M12 3v12"/></svg>Nahrát dokument</div>
-        <div class="fg" style="margin-bottom:10px">
-          <label>Typ dokumentu</label>
-          <select id="upload-doc-type" onchange="onDocTypeChange()" style="width:100%;padding:10px;border:1.5px solid var(--brd);border-radius:8px;font-size:14px">
-            <option value="op">🪪 Občanský průkaz</option>
-            <option value="pas">📘 Cestovní pas</option>
-            <option value="zivnost">🏢 Živnostenské oprávnění</option>
-            <option value="a1">🇪🇺 Potvrzení A1</option>
-            <option value="freistellung">📄 Freistellung</option>
-            <option value="other">📎 Jiný dokument</option>
-          </select>
+        <!-- Skrytý nositel hodnoty — zbytek formuláře si z něj čte vybraný typ -->
+        <select id="upload-doc-type" onchange="onDocTypeChange()" style="display:none"></select>
+
+        <!-- Krok 1: co vlastně nahrávám -->
+        <div id="upload-type-picker">
+          <div style="font-size:14px;font-weight:800;color:var(--text);margin-bottom:4px">Co nahráváte?</div>
+          <div style="font-size:12px;color:var(--text2);margin-bottom:11px">Ťukněte na doklad, který budete fotit — ať se uloží tam, kam patří.</div>
+          <div id="upload-type-tiles" style="display:flex;flex-direction:column;gap:8px;margin-bottom:12px"></div>
+          <button onclick="closeUploadForm()" style="width:100%;padding:12px;background:var(--bg);border:1.5px solid var(--brd);border-radius:12px;font-size:14px;cursor:pointer;font-family:inherit">Zrušit</button>
         </div>
+
+        <!-- Krok 2 a dál: vybraný typ (dá se přepnout) -->
+        <div id="upload-type-chosen" style="display:none;align-items:center;gap:10px;padding:11px 13px;background:var(--bg);border:1.5px solid var(--brd);border-radius:12px;margin-bottom:10px">
+          <span id="upload-type-chosen-icon" style="font-size:20px;flex-shrink:0"></span>
+          <div style="flex:1;min-width:0">
+            <div style="font-size:10.5px;color:var(--text3);font-weight:700;text-transform:uppercase;letter-spacing:.04em">Nahráváte</div>
+            <div id="upload-type-chosen-label" style="font-size:14px;font-weight:800;color:var(--text);line-height:1.25"></div>
+          </div>
+          <button onclick="backToTypePicker()" style="flex-shrink:0;font-size:12px;padding:7px 12px;border:1.5px solid var(--brd);border-radius:9px;background:#fff;color:var(--text2);font-weight:700;cursor:pointer;font-family:inherit">Změnit</button>
+        </div>
+
+        <div id="upload-body" style="display:none">
         <!-- Platnost dokladu zadává jen SubBau (admin) — pracovník ji nevyplňuje.
              Jakmile ji admin doplní, uvidí ji pracovník u dokladu níže v seznamu. -->
         <div style="display:flex;align-items:flex-start;gap:9px;padding:11px 13px;background:var(--bg);border:1px solid var(--brd);border-radius:10px;margin-bottom:10px">
@@ -1710,6 +1721,7 @@ button:not(.x-close) > svg:first-child{margin-right:6px}
             Zrušit
           </button>
         </div>
+        </div><!-- /upload-body -->
       </div>
 
       <!-- Ruční ořez: fotka přes celou obrazovku a rámeček, který se tahá prstem -->
@@ -6537,6 +6549,9 @@ async function rejectWorkerRegistration(workerId, workerName) {
 // zařízeních. Prohlížeč si drží jen kopii pro případ, že by databáze byla nedostupná.
 const PREG_KEY_PREFIX = 'preg|'
 window._pendingRegDismissed = window._pendingRegDismissed || new Set()
+// Podařilo se přečíst sdílenou databázi? Pokud ano, je jediným zdrojem pravdy —
+// co je odložené, řekne ona, ne paměť tohohle prohlížeče.
+window._pregSharedOk = false
 
 async function loadPendingRegDismissals() {
   try {
@@ -6544,9 +6559,11 @@ async function loadPendingRegDismissals() {
       .select('dismiss_key').like('dismiss_key', PREG_KEY_PREFIX + '%')
     if (error) throw error
     window._pendingRegDismissed = new Set((data || []).map(r => String(r.dismiss_key).slice(PREG_KEY_PREFIX.length)))
+    window._pregSharedOk = true
     return true
   } catch (e) {
-    // Tabulka nemusí existovat — pak zůstane aspoň lokální odložení v tomto prohlížeči
+    // Databáze nedostupná (nebo chybí oprávnění) → jedeme na lokální paměť prohlížeče
+    window._pregSharedOk = false
     console.warn('[registrace] odložené se nenačetly ze společné databáze:', e?.message)
     return false
   }
@@ -6554,6 +6571,9 @@ async function loadPendingRegDismissals() {
 
 // Je tahle registrace na dashboardu už odložená? (ať se znova nesvítí, dokud nepřijde nová)
 function isPendingRegDismissed(workerId) {
+  // Sdílená databáze rozhoduje — jinak by na počítači, kde se kdysi odložilo
+  // „jen lokálně", registrace zůstala schovaná napořád, i když ji kolegové vidí.
+  if (window._pregSharedOk) return window._pendingRegDismissed.has(workerId)
   if (window._pendingRegDismissed && window._pendingRegDismissed.has(workerId)) return true
   return lsGet('pending_reg_dismissed_' + workerId) === '1'
 }
@@ -6593,16 +6613,22 @@ async function postponePendingReg(workerId) {
   if (window._pendingRegDismissed) window._pendingRegDismissed.add(workerId)
   lsSet('pending_reg_dismissed_' + workerId, '1')
   let sdileno = false
+  let chyba = ''
   try {
     const { error } = await sb.from('doc_alert_dismissals')
       .insert({ dismiss_key: PREG_KEY_PREFIX + workerId, dismissed_by: currentUser?.id || null })
     // Duplicita = někdo jiný to už odložil, což je v pořádku
     sdileno = !error || error.code === '23505'
     if (error && error.code !== '23505') throw error
-  } catch (e) { console.warn('[registrace] odložení se neuložilo do databáze:', e?.message) }
-  showToast(sdileno
-    ? '✅ Odloženo — neuvidí to ani ostatní admini'
-    : '⚠️ Odloženo jen v tomto zařízení — ostatním adminům se registrace zobrazí dál')
+  } catch (e) {
+    chyba = e?.message || ''
+    console.warn('[registrace] odložení se neuložilo do databáze:', chyba)
+  }
+  if (sdileno) showToast('✅ Odloženo — zmizí to i ostatním adminům na všech počítačích')
+  else showToast('⚠️ Odloženo jen v tomto počítači — ostatní adminy registrace stále čeká. '
+    + (/row-level security|policy|permission|42501/i.test(chyba)
+        ? 'Databáze zápis nepovolila — spusťte migraci supabase-migrace-odlozene-registrace.sql'
+        : 'Databáze není dostupná: ' + chyba))
   loadDashboard()
   openPendingRegistrationsView()
 }
@@ -7812,10 +7838,46 @@ async function deleteDocument(docId) {
   loadDocuments()
 }
 
+// ---------------------------------------------------------------------------
+// TYPY DOKUMENTŮ — jedno místo pro celou aplikaci
+// Když se sem přidá další doklad, objeví se sám v nabídce u pracovníka i u
+// admina a všude se zobrazí stejným názvem. Dřív byl seznam opsaný na osmi
+// místech a názvy se rozcházely.
+//   required   = bez něj pracovníka nepustíme na stavbu
+//   card       = fotí se jako kartička (ořez, srovnání jasu)
+//   twoSides   = má přední a zadní stranu
+//   hasExpiry  = doklad propadá → hlídáme datum platnosti
+// ---------------------------------------------------------------------------
+const DOC_TYPES = [
+  { id:'op',          icon:'🪪', label:'Občanský průkaz',        required:true,  card:true,  twoSides:true,  hasExpiry:true  },
+  { id:'pas',         icon:'📘', label:'Cestovní pas',           required:true,  card:true,  twoSides:false, hasExpiry:true  },
+  { id:'zivnost',     icon:'🏢', label:'Živnostenské oprávnění', required:true,  card:false, twoSides:true,  hasExpiry:false },
+  { id:'a1',          icon:'🇪🇺', label:'Formulář A1',            required:true,  card:false, twoSides:true,  hasExpiry:true  },
+  { id:'a1_zadost',   icon:'📝', label:'Žádost o A1',            required:false, card:false, twoSides:true,  hasExpiry:false },
+  { id:'pobyt',       icon:'🏠', label:'Povolení k pobytu',      required:false, card:true,  twoSides:true,  hasExpiry:true  },
+  { id:'vizum',       icon:'🛂', label:'Vízum',                  required:false, card:true,  twoSides:false, hasExpiry:true  },
+  { id:'freistellung',icon:'📄', label:'Freistellung',           required:false, card:false, twoSides:true,  hasExpiry:true  },
+  { id:'other',       icon:'📎', label:'Jiný dokument',          required:false, card:false, twoSides:false, hasExpiry:false }
+]
+// Rychlý přístup k jednomu typu
+const DOC_TYPE_BY_ID = {}
+DOC_TYPES.forEach(t => { DOC_TYPE_BY_ID[t.id] = t })
+// Názvy dokladů. `gewerbeschein` je starý název živnosťáku z dřívějších nahrání —
+// v databázi u někoho zůstal, tak ať se pořád zobrazí česky.
+const DOC_LABELS = { gewerbeschein: 'Živnostenské oprávnění' }
+DOC_TYPES.forEach(t => { DOC_LABELS[t.id] = t.label })
+function docLabel(type) { return DOC_LABELS[type] || type || 'Dokument' }
+// Nabídka typů pro <select> (pracovník i admin vidí stejné pořadí i názvy)
+function docTypeOptions(selected) {
+  return DOC_TYPES.map(t =>
+    `<option value="${t.id}"${t.id === selected ? ' selected' : ''}>${t.icon} ${t.label}</option>`
+  ).join('')
+}
+
 let _docsCache = []
 // U kterého dokladu má admin právě otevřené pole na datum platnosti (null = žádný).
 let _docValidityEditId = null
-const _docLabels = {op:'Občanský průkaz',pas:'Cestovní pas',zivnost:'Živnostenské oprávnění',gewerbeschein:'Živnostenské oprávnění',a1:'Potvrzení A1',freistellung:'Freistellung',other:'Jiný dokument'}
+const _docLabels = DOC_LABELS
 async function loadDocuments() {
   const { data } = await sb.from('documents').select('*, worker:profiles!worker_id(full_name)').order('uploaded_at',{ascending:false})
   _docsCache = data || []
@@ -8626,10 +8688,34 @@ const tutorialSteps = [
       <div class="tut-doc-card" style="border-color:#c0392b">
         <div style="font-size:22px">🇪🇺</div>
         <div>
-          <div class="tut-doc-title">Potvrzení A1</div>
-          <div class="tut-doc-desc">Formulář o sociálním pojištění v EU</div>
+          <div class="tut-doc-title">Formulář A1</div>
+          <div class="tut-doc-desc">Potvrzení o sociálním pojištění v EU</div>
         </div>
         <span class="tut-badge red">Povinné</span>
+      </div>
+      <div class="tut-doc-card" style="border-color:#e6a800">
+        <div style="font-size:22px">📝</div>
+        <div>
+          <div class="tut-doc-title">Žádost o A1</div>
+          <div class="tut-doc-desc">Než vám formulář A1 vystaví, nahrajte alespoň žádost</div>
+        </div>
+        <span class="tut-badge orange">Pokud máte</span>
+      </div>
+      <div class="tut-doc-card" style="border-color:#e6a800">
+        <div style="font-size:22px">🏠</div>
+        <div>
+          <div class="tut-doc-title">Povolení k pobytu</div>
+          <div class="tut-doc-desc">Aufenthaltstitel — obě strany karty</div>
+        </div>
+        <span class="tut-badge orange">Pokud máte</span>
+      </div>
+      <div class="tut-doc-card" style="border-color:#e6a800">
+        <div style="font-size:22px">🛂</div>
+        <div>
+          <div class="tut-doc-title">Vízum</div>
+          <div class="tut-doc-desc">Stránka pasu s vízovým štítkem</div>
+        </div>
+        <span class="tut-badge orange">Pokud máte</span>
       </div>
       <div class="tut-doc-card" style="border-color:#e6a800">
         <div style="font-size:22px">📄</div>
@@ -8663,7 +8749,7 @@ const tutorialSteps = [
         <div class="tut-step-num" style="background:#3b7dd8">3</div>
         <div>
           <div class="tut-step-title">Vyberte typ dokumentu</div>
-          <div class="tut-step-desc">Z nabídky vyberte o jaký dokument jde (OP, živnostenský list...).</div>
+          <div class="tut-step-desc">Ťukněte na doklad, který nahráváte (občanka, živnosťák, formulář A1…). <b style="color:#E8A13A">Bez výběru nejde pokračovat</b> — ať se doklad neuloží pod špatný typ.</div>
         </div>
       </div>
       <div class="tut-step-box" style="border-color:#3b7dd8">
@@ -11176,12 +11262,10 @@ async function loadMobWeek() {
 // Panel se seznamem je v sekci Dokumenty, kam ale pracovník nechodí – proto po
 // přihlášení vyskočí okno, které musí zavřít křížkem.
 // ---------------------------------------------------------------------------
-const REQUIRED_DOC_TYPES = ['op', 'zivnost', 'a1']
-const REQUIRED_DOC_LABELS = {
-  op: 'Občanský průkaz / Pas',
-  zivnost: 'Živnostenské oprávnění',
-  a1: 'Potvrzení A1'
-}
+// Povinné doklady bez pasu — pas je náhrada za občanku, ne samostatná povinnost
+const REQUIRED_DOC_TYPES = DOC_TYPES.filter(t => t.required && t.id !== 'pas').map(t => t.id)
+const REQUIRED_DOC_LABELS = {}
+REQUIRED_DOC_TYPES.forEach(id => { REQUIRED_DOC_LABELS[id] = id === 'op' ? 'Občanský průkaz / Pas' : docLabel(id) })
 
 async function checkMissingDocsAlert() {
   try {
@@ -11237,24 +11321,18 @@ async function loadMobDocs() {
   const div = document.getElementById('mob-docs')
   const today = new Date()
 
-  const typeLabels = {
-    op: 'Občanský průkaz',
-    pas: 'Cestovní pas',
-    zivnost: 'Živnostenské oprávnění',
-    gewerbeschein: 'Živnostenské oprávnění',
-    a1: 'Potvrzení A1',
-    freistellung: 'Freistellung',
-    other: 'Jiný dokument'
-  }
+  const typeLabels = DOC_LABELS
   const checkIco = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" style="width:15px;height:15px"><path d="M20 6 9 17l-5-5"/></svg>'
   const emptyIco = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:15px;height:15px"><rect x="3" y="3" width="18" height="18" rx="4"/></svg>'
 
   // Povinné dokumenty, které musí OSVČ nahrát
-  const REQUIRED_DOCS = ['op', 'zivnost', 'a1']
+  const REQUIRED_DOCS = REQUIRED_DOC_TYPES
   const docsArr = data || []
   function hasValidDoc(type) {
     return docsArr.some(d => {
-      if (d.doc_type !== type) return false
+      // Občanka a pas jsou zaměnitelné — stačí jeden z nich.
+      const sedi = type === 'op' ? (d.doc_type === 'op' || d.doc_type === 'pas') : d.doc_type === type
+      if (!sedi) return false
       if (d.status === 'unreadable' || d.status === 'rejected') return false
       return true
     })
@@ -11272,7 +11350,7 @@ async function loadMobDocs() {
         const ok = hasValidDoc(t)
         return `<div style="display:flex;align-items:center;gap:9px;padding:6px 0;font-size:13.5px">
           <span style="color:${ok ? '#3f7d54' : '#c9bfae'};display:flex">${ok ? checkIco : emptyIco}</span>
-          <span style="flex:1;color:${ok ? '#6b6157' : '#211D1A'};font-weight:${ok?'500':'700'}">${typeLabels[t]}</span>
+          <span style="flex:1;color:${ok ? '#6b6157' : '#211D1A'};font-weight:${ok?'500':'700'}">${t === 'op' ? 'Občanský průkaz / Pas' : typeLabels[t]}</span>
           ${ok ? '' : `<button onclick="openUploadForm('${t}')" style="font-size:12px;padding:6px 14px;border:none;border-radius:9px;background:#9c3b22;color:#fff;font-weight:800;cursor:pointer;font-family:inherit">Nahrát</button>`}
         </div>`
       }).join('')}
@@ -11344,7 +11422,8 @@ async function loadMobDocs() {
 
 let selectedFile = null
 let selectedFile2 = null
-const MULTISIDE_TYPES = ['op', 'zivnost', 'gewerbeschein', 'a1', 'freistellung']
+// Doklady, u kterých má smysl nahrát i druhou stranu (nebo víc stránek)
+const MULTISIDE_TYPES = DOC_TYPES.filter(t => t.twoSides).map(t => t.id).concat('gewerbeschein')
 
 // ---------------------------------------------------------------------------
 // PRŮVODCE NAHRÁVÁNÍM DOKUMENTŮ
@@ -11359,15 +11438,16 @@ let uploadStep = 1
 let scanPages = []
 
 function docTypeIsCard() {
-  // Doklady, kde chceme rovnou hezký fotoaparát (ořez, srovnání jasu) místo
-  // obecného skeneru na víc stránek — občanka (2 strany) i pas (1 strana).
+  // Kartičky (občanka, pas, povolení k pobytu, vízum) fotíme rovnou hezkým
+  // fotoaparátem s ořezem; papírové doklady jdou přes skener na víc stránek.
   const t = document.getElementById('upload-doc-type')?.value || 'op'
-  return t === 'op' || t === 'pas'
+  return !!DOC_TYPE_BY_ID[t]?.card
 }
 
 function docTypeHasSecondSide() {
-  // Jen občanka má zadní stranu – pas má jen jednu fotostránku.
-  return (document.getElementById('upload-doc-type')?.value || 'op') === 'op'
+  // Občanka a povolení k pobytu mají zadní stranu; pas a vízum jen jednu.
+  const t = document.getElementById('upload-doc-type')?.value || 'op'
+  return !!DOC_TYPE_BY_ID[t]?.twoSides
 }
 
 // ---------------------------------------------------------------------------
@@ -11376,7 +11456,7 @@ function docTypeHasSecondSide() {
 // vyplněné — jinak nemáme co hlídat a nikdo se včas nedozví, že platnost končí.
 // U živnosťáku a "jiného dokumentu" je datum nepovinné, ty obvykle nevyprší.
 // ---------------------------------------------------------------------------
-const DOC_VALIDITY_REQUIRED = ['op', 'pas', 'a1', 'freistellung', 'ridicak']
+const DOC_VALIDITY_REQUIRED = DOC_TYPES.filter(t => t.hasExpiry).map(t => t.id).concat('ridicak')
 // Kolik dní předem upozorňujeme na blížící se konec platnosti
 const DOC_EXPIRY_WARN_DAYS = 30
 
@@ -12201,20 +12281,73 @@ function retakeCurrent() {
 }
 
 // Otevře formulář pro nahrání dokumentu (volá se i z panelu „Chybí povinné dokumenty").
+// Bez presetType začne výběrem typu — dokud si člověk nevybere, fotit nemůže.
+// S presetType (tlačítko „Nahrát" u konkrétního dokladu) jde rovnou na focení.
 function openUploadForm(presetType) {
   const card = document.getElementById('upload-form-card')
   if (!card) return
   resetUploadForm()
   card.style.display = 'block'
   const typeEl = document.getElementById('upload-doc-type')
-  if (typeEl) typeEl.value = (presetType && typeof presetType === 'string') ? presetType : 'op'
-  onDocTypeChange()
+  if (typeEl) typeEl.innerHTML = docTypeOptions()
+  const preset = (presetType && typeof presetType === 'string' && DOC_TYPE_BY_ID[presetType]) ? presetType : null
+  if (preset) pickDocType(preset)
+  else showTypePicker()
   card.scrollIntoView({ behavior: 'smooth', block: 'start' })
+}
+
+// Krok 1 — dlaždice s doklady. Povinné jsou nahoře a označené.
+function showTypePicker() {
+  const picker = document.getElementById('upload-type-picker')
+  const chosen = document.getElementById('upload-type-chosen')
+  const body = document.getElementById('upload-body')
+  const tiles = document.getElementById('upload-type-tiles')
+  if (tiles) {
+    const sorted = DOC_TYPES.slice().sort((a, b) => (b.required ? 1 : 0) - (a.required ? 1 : 0))
+    tiles.innerHTML = sorted.map(t => `
+      <button onclick="pickDocType('${t.id}')" style="display:flex;align-items:center;gap:12px;width:100%;padding:14px;background:#fff;border:1.5px solid ${t.required ? '#e8a13a' : 'var(--brd)'};border-radius:13px;cursor:pointer;font-family:inherit;text-align:left">
+        <span style="font-size:22px;flex-shrink:0">${t.icon}</span>
+        <span style="flex:1;min-width:0">
+          <span style="display:block;font-size:14px;font-weight:800;color:#211D1A;line-height:1.25">${t.label}</span>
+          <span style="display:block;font-size:11.5px;color:${t.required ? '#9a6b15' : 'var(--text3)'};font-weight:${t.required ? '700' : '500'};margin-top:1px">${t.required ? (t.id === 'op' || t.id === 'pas' ? 'Povinné — stačí občanka nebo pas' : 'Povinný doklad') : 'Nepovinné'}</span>
+        </span>
+        <svg viewBox="0 0 24 24" fill="none" stroke="#9c3b22" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" style="width:17px;height:17px;flex-shrink:0"><path d="M9 18l6-6-6-6"/></svg>
+      </button>`).join('')
+  }
+  if (picker) picker.style.display = 'block'
+  if (chosen) chosen.style.display = 'none'
+  if (body) body.style.display = 'none'
+}
+
+// Vybraný doklad → schová dlaždice a pustí focení
+function pickDocType(type) {
+  const typeEl = document.getElementById('upload-doc-type')
+  if (typeEl) typeEl.value = type
+  const t = DOC_TYPE_BY_ID[type] || { icon: '📎', label: docLabel(type) }
+  const ico = document.getElementById('upload-type-chosen-icon')
+  if (ico) ico.textContent = t.icon
+  const lbl = document.getElementById('upload-type-chosen-label')
+  if (lbl) lbl.textContent = t.label
+  const picker = document.getElementById('upload-type-picker')
+  if (picker) picker.style.display = 'none'
+  const chosen = document.getElementById('upload-type-chosen')
+  if (chosen) chosen.style.display = 'flex'
+  const body = document.getElementById('upload-body')
+  if (body) body.style.display = 'block'
+  onDocTypeChange()
+}
+
+// „Změnit" — zpět na výběr typu; co je vyfocené, se zahodí, ať se doklad
+// nenahraje pod špatným typem.
+function backToTypePicker() {
+  resetUploadForm()
+  showTypePicker()
 }
 
 function closeUploadForm() {
   document.getElementById('upload-form-card').style.display = 'none'
   resetUploadForm()
+  showTypePicker()
 }
 
 // Čitelné labely typů dokumentů pro AI prompt
@@ -12222,7 +12355,13 @@ const DOC_TYPE_NAMES = {
   op: 'občanský průkaz (přední nebo zadní strana)',
   pas: 'cestovní pas',
   ridicak: 'řidičský průkaz',
+  zivnost: 'výpis z živnostenského rejstříku / živnostenský list',
   zivnostak: 'výpis z živnostenského rejstříku / živnostenský list',
+  a1: 'formulář A1 (potvrzení o příslušnosti k právním předpisům sociálního zabezpečení)',
+  a1_zadost: 'žádost o vystavení formuláře A1',
+  pobyt: 'povolení k pobytu (Aufenthaltstitel / pobytová karta)',
+  vizum: 'vízum (vízový štítek v cestovním pase)',
+  freistellung: 'Freistellungsbescheinigung',
   pojisteni: 'doklad o pojištění / zdravotní pojištění',
   smlouva: 'smlouva',
   certifikat: 'certifikát nebo osvědčení',
@@ -16130,16 +16269,8 @@ async function loadDocumentAlertsStat() {
   const in30days = localDateStr(new Date(today.getTime()+30*86400000))
 
   // Povinné typy dokumentů
-  const REQUIRED_TYPES = ['op', 'zivnost', 'a1']
-  const typeLabels = {
-    op: 'Občanský průkaz / Pas',
-    pas: 'Cestovní pas',
-    zivnost: 'Živnostenské oprávnění',
-    gewerbeschein: 'Živnostenské oprávnění',
-    a1: 'Potvrzení A1',
-    freistellung: 'Freistellung',
-    other: 'Dokument'
-  }
+  const REQUIRED_TYPES = REQUIRED_DOC_TYPES
+  const typeLabels = { ...DOC_LABELS, op: 'Občanský průkaz / Pas' }
 
   // Načti všechny AKTIVNÍ OSVČ pracovníky (neaktivní/odebrané neřešíme)
   const { data: workers } = await sb.from('profiles')
@@ -16266,9 +16397,20 @@ async function loadDocumentAlertsStat() {
 async function dismissDocAlert(key) {
   if (!window._docAlertDismissed) window._docAlertDismissed = new Set()
   window._docAlertDismissed.add(key)
+  let chyba = ''
   try {
-    await sb.from('doc_alert_dismissals').insert({ dismiss_key: key, dismissed_by: currentUser?.id || null })
-  } catch(e) { /* tabulka nemusí existovat — zůstane aspoň skryté do reloadu */ }
+    const { error } = await sb.from('doc_alert_dismissals')
+      .insert({ dismiss_key: key, dismissed_by: currentUser?.id || null })
+    // Duplicita = kolega to už skryl, to je v pořádku
+    if (error && error.code !== '23505') chyba = error.message || 'neznámá chyba'
+  } catch(e) { chyba = e?.message || 'neznámá chyba' }
+  if (chyba) {
+    console.warn('[dokumenty] skrytí se neuložilo do databáze:', chyba)
+    showToast('⚠️ Skryto jen v tomto počítači — ostatním adminům to zůstane. '
+      + (/row-level security|policy|permission|42501/i.test(chyba)
+          ? 'Spusťte migraci supabase-migrace-odlozene-registrace.sql'
+          : 'Databáze: ' + chyba))
+  }
   loadDocumentAlertsStat()
 }
 
@@ -18244,14 +18386,7 @@ async function checkDocumentAlerts() {
   const in30days = localDateStr(new Date(today.getTime()+30*86400000))
   const todayStr = localDateStr(today)
 
-  const typeLabels = {
-    op: 'Občanský průkaz',
-    pas: 'Cestovní pas',
-    zivnost: 'Živnostenské oprávnění',
-    a1: 'Potvrzení A1',
-    freistellung: 'Freistellung',
-    other: 'Dokument'
-  }
+  const typeLabels = DOC_LABELS
 
   if (currentProfile?.role === 'admin') {
     await loadDocumentAlertsStat()
@@ -18268,7 +18403,7 @@ async function checkDocumentAlerts() {
 
     // A1 je povinný
     const hasA1 = data.some(d => d.doc_type === 'a1' && d.status !== 'rejected')
-    if (!hasA1) alerts.push('⚠️ Potvrzení A1 chybí — tento dokument je povinný!')
+    if (!hasA1) alerts.push('⚠️ Formulář A1 chybí — tento dokument je povinný!')
 
     data.forEach(d => {
       if (d.status === 'unreadable') {
@@ -19347,11 +19482,7 @@ function openUploadForWorker() {
       <div class="fg" style="margin-bottom:12px">
         <label style="font-size:12px;color:var(--text3)">Typ dokumentu</label>
         <select id="admin-upload-doc-type" style="width:100%;padding:10px;border:1.5px solid var(--brd);border-radius:8px;font-size:14px" onchange="adminDocTypeChange()">
-          <option value="op">Obcansky prukaz / Pas</option>
-          <option value="zivnost">Zivnostenske opravneni</option>
-          <option value="a1">Potvrzeni A1</option>
-          <option value="freistellung">Freistellung</option>
-          <option value="other">Jiny dokument</option>
+          ${docTypeOptions('op')}
         </select>
       </div>
       <div class="fg" style="margin-bottom:12px">
@@ -19401,10 +19532,10 @@ function closeUploadForWorker() {
 function adminDocTypeChange() {
   updateValidityRequiredMark('admin-upload-doc-type', 'admin-valid-req', 'admin-valid-hint')
   const t = document.getElementById('admin-upload-doc-type')?.value
-  const multiside = ['op','zivnost','gewerbeschein']
+  const multiside = MULTISIDE_TYPES
   document.getElementById('admin-upload-side2').style.display = multiside.includes(t) ? 'block' : 'none'
-  // Focení nabízíme u občanky/pasu – to je doklad, který se na schůzce fotí.
-  const isCard = t === 'op'
+  // Focení nabízíme u kartiček (občanka, pas, pobyt, vízum) – ty se na schůzce fotí.
+  const isCard = !!DOC_TYPE_BY_ID[t]?.card
   const c1 = document.getElementById('admin-cam1-btn'); if (c1) c1.style.display = isCard ? 'flex' : 'none'
   const c2 = document.getElementById('admin-cam2-btn'); if (c2) c2.style.display = isCard ? 'flex' : 'none'
   const lbl = document.getElementById('admin-side1-label')
@@ -19444,7 +19575,7 @@ async function uploadDocumentForWorker() {
   if (validInputA) validInputA.style.borderColor = ''
   if (st) { st.style.display='block'; st.style.background='#e8f5e9'; st.style.color='#2e7d32'; st.textContent='Nahravam...' }
 
-  const MULTI = ['op','zivnost','gewerbeschein']
+  const MULTI = MULTISIDE_TYPES
   const safeName1 = adminUploadFile1.name.normalize('NFD').replace(/[̀-ͯ]/g,'').replace(/[^a-zA-Z0-9._-]/g,'_').toLowerCase()
   const fp1 = uploadingForWorkerId + '/' + Date.now() + '_' + safeName1
 
@@ -19489,7 +19620,7 @@ async function uploadDocumentForWorker() {
 async function loadWdDocs(id) {
   const { data } = await sb.from('documents').select('*').eq('worker_id', id||currentWorkerId)
   const div = document.getElementById('wd-docs-list')
-  const types = {op:'Občanský průkaz',pas:'Cestovní pas',zivnost:'Živnostenské oprávnění',gewerbeschein:'Živnostenské oprávnění',a1:'Potvrzení A1',freistellung:'Freistellung',other:'Jiný dokument'}
+  const types = DOC_LABELS
   const statusInfo = {
     ok: { label: 'V pořádku', cls: 'pg' },
     pending: { label: 'Čeká na kontrolu', cls: 'pa' },
@@ -19570,7 +19701,7 @@ async function downloadAllDocs(workerId) {
 
     await ensureLib('jszip')
     const zip = new window.JSZip()
-    const typeNames = {op:'Obcansky_prukaz',pas:'Cestovni_pas',zivnost:'Zivnostenske_opravneni',gewerbeschein:'Gewerbeschein',a1:'Potvrzeni_A1',freistellung:'Freistellung',other:'Jiny_dokument'}
+    const typeNames = {op:'Obcansky_prukaz',pas:'Cestovni_pas',zivnost:'Zivnostenske_opravneni',gewerbeschein:'Gewerbeschein',a1:'Formular_A1',a1_zadost:'Zadost_o_A1',pobyt:'Povoleni_k_pobytu',vizum:'Vizum',freistellung:'Freistellung',other:'Jiny_dokument'}
     const used = {}
     let added = 0
     for (const d of docs) {
