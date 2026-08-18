@@ -1116,6 +1116,7 @@ button:not(.x-close) > svg:first-child{margin-right:6px}
               <span><span style="display:inline-block;width:11px;height:11px;border-radius:3px;background:#a5d6a7;vertical-align:middle"></span> Plán (měl by být)</span>
               <span><span style="display:inline-block;width:11px;height:11px;border-radius:3px;background:#f5c518;vertical-align:middle"></span> Problém s časem</span>
               <span><span style="display:inline-block;width:11px;height:11px;border-radius:3px;background:var(--blue);vertical-align:middle"></span> Dovolená</span>
+              <span><span style="display:inline-block;width:11px;height:11px;border-radius:3px;background:#6a4c93;vertical-align:middle"></span> Nemoc</span>
               <span><span style="display:inline-block;width:11px;height:11px;border-radius:3px;background:#d8c9b8;vertical-align:middle"></span> Odpočinek (víkend)</span>
               <span><span style="display:inline-block;width:11px;height:11px;border-radius:3px;background:#bbb;vertical-align:middle"></span> Volno (turnus)</span>
             </div>
@@ -1388,8 +1389,8 @@ button:not(.x-close) > svg:first-child{margin-right:6px}
         <div id="v-pristupy" class="view">
           <div class="card">
             <div class="card-h" style="flex-wrap:wrap;gap:10px">
-              <h4><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:18px;height:18px;flex-shrink:0;vertical-align:-3px;margin-right:7px"><path d="M21 2l-2 2m-7.6 7.6a5.5 5.5 0 1 0-1.4 1.4l3.5 3.5 2-2 2 2 2-2-3.6-3.5z"/></svg>Reset hesla pro pracovníka</h4>
-              <span style="font-size:12px;color:var(--text3)">Pracovník dostane email s odkazem na nastavení nového hesla</span>
+              <h4><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:18px;height:18px;flex-shrink:0;vertical-align:-3px;margin-right:7px"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>Přihlášení do aplikace</h4>
+              <span style="font-size:12px;color:var(--text3)">Odebrání přístupu zabrání přihlášení do aplikace. Zápis docházky se vypíná zvlášť v sekci Pracovníci.</span>
               <div class="card-search">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>
                 <input type="text" id="access-search" oninput="filterTableRows('access-search','#access-table .access-row')" placeholder="Hledat jméno nebo e-mail…">
@@ -1400,14 +1401,15 @@ button:not(.x-close) > svg:first-child{margin-right:6px}
               <thead>
                 <tr>
                   <th>Jméno</th>
-                  <th>Email</th>
                   <th>Role</th>
-                  <th>Stav</th>
-                  <th style="text-align:center">Reset hesla</th>
+                  <th>Přihlášení do aplikace</th>
+                  <th style="text-align:center">Aktivita</th>
+                  <th style="text-align:center">Přístup do aplikace</th>
+                  <th style="text-align:right">Další akce</th>
                 </tr>
               </thead>
               <tbody id="access-table">
-                <tr><td colspan="5" style="text-align:center;color:var(--text3);padding:20px">Načítám...</td></tr>
+                <tr><td colspan="6" style="text-align:center;color:var(--text3);padding:20px">Načítám...</td></tr>
               </tbody>
             </table>
           </div>
@@ -2583,9 +2585,9 @@ button:not(.x-close) > svg:first-child{margin-right:6px}
 <!-- ČEKÁ NA SCHVÁLENÍ -->
 <div id="pending-app" style="display:none;min-height:100vh;background:var(--bg);display:none;align-items:center;justify-content:center">
   <div style="text-align:center;padding:40px;max-width:400px">
-    <div style="font-size:60px;margin-bottom:20px">⏳</div>
-    <h2 style="font-size:22px;font-weight:700;margin-bottom:10px">Čekáte na schválení</h2>
-    <p style="color:var(--text2);font-size:14px;line-height:1.6;margin-bottom:24px">
+    <div id="pending-icon" style="font-size:60px;margin-bottom:20px">⏳</div>
+    <h2 id="pending-title" style="font-size:22px;font-weight:700;margin-bottom:10px">Čekáte na schválení</h2>
+    <p id="pending-text" style="color:var(--text2);font-size:14px;line-height:1.6;margin-bottom:24px">
       Vaše registrace byla přijata. Administrátor SubBau ji co nejdříve zkontroluje a schválí.<br><br>
       Po schválení budete moci aplikaci plně používat.
     </p>
@@ -4594,9 +4596,10 @@ async function _initAppInner(user) {
     setTimeout(() => { try { checkMissingDocsAlert() } catch(e) { console.warn(e) } }, 1200)
   }
 
-  // Čeká na schválení
+  // Nemá přístup do aplikace — buď registrace ještě není schválená,
+  // nebo mu admin přístup odebral v sekci Přístupy (registration_status='removed').
   if (!profile.is_active && role !== 'admin') {
-    showPending()
+    showPending(profile.registration_status === 'pending' ? 'pending' : 'removed')
     return
   }
 
@@ -5299,7 +5302,20 @@ function showLoginForm() {
   document.getElementById('form-register').style.display = 'none'
 }
 
-function showPending() {
+// mode: 'pending' = čeká na schválení registrace, 'removed' = admin odebral přístup do aplikace
+function showPending(mode) {
+  const ico = document.getElementById('pending-icon')
+  const ttl = document.getElementById('pending-title')
+  const txt = document.getElementById('pending-text')
+  if (mode === 'removed') {
+    if (ico) ico.textContent = '🔒'
+    if (ttl) ttl.textContent = 'Přístup do aplikace pozastaven'
+    if (txt) txt.innerHTML = 'SubBau vám dočasně pozastavil přihlášení do aplikace.<br><br>Pokud jde o omyl, ozvěte se nám a přístup vám obnovíme.'
+  } else {
+    if (ico) ico.textContent = '⏳'
+    if (ttl) ttl.textContent = 'Čekáte na schválení'
+    if (txt) txt.innerHTML = 'Vaše registrace byla přijata. Administrátor SubBau ji co nejdříve zkontroluje a schválí.<br><br>Po schválení budete moci aplikaci plně používat.'
+  }
   document.getElementById('login').style.display = 'none'
   document.getElementById('app').style.display = 'none'
   document.getElementById('osvec-app').style.display = 'none'
@@ -5748,7 +5764,7 @@ ${rows || '<div class="empty">Žádná přihlášení za posledních 30 dní</di
 async function loadAccess() {
   const tbody = document.getElementById('access-table')
   if (!tbody) return
-  tbody.innerHTML = '<tr><td colspan="5" style="text-align:center;padding:20px;color:var(--text3)">Načítám...</td></tr>'
+  tbody.innerHTML = '<tr><td colspan="6" style="text-align:center;padding:20px;color:var(--text3)">Načítám...</td></tr>'
 
   const { data } = await sb.from('profiles')
     .select('id, full_name, email, role, is_active, last_login_at, login_count, last_seen_at')
@@ -5756,7 +5772,7 @@ async function loadAccess() {
     .order('full_name')
 
   if (!data?.length) {
-    tbody.innerHTML = '<tr><td colspan="5" style="text-align:center;padding:20px;color:var(--text3)">Žádní pracovníci</td></tr>'
+    tbody.innerHTML = '<tr><td colspan="6" style="text-align:center;padding:20px;color:var(--text3)">Žádní pracovníci</td></tr>'
     return
   }
 
@@ -5797,17 +5813,26 @@ async function loadAccess() {
       <td><span style="display:flex;align-items:center"><b>${dot}${w.full_name}</b></span><span style="font-size:11px;color:var(--text2);margin-left:16px">${w.email}</span></td>
       <td><span class="pill pb">${roleLabels[w.role] || w.role}</span></td>
       <td>
-        <span class="pill ${w.is_active ? 'pg' : 'pr'}">${w.is_active ? 'Aktivní' : 'Neaktivní'}</span>
+        <span class="pill ${w.is_active ? 'pg' : 'pr'}">${w.is_active ? 'Může se přihlásit' : 'Přihlášení zablokováno'}</span>
         <div style="font-size:11px;color:var(--text3);margin-top:3px">
           Poslední: ${lastLogin}<br>
           ${logins.length} přihlášení (3 dny)
         </div>
       </td>
-      <td style="text-align:right">
+      <td style="text-align:center">
         <button onclick="showWorkerActivity('${w.id}','${w.full_name.replace(/'/g, String.fromCharCode(39))}')"
-          style="padding:5px 10px;font-size:11px;background:var(--blue);color:#E8A13A;border:none;border-radius:6px;cursor:pointer;font-family:inherit;font-weight:700;margin-bottom:4px;display:block;width:100%">
+          style="padding:6px 10px;font-size:11px;background:var(--blue);color:#E8A13A;border:none;border-radius:6px;cursor:pointer;font-family:inherit;font-weight:700;display:block;width:100%;white-space:nowrap">
           Detail aktivity
         </button>
+      </td>
+      <td style="text-align:center">
+        <button onclick="toggleWorkerActiveFromAccess('${w.id}','${w.full_name}',${w.is_active})"
+          title="${w.is_active ? 'Pracovník se přestane moci přihlásit do aplikace' : 'Pracovník se bude moci znovu přihlásit do aplikace'}"
+          style="padding:6px 10px;font-size:11px;background:${w.is_active ? '#dc3545' : '#198754'};color:#fff;border:none;border-radius:6px;cursor:pointer;font-family:inherit;font-weight:700;display:block;width:100%;white-space:nowrap">
+          ${w.is_active ? 'Odebrat přístup' : 'Obnovit přístup'}
+        </button>
+      </td>
+      <td style="text-align:right">
         <button onclick="sendPasswordReset('${w.email}','${w.full_name}')"
           style="padding:5px 10px;font-size:11px;background:none;border:1px solid var(--brd);color:var(--text);border-radius:6px;cursor:pointer;font-family:inherit;margin-bottom:4px;display:block;width:100%">
           Reset hesla
@@ -5815,10 +5840,6 @@ async function loadAccess() {
         <button onclick="openEditAccessModal('${w.id}','${(w.email||'').replace(/'/g, String.fromCharCode(39))}','${w.full_name.replace(/'/g, String.fromCharCode(39))}')"
           style="padding:5px 10px;font-size:11px;background:var(--amber-l);border:1px solid var(--amber);color:#9a6b15;border-radius:6px;cursor:pointer;font-family:inherit;font-weight:700;margin-bottom:4px;display:block;width:100%">
           ✏️ Změnit e-mail / heslo
-        </button>
-        <button onclick="toggleWorkerActiveFromAccess('${w.id}','${w.full_name}',${w.is_active})"
-          style="padding:5px 10px;font-size:11px;background:${w.is_active ? '#dc3545' : '#198754'};color:#fff;border:none;border-radius:6px;cursor:pointer;font-family:inherit;font-weight:700;display:block;width:100%;margin-bottom:4px">
-          ${w.is_active ? 'Odebrat pristup' : 'Obnovit pristup'}
         </button>
         <button onclick="deleteAccountFully('${w.id}','${w.full_name.replace(/'/g, String.fromCharCode(39))}','${w.email}')"
           style="padding:5px 10px;font-size:11px;background:#211D1A;color:#ff6b6b;border:1px solid #ff6b6b;border-radius:6px;cursor:pointer;font-family:inherit;font-weight:700;display:block;width:100%"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:1em;height:1em;flex-shrink:0;vertical-align:-2px"><path d="M3 6h18M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6M14 11v6"/></svg> Smazat účet
@@ -6000,6 +6021,29 @@ async function saveProvizeRate(input, workerId) {
   const { error } = await sb.from('profiles').update({ hourly_rate_worker: rate }).eq('id', workerId)
   if (error) { showToast('❌ Chyba: ' + error.message); return }
   showToast('✅ Sazba uložena — projeví se i v profilu pracovníka')
+  updateProvizeEarningsDisplay(workerId, rate || 0)
+}
+// Po změně sazby přepočítá zobrazený týdenní výdělek pracovníka (jeho řádek,
+// součet firmy i celkovou dlaždici) — bez překreslení celé tabulky, aby admin
+// nepřišel o rozepsané hodnoty v ostatních polích.
+function updateProvizeEarningsDisplay(workerId, newRate) {
+  const idx = window._provizeIndex && window._provizeIndex[workerId]
+  if (!idx) return
+  const eur = n => n.toLocaleString('cs-CZ', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + ' €'
+  const newEarn = newRate * idx.hoursWeek
+  const delta = newEarn - (idx.rate || 0) * idx.hoursWeek
+  idx.rate = newRate
+  const eEl = document.getElementById('pv-e-' + workerId); if (eEl) eEl.textContent = eur(newEarn)
+  const ft = window._provizeFirmTotals && window._provizeFirmTotals[idx.firmIdx]
+  if (ft) {
+    ft.earn = (ft.earn || 0) + delta
+    const fe = document.getElementById('pv-fe-' + idx.firmIdx); if (fe) fe.textContent = eur(ft.earn)
+  }
+  const g = window._provizeGrand
+  if (g) {
+    g.earnWeek = (g.earnWeek || 0) + delta
+    const ge = document.getElementById('pv-ge'); if (ge) ge.textContent = eur(g.earnWeek)
+  }
 }
 async function saveProvizeCommission(input, workerId) {
   const val = parseFloat(input.value)
@@ -6274,6 +6318,8 @@ async function renderProvizeContent() {
       terms,
       hoursDay: hrs.day, hoursWeek: hrs.week, hoursMonth: hrs.month,
       commDay: prov * hrs.day, commWeek: prov * hrs.week, commMonth: prov * hrs.month,
+      // kolik si za týden vydělá sám pracovník (sazba × odpracované hodiny)
+      earnWeek: rate * hrs.week,
       paid, dueDate: dueInfo.due, overdue: !paid && dueInfo.overdue
     }
   })
@@ -6291,7 +6337,7 @@ async function renderProvizeContent() {
 
   const eur = n => n.toLocaleString('cs-CZ', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + ' €'
   const TERMS_OPTIONS = ['7/7', '7/10', '7/14', '14/14']
-  let weekGrandTotal = 0, monthGrandTotal = 0
+  let weekGrandTotal = 0, monthGrandTotal = 0, earnGrandTotal = 0
 
   // Index pro rychlý přepočet Odměny po uložení provize bez znovuvykreslení celé tabulky (viz updateProvizeCommissionDisplay)
   window._provizeIndex = {}
@@ -6302,10 +6348,10 @@ async function renderProvizeContent() {
     const isNoFirm = firm === 'Bez firmy'
     const gc = groupColor(firm, 'company')
     const safeFirm = firm.replace(/'/g, String.fromCharCode(39))
-    let fDay = 0, fWeek = 0, fMonth = 0, fPaidCount = 0
+    let fDay = 0, fWeek = 0, fMonth = 0, fEarn = 0, fPaidCount = 0
     const memberRows = members.map(r => {
-      fDay += r.commDay; fWeek += r.commWeek; fMonth += r.commMonth; if (r.paid) fPaidCount++
-      window._provizeIndex[r.id] = { hoursDay: r.hoursDay, hoursWeek: r.hoursWeek, hoursMonth: r.hoursMonth, prov: r.prov, firmIdx }
+      fDay += r.commDay; fWeek += r.commWeek; fMonth += r.commMonth; fEarn += r.earnWeek; if (r.paid) fPaidCount++
+      window._provizeIndex[r.id] = { hoursDay: r.hoursDay, hoursWeek: r.hoursWeek, hoursMonth: r.hoursMonth, prov: r.prov, rate: r.rate, firmIdx }
       const termsOpts = TERMS_OPTIONS.map(t => `<option value="${t}" ${r.terms === t ? 'selected' : ''}>${t}</option>`).join('')
       const rowBg = r.paid ? 'background:var(--green-l)' : (r.overdue ? 'background:var(--red-l)' : '')
       const dueLabel = paymentTermsColumnMissing
@@ -6315,6 +6361,7 @@ async function renderProvizeContent() {
         <td style="font-size:${isNoFirm ? '16px' : '14.5px'};font-weight:600">${r.name}${r.overdue ? ' <span style="font-size:11px;color:var(--red);font-weight:700">⚠️ nezaplaceno</span>' : ''}</td>
         <td style="text-align:right"><input type="number" step="0.01" value="${r.rate || ''}" placeholder="0" onchange="saveProvizeRate(this,'${r.id}')" style="width:80px;padding:6px 8px;border:1.5px solid var(--brd);border-radius:7px;font-size:14px;text-align:right;font-family:inherit"> €/h</td>
         <td style="text-align:right"><input type="number" step="0.01" value="${r.prov || ''}" placeholder="0" onchange="saveProvizeCommission(this,'${r.id}')" style="width:80px;padding:6px 8px;border:1.5px solid var(--amber);border-radius:7px;font-size:14px;text-align:right;font-family:inherit;background:#faf6ee"> €/h</td>
+        <td style="text-align:right;background:#f2f8f4"><b id="pv-e-${r.id}" style="font-size:14px;color:var(--green)">${eur(r.earnWeek)}</b><div style="font-size:11px;color:var(--text3)">${r.hoursWeek.toFixed(2)} h</div></td>
         <td style="text-align:right"><b id="pv-d-${r.id}" style="font-size:14px">${eur(r.commDay)}</b><div style="font-size:11px;color:var(--text3)">${r.hoursDay.toFixed(2)} h</div></td>
         <td style="text-align:right"><b id="pv-w-${r.id}" style="font-size:14px">${eur(r.commWeek)}</b><div style="font-size:11px;color:var(--text3)">${r.hoursWeek.toFixed(2)} h</div></td>
         <td style="text-align:right"><b id="pv-m-${r.id}" style="font-size:14px">${eur(r.commMonth)}</b><div style="font-size:11px;color:var(--text3)">${r.hoursMonth.toFixed(2)} h</div></td>
@@ -6322,8 +6369,8 @@ async function renderProvizeContent() {
         <td><select onchange="saveProvizeTerms(this,'${r.id}')" style="padding:6px 8px;border:1.5px solid var(--brd);border-radius:7px;font-size:13px;font-family:inherit">${termsOpts}</select>${dueLabel}</td>
       </tr>`
     }).join('')
-    weekGrandTotal += fWeek; monthGrandTotal += fMonth
-    window._provizeFirmTotals[firmIdx] = { day: fDay, week: fWeek, month: fMonth }
+    weekGrandTotal += fWeek; monthGrandTotal += fMonth; earnGrandTotal += fEarn
+    window._provizeFirmTotals[firmIdx] = { day: fDay, week: fWeek, month: fMonth, earn: fEarn }
     return `
     <div class="card" style="border-left:6px solid ${gc.border};margin-bottom:16px">
       <div class="card-h" style="flex-wrap:wrap;gap:10px">
@@ -6338,12 +6385,14 @@ async function renderProvizeContent() {
       <table>
         <thead><tr>
           <th style="font-size:14px">Jméno</th><th style="text-align:right;font-size:14px">Sazba</th><th style="text-align:right;font-size:14px">Provize</th>
+          <th style="text-align:right;font-size:13px;color:var(--green);background:#f2f8f4">Výdělek pracovníka<div style="font-weight:400;font-size:11px">za týden</div></th>
           <th style="text-align:right;font-size:13px">Odměna den</th><th style="text-align:right;font-size:13px">Odměna týden</th><th style="text-align:right;font-size:13px">Odměna měsíc</th>
           <th style="text-align:center;font-size:14px">Uhrazeno</th><th style="font-size:14px">Splatnost</th>
         </tr></thead>
         <tbody>${memberRows}</tbody>
         <tfoot><tr style="font-weight:800;background:var(--bg)">
           <td colspan="3" style="font-size:15px">Součet — ${firm}</td>
+          <td style="text-align:right;font-size:14px;color:var(--green);background:#f2f8f4" id="pv-fe-${firmIdx}">${eur(fEarn)}</td>
           <td style="text-align:right;font-size:14px" id="pv-fd-${firmIdx}">${eur(fDay)}</td>
           <td style="text-align:right;font-size:14px" id="pv-fw-${firmIdx}">${eur(fWeek)}</td>
           <td style="text-align:right;font-size:14px" id="pv-fm-${firmIdx}">${eur(fMonth)}</td>
@@ -6354,7 +6403,7 @@ async function renderProvizeContent() {
     </div>`
   }).join('')
 
-  window._provizeGrand = { week: weekGrandTotal, month: monthGrandTotal }
+  window._provizeGrand = { week: weekGrandTotal, month: monthGrandTotal, earnWeek: earnGrandTotal }
 
   el.innerHTML = `
     <div class="card" style="margin-bottom:16px">
@@ -6378,6 +6427,7 @@ async function renderProvizeContent() {
         <div class="stats" style="grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;margin-bottom:0">
           <div class="sc b"><div class="sc-lbl" style="font-size:12px">Týdenní provize</div><div class="sc-val" id="pv-gw" style="color:var(--blue);font-size:24px">${eur(weekGrandTotal)}</div></div>
           <div class="sc b"><div class="sc-lbl" style="font-size:12px">Měsíční provize</div><div class="sc-val" id="pv-gm" style="color:var(--blue);font-size:24px">${eur(monthGrandTotal)}</div></div>
+          <div class="sc g"><div class="sc-lbl" style="font-size:12px">Výdělek pracovníků (týden)</div><div class="sc-val" id="pv-ge" style="color:var(--green);font-size:24px">${eur(earnGrandTotal)}</div></div>
           <div class="sc g"><div class="sc-lbl" style="font-size:12px">Firem</div><div class="sc-val" style="color:var(--green);font-size:24px">${firmNames.length}</div></div>
           <div class="sc g"><div class="sc-lbl" style="font-size:12px">Pracovníků</div><div class="sc-val" style="color:var(--green);font-size:24px">${rows.length}</div></div>
         </div>
@@ -6762,8 +6812,8 @@ async function loadDashboard() {
   const { data: teams } = await sb.from('teams').select('id').eq('is_active',true)
   document.getElementById('stat-teams').textContent = teams?.length || 0
 
-  // ⚠️ Nezavřené směny běžící více než 11 hodin (zapomenutý odchod)
-  await loadUnclosedShiftsAlert()
+  // ⚠️ Dlouhá pracovní doba (práce po 19:00) a zapomenuté odchody
+  await loadLongDayAlert()
 
   const kw = getKW()
   const { data: att } = await sb.from('attendance').select('*').eq('kw',kw.week).eq('kw_year',kw.year)
@@ -6838,64 +6888,114 @@ async function refreshPendingRegistrations() {
   } catch(e) { /* ticho — jen automatické obnovení */ }
 }
 
-// Spočítá pracovníky s nezavřenou směnou > 11 h a vrátí pole záznamů; naplní window.unclosedWorkerIds
-async function computeUnclosedWorkerIds() {
-  const { data } = await sb.from('attendance')
-    .select('*, worker:profiles(full_name,profession)')
-    .not('check_in', 'is', null)
-    .is('check_out', null)
-    .order('work_date', { ascending: false })
+// Hranice dlouhé pracovní doby. Kdo je na stavbě i po 19:00, má za sebou
+// nadstandardně dlouhý den a admin se o tom má dozvědět. Docházka se tím
+// nijak nemění — uloží se přesně tak, jak ji pracovník zapsal.
+const LONG_DAY_HOUR = 19
 
-  const now = new Date()
-  const longRunning = []
-  ;(data || []).forEach(r => {
-    if (!r.check_in || !r.work_date) return
-    const [hh, mm, ss] = r.check_in.split(':').map(Number)
-    const [Y, M, D] = r.work_date.split('-').map(Number)
-    const startedAt = new Date(Y, M - 1, D, hh || 0, mm || 0, ss || 0)
-    const hoursRunning = (now - startedAt) / 3600000
-    if (hoursRunning > 11) {
-      r._hoursRunning = hoursRunning
-      r._startedAt = startedAt
-      longRunning.push(r)
-    }
-  })
-  window.unclosedWorkerIds = new Set(longRunning.map(r => r.worker_id))
-  return longRunning
+// Poskládá z data ("2026-03-12") a času ("07:00:00") skutečné datum a čas.
+function attDateTime(dateStr, timeStr) {
+  if (!dateStr || !timeStr) return null
+  const [Y, M, D] = String(dateStr).slice(0, 10).split('-').map(Number)
+  const [h, m, sec] = String(timeStr).slice(0, 8).split(':').map(Number)
+  const d = new Date(Y, (M || 1) - 1, D || 1, h || 0, m || 0, sec || 0)
+  return isNaN(d) ? null : d
 }
 
-// ⚠️ Upozornění: směny běžící > 11 hodin bez odchodu (zapomenutý odchod)
-async function loadUnclosedShiftsAlert() {
+// Najde dny, které přesáhly 19:00 — buď pracovník skončil až po 19:00
+// (dlouhá pracovní doba), nebo den vůbec neukončil (zapomenutý odchod).
+// Zároveň naplní window.unclosedWorkerIds pro odznak v tabulce Pracovníci.
+async function computeLongDayAlerts() {
+  const now = new Date()
+  const since = new Date(now); since.setDate(since.getDate() - 7)
+
+  const sel = '*, worker:profiles(full_name,profession)'
+  // Neukončené dny hledáme bez omezení data — zapomenutý odchod je potřeba
+  // dořešit i po týdnu. Uzavřené dlouhé dny stačí za poslední týden, ať
+  // upozornění na dashboardu nezůstává viset donekonečna.
+  const [openRes, closedRes] = await Promise.all([
+    sb.from('attendance').select(sel)
+      .not('check_in', 'is', null).is('check_out', null)
+      .order('work_date', { ascending: false }),
+    sb.from('attendance').select(sel)
+      .not('check_in', 'is', null).not('check_out', 'is', null)
+      .gte('work_date', localDateStr(since))
+      .order('work_date', { ascending: false })
+  ])
+
+  const items = []
+  const openIds = new Set()
+
+  ;(openRes.data || []).forEach(r => {
+    const startedAt = attDateTime(r.work_date, r.check_in)
+    if (!startedAt) return
+    // Rozdělaná směna se ozve až po 19:00 — během dne běží normálně a nemá otravovat.
+    const cutoff = new Date(startedAt); cutoff.setHours(LONG_DAY_HOUR, 0, 0, 0)
+    if (now < cutoff) return
+    openIds.add(r.worker_id)
+    items.push({ ...r, _kind: 'open', _startedAt: startedAt, _hours: (now - startedAt) / 3600000 })
+  })
+
+  ;(closedRes.data || []).forEach(r => {
+    const startedAt = attDateTime(r.work_date, r.check_in)
+    const endedAt = attDateTime(r.work_date, r.check_out)
+    if (!startedAt || !endedAt) return
+    if (endedAt < startedAt) endedAt.setDate(endedAt.getDate() + 1)  // odchod až po půlnoci
+    const cutoff = new Date(startedAt); cutoff.setHours(LONG_DAY_HOUR, 0, 0, 0)
+    if (endedAt <= cutoff) return   // skončil do 19:00 → běžný den
+    items.push({ ...r, _kind: 'long', _startedAt: startedAt, _endedAt: endedAt, _hours: r.total_hours || 0 })
+  })
+
+  window.unclosedWorkerIds = openIds
+  // Nejdřív neukončené dny (ty se musí dořešit), pak nejnovější dlouhé dny.
+  items.sort((a, b) => a._kind === b._kind
+    ? String(b.work_date || '').localeCompare(String(a.work_date || ''))
+    : (a._kind === 'open' ? -1 : 1))
+  return items
+}
+
+// ⚠️ Upozornění na dlouhou pracovní dobu — práce po 19:00 a zapomenuté odchody
+async function loadLongDayAlert() {
   const div = document.getElementById('dash-unclosed-shifts')
   if (!div) return
 
-  const longRunning = await computeUnclosedWorkerIds()
+  const items = await computeLongDayAlerts()
 
-  if (!longRunning.length) {
+  if (!items.length) {
     div.style.display = 'none'
     div.innerHTML = ''
     return
   }
 
+  const n = items.length
+  const zaznamy = n === 1 ? 'záznam' : (n < 5 ? 'záznamy' : 'záznamů')
+  const den = d => new Date(String(d).slice(0, 10) + 'T00:00:00').toLocaleDateString('cs-CZ', { day: '2-digit', month: '2-digit' })
+  const cas = d => d.toLocaleTimeString('cs-CZ', { hour: '2-digit', minute: '2-digit' })
+
   div.style.display = 'block'
   div.innerHTML = `
     <div style="background:var(--red-l);border-left:4px solid var(--red);border-radius:8px;padding:12px 16px">
       <div style="font-size:13px;font-weight:700;color:var(--red);margin-bottom:8px">
-        ⚠️ ${longRunning.length} ${longRunning.length === 1 ? 'pracovník nemá' : 'pracovníků nemá'} ukončený den (směna běží přes 11 h)
+        ⚠️ Dlouhá pracovní doba — ${n} ${zaznamy} po ${LONG_DAY_HOUR}:00
       </div>
-      ${longRunning.map(r => {
-        const startTxt = r._startedAt.toLocaleString('cs-CZ', {day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'})
-        const hrs = r._hoursRunning.toFixed(1)
+      ${items.map(r => {
+        const jmeno = r.worker?.full_name || '—'
+        const popis = r._kind === 'open'
+          ? `${den(r.work_date)} · příchod ${cas(r._startedAt)} · <b>odchod nezaznamenán</b> (běží ${r._hours.toFixed(1)} h)`
+          : `${den(r.work_date)} · ${cas(r._startedAt)} → ${cas(r._endedAt)} · skončil po ${LONG_DAY_HOUR}:00`
+        const odznak = r._kind === 'open'
+          ? `<span style="flex-shrink:0;background:var(--red);color:#fff;font-size:11px;font-weight:700;padding:3px 8px;border-radius:10px;white-space:nowrap">neukončeno ▶</span>`
+          : `<span style="flex-shrink:0;background:var(--amber);color:#211D1A;font-size:11px;font-weight:700;padding:3px 8px;border-radius:10px;white-space:nowrap">${r._hours.toFixed(1)} h</span>`
         return `
           <div class="unclosed-row" data-id="${r.worker_id||''}" style="display:flex;justify-content:space-between;align-items:center;padding:6px 0;border-bottom:1px solid rgba(0,0,0,0.08);gap:8px;cursor:pointer">
             <div style="min-width:0">
-              <div style="font-size:13px;font-weight:600">${r.worker?.full_name||'—'}</div>
-              <div style="font-size:11px;color:var(--text3)">Příchod ${startTxt} · běží ${hrs} h bez odchodu</div>
+              <div style="font-size:13px;font-weight:600">${jmeno}</div>
+              <div style="font-size:11px;color:var(--text3)">${popis}</div>
             </div>
-            <span style="flex-shrink:0;background:var(--red);color:#fff;font-size:11px;font-weight:700;padding:3px 8px;border-radius:10px;white-space:nowrap">${hrs} h ▶</span>
+            ${odznak}
           </div>`
       }).join('')}
-      <div style="font-size:11px;color:var(--text3);margin-top:8px">Klikněte na pracovníka pro detail a ruční úpravu docházky.</div>
+      <div style="font-size:11px;color:var(--text3);margin-top:8px">Docházka je uložená přesně tak, jak ji pracovník zapsal — tohle je jen upozornění. Klikněte na pracovníka pro detail.</div>
     </div>`
 
   div.querySelector('div').onclick = function(e) {
@@ -6993,7 +7093,7 @@ async function loadWorkers() {
   ;(subteamsForW||[]).forEach(s => { subteamById[s.id] = s })
 
   // Zjisti, kdo má nezavřenou směnu > 11 h (pro červený odznáček)
-  await computeUnclosedWorkerIds()
+  await computeLongDayAlerts()
 
   const sortedWorkers = sortByGroup(data, teamNameById, subteamById)
 
@@ -7003,7 +7103,7 @@ async function loadWorkers() {
     const subName = w.subteam_id ? (subteamById[w.subteam_id]?.name||'') : ''
     return `
     <tr style="cursor:pointer" class="worker-row" data-id="${w.id}" data-name="${((w.full_name||'') + ' ' + (w.email||'')).replace(/"/g,'&quot;')}">
-      <td><b>${w.full_name}</b>${w.has_car ? ' <span style="font-size:11px;background:#eef7ee;color:#2e7d32;border:1px solid #b8dcb8;font-weight:700;padding:1px 6px;border-radius:8px;white-space:nowrap" title="Má vlastní auto">🚗 auto</span>' : ''}${(window.unclosedWorkerIds && window.unclosedWorkerIds.has(w.id)) ? ' <span style="background:var(--red);color:#fff;font-size:10px;font-weight:700;padding:2px 6px;border-radius:8px;white-space:nowrap" title="Nemá ukončený den (směna přes 11 h)">⚠️ neukončeno</span>' : ''}</td>
+      <td><b>${w.full_name}</b>${w.has_car ? ' <span style="font-size:11px;background:#eef7ee;color:#2e7d32;border:1px solid #b8dcb8;font-weight:700;padding:1px 6px;border-radius:8px;white-space:nowrap" title="Má vlastní auto">🚗 auto</span>' : ''}${(window.unclosedWorkerIds && window.unclosedWorkerIds.has(w.id)) ? ' <span style="background:var(--red);color:#fff;font-size:10px;font-weight:700;padding:2px 6px;border-radius:8px;white-space:nowrap" title="Nemá ukončený den — směna běží i po 19:00">⚠️ neukončeno</span>' : ''}</td>
       <td>${groupCellHtml(teamName, subName)}</td>
       <td>${profLabel(w.profession)||'—'}</td>
       <td style="font-size:12px">${w.email}</td>
@@ -7589,8 +7689,11 @@ async function renderCalendar() {
   ;(att||[]).forEach(a => { attMap[a.worker_id + '|' + a.work_date] = a })
   window._calAttMap = attMap
 
-  // Dovolené (překryv s rozsahem)
-  const { data: vacs } = await sb.from('vacations').select('worker_id, date_from, date_to')
+  // Nepřítomnosti — dovolená i nemoc (překryv s rozsahem).
+  // select('*') schválně: druh je ve sloupci `type`, a u starších záznamů se pozná
+  // z poznámky. Kdybychom vyjmenovali sloupce a `type` v databázi ještě nebyl,
+  // celý dotaz by spadl a v kalendáři by zmizely i dovolené.
+  const { data: vacs } = await sb.from('vacations').select('*')
     .lte('date_from', endStr).gte('date_to', startStr)
   const vacList = vacs || []
 
@@ -7657,8 +7760,8 @@ async function renderCalendar() {
   window._calRows = calRows
 
   const todayStr = localDateStr()
-  const colors = { worked:'var(--green)', plan:'#a5d6a7', bad:'#f5c518', vac:'var(--blue)', off:'#bbb', rest:'#d8c9b8' }
-  const stLabel = st => st==='worked'?'práce':st==='plan'?'plán':st==='bad'?'⚠ čas':st==='vac'?'dovolená':st==='off'?'volno':st==='rest'?'odpočinek':''
+  const colors = { worked:'var(--green)', plan:'#a5d6a7', bad:'#f5c518', vac:'var(--blue)', sick:'#6a4c93', off:'#bbb', rest:'#d8c9b8' }
+  const stLabel = st => st==='worked'?'práce':st==='plan'?'plán':st==='bad'?'⚠ čas':st==='vac'?'dovolená':st==='sick'?'nemoc':st==='off'?'volno':st==='rest'?'odpočinek':''
   const dayShort = ['Po','Út','St','Čt','Pá','So','Ne']
 
   if (calView === 'week') {
@@ -7733,16 +7836,17 @@ async function renderCalendar() {
       let inner = ''
       if (filterId && workers.length === 1) {
         const st = dayStatusFor(workers[0], ds, attSet, vacList)
-        const lbl = st==='worked'?'🟢':st==='plan'?'🟩':st==='bad'?'⚠️':st==='vac'?'🔵':st==='rest'?'🏠':st==='off'?'⚪':''
+        const lbl = st==='worked'?'🟢':st==='plan'?'🟩':st==='bad'?'⚠️':st==='vac'?'🔵':st==='sick'?'🟣':st==='rest'?'🏠':st==='off'?'⚪':''
         inner = `<div style="font-size:20px;line-height:1">${inMonth?lbl:''}</div>`
       } else {
-        let nWorked=0,nPlan=0,nBad=0,nVac=0,nRest=0,nOff=0
-        workers.forEach(w=>{ const st=dayStatusFor(w,ds,attSet,vacList); if(st==='worked')nWorked++; else if(st==='plan')nPlan++; else if(st==='bad')nBad++; else if(st==='vac')nVac++; else if(st==='rest')nRest++; else if(st==='off')nOff++ })
+        let nWorked=0,nPlan=0,nBad=0,nVac=0,nSick=0,nRest=0,nOff=0
+        workers.forEach(w=>{ const st=dayStatusFor(w,ds,attSet,vacList); if(st==='worked')nWorked++; else if(st==='plan')nPlan++; else if(st==='bad')nBad++; else if(st==='vac')nVac++; else if(st==='sick')nSick++; else if(st==='rest')nRest++; else if(st==='off')nOff++ })
         // Přehledná buňka: velké číslo = kolik bylo v práci; malé tečky = ostatní stavy
         const present = nWorked
         const dots = []
         if (nBad) dots.push(`<span title="Problém s časem" style="color:#c79a00;font-weight:700">⚠${nBad}</span>`)
         if (nVac) dots.push(`<span title="Dovolená" style="color:var(--blue);font-weight:700">${nVac}</span>`)
+        if (nSick) dots.push(`<span title="Nemoc" style="color:#6a4c93;font-weight:700">${nSick}</span>`)
         if (nPlan) dots.push(`<span title="Plán" style="color:#5fa463;font-weight:700">${nPlan}</span>`)
         const isWeekend = (d.getDay()===0 || d.getDay()===6)
         inner = `<div style="display:flex;flex-direction:column;align-items:center;gap:2px;line-height:1">
@@ -7755,7 +7859,7 @@ async function renderCalendar() {
         <div style="flex:1;display:flex;align-items:center;justify-content:center">${inMonth?inner:''}</div>
       </div>`
     })
-    html += '</div><div style="font-size:11px;color:var(--text3);margin-top:10px">Velké číslo = počet v práci · <span style="color:#c79a00">⚠ problém s časem</span> · <span style="color:var(--blue)">číslo = dovolená</span> · <span style="color:#5fa463">číslo = plán</span> · klepnutím na den zobrazíte detail</div>'
+    html += '</div><div style="font-size:11px;color:var(--text3);margin-top:10px">Velké číslo = počet v práci · <span style="color:#c79a00">⚠ problém s časem</span> · <span style="color:var(--blue)">číslo = dovolená</span> · <span style="color:#6a4c93">číslo = nemoc</span> · <span style="color:#5fa463">číslo = plán</span> · klepnutím na den zobrazíte detail</div>'
     content.innerHTML = html
   }
 }
@@ -7765,7 +7869,7 @@ let calData = null
 function showDayDetail(dateStr) {
   if (!calData) return
   const { workers, attSet, vacList } = calData
-  const groups = { worked: [], plan: [], bad: [], vac: [], rest: [], off: [] }
+  const groups = { worked: [], plan: [], bad: [], vac: [], sick: [], rest: [], off: [] }
   workers.forEach(w => {
     const st = dayStatusFor(w, dateStr, attSet, vacList)
     if (st && groups[st]) groups[st].push(w)
@@ -7785,6 +7889,7 @@ function showDayDetail(dateStr) {
       section('🟩 Plán (měl by být)', groups.plan, '#5fa463') +
       section('⚠️ Problém s časem', groups.bad, '#c79a00') +
       section('🔵 Dovolená', groups.vac, 'var(--blue)') +
+      section('🟣 Nemoc', groups.sick, '#6a4c93') +
       section('🏠 Odpočinek (víkend)', groups.rest, '#a08c70') +
       section('⚪ Volno (turnus)', groups.off, '#888')
     : '<div style="text-align:center;color:var(--text3);padding:20px;font-size:13px">Pro tento den nejsou žádné záznamy ani turnus.</div>'
@@ -7942,10 +8047,40 @@ function renderSitePhotosAdmin() {
         <div style="display:flex;gap:6px;margin-top:8px">
           <button onclick="downloadSitePhoto('${p.url}','${safeAuthor}','${p.created_at||''}')" style="flex:1;display:flex;align-items:center;justify-content:center;gap:5px;padding:6px 8px;font-size:11px;font-weight:700;border:1px solid var(--brd);border-radius:7px;background:#fff;color:var(--text);cursor:pointer;font-family:inherit"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:14px;height:14px"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="M7 10l5 5 5-5"/><path d="M12 15V3"/></svg>Stáhnout</button>
           <button onclick="printSitePhoto('${p.url}','${safeAuthor}')" title="Vytisknout fotku" style="display:flex;align-items:center;justify-content:center;padding:6px 9px;font-size:11px;font-weight:700;border:1px solid var(--brd);border-radius:7px;background:#fff;color:var(--text);cursor:pointer;font-family:inherit"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:14px;height:14px"><path d="M6 9V2h12v7"/><path d="M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2"/><rect x="6" y="14" width="12" height="8"/></svg></button>
+          <button onclick="deleteSitePhoto('${p.id}','${p.url}')" title="Smazat fotku" style="display:flex;align-items:center;justify-content:center;padding:6px 9px;font-size:11px;font-weight:700;border:1px solid var(--red);border-radius:7px;background:#fff;color:var(--red);cursor:pointer;font-family:inherit"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:14px;height:14px"><path d="M3 6h18M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6M14 11v6"/></svg></button>
         </div>
       </div>
     </div>`
   }).join('')
+}
+
+// Smaže fotku ze stavby — záznam v galerii i soubor v úložišti.
+async function deleteSitePhoto(id, url) {
+  if (!id) return
+  if (!confirm('Opravdu smazat tuto fotku?\n\nSmaže se z galerie i z úložiště. Akce je nevratná.')) return
+  showToast('⏳ Mažu fotku…')
+  // Cestu k souboru v bucketu vytáhneme z jeho veřejné adresy
+  try {
+    const m = String(url || '').match(/\/storage\/v1\/object\/public\/site-photos\/(.+)$/)
+    if (m) {
+      const path = decodeURIComponent(m[1].split('?')[0])
+      const { error: sErr } = await sb.storage.from('site-photos').remove([path])
+      // Když se soubor nesmaže, záznam v galerii přesto smažeme — fotka zmizí z přehledu
+      if (sErr) console.warn('[fotky] soubor z úložiště se nesmazal:', sErr.message)
+    }
+  } catch (e) { console.warn('[fotky] mazání souboru:', e?.message) }
+  const { error } = await sb.from('site_photos').delete().eq('id', id)
+  if (error) {
+    showToast(/row-level security|policy|permission|42501/i.test(error.message || '')
+      ? '❌ Databáze mazání nepovolila — chybí oprávnění pro admina'
+      : '❌ Chyba: ' + error.message)
+    return
+  }
+  _sitePhotosCache = _sitePhotosCache.filter(x => String(x.id) !== String(id))
+  const cnt = document.getElementById('fotky-count')
+  if (cnt) cnt.textContent = _sitePhotosCache.length ? _sitePhotosCache.length : ''
+  renderSitePhotosAdmin()
+  showToast('🗑 Fotka smazána')
 }
 
 // Stáhne fotku do počítače (přes blob, aby fungovalo i ze Supabase storage)
@@ -19006,8 +19141,9 @@ function buildKWOptions() {
 
 
 // ============ ZAOKROUHLENÍ HODIN - PRACOVNÍ PRAVIDLA ============
-// Standardní směna: příchod 7:00, přestávka 11:00-11:30, odchod 16:00
-const SHIFT = { start: 7*60, breakStart: 11*60, breakLen: 30, end: 16*60, abnormal: 18*60 }
+// Standardní směna: příchod 7:00, přestávka 11:00-11:30, odchod 16:00.
+// abnormal = hranice dlouhé pracovní doby (19:00), stejná jako u upozornění na dashboardu.
+const SHIFT = { start: 7*60, breakStart: 11*60, breakLen: 30, end: 16*60, abnormal: 19*60 }
 
 function timeToMin(t) {
   if (!t) return null
@@ -19235,7 +19371,7 @@ function flagBadge(flag, text) {
     lateBreak:  { bg: '#fff3cd', color: '#856404', label: 'Pozdní návrat z přestávky' },
     earlyOut:   { bg: '#cfe2ff', color: '#0a58ca', label: 'Brzy odešel' },
     overtime:   { bg: '#d1e7dd', color: '#146c43', label: 'Přesčas' },
-    abnormal:   { bg: '#f8d7da', color: '#842029', label: 'Abnormální doba' },
+    abnormal:   { bg: '#f8d7da', color: '#842029', label: 'Dlouhá pracovní doba — konec po 19:00' },
     incomplete: { bg: '#f8d7da', color: '#842029', label: 'Nesplněná směna (< 8h)' }
   }
   const b = badges[flag]
