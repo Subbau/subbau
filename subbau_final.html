@@ -6060,7 +6060,7 @@ async function saveProvizeTerms(select, workerId) {
     const { error: pErr } = await sb.from('profiles').update({ invoice_due_days: days }).eq('id', workerId)
     if (pErr) {
       console.warn('[provize] splatnost se nepropsala do profilu:', pErr.message)
-      showToast('⚠️ Splatnost uložena, ale nepropsala se do faktury — spusťte migraci supabase-migrace-splatnost-faktura.sql')
+      showToast('⚠️ Splatnost uložena. Admin ji na faktuře uvidí, pracovníkovi se ale nepropíše — spusťte migraci supabase-migrace-VSE.sql')
       return
     }
   }
@@ -8070,7 +8070,7 @@ async function applyDocNoExpiry(id, workerId, value) {
   const { error } = await sb.from('documents').update(upd).eq('id', id)
   if (error) {
     showToast(/no_expiry|column/i.test(error.message)
-      ? '❌ Chybí sloupec no_expiry — spusťte migraci supabase-migrace-doklad-bez-expirace.sql'
+      ? '❌ Chybí sloupec no_expiry — spusťte migraci supabase-migrace-VSE.sql'
       : '❌ Chyba: ' + error.message)
     return false
   }
@@ -16329,10 +16329,10 @@ function renderInvoice(d, lang = 'en') {
     total: 'Celkem · Gesamt · Total',
     vatNote: d.isVatPayer ? 'Plátce DPH · USt-pflichtig · VAT payer' : 'Neplátce DPH · Kein USt · Not VAT registered',
     vatRow: 'DPH · USt · VAT',
-    // Obojí se fakturuje bez DPH: neplátce ji neúčtuje, u plátce ji odvádí odběratel (B2B v EU)
-    vatReason: d.isVatPayer
-      ? 'Přenesená daňová povinnost · Reverse charge · Steuerschuldnerschaft des Leistungsempfängers'
-      : 'Dodavatel není plátcem DPH · Supplier is not VAT registered · Lieferant ist kein USt-Zahler',
+    // Služba do Německa (B2B) = daň odvádí odběratel. Reverse charge proto na faktuře
+    // musí být VŽDY — u plátce i neplátce DPH. U neplátce se navíc doplní, že daň neúčtuje.
+    vatReason: 'Přenesená daňová povinnost · Reverse charge · Steuerschuldnerschaft des Leistungsempfängers'
+      + (d.isVatPayer ? '' : '<br>Dodavatel není plátcem DPH · Supplier is not VAT registered · Lieferant ist kein USt-Zahler'),
     stampSign: 'Razítko a podpis · Stempel und Unterschrift · Stamp and signature',
     totalAmount: 'Celková částka · Gesamtbetrag · Total amount',
     exchangeRate: 'Kurz · Kurs · Rate',
@@ -16643,15 +16643,34 @@ async function loadInvoiceWeeks() {
   }
 
   // Splatnost nastavuje SubBau v sekci Provize — OSVČ ji jen vidí, needituje
-  applyInvoiceDueFromProfile('inv-due', currentProfile, true)
+  applyInvoiceDueFromProfile('inv-due', currentProfile, true, currentUser?.id)
+}
+
+// Splatnost zadává SubBau v sekci Provize jako kód "7/14" (worker_commissions.payment_terms)
+// a propisuje se do profilu jako invoice_due_days. Když ten sloupec v databázi ještě není,
+// přečteme kód rovnou z Provizí — jinak by faktura tiše počítala s výchozími 14 dny.
+async function dueDaysFromProvize(workerId) {
+  if (!workerId) return null
+  try {
+    const { data, error } = await sb.from('worker_commissions')
+      .select('payment_terms').eq('worker_id', workerId).maybeSingle()
+    if (error || !data || !data.payment_terms) return null
+    const days = parseInt(String(data.payment_terms).split('/')[1], 10)
+    return isNaN(days) ? null : days
+  } catch(e) { return null }
 }
 
 // Předvyplní splatnost podle toho, co má SubBau nastavené v sekci Provize.
 // lock=true → pole se zamkne (pracovník splatnost neurčuje).
-function applyInvoiceDueFromProfile(selectId, profile, lock) {
+async function applyInvoiceDueFromProfile(selectId, profile, lock, workerId) {
   const sel = document.getElementById(selectId)
   if (!sel) return
-  const days = profile?.invoice_due_days
+  let days = profile?.invoice_due_days
+  // Chybí v profilu → zkus Provize (a zapamatuj si do profilu v paměti, ať to jinde sedí)
+  if (days == null || days === '') {
+    days = await dueDaysFromProvize(workerId || profile?.id)
+    if (days != null && profile) profile.invoice_due_days = days
+  }
   if (days != null && days !== '') {
     const val = String(days)
     // Když sazba splatnosti není mezi nabízenými, přidej ji, ať se nastavení neztratí
@@ -18370,7 +18389,7 @@ async function addVacation() {
   }, _vacType)
   if (error) { showToast('❌ Chyba: ' + error.message); return }
   showToast(degraded
-    ? '⚠️ ' + info.label + ' uložena, ale zatím se nerozlišuje — spusťte migraci supabase-migrace-nemoc.sql'
+    ? '⚠️ ' + info.label + ' uložena, ale zatím se nerozlišuje — spusťte migraci supabase-migrace-VSE.sql'
     : '✅ ' + info.label + ' uložena')
   toggleVacForm()
   loadMobVacations()
@@ -18568,7 +18587,7 @@ async function wdAddVacation() {
   } catch(e) { console.warn('[nepřítomnost] upozornění pracovníkovi se neodeslalo:', e?.message) }
 
   showToast(degraded
-    ? '⚠️ ' + info.label + ' zapsána, ale zatím se nerozlišuje — spusťte migraci supabase-migrace-nemoc.sql'
+    ? '⚠️ ' + info.label + ' zapsána, ale zatím se nerozlišuje — spusťte migraci supabase-migrace-VSE.sql'
     : '✅ ' + info.label + ' zapsána')
   loadWdVacations()
 }
@@ -19602,7 +19621,7 @@ async function loadWdInvoiceForm(profile) {
     it.placeholder = byProf
   }
   // Splatnost se bere z Provizí (admin ji tam nastavuje), tady ji ještě může přepsat
-  applyInvoiceDueFromProfile('wd-inv-due', profile, false)
+  await applyInvoiceDueFromProfile('wd-inv-due', profile, false, currentWorkerId)
   // Ukaž odběratele včetně IČO a DIČ — chybějící údaje dotáhni z databáze firem
   renderWdInvoiceCustomerInfo(profile)
 
