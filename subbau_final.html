@@ -3502,18 +3502,21 @@ async function saveWorkerSignPlacement() {
       const resp = await fetch(wspState.fileUrl)
       const pdfBytes = await resp.arrayBuffer()
       await ensureLib('pdflib')
-      const { PDFDocument, StandardFonts, rgb } = PDFLib
+      const { PDFDocument, rgb } = PDFLib
       const pdfDoc = await PDFDocument.load(pdfBytes)
-      const font = await pdfDoc.embedFont(StandardFonts.Helvetica)
-      const stripDia = (s) => s.normalize('NFD').replace(/[\u0300-\u036f]/g,'')
+      // P\u00edsmo s h\u00e1\u010dky. D\u0159\u00edv se tu psalo Helvetikou, tak\u017ee se text s diakritikou
+      // vepsal do smlouvy bez h\u00e1\u010dk\u016f (\u201eDekuji" m\u00edsto \u201eD\u011bkuji").
+      const { font, unicode } = await embedCzechFont(pdfDoc)
       wspState.texts.forEach(t => {
         const pageIndex = (t.page || 1) - 1
         if (pageIndex < 0 || pageIndex >= pdfDoc.getPageCount()) return
         const page = pdfDoc.getPage(pageIndex)
+        const text = pdfSafeText(t.text, unicode)
         try {
-          page.drawText(t.text, { x: t.x, y: t.y, size: 12, font, color: rgb(0.1,0.1,0.1) })
+          page.drawText(text, { x: t.x, y: t.y, size: 12, font, color: rgb(0.1,0.1,0.1) })
         } catch(e) {
-          try { page.drawText(stripDia(t.text), { x: t.x, y: t.y, size: 12, font, color: rgb(0.1,0.1,0.1) }) } catch(e2) {}
+          // Posledn\u00ed pojistka \u2013 rad\u0161i text bez h\u00e1\u010dk\u016f ne\u017e neulo\u017een\u00e1 smlouva.
+          try { page.drawText(pdfSafeText(t.text, false), { x: t.x, y: t.y, size: 12, font, color: rgb(0.1,0.1,0.1) }) } catch(e2) {}
         }
       })
       const outBytes = await pdfDoc.save()
@@ -4018,10 +4021,55 @@ async function ensureLib(name) {
   } else if (name === 'jszip') {
     if (window.JSZip) return
     await _loadScript('https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js')
+  } else if (name === 'fontkit') {
+    if (window.fontkit) return
+    await _loadScript('https://unpkg.com/@pdf-lib/fontkit@1.1.1/dist/fontkit.umd.min.js')
   }
 }
 // Pohodlí: načti víc knihoven najednou
 async function ensureLibs(...names) { for (const n of names) await ensureLib(n) }
+
+// ===== ČESKÉ PÍSMO DO PDF =====
+// pdf-lib umí sám od sebe jen Helvetiku a ta české znaky neumí — na prvním „ě"
+// spadne s hláškou „WinAnsi cannot encode". Proto do PDF vkládáme skutečné
+// písmo (DejaVu Sans), které háčky a čárky zná.
+//
+// Do hotové smlouvy se z písma uloží JEN použité znaky (subset), takže soubor
+// naroste asi o 10 kB, ne o celé písmo.
+const PDF_FONT_URL = 'https://cdn.jsdelivr.net/npm/dejavu-fonts-ttf@2.37.3/ttf/DejaVuSans.ttf'
+let _pdfFontBytes = null
+
+async function _getPdfFontBytes() {
+  if (_pdfFontBytes) return _pdfFontBytes
+  const resp = await fetch(PDF_FONT_URL)
+  if (!resp.ok) throw new Error('písmo se nestáhlo (' + resp.status + ')')
+  _pdfFontBytes = await resp.arrayBuffer()
+  return _pdfFontBytes
+}
+
+// Vrátí písmo pro psaní do PDF. `unicode: true` znamená, že háčky projdou.
+// Kdyby se písmo nestáhlo (slabý signál), vrátíme Helvetiku s `unicode: false` —
+// text se pak zapíše bez háčků, ale ULOŽÍ SE. Nikdy kvůli tomu nespadneme.
+async function embedCzechFont(pdfDoc) {
+  try {
+    await ensureLib('fontkit')
+    pdfDoc.registerFontkit(window.fontkit)
+    const font = await pdfDoc.embedFont(await _getPdfFontBytes(), { subset: true })
+    return { font, unicode: true }
+  } catch (e) {
+    console.warn('[pdf] české písmo se nenačetlo, píšu bez háčků:', e)
+    const font = await pdfDoc.embedFont(PDFLib.StandardFonts.Helvetica)
+    return { font, unicode: false }
+  }
+}
+
+// Text určený k zapsání do PDF. S vloženým písmem zůstane, jak je; bez něj se
+// z něj sundají háčky, aby ho Helvetica zvládla.
+function pdfSafeText(text, unicode) {
+  const s = String(text == null ? '' : text)
+  // \u0300-\u036f = háčky a čárky zapsané zvlášť nad písmenem (proto ten NFD nad tím).
+  return unicode ? s : s.normalize('NFD').replace(/[\u0300-\u036f]/g, '').normalize('NFC')
+}
 
 // ===== PWA: registrace service workeru (umožní instalaci na plochu) =====
 if ('serviceWorker' in navigator) {
@@ -17189,9 +17237,13 @@ async function pdfFillSave() {
   if (loading) { loading.style.display = 'flex'; loading.textContent = 'Vkládám text do PDF…' }
   try {
     await ensureLib('pdflib')
-    const { PDFDocument, rgb, StandardFonts } = PDFLib
+    const { PDFDocument, rgb } = PDFLib
     const pdfDoc = await PDFDocument.load(pdfFillState.pdfBytes.slice(0))
-    const font = await pdfDoc.embedFont(StandardFonts.Helvetica)
+    // Písmo, které umí háčky. Dřív se tu brala Helvetica a ukládání spadlo
+    // na prvním „ě" hláškou „WinAnsi cannot encode".
+    if (loading) loading.textContent = 'Připravuji písmo…'
+    const { font, unicode } = await embedCzechFont(pdfDoc)
+    if (loading) loading.textContent = 'Vkládám text do PDF…'
     const pages = pdfDoc.getPages()
 
     // Pro každé pole přepočítej css souřadnice → PDF body (origin vlevo dole)
@@ -17214,7 +17266,7 @@ async function pdfFillSave() {
       const baselineFromTopCss = f.yCss + fontSize  // text baseline ~ horní okraj + velikost
       const yPdf = ph - (baselineFromTopCss / sc)
       // rozdělení na řádky (kdyby uživatel dal Enter)
-      const lines = (f.text||'').split('\n')
+      const lines = pdfSafeText(f.text || '', unicode).split('\n')
       lines.forEach((line, li) => {
         page.drawText(line, {
           x: xPdf,
