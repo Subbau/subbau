@@ -9965,6 +9965,35 @@ async function fillInvoiceCustomerFromTeam(workerId, teamId) {
 // Checkout dialog
 let pendingCheckout = null
 
+// Zápis "kde a co jsem dělal" je u konce směny POVINNÝ — dialog v tomto režimu
+// nejde zavřít (ani tlačítkem Zpět, ani stažením dolů). Volitelný je jen
+// průběžný zápis během dne (dayWorkLogMode).
+function checkoutIsMandatory() {
+  return !!pendingCheckout && !dayWorkLogMode
+}
+
+// Systémové tlačítko Zpět (Android / prohlížeč) by povinný dialog jinak odkliklo —
+// proto si při jeho otevření zapíšeme stav do historie a Zpět nasměrujeme zpátky sem.
+function _checkoutBackHandler() {
+  if (checkoutIsMandatory()) {
+    try { history.pushState({ sbCheckout: 1 }, '') } catch(e) {}
+    showToast('⚠️ Nejdřív napiš, kde a co jsi dělal')
+  } else {
+    disarmCheckoutBackGuard()
+  }
+}
+function armCheckoutBackGuard() {
+  if (window._checkoutBackGuard) return
+  window._checkoutBackGuard = true
+  try { history.pushState({ sbCheckout: 1 }, '') } catch(e) {}
+  window.addEventListener('popstate', _checkoutBackHandler)
+}
+function disarmCheckoutBackGuard() {
+  if (!window._checkoutBackGuard) return
+  window._checkoutBackGuard = false
+  window.removeEventListener('popstate', _checkoutBackHandler)
+}
+
 function showCheckoutDialog() {
   const d = document.getElementById('checkout-dialog')
   if (!d) return
@@ -9973,21 +10002,41 @@ function showCheckoutDialog() {
   if (titleEl) titleEl.textContent = 'Doplňte stavbu a co jste dělal'
   const confirmBtn = d.querySelector('button[onclick="saveDayWorkLog()"]') || d.querySelector('button[onclick="confirmCheckout()"]')
   if (confirmBtn) { const sp = confirmBtn.querySelector('span'); if (sp) sp.textContent = 'Uložit'; confirmBtn.setAttribute('onclick', 'confirmCheckout()') }
+  // Doplňuje se dnešní směna, nebo starší nedokončený den?
+  const rec = pendingCheckout?.record || todayRecord
+  const dayStr = pendingCheckout?.workDate || null
+  const isToday = !dayStr || dayStr === localDateStr()
+  let dayLabel = ''
+  if (!isToday) {
+    const dd = new Date(dayStr + 'T00:00:00')
+    if (!isNaN(dd)) dayLabel = dd.toLocaleDateString('cs-CZ', { weekday:'long', day:'2-digit', month:'2-digit' })
+  }
   const lbl = document.getElementById('checkout-time-label')
   if (lbl && pendingCheckout) {
-    lbl.textContent = 'Odchod ' + pendingCheckout.timeStr + ' (' + pendingCheckout.hours + 'h) je uložen — doplňte prosím detaily.'
+    lbl.textContent = (dayLabel ? dayLabel + ' · ' : '')
+      + 'Odchod ' + pendingCheckout.timeStr + ' (' + pendingCheckout.hours + 'h) je uložen — doplňte prosím detaily.'
   }
-  // Předvyplň stavbu: 1) GPS adresa (když povolena poloha), 2) dnešní záznam, 3) naposledy použitá
-  const fromRecord = todayRecord?.construction_site || todayRecord?.location_address || ''
-  const fromGps = gpsAddr || ''
+  const hintEl = document.getElementById('checkout-hint')
+  if (hintEl) {
+    hintEl.innerHTML = isToday
+      ? 'Ještě nám napiš, <b style="color:#211D1A">kde</b> a <b style="color:#211D1A">co</b> jsi dnes dělal — bez toho směnu uzavřít nejde.'
+      : 'U dne <b style="color:#211D1A">' + dayLabel + '</b> chybí zápis. Doplň prosím, <b style="color:#211D1A">kde</b> a <b style="color:#211D1A">co</b> jsi tehdy dělal.'
+  }
+  // Tlačítko Zpět v povinném režimu nedává smysl — schovej ho
+  const cancelBtn = document.getElementById('checkout-cancel-btn')
+  if (cancelBtn) cancelBtn.style.display = 'none'
+  // Předvyplň stavbu: 1) záznam dne, 2) GPS adresa (u dneška), 3) naposledy použitá
+  const fromRecord = rec?.construction_site || rec?.location_address || ''
+  const fromGps = isToday ? (gpsAddr || '') : ''
   const lastSite = lsGet('lastConstructionSite') || ''
   const siteEl = document.getElementById('checkout-site')
   if (siteEl) siteEl.value = fromRecord || fromGps || lastSite
   const descEl = document.getElementById('checkout-desc')
   // Předvyplň popis, pokud už byl během dne zapsán
-  if (descEl) descEl.value = todayRecord?.work_description || ''
+  if (descEl) descEl.value = rec?.work_description || ''
   d.style.display = 'flex'
   initCheckoutSwipe()
+  armCheckoutBackGuard()
   setTimeout(() => siteEl?.focus(), 100)
 }
 
@@ -10008,6 +10057,8 @@ function initCheckoutSwipe() {
     if (!dragging) return
     const dy = (y ?? startY) - startY
     inner.style.transition = 'transform .22s ease'; inner.style.transform = ''
+    // U konce směny se dialog stažením dolů nezavře — cancelCheckout jen připomene,
+    // že zápis chybí. Zavře se jen dobrovolný průběžný zápis.
     if (dy > 80) cancelCheckout()
     dragging = false; startY = null
   }
@@ -10021,8 +10072,18 @@ function initCheckoutSwipe() {
 
 function cancelCheckout() {
   const inner = document.getElementById('checkout-sheet-inner')
-  if (inner) { inner.style.transition = ''; inner.style.transform = '' }
+  if (inner) { inner.style.transition = 'transform .22s ease'; inner.style.transform = '' }
+  // Konec směny musí mít zapsanou stavbu i náplň práce — dialog proto nezavírej
+  if (checkoutIsMandatory()) {
+    showToast('⚠️ Nejdřív napiš, kde a co jsi dělal')
+    const siteEl = document.getElementById('checkout-site')
+    const descEl = document.getElementById('checkout-desc')
+    if (siteEl && !siteEl.value.trim()) siteEl.focus()
+    else if (descEl && !descEl.value.trim()) descEl.focus()
+    return
+  }
   document.getElementById('checkout-dialog').style.display = 'none'
+  disarmCheckoutBackGuard()
   pendingCheckout = null
   resetCheckoutDialogToDefault()
   dayWorkLogMode = false
@@ -10062,6 +10123,8 @@ async function confirmCheckout() {
   }
   const saved = savedRows && savedRows[0]
   if (saved && (saved.work_description == null || saved.work_description === '') && desc) {
+    // Sloupec v databázi chybí — vynucování vypni, jinak by dialog vyskakoval donekonečna
+    _workDescColumnMissing = true
     console.warn('[checkout] work_description se neuložil — chybí sloupec v tabulce attendance?')
     showToast('⚠️ Popis se neuložil — chybí sloupec work_description v databázi')
   }
@@ -10074,6 +10137,7 @@ async function confirmCheckout() {
   }
 
   document.getElementById('checkout-dialog').style.display = 'none'
+  disarmCheckoutBackGuard()
   pendingCheckout = null
   todayAttId = null
   todayRecord = null
@@ -10326,6 +10390,11 @@ function openDayWorkLog() {
   if (titleEl) titleEl.textContent = 'Co jsem dnes dělal'
   const lbl = document.getElementById('checkout-time-label')
   if (lbl) lbl.textContent = 'Můžete zapsat kdykoli během dne (i o pauze).'
+  const hintEl = document.getElementById('checkout-hint')
+  if (hintEl) hintEl.innerHTML = 'Zapiš, <b style="color:#211D1A">kde</b> a <b style="color:#211D1A">co</b> jsi dnes dělal. Na konci směny se tě už ptát nebudeme.'
+  // Průběžný zápis je dobrovolný — tlačítko Zpět zobraz
+  const cancelBtn = document.getElementById('checkout-cancel-btn')
+  if (cancelBtn) cancelBtn.style.display = 'block'
   const confirmBtn = d.querySelector('button[onclick="confirmCheckout()"]')
   if (confirmBtn) { const sp = confirmBtn.querySelector('span'); if (sp) sp.textContent = 'Uložit'; confirmBtn.setAttribute('onclick', 'saveDayWorkLog()') }
   // Předvyplň
@@ -10367,6 +10436,7 @@ async function saveDayWorkLog() {
   // Vrať dialog do původního stavu (checkout)
   resetCheckoutDialogToDefault()
   document.getElementById('checkout-dialog').style.display = 'none'
+  disarmCheckoutBackGuard()
   dayWorkLogMode = false
   showToast('✅ Zapsáno')
   getTodayRecord()
@@ -10378,8 +10448,63 @@ function resetCheckoutDialogToDefault() {
   if (!d) return
   const titleEl = document.getElementById('checkout-title')
   if (titleEl) titleEl.textContent = 'Konec směny'
+  const hintEl = document.getElementById('checkout-hint')
+  if (hintEl) hintEl.innerHTML = 'Ještě nám napiš, <b style="color:#211D1A">kde</b> a <b style="color:#211D1A">co</b> jsi dnes dělal — bez toho směnu uzavřít nejde.'
+  const cancelBtn = document.getElementById('checkout-cancel-btn')
+  if (cancelBtn) cancelBtn.style.display = 'none'
   const confirmBtn = d.querySelector('button[onclick="saveDayWorkLog()"]')
   if (confirmBtn) { const sp = confirmBtn.querySelector('span'); if (sp) sp.textContent = 'Uložit a ukončit směnu'; confirmBtn.setAttribute('onclick', 'confirmCheckout()') }
+}
+
+// Uzavřená směna bez zápisu „kde a co jsem dělal" se musí doplnit. Kdyby pracovník
+// appku během dialogu zavřel, po dalším otevření mu nedokončený den vyskočí znovu —
+// jinak by šla povinnost obejít prostým zavřením aplikace.
+let _workLogPromptBusy = false
+let _workDescColumnMissing = false
+
+async function checkPendingWorkLog() {
+  if (!currentUser || _workLogPromptBusy || _workDescColumnMissing) return
+  if (pendingCheckout || dayWorkLogMode) return          // dialog už řeší jiný den
+  const dlg = document.getElementById('checkout-dialog')
+  if (dlg && dlg.style.display === 'flex') return        // dialog je právě otevřený
+  // Jen pro pracovníky s povolenou docházkou (admin sem nepatří)
+  if (currentProfile && currentProfile.role === 'admin') return
+  _workLogPromptBusy = true
+  try {
+    const od = new Date(); od.setDate(od.getDate() - 7)   // dozadu jen týden, ať to nestraší donekonečna
+    const { data, error } = await sb.from('attendance')
+      .select('id, work_date, check_in, check_out, total_hours, construction_site, work_description, location_address')
+      .eq('worker_id', currentUser.id)
+      .gte('work_date', localDateStr(od))
+      .not('check_in', 'is', null)
+      .not('check_out', 'is', null)
+      .order('work_date', { ascending: true })
+    if (error) {
+      // Chybí sloupec v databázi → vynucování vypni, ať to appku neblokuje
+      if (/column|schema cache/i.test(error.message || '')) _workDescColumnMissing = true
+      else console.warn('[zápis práce] kontrola selhala:', error.message)
+      return
+    }
+    // Jen uzavřené směny (mají příchod i odchod) — rozdělaná směna ani záznam
+    // druhé stavby se neřeší. Filtr držíme i tady, ať to nestojí jen na databázi.
+    const chybi = (data || []).find(r => r.check_in && r.check_out &&
+      (!(r.construction_site || '').trim() || !(r.work_description || '').trim()))
+    if (!chybi) return
+    pendingCheckout = {
+      timeStr: (chybi.check_out || '').slice(0, 5),
+      hours: chybi.total_hours || 0,
+      attId: chybi.id,
+      workDate: chybi.work_date,
+      record: chybi
+    }
+    clearCheckoutPhotos()
+    resetCheckoutDialogToDefault()
+    showCheckoutDialog()
+  } catch (e) {
+    console.warn('[zápis práce] kontrola výjimka:', e?.message)
+  } finally {
+    _workLogPromptBusy = false
+  }
 }
 
 async function getTodayRecord() {
@@ -10420,6 +10545,8 @@ async function getTodayRecord() {
   }
   // Schovej/ukaž proužek "Načítám polohu" podle toho, jestli už je adresa
   if (typeof updateGpsStrip === 'function') updateGpsStrip()
+  // Uzavřený den bez zápisu „kde a co jsem dělal" → vyskočí znovu a nejde zavřít
+  checkPendingWorkLog()
 }
 
 function updateMobStav(rec, allToday) {
@@ -12795,13 +12922,17 @@ function sv(name, navEl) {
   if(name === 'pristupy') { loadAccess() }
   if(name === 'provize') { loadProvize() }
   if(name === 'provize-pristup') { loadProvizeAccessList() }
-  if(name === 'smlouvy') { loadAdminContracts() }
+  if(name === 'smlouvy') { loadAdminContracts(); loadContractWorkers() }
   if(name === 'faktury') { loadCompanies() }
   if(name === 'tymy') { loadTeams() }
   if(name === 'fotky') { loadSitePhotosAdmin() }
-  if(name === 'dochazka') { fillKWSelect(true) }  // předvyber aktuální týden + načti data
+  if(name === 'dochazka') { fillKWSelect(true); loadTodayTimeline(); loadAttendanceWorkers() }
   if(name === 'kalendar') { renderCalendar() }
   if(name === 'cekajici-registrace') { loadPendingRegistrationsPage() }
+  // Zbylé sekce si data taky natáhnou znovu, ať admin nemusí obnovovat stránku
+  if(name === 'dashboard') { loadDashboard(); checkDocumentAlerts(); loadDocumentAlertsStat(); refreshPendingRegistrations() }
+  if(name === 'pracovnici') { loadWorkers() }
+  if(name === 'dokumenty') { loadDocuments() }
   const titles={dashboard:'Dashboard',tymy:'Skupiny / Týmy',dochazka:'Docházka','cekajici-registrace':'Čekající registrace',kalendar:'Kalendář',pracovnici:'Pracovníci',dokumenty:'Dokumenty',fotky:'Fotky ze stavby',smlouvy:'Smlouvy',faktury:'Firmy',zpravy:'Zprávy',chat:'Chat',oznameni:'Oznámení',pristupy:'Přístupy',provize:'Provize','provize-pristup':'Přístup/provize'}
   const pt = document.getElementById('pt')
   if (pt && titles[name]) pt.textContent = titles[name]
@@ -16440,7 +16571,7 @@ function renderInvoice(d, lang = 'en') {
           <td style="padding:5px 0;font-size:9pt;text-align:right;font-weight:600">0,00 €</td>
         </tr>
         <tr>
-          <td colspan="2" style="padding:0 0 5px;font-size:7.5pt;color:#9a9a9a;line-height:1.35">${L.vatReason}</td>
+          <td colspan="2" style="padding:5px 0 7px"><div style="font-size:8pt;font-weight:700;color:#211D1A;background:#faf6ee;border:1px solid #E8A13A;border-radius:6px;padding:7px 10px;line-height:1.4">${L.vatReason}</div></td>
         </tr>
         <tr>
           <td style="padding:5px 0;font-size:8pt;color:#9a9a9a">${totalCZK} CZK</td>
@@ -19997,6 +20128,13 @@ function tichaObnovaDat() {
 setInterval(tichaObnovaDat, 60000)
 // při návratu k oknu
 window.addEventListener('focus', tichaObnovaDat)
+// Nedokončený zápis „kde a co jsem dělal" připomeň hned po návratu do aplikace
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible' && typeof checkPendingWorkLog === 'function') checkPendingWorkLog()
+})
+window.addEventListener('focus', () => {
+  if (typeof checkPendingWorkLog === 'function') checkPendingWorkLog()
+})
 // při přepnutí zpět na záložku / probuzení telefonu
 document.addEventListener('visibilitychange', () => {
   if (document.visibilityState === 'visible') tichaObnovaDat()
@@ -20455,7 +20593,7 @@ document.addEventListener('visibilitychange', () => {
         <div id="checkout-time-label" style="font-size:13px;color:#9a9082;margin-top:1px"></div>
       </div>
     </div>
-    <p style="font-size:13px;color:#6b6157;line-height:1.5;margin:14px 0 18px;padding:12px 14px;background:#faf0dc;border-radius:12px">Ještě nám napiš, <b style="color:#211D1A">kde</b> a <b style="color:#211D1A">co</b> jsi dnes dělal — pak směnu uložíme a spočítáme hodiny.</p>
+    <p id="checkout-hint" style="font-size:13px;color:#6b6157;line-height:1.5;margin:14px 0 18px;padding:12px 14px;background:#faf0dc;border-radius:12px">Ještě nám napiš, <b style="color:#211D1A">kde</b> a <b style="color:#211D1A">co</b> jsi dnes dělal — bez toho směnu uzavřít nejde.</p>
     <div style="margin-bottom:16px">
       <label style="font-size:13px;font-weight:800;color:#211D1A;display:block;margin-bottom:8px">Na jaké stavbě jsi pracoval?</label>
       <input type="text" id="checkout-site" placeholder="např. Mnichov — Schwabing, Praha — Vinohrady…"
@@ -20483,7 +20621,7 @@ document.addEventListener('visibilitychange', () => {
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:19px;height:19px"><path d="M20 6 9 17l-5-5"/></svg>
       <span>Uložit a ukončit směnu</span>
     </button>
-    <button onclick="cancelCheckout()"
+    <button id="checkout-cancel-btn" onclick="cancelCheckout()"
       style="width:100%;padding:13px;background:none;border:none;color:#9a9082;border-radius:12px;font-size:14px;font-weight:600;cursor:pointer;font-family:inherit">
       Zpět
     </button>
