@@ -6951,6 +6951,49 @@ async function resetLongDayAlerts() {
   loadLongDayAlert()
 }
 
+// Když admin docházku opraví (nebo den smaže) a záznam už 19:00 nepřekračuje,
+// nemá smysl si dál pamatovat, že byl skrytý — značka se uklidí sama, ať
+// v databázi nezůstávají viset staré řádky.
+async function cleanStaleLongDayDismissals(aktualni) {
+  // Když dotaz na docházku selhal, prázdný výsledek neznamená „vše je vyřešeno" —
+  // úklid by pak zbytečně vrátil skrytá upozornění zpátky.
+  if (!window._longDayLoadOk) return
+  if (!window._longDayDismissed || !window._longDayDismissed.size) return
+  const zive = new Set((aktualni || []).map(r => String(r.id)))
+  const kUklidu = [...window._longDayDismissed].filter(id => !zive.has(id))
+  if (!kUklidu.length) return
+  kUklidu.forEach(id => window._longDayDismissed.delete(id))
+  try {
+    const { error } = await sb.from('doc_alert_dismissals').delete()
+      .in('dismiss_key', kUklidu.map(id => LONG_KEY_PREFIX + id))
+    if (error) throw error
+  } catch (e) { console.warn('[dlouhý den] úklid vyřešených skrytí:', e?.message) }
+}
+
+// „Smazat" u jednoho dne — celý záznam docházky se odstraní (typicky omylem
+// zapnutá směna, kterou nikdo neodpracoval). Hodiny toho dne tím zmizí,
+// proto se ptáme a v otázce je vidět, koho a který den se to týká.
+async function deleteLongDayRecord(id, workerId, jmeno, popis) {
+  if (!id) return
+  if (!confirm('Opravdu SMAZAT celý záznam docházky?\n\n'
+    + (jmeno || 'Pracovník') + '\n' + (popis || '')
+    + '\n\nHodiny tohoto dne se nenávratně ztratí.'
+    + '\nPokud jen nesedí časy, dejte Zrušit a raději je opravte kliknutím na pracovníka.')) return
+  const { error } = await sb.from('attendance').delete().eq('id', id)
+  if (error) {
+    showToast(/row-level security|policy|permission|42501/i.test(error.message || '')
+      ? '❌ Databáze mazání nepovolila — chybí oprávnění pro admina'
+      : '❌ Chyba mazání: ' + error.message)
+    return
+  }
+  // Smazaný den už nemá co hlídat — ať po něm nezůstane viset značka „skryto".
+  if (window._longDayDismissed) window._longDayDismissed.delete(String(id))
+  try { await sb.from('doc_alert_dismissals').delete().eq('dismiss_key', LONG_KEY_PREFIX + id) }
+  catch (e) { console.warn('[dlouhý den] úklid po smazání:', e?.message) }
+  showToast('🗑 Záznam docházky smazán')
+  await refreshAttendanceEverywhere(workerId || undefined)
+}
+
 // Poskládá z data ("2026-03-12") a času ("07:00:00") skutečné datum a čas.
 function attDateTime(dateStr, timeStr) {
   if (!dateStr || !timeStr) return null
@@ -6980,6 +7023,10 @@ async function computeLongDayAlerts() {
       .gte('work_date', localDateStr(since))
       .order('work_date', { ascending: false })
   ])
+
+  // Prošly oba dotazy? Bez toho by se prázdný výsledek po výpadku sítě
+  // tvářil jako „žádný dlouhý den" a úklid skrytých by je vrátil zpátky.
+  window._longDayLoadOk = !openRes.error && !closedRes.error
 
   const items = []
   const openIds = new Set()
@@ -7019,6 +7066,7 @@ async function loadLongDayAlert() {
 
   await loadLongDayDismissals()      // co už jiný admin vyřídil, se znovu neukazuje
   const vse = await computeLongDayAlerts()
+  await cleanStaleLongDayDismissals(vse)   // opravené i smazané dny přestanou být „skryté"
   const items = vse.filter(r => !window._longDayDismissed.has(String(r.id)))
   const skrytych = vse.length - items.length
 
@@ -7042,6 +7090,8 @@ async function loadLongDayAlert() {
   const zaznamy = n === 1 ? 'záznam' : (n < 5 ? 'záznamy' : 'záznamů')
   const den = d => new Date(String(d).slice(0, 10) + 'T00:00:00').toLocaleDateString('cs-CZ', { day: '2-digit', month: '2-digit' })
   const cas = d => d.toLocaleTimeString('cs-CZ', { hour: '2-digit', minute: '2-digit' })
+  // Jméno pracovníka může obsahovat apostrof — ať nerozbije onclick="…('…')".
+  const arg = s => String(s == null ? '' : s).replace(/\\/g, '\\\\').replace(/'/g, "\\'").replace(/"/g, '&quot;')
 
   div.style.display = 'block'
   div.innerHTML = `
@@ -7057,6 +7107,10 @@ async function loadLongDayAlert() {
         const popis = r._kind === 'open'
           ? `${den(r.work_date)} · příchod ${cas(r._startedAt)} · <b>odchod nezaznamenán</b> (běží ${r._hours.toFixed(1)} h)`
           : `${den(r.work_date)} · ${cas(r._startedAt)} → ${cas(r._endedAt)} · skončil po ${LONG_DAY_HOUR}:00`
+        // Totéž bez HTML — jde do potvrzovacího okna u mazání, ať admin vidí, který den maže.
+        const popisText = r._kind === 'open'
+          ? `${den(r.work_date)} · příchod ${cas(r._startedAt)} · odchod nezaznamenán`
+          : `${den(r.work_date)} · ${cas(r._startedAt)} → ${cas(r._endedAt)}`
         const odznak = r._kind === 'open'
           ? `<span style="flex-shrink:0;background:var(--red);color:#fff;font-size:11px;font-weight:700;padding:3px 8px;border-radius:10px;white-space:nowrap">neukončeno ▶</span>`
           : `<span style="flex-shrink:0;background:var(--amber);color:#211D1A;font-size:11px;font-weight:700;padding:3px 8px;border-radius:10px;white-space:nowrap">${r._hours.toFixed(1)} h</span>`
@@ -7069,10 +7123,11 @@ async function loadLongDayAlert() {
             <div style="display:flex;align-items:center;gap:7px;flex-shrink:0">
               ${odznak}
               <button onclick="event.stopPropagation();dismissLongDayAlert('${r.id}')" title="Vyřízeno — už mi to nepřipomínej" style="font-size:11px;padding:3px 9px;border:1px solid var(--brd);border-radius:7px;background:#fff;color:var(--text3);cursor:pointer;font-family:inherit;font-weight:600;display:inline-flex;align-items:center;gap:4px;white-space:nowrap"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" style="width:12px;height:12px"><path d="M18 6L6 18M6 6l12 12"/></svg>Skrýt</button>
+              <button onclick="event.stopPropagation();deleteLongDayRecord('${r.id}','${r.worker_id||''}','${arg(jmeno)}','${arg(popisText)}')" title="Smazat celý záznam docházky — hodiny toho dne se ztratí" style="font-size:11px;padding:3px 9px;border:1px solid var(--red);border-radius:7px;background:#fff;color:var(--red);cursor:pointer;font-family:inherit;font-weight:600;display:inline-flex;align-items:center;gap:4px;white-space:nowrap"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" style="width:12px;height:12px"><path d="M3 6h18M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6M14 11v6"/></svg>Smazat</button>
             </div>
           </div>`
       }).join('')}
-      <div style="font-size:11px;color:var(--text3);margin-top:8px">Docházka je uložená přesně tak, jak ji pracovník zapsal — tohle je jen upozornění. Klikněte na pracovníka pro detail, nebo dejte <b>Skrýt</b>, když je to vyřízené.</div>
+      <div style="font-size:11px;color:var(--text3);margin-top:8px">Docházka je uložená přesně tak, jak ji pracovník zapsal — tohle je jen upozornění. Klikněte na pracovníka a časy opravte (upozornění pak zmizí samo), dejte <b>Skrýt</b>, když je den v pořádku, nebo <b>Smazat</b>, když záznam vznikl omylem.</div>
     </div>`
 
   div.querySelector('div').onclick = function(e) {
