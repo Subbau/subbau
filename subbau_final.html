@@ -2214,7 +2214,7 @@ button:not(.x-close) > svg:first-child{margin-right:6px}
   <div style="background:#fff;border-radius:16px;max-width:1200px;width:95%;margin:auto;overflow:visible;box-shadow:0 24px 80px rgba(0,0,0,0.4)">
     <div style="background:var(--blue);padding:18px 22px;display:flex;justify-content:space-between;align-items:center">
       <div style="display:flex;align-items:center;gap:14px">
-        <div id="wd-avatar-wrap" style="width:48px;height:48px;border-radius:50%;background:rgba(255,255,255,.2);display:flex;align-items:center;justify-content:center;overflow:hidden;flex-shrink:0">
+        <div id="wd-avatar-wrap" onclick="openWorkerAvatarPreview()" title="Zobrazit fotku ve velkém" style="width:48px;height:48px;border-radius:50%;background:rgba(255,255,255,.2);display:flex;align-items:center;justify-content:center;overflow:hidden;flex-shrink:0;cursor:default">
           <img id="wd-avatar-img" src="" style="width:48px;height:48px;border-radius:50%;object-fit:cover;display:none">
           <span id="wd-avatar-init" style="font-size:18px;font-weight:700;color:#E8A13A">—</span>
         </div>
@@ -2752,7 +2752,7 @@ async function saveAdminSignedPDF(signedBlob) {
   const updateData = isForWorker
     ? {file_url:signedUrl,signature_url:signedUrl,signed_at:new Date().toISOString(),status:'signed_electronic'}
     : {file_url:signedUrl,admin_signature_url:signedUrl,admin_signed_at:new Date().toISOString(),status:'pending'}
-  const {error:dbErr} = await sb.from('contracts').update(updateData).eq('id',contractId)
+  const {error:dbErr} = await updateContractFile(contractId, updateData)
   if (dbErr) throw new Error('DB: ' + dbErr.message)
   if (!isForWorker) {
     const {data:cData} = await sb.from('contracts').select('worker_id,title').eq('id',contractId).single()
@@ -2776,12 +2776,12 @@ async function saveWorkerSignedPDF(signedBlob) {
     if (upErr) throw new Error('Upload: ' + upErr.message)
     const {data:urlData} = sb.storage.from('contracts').getPublicUrl(filePath)
     const signedUrl = urlData?.publicUrl
-    const {error:dbErr} = await sb.from('contracts').update({
+    const {error:dbErr} = await updateContractFile(contractId, {
       file_url: signedUrl,
       company_signature_url: signedUrl,
       company_signed_at: new Date().toISOString()
       // sign_token ponecháváme — firma se přes stejný odkaz vrátí ke smlouvě (jen ke stažení)
-    }).eq('id', contractId)
+    })
     if (dbErr) throw new Error('DB: ' + dbErr.message)
     closeSignModal()
     showCompanySignedView(contractId)
@@ -2794,7 +2794,7 @@ async function saveWorkerSignedPDF(signedBlob) {
   if (upErr) throw new Error('Upload: ' + upErr.message)
   const {data:urlData} = sb.storage.from('contracts').getPublicUrl(filePath)
   const signedUrl = urlData?.publicUrl
-  const {error:dbErr} = await sb.from('contracts').update({file_url:signedUrl,signature_url:signedUrl,signed_at:new Date().toISOString(),status:'signed_electronic'}).eq('id',contractId)
+  const {error:dbErr} = await updateContractFile(contractId, {file_url:signedUrl,signature_url:signedUrl,signed_at:new Date().toISOString(),status:'signed_electronic'})
   if (dbErr) throw new Error('DB: ' + dbErr.message)
   closeSignModal(); showToast('Smlouva podepsána! ✓'); loadMobContracts()
 }
@@ -3197,7 +3197,7 @@ async function submitWorkerSignWithPlacement() {
         // sign_token ponecháváme — firma se přes odkaz vrátí ke smlouvě ke stažení
       }
       if (cSignedUrl) { upd.company_signature_url = cSignedUrl; upd.file_url = cSignedUrl }
-      const { error: cDbErr } = await sb.from('contracts').update(upd).eq('id', cId)
+      const { error: cDbErr } = await updateContractFile(cId, upd)
       if (cDbErr) throw new Error(cDbErr.message)
 
       closeSignModal()
@@ -3213,12 +3213,12 @@ async function submitWorkerSignWithPlacement() {
     const { data: urlData } = sb.storage.from('contracts').getPublicUrl(filePath)
     const signedUrl = urlData?.publicUrl
 
-    const { error: dbErr } = await sb.from('contracts').update({
+    const { error: dbErr } = await updateContractFile(workerPdfState.contractId, {
       file_url: signedUrl,
       signature_url: signedUrl,
       signed_at: new Date().toISOString(),
       status: 'signed_electronic'
-    }).eq('id', workerPdfState.contractId)
+    })
     if (dbErr) throw new Error(dbErr.message)
 
     showToast('✅ Smlouva úspěšně podepsána!')
@@ -3987,7 +3987,7 @@ async function submitAdminSignatureWithPlacement() {
     const updateData = isForWorker
       ? { file_url: signedUrl, signature_url: signedUrl, signed_at: new Date().toISOString(), status: 'signed_electronic' }
       : { file_url: signedUrl, admin_signature_url: signedUrl, admin_signed_at: new Date().toISOString(), status: 'pending' }
-    const { error: dbErr } = await sb.from('contracts').update(updateData).eq('id', pdfSignState.contractId)
+    const { error: dbErr } = await updateContractFile(pdfSignState.contractId, updateData)
     if (dbErr) throw new Error('DB error: ' + dbErr.message)
 
     // 7. Notifikace pracovníkovi — jen u běžného admin podpisu (ne když admin podepsal za OSVČ)
@@ -4817,6 +4817,8 @@ function _onAdminDbChange(table, payload) {
   const view = _activeAdminView()
   // Chat má vlastní obnovu; tady jen zvuk (výše) — dál nepokračuj kvůli refreshi sekcí
   if (table === 'chat_messages') return
+  // Otevřená karta pracovníka se dorovná bez ohledu na to, která sekce je vidět
+  _refreshOpenWorkerCard(table, payload)
   // Statistiky na dashboardu se týkají skoro všeho — drž je svěží
   if (view === 'dashboard') {
     _debouncedRefresh('dashboard', () => { loadDashboard(); checkDocumentAlerts(); loadDocumentAlertsStat() })
@@ -5065,6 +5067,7 @@ function startAdminRealtime() {
     }
   })
   _startAdminRealtimeWatchdog()
+  _startAdminFallbackPolling()
 
   // Při návratu na záložku (telefon ve spánku apod.) krátce dorovnej aktivní sekci
   if (!window._adminVisHooked) {
@@ -8280,7 +8283,7 @@ function renderDocuments() {
   tbody.innerHTML = data.map(d=>`
     <tr>
       <td><b>${d.worker?.full_name||'—'}</b></td>
-      <td>${docLabels[d.doc_type]||d.doc_type}</td>
+      <td>${docTypeCellHtml(d)}</td>
       <td style="font-size:12px">${d.file_name}</td>
       <td>${docValidityCellHtml(d)}</td>
       <td><span class="pill ${d.status==='ok'?'pg':d.status==='unreadable'||d.status==='expired'||d.status==='rejected'?'pr':'pa'}">${({ok:'V pořádku',pending:'Čeká na kontrolu',unreadable:'Nečitelný',expired:'Propadlý',rejected:'Zamítnutý'})[d.status]||d.status}</span></td>
@@ -8413,6 +8416,76 @@ async function applyDocNoExpiry(id, workerId, value) {
   showToast(value ? '✅ U tohoto dokladu se platnost už neřeší' : '🔔 Platnost dokladu se zase hlídá')
   if (typeof loadDocumentAlertsStat === 'function') loadDocumentAlertsStat()
   return true
+}
+
+// Přeřazení dokladu pod jiný typ. Lidi si při nahrávání často spletou kolonku —
+// občanku pošlou jako „Jiný dokument" — ať to admin spraví bez mazání a nahrávání znovu.
+async function applyDocTypeChange(id, workerId, newType) {
+  if (!newType) return false
+  const { error } = await sb.from('documents').update({ doc_type: newType }).eq('id', id)
+  if (error) { showToast('❌ ' + docSaveErrorText(error)); return false }
+  // Upozornění visí na konkrétním dokladu — po přeřazení ať se přepočítají podle nového typu
+  if (workerId) {
+    const keys = ['expiring', 'expired', 'novalid', 'pending', 'unreadable'].map(k => workerId + '|' + k + '|' + id)
+    if (window._docAlertDismissed) keys.forEach(k => window._docAlertDismissed.delete(k))
+    try { await sb.from('doc_alert_dismissals').delete().in('dismiss_key', keys) } catch(e) {}
+  }
+  const nt = DOC_TYPE_BY_ID[newType]
+  showToast('✅ Přeřazeno na: ' + docLabel(newType)
+    + (nt && nt.hasExpiry ? ' — doplňte platnost' : ''))
+  if (typeof loadDocumentAlertsStat === 'function') loadDocumentAlertsStat()
+  return true
+}
+
+// --- Přeřazení z tabulky Dokumenty ---
+let _docTypeEditId = null
+function startEditDocType(id) { _docTypeEditId = id; _docValidityEditId = null; renderDocuments() }
+function cancelEditDocType() { _docTypeEditId = null; renderDocuments() }
+async function saveDocType(id) {
+  const doc = _docsCache.find(d => d.id === id)
+  const val = document.getElementById('doc-type-input')?.value
+  if (val && val !== doc?.doc_type && !await applyDocTypeChange(id, doc?.worker_id, val)) return
+  _docTypeEditId = null
+  await loadDocuments()
+}
+function docTypeCellHtml(d) {
+  const btn = 'font-size:10.5px;padding:2px 7px;border-radius:6px;cursor:pointer;font-family:inherit;font-weight:700'
+  if (_docTypeEditId === d.id) {
+    return `<span style="display:inline-flex;gap:4px;align-items:center;flex-wrap:wrap">
+      <select id="doc-type-input" style="font-size:11.5px;padding:4px 6px;border:1px solid var(--brd);border-radius:8px;font-family:inherit">${docTypeOptions(d.doc_type)}</select>
+      <button onclick="saveDocType('${d.id}')" style="${btn};border:none;background:#3f7d54;color:#fff">Uložit</button>
+      <button onclick="cancelEditDocType()" style="${btn};border:1px solid var(--brd);background:#fff;color:#9a9082">Zrušit</button>
+    </span>`
+  }
+  return `<span style="display:inline-flex;gap:6px;align-items:center;flex-wrap:wrap">${docLabel(d.doc_type)}
+    <button onclick="startEditDocType('${d.id}')" title="Přeřadit pod jiný typ — když se doklad nahrál do špatné kolonky"
+      style="${btn};border:1px solid var(--brd);background:#fff;color:#9a9082">Přeřadit</button></span>`
+}
+
+// --- Totéž na kartě pracovníka ---
+let _wdTypeEditId = null
+function startEditWdDocType(id, workerId) { _wdTypeEditId = id; _wdValidityEditId = null; loadWdDocs(workerId) }
+function cancelEditWdDocType(workerId) { _wdTypeEditId = null; loadWdDocs(workerId) }
+async function saveWdDocType(id, workerId, oldType) {
+  const val = document.getElementById('wd-type-input')?.value
+  if (val && val !== oldType && !await applyDocTypeChange(id, workerId, val)) return
+  _wdTypeEditId = null
+  await loadWdDocs(workerId)
+}
+function wdDocTypeHtml(d, workerId) {
+  const btn = 'font-size:11px;padding:3px 8px;border-radius:8px;cursor:pointer;font-family:inherit;font-weight:700'
+  if (_wdTypeEditId === d.id) {
+    return `<div style="display:flex;gap:5px;align-items:center;flex-wrap:wrap">
+      <select id="wd-type-input" style="font-size:12px;padding:5px 7px;border:1px solid var(--brd);border-radius:8px;font-family:inherit">${docTypeOptions(d.doc_type)}</select>
+      <button onclick="saveWdDocType('${d.id}','${workerId}','${d.doc_type}')" style="${btn};border:none;background:#3f7d54;color:#fff">Uložit</button>
+      <button onclick="cancelEditWdDocType('${workerId}')" style="${btn};border:1px solid var(--brd);background:#fff;color:#9a9082">Zrušit</button>
+    </div>`
+  }
+  return `<div style="display:flex;gap:7px;align-items:center;flex-wrap:wrap">
+    <span style="font-size:14px;font-weight:800;color:#211D1A;line-height:1.25">${docLabel(d.doc_type)}</span>
+    <button onclick="startEditWdDocType('${d.id}','${workerId}')" title="Přeřadit pod jiný typ — když se doklad nahrál do špatné kolonky"
+      style="${btn};border:1px solid var(--brd);background:#fff;color:#9a9082">Přeřadit</button>
+  </div>`
 }
 
 // Přepnutí z tabulky Dokumenty
@@ -11035,6 +11108,8 @@ function resetCheckoutDialogToDefault() {
 // jinak by šla povinnost obejít prostým zavřením aplikace.
 let _workLogPromptBusy = false
 let _workDescColumnMissing = false
+// Jak daleko zpět se nedoplněné dny ještě připomínají
+const WORKLOG_BACKFILL_DAYS = 14
 
 async function checkPendingWorkLog() {
   if (!currentUser || _workLogPromptBusy || _workDescColumnMissing) return
@@ -11045,14 +11120,20 @@ async function checkPendingWorkLog() {
   if (currentProfile && currentProfile.role === 'admin') return
   _workLogPromptBusy = true
   try {
-    // Vynucuje se jen dnešek — starší dny se zpětně nepřipomínají, aby pracovníka
-    // ráno neblokoval den, který už neuzavře (dozadu to řeší admin ručně).
+    // Vynucuje se i zpětně, ne jen dnešek: kdo dialog obešel (zavřel appku, vypnul
+    // telefon), nesmí mu den beze zápisu propadnout do zapomnění — druhý den mu
+    // vyskočí znovu. Bereme dva týdny zpátky; starší už řeší admin ručně.
+    const dnesStr = localDateStr()
+    const odD = new Date(); odD.setDate(odD.getDate() - WORKLOG_BACKFILL_DAYS)
+    const odStr = localDateStr(odD)
     const { data, error } = await sb.from('attendance')
       .select('id, work_date, check_in, check_out, total_hours, construction_site, work_description, location_address')
       .eq('worker_id', currentUser.id)
-      .eq('work_date', localDateStr())
+      .gte('work_date', odStr)
+      .lte('work_date', dnesStr)
       .not('check_in', 'is', null)
       .not('check_out', 'is', null)
+      .order('work_date', { ascending: true })
       .order('check_in', { ascending: true })
     if (error) {
       // Chybí sloupec v databázi → vynucování vypni, ať to appku neblokuje
@@ -11060,11 +11141,10 @@ async function checkPendingWorkLog() {
       else console.warn('[zápis práce] kontrola selhala:', error.message)
       return
     }
-    // Jen dnešní uzavřené směny (mají příchod i odchod) — starší dny, rozdělaná
-    // směna ani záznam druhé stavby se neřeší. Filtr držíme i tady, ať to
-    // nestojí jen na databázi.
-    const dnes = localDateStr()
-    const chybi = (data || []).find(r => r.work_date === dnes && r.check_in && r.check_out &&
+    // Jen uzavřené směny (mají příchod i odchod) — rozdělaná směna ani záznam
+    // druhé stavby se neřeší. Filtr držíme i tady, ať to nestojí jen na databázi.
+    // Řeší se od nejstaršího dne, ať se nedodělky odbourávají popořadě.
+    const chybi = (data || []).find(r => r.check_in && r.check_out &&
       (!(r.construction_site || '').trim() || !(r.work_description || '').trim()))
     if (!chybi) return
     pendingCheckout = {
@@ -13514,10 +13594,23 @@ async function saveMyCar(has) {
   showToast('✅ Uloženo')
 }
 
-// Náhled profilové fotky (klik na fotku v profilu)
+// Náhled profilové fotky (klik na fotku v profilu) — pracovník na mobilu
 function openAvatarPreview() {
   const url = currentProfile?.avatar_url
   if (!url) { showToast('Zatím nemáte nahranou fotku'); return }
+  showAvatarPreview(url)
+}
+
+// Totéž u admina v detailu pracovníka — klik na fotku v hlavičce ji zvětší,
+// ať je na velké obrazovce poznat, koho posílá na stavbu.
+function openWorkerAvatarPreview() {
+  const url = currentWorkerProfile?.avatar_url
+  if (!url) { showToast('Tento pracovník zatím nemá nahranou fotku'); return }
+  showAvatarPreview(url)
+}
+
+// Společné okno se zvětšenou fotkou (zavře se klepnutím kamkoli nebo křížkem)
+function showAvatarPreview(url) {
   let ov = document.getElementById('avatar-preview-overlay')
   if (!ov) {
     ov = document.createElement('div')
@@ -13542,6 +13635,96 @@ function reblurStats() {
   document.querySelectorAll('#admin-stats .blurable.revealed').forEach(el => el.classList.remove('revealed'))
 }
 
+// Načtení dat jedné sekce. Vytažené ze sv(), aby se šla stejná sekce kdykoli
+// dorovnat i na pozadí — admin nemá důvod kvůli cizí změně načítat celou appku znovu.
+function loadAdminViewData(name) {
+  if(name === 'zpravy') { loadNotifWorkers(); loadNotifHistory() }
+  if(name === 'pristupy') { loadAccess() }
+  if(name === 'provize') { loadProvize() }
+  if(name === 'provize-pristup') { loadProvizeAccessList() }
+  if(name === 'smlouvy') { loadAdminContracts(); loadContractWorkers() }
+  if(name === 'faktury') { loadCompanies() }
+  if(name === 'tymy') { loadTeams() }
+  if(name === 'fotky') { loadSitePhotosAdmin() }
+  if(name === 'dochazka') { fillKWSelect(true); loadTodayTimeline(); loadAttendanceWorkers() }
+  if(name === 'kalendar') { renderCalendar() }
+  if(name === 'cekajici-registrace') { loadPendingRegistrationsPage() }
+  if(name === 'dashboard') { loadDashboard(); checkDocumentAlerts(); loadDocumentAlertsStat(); refreshPendingRegistrations() }
+  if(name === 'pracovnici') { loadWorkers() }
+  if(name === 'dokumenty') { loadDocuments() }
+}
+
+// Rozepsaný formulář se nesmí přepsat pod rukama — obnovu na pozadí kvůli tomu
+// raději o kolo odložíme.
+function _adminEditInProgress() {
+  if (_docTypeEditId || _docValidityEditId || _wdTypeEditId || _wdValidityEditId) return true
+  const a = document.activeElement
+  return !!(a && (a.tagName === 'INPUT' || a.tagName === 'TEXTAREA' || a.tagName === 'SELECT'))
+}
+
+// Je otevřená karta pracovníka?
+function _wdCardOpen() {
+  const m = document.getElementById('worker-modal')
+  return !!(m && m.style.display === 'flex' && typeof currentWorkerId !== 'undefined' && currentWorkerId)
+}
+
+// Týká se změna zrovna zobrazeného pracovníka? Když to z dat nejde poznat
+// (smazaný řádek vrací jen id), radši kartu obnovíme.
+function _wdCardTouched(table, payload) {
+  const row = payload?.new || payload?.old
+  if (!row) return true
+  const wid = table === 'profiles' ? row.id : row.worker_id
+  return !wid || wid === currentWorkerId
+}
+
+// Otevřená karta pracovníka se dorovná sama — admin v ní tráví většinu času.
+function _refreshOpenWorkerCard(table, payload) {
+  if (!_wdCardOpen() || !_wdCardTouched(table, payload)) return
+  const wid = currentWorkerId
+  switch (table) {
+    case 'documents':
+      if (_adminEditInProgress()) return
+      _debouncedRefresh('wd-docs', () => loadWdDocs(wid))
+      break
+    case 'contracts':
+      _debouncedRefresh('wd-contracts', () => loadWdContracts(wid))
+      break
+    case 'attendance':
+      if (typeof loadWdAttendance === 'function') _debouncedRefresh('wd-att', loadWdAttendance)
+      break
+    case 'profiles':
+      if (typeof loadWdVacations === 'function') _debouncedRefresh('wd-vac', loadWdVacations)
+      break
+  }
+}
+
+// Dorovnání toho, co má admin právě na obrazovce — bez přepínání a bez reloadu.
+function refreshActiveAdminView() {
+  if (_adminEditInProgress()) return
+  const view = _activeAdminView()
+  if (view) { try { loadAdminViewData(view) } catch(e) { console.warn('[dorovnání sekce]', e?.message) } }
+  if (_wdCardOpen()) {
+    const wid = currentWorkerId
+    try {
+      loadWdDocs(wid); loadWdContracts(wid)
+      if (typeof loadWdAttendance === 'function') loadWdAttendance()
+    } catch(e) { console.warn('[dorovnání karty]', e?.message) }
+  }
+}
+
+// Záloha pro případ, že živé spojení nejede (server ho nemá zapnutý, mizerná síť):
+// obrazovka se tiše dorovná sama, místo aby admin musel načítat celou appku znovu.
+let _rtFallbackInt = null
+function _startAdminFallbackPolling() {
+  if (_rtFallbackInt) return
+  _rtFallbackInt = setInterval(() => {
+    if (!_jeAdminPrihlasen()) return
+    if (document.visibilityState !== 'visible') return
+    if (adminRealtimeSub?.state === 'joined') return   // živé spojení stačí
+    refreshActiveAdminView()
+  }, 45000)
+}
+
 function sv(name, navEl) {
   // Při každém přepnutí stránky znovu rozmaž dlaždice na dashboardu (soukromí)
   if (typeof reblurStats === 'function') reblurStats()
@@ -13564,21 +13747,7 @@ function sv(name, navEl) {
     }
     activeChatWorkerId = null
   }
-  if(name === 'zpravy') { loadNotifWorkers(); loadNotifHistory() }
-  if(name === 'pristupy') { loadAccess() }
-  if(name === 'provize') { loadProvize() }
-  if(name === 'provize-pristup') { loadProvizeAccessList() }
-  if(name === 'smlouvy') { loadAdminContracts(); loadContractWorkers() }
-  if(name === 'faktury') { loadCompanies() }
-  if(name === 'tymy') { loadTeams() }
-  if(name === 'fotky') { loadSitePhotosAdmin() }
-  if(name === 'dochazka') { fillKWSelect(true); loadTodayTimeline(); loadAttendanceWorkers() }
-  if(name === 'kalendar') { renderCalendar() }
-  if(name === 'cekajici-registrace') { loadPendingRegistrationsPage() }
-  // Zbylé sekce si data taky natáhnou znovu, ať admin nemusí obnovovat stránku
-  if(name === 'dashboard') { loadDashboard(); checkDocumentAlerts(); loadDocumentAlertsStat(); refreshPendingRegistrations() }
-  if(name === 'pracovnici') { loadWorkers() }
-  if(name === 'dokumenty') { loadDocuments() }
+  loadAdminViewData(name)
   const titles={dashboard:'Dashboard',tymy:'Skupiny / Týmy',dochazka:'Docházka','cekajici-registrace':'Čekající registrace',kalendar:'Kalendář',pracovnici:'Pracovníci',dokumenty:'Dokumenty',fotky:'Fotky ze stavby',smlouvy:'Smlouvy',faktury:'Firmy',zpravy:'Zprávy',chat:'Chat',oznameni:'Oznámení',pristupy:'Přístupy',provize:'Provize','provize-pristup':'Přístup/provize'}
   const pt = document.getElementById('pt')
   if (pt && titles[name]) pt.textContent = titles[name]
@@ -17723,6 +17892,177 @@ async function uploadAdminSignedContract() {
 }
 
 
+// ===== VERZE SMLOUVY =====
+// Podpis se vždycky vkládá do PDF a výsledek přepíše file_url. Když se někdo
+// podepíše špatně, potřebuje admin sáhnout po starší verzi — proto si původní
+// (nepodepsanou) smlouvu odkládáme stranou a všechny verze nabízíme ke stažení.
+
+function contractPublicUrl(path) {
+  try { const { data } = sb.storage.from('contracts').getPublicUrl(path); return data?.publicUrl || '' }
+  catch (e) { return '' }
+}
+
+// Název souboru bez háčků a mezer, ať ho stáhne každý systém bez reptání.
+function safeFileName(s) {
+  return String(s == null ? '' : s).normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-zA-Z0-9]+/g, '_').replace(/^_+|_+$/g, '') || 'smlouva'
+}
+
+// Odloží stranou původní verzi smlouvy — jen jednou, podruhé už se nepřepíše.
+async function ensureContractOriginal(contractId) {
+  if (!contractId) return null
+  const path = 'signed/' + contractId + '_original.pdf'
+  try {
+    const { data: list } = await sb.storage.from('contracts').list('signed', { limit: 100, search: contractId })
+    if ((list || []).some(f => f && f.name === contractId + '_original.pdf')) return contractPublicUrl(path)
+    const { data: c } = await sb.from('contracts').select('file_url').eq('id', contractId).maybeSingle()
+    if (!c || !c.file_url) return null
+    const resp = await fetch(c.file_url, { cache: 'no-store' })
+    if (!resp.ok) throw new Error('HTTP ' + resp.status)
+    const blob = await resp.blob()
+    const { error } = await sb.storage.from('contracts').upload(path, blob, { contentType: 'application/pdf', upsert: false })
+    // 'already exists' je v pořádku — někdo jiný zálohu stihl dřív.
+    if (error && !/exist|duplicate/i.test(error.message || '')) throw error
+    return contractPublicUrl(path)
+  } catch (e) {
+    console.warn('[smlouva] záloha původní verze selhala:', e?.message)
+    return null
+  }
+}
+
+// Jediná cesta, kterou se mění file_url smlouvy — vždy nejdřív zazálohuje původní verzi.
+async function updateContractFile(contractId, updateData) {
+  if (updateData && updateData.file_url) await ensureContractOriginal(contractId)
+  return sb.from('contracts').update(updateData).eq('id', contractId)
+}
+
+// Stáhne PDF rovnou do počítače (ne jen otevře v záložce).
+async function downloadPdfUrl(url, filename) {
+  if (!url) { showToast('⚠️ Tato verze smlouvy není dostupná'); return }
+  showToast('⏳ Stahuji smlouvu…')
+  try {
+    const resp = await fetch(url, { cache: 'no-store' })
+    if (!resp.ok) throw new Error('HTTP ' + resp.status)
+    const blob = await resp.blob()
+    const objUrl = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = objUrl
+    a.download = (filename || 'smlouva') + '.pdf'
+    document.body.appendChild(a); a.click(); a.remove()
+    setTimeout(() => URL.revokeObjectURL(objUrl), 5000)
+    showToast('✅ Smlouva stažena')
+  } catch (e) {
+    console.warn('[smlouva] stažení selhalo:', e?.message)
+    window.open(url, '_blank')
+    showToast('ℹ️ Otevřel jsem PDF v nové záložce — uložte ho odtud')
+  }
+}
+
+// Přehled souborů smluv v úložišti — jeden dotaz pro celý seznam, ne pro každou smlouvu.
+async function loadContractStorageIndex() {
+  const idx = { originals: new Set(), filled: {} }
+  try {
+    const { data: signed } = await sb.storage.from('contracts').list('signed', { limit: 1000 })
+    ;(signed || []).forEach(f => {
+      const m = f && f.name && f.name.match(/^(.+)_original\.pdf$/)
+      if (m) idx.originals.add(m[1])
+    })
+  } catch (e) { console.warn('[smlouvy] výpis složky signed:', e?.message) }
+  try {
+    const { data: root } = await sb.storage.from('contracts').list('', { limit: 1000 })
+    ;(root || []).forEach(f => {
+      const m = f && f.name && f.name.match(/^filled_(.+?)_(\d+)\.pdf$/)
+      if (!m) return
+      ;(idx.filled[m[1]] = idx.filled[m[1]] || []).push({ name: m[0], ts: Number(m[2]) })
+    })
+    Object.values(idx.filled).forEach(a => a.sort((x, y) => x.ts - y.ts))
+  } catch (e) { console.warn('[smlouvy] výpis vyplněných verzí:', e?.message) }
+  return idx
+}
+
+// Seznam verzí jedné smlouvy, od nepodepsané po nejnovější.
+function contractVersions(c, idx) {
+  const out = []
+  const seen = new Set()
+  const add = v => { if (v.url && !seen.has(v.url)) { seen.add(v.url); out.push(v) } }
+  const scan = c.status === 'signed_scan'
+
+  // 1) Původní verze bez podpisů
+  const hasChanges = !!(c.admin_signature_url || c.signature_url || c.company_signature_url
+    || (idx && idx.filled && idx.filled[c.id] && idx.filled[c.id].length))
+  if (idx && idx.originals && idx.originals.has(c.id)) {
+    add({ label: 'Bez podpisů (originál)', desc: 'Tak, jak byla smlouva nahraná', file: 'bez_podpisu',
+          url: contractPublicUrl('signed/' + c.id + '_original.pdf'), color: '#6b6157' })
+  } else if (!hasChanges && c.file_url) {
+    add({ label: 'Bez podpisů (originál)', desc: 'Zatím nikdo nepodepsal', file: 'bez_podpisu',
+          url: c.file_url, color: '#6b6157' })
+  }
+
+  // 2) Verze s dopsaným textem, ještě bez podpisů
+  const filled = (idx && idx.filled && idx.filled[c.id]) || []
+  filled.forEach((f, i) => add({
+    label: filled.length > 1 ? ('Doplněný text (' + (i + 1) + ')') : 'S doplněným textem',
+    desc: 'Dopsané údaje, bez podpisů', file: 'doplneno' + (filled.length > 1 ? '_' + (i + 1) : ''),
+    url: contractPublicUrl(f.name), color: '#9a6b15'
+  }))
+
+  // 3) Náš podpis
+  if (c.admin_signature_url) add({
+    label: 'Podepsáno: SubBau', desc: c.signature_url ? 'Jen náš podpis, ještě bez OSVČ' : 'Jen náš podpis, čeká na OSVČ',
+    file: 'podpis_subbau', url: c.admin_signature_url, color: '#9a6b15'
+  })
+
+  // 4) Podpis OSVČ (do PDF, které už náš podpis obsahuje — pokud jsme podepsali dřív)
+  if (c.signature_url) add({
+    label: scan ? 'Podepsáno (nahraný sken)' : (c.admin_signed_at ? 'Podepsáno: SubBau + OSVČ' : 'Podepsáno: OSVČ'),
+    desc: scan ? 'Sken podepsané smlouvy' : (c.admin_signed_at ? 'Obě strany podepsané' : 'Jen podpis OSVČ'),
+    file: 'podpis_osvc', url: c.signature_url, color: '#2f6b45'
+  })
+
+  // 5) Podpis firmy
+  if (c.company_signature_url) add({
+    label: 'Podepsáno: i firma', desc: 'Včetně podpisu firmy',
+    file: 'podpis_firma', url: c.company_signature_url, color: '#1a56a0'
+  })
+
+  // 6) Aktuální verze, pokud se do žádné z výše uvedených netrefila
+  if (c.file_url) add({ label: 'Aktuální verze', desc: 'Poslední uložená podoba smlouvy',
+                        file: 'aktualni', url: c.file_url, color: '#211D1A' })
+  return out
+}
+
+// Rozbalovací seznam verzí — u každé „zobrazit" a „stáhnout".
+function contractVersionsHtml(c, idx, workerName) {
+  const vers = contractVersions(c, idx)
+  if (!vers.length) return ''
+  const base = safeFileName(workerName) + '_' + safeFileName(c.title)
+  const hasOriginal = vers.some(v => v.file === 'bez_podpisu')
+  const eyeIco = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:14px;height:14px;display:block"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>'
+  const dlIco = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:14px;height:14px;display:block"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="M7 10l5 5 5-5"/><path d="M12 15V3"/></svg>'
+  const btn = 'display:inline-flex;align-items:center;justify-content:center;width:30px;height:28px;border:1px solid var(--brd);border-radius:7px;background:#fff;cursor:pointer;font-family:inherit;flex-shrink:0'
+  const rows = vers.map(v => {
+    const current = c.file_url && v.url === c.file_url
+    return '<div style="display:flex;align-items:center;gap:8px;padding:7px 0;border-top:1px solid var(--brd)">'
+      + '<span style="width:8px;height:8px;border-radius:50%;background:' + v.color + ';flex-shrink:0"></span>'
+      + '<span style="flex:1;min-width:0;line-height:1.3">'
+      + '<span style="font-size:11.5px;font-weight:700;color:var(--text)">' + v.label
+      + (current ? ' <span style="font-weight:700;color:var(--green)">· aktuální</span>' : '') + '</span>'
+      + '<span style="display:block;font-size:10px;color:var(--text3)">' + v.desc + '</span>'
+      + '</span>'
+      + '<button onclick="event.stopPropagation();openPdfUrl(\'' + v.url + '\')" title="Zobrazit v prohlížeči" style="' + btn + ';color:var(--blue)">' + eyeIco + '</button>'
+      + '<button onclick="event.stopPropagation();downloadPdfUrl(\'' + v.url + '\',\'' + base + '_' + v.file + '\')" title="Stáhnout do počítače" style="' + btn + ';color:#211D1A">' + dlIco + '</button>'
+      + '</div>'
+  }).join('')
+  const note = hasOriginal ? ''
+    : '<div style="font-size:10px;color:var(--text3);padding:7px 0 0;border-top:1px solid var(--brd);line-height:1.4">Nepodepsaná verze u této smlouvy chybí — vznikla dřív, než se původní verze začaly odkládat.</div>'
+  return '<details style="margin-top:8px;border:1px solid var(--brd);border-radius:9px;background:var(--bg)">'
+    + '<summary style="padding:8px 11px;font-size:11.5px;font-weight:700;color:var(--text2);cursor:pointer;list-style:none;display:flex;align-items:center;gap:7px">'
+    + '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:14px;height:14px;flex-shrink:0"><path d="M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.7-.9l-.8-1.2A2 2 0 0 0 7.9 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2z"/></svg>'
+    + 'Verze ke stažení (' + vers.length + ')</summary>'
+    + '<div style="padding:0 11px 9px">' + rows + note + '</div>'
+    + '</details>'
+}
+
 // Otevřít PDF - spolehlivé i v Safari anonymous okně
 function openPdfUrl(url) {
   if (!url) { showToast('⚠️ PDF URL není dostupná'); return }
@@ -17984,11 +18324,11 @@ async function submitCompanyUploadedPDF() {
     if (upErr) throw new Error(upErr.message)
     const { data: urlData } = sb.storage.from('contracts').getPublicUrl(path)
     const signedUrl = urlData?.publicUrl
-    const { error: dbErr } = await sb.from('contracts').update({
+    const { error: dbErr } = await updateContractFile(cId, {
       file_url: signedUrl,
       company_signature_url: signedUrl,
       company_signed_at: new Date().toISOString()
-    }).eq('id', cId)
+    })
     if (dbErr) throw new Error(dbErr.message)
     showCompanySignedView(cId)
   } catch(e) {
@@ -18304,7 +18644,7 @@ async function pdfFillSave() {
       showToast('⚠️ Upload selhal, PDF staženo do zařízení')
     } else {
       // Aktualizuj smlouvu — nahraď file_url vyplněnou verzí
-      const { error: dbErr } = await sb.from('contracts').update({ file_url: publicUrl }).eq('id', pdfFillState.contractId)
+      const { error: dbErr } = await updateContractFile(pdfFillState.contractId, { file_url: publicUrl })
       if (dbErr) showToast('⚠️ PDF uloženo, ale záznam smlouvy se nepodařilo aktualizovat')
       else showToast('✅ Vyplněné PDF uloženo')
       loadAdminContracts()
@@ -18330,6 +18670,8 @@ async function loadAdminContracts() {
   if (cErr) { div.innerHTML=`<div style="color:red;padding:10px;font-size:12px">Chyba: ${cErr.message}</div>`; return }
   if (!data?.length) { div.innerHTML='<div style="text-align:center;padding:20px;color:var(--text3)">Žádné smlouvy</div>'; return }
   const statusLabels = {admin_pending:'⏳ Čeká na podpis admina',pending:'📝 Čeká na podpis OSVČ',signed_electronic:'✅ Podepsána',signed_scan:'✅ Podepsána (sken)',rejected:'❌ Zamítnuta'}
+  // Verze smluv v úložišti — jeden dotaz pro celý seznam
+  const stIdx = await loadContractStorageIndex()
   div.innerHTML = data.map(c=>`
     <div style="padding:12px 16px;border-bottom:1px solid var(--brd)">
       <div style="display:flex;justify-content:space-between;align-items:flex-start">
@@ -18342,18 +18684,16 @@ async function loadAdminContracts() {
           <span class="pill ${c.status==='pending'?'pa':c.status==='signed_electronic'?'pg':'pr'}">${statusLabels[c.status]||c.status}</span>
           ${c.signed_at?`<div style="font-size:10px;color:var(--text3);margin-top:3px">Podepsáno: ${c.signed_at.slice(0,10)}</div>`:''}
           ${c.file_url?`<button onclick="openPdfUrl('${c.file_url}')" style="font-size:11px;color:var(--blue);display:block;margin-top:3px;background:none;border:none;cursor:pointer;padding:0;font-family:inherit;text-decoration:underline"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:1em;height:1em;flex-shrink:0;vertical-align:-2px"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/></svg> Smlouva PDF</button>`:''}
-          ${c.admin_signature_url?`<button onclick="openPdfUrl('${c.admin_signature_url}')" style="font-size:11px;color:var(--amber);display:block;margin-top:2px;background:none;border:none;cursor:pointer;padding:0;font-family:inherit;text-decoration:underline"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:1em;height:1em;flex-shrink:0;vertical-align:-2px"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/></svg> Podpis admina</button>`:''}
-          ${c.signature_url?`<button onclick="openPdfUrl('${c.signature_url}')" style="font-size:11px;color:var(--green);display:block;margin-top:2px;background:none;border:none;cursor:pointer;padding:0;font-family:inherit;text-decoration:underline"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:1em;height:1em;flex-shrink:0;vertical-align:-2px"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/></svg> Podpis OSVČ</button>`:''}
           ${c.status==='admin_pending'?`<button onclick="openAdminSignModal('${c.id}','${(c.title||'').replace(/'/g,"\'")}','${c.file_url||''}')" style="margin-top:6px;width:100%;padding:5px 8px;background:#211D1A;color:#E8A13A;border:none;border-radius:6px;cursor:pointer;font-size:11px;font-weight:700"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:1em;height:1em;flex-shrink:0;vertical-align:-2px"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/></svg> Podepsat jako admin</button>`:''}
           ${!c.signature_url?`<button onclick="openSignForWorker('${c.id}','${(c.title||'').replace(/'/g,"\'")}','${c.file_url||''}')" style="margin-top:4px;width:100%;padding:5px 8px;background:var(--green);color:#fff;border:none;border-radius:6px;cursor:pointer;font-size:11px;font-weight:700;font-family:inherit"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:1em;height:1em;flex-shrink:0;vertical-align:-2px"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/></svg> Podepsat za OSVČ</button>`:''}
           ${!c.signature_url && c.file_url?`<button onclick="openWorkerSignPlaceModal('${c.id}','${(c.title||'').replace(/'/g,"\'")}','${c.file_url||''}')" style="margin-top:4px;width:100%;padding:5px 8px;background:${c.worker_sign_page?'#e8f5e9':'none'};border:1px solid ${c.worker_sign_page?'#2e7d32':'#9c3b22'};color:${c.worker_sign_page?'#2e7d32':'#9c3b22'};border-radius:6px;cursor:pointer;font-size:11px;font-weight:700;font-family:inherit">📍 ${c.worker_sign_page?'Místo podpisu nastaveno (změnit)':'Určit místo podpisu OSVČ'}</button>`:''}
           ${c.company_signed_at?`<div style="font-size:10px;color:var(--green);margin-top:3px">🏢 Firma podepsala: ${c.company_signed_at.slice(0,10)}${c.company_signer_name?' ('+c.company_signer_name+')':''}</div>`:''}
-          ${c.company_signature_url?`<button onclick="openPdfUrl('${c.company_signature_url}')" style="font-size:11px;color:var(--blue);display:block;margin-top:2px;background:none;border:none;cursor:pointer;padding:0;font-family:inherit;text-decoration:underline"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:1em;height:1em;flex-shrink:0;vertical-align:-2px"><rect x="4" y="2" width="16" height="20" rx="1"/><path d="M9 22v-4h6v4M8 6h.01M12 6h.01M16 6h.01M8 10h.01M12 10h.01M16 10h.01M8 14h.01M12 14h.01M16 14h.01"/></svg> Podpis firmy</button>`:''}
           ${c.file_url?`<button onclick="openPdfFillModal('${c.id}','${(c.title||'').replace(/'/g,String.fromCharCode(39))}','${c.file_url}')" style="margin-top:4px;width:100%;padding:5px 8px;background:none;border:1px solid var(--amber,#E8A13A);color:#9a6b15;border-radius:6px;cursor:pointer;font-size:11px;font-weight:700;font-family:inherit"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:1em;height:1em;flex-shrink:0;vertical-align:-2px"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/></svg> Vyplnit / dopsat do PDF</button>`:''}
           <button onclick="openCompanyLinkModal('${c.id}','${(c.title||'').replace(/'/g,"\'")}')" style="margin-top:4px;width:100%;padding:5px 8px;background:none;border:1px solid var(--blue);color:var(--blue);border-radius:6px;cursor:pointer;font-size:11px;font-weight:700;font-family:inherit"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:1em;height:1em;flex-shrink:0;vertical-align:-2px"><path d="M10 13a5 5 0 0 0 7 0l3-3a5 5 0 0 0-7-7l-1 1"/><path d="M14 11a5 5 0 0 0-7 0l-3 3a5 5 0 0 0 7 7l1-1"/></svg> Odkaz pro firmu</button>
           <button onclick="deleteContract('${c.id}','${(c.title||'').replace(/'/g,"\'")}','${c.file_url||''}','${c.admin_signature_url||''}','${c.signature_url||''}')" style="margin-top:4px;width:100%;padding:4px 8px;background:none;border:1px solid var(--red);color:var(--red);border-radius:6px;cursor:pointer;font-size:10px;font-family:inherit"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:1em;height:1em;flex-shrink:0;vertical-align:-2px"><path d="M3 6h18M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6M14 11v6"/></svg> Smazat smlouvu</button>
         </div>
       </div>
+      ${contractVersionsHtml(c, stIdx, c.worker?.full_name)}
     </div>`).join('')
 }
 
@@ -19400,6 +19740,7 @@ async function openWorkerModal(id) {
   // Avatar v hlavičce
   const wdAvatarImg = document.getElementById('wd-avatar-img')
   const wdAvatarInit = document.getElementById('wd-avatar-init')
+  const wdAvatarWrap = document.getElementById('wd-avatar-wrap')
   if (wdAvatarImg && wdAvatarInit) {
     if (w.avatar_url) {
       wdAvatarImg.src = w.avatar_url
@@ -19409,6 +19750,11 @@ async function openWorkerModal(id) {
       wdAvatarImg.style.display = 'none'
       wdAvatarInit.style.display = 'block'
       wdAvatarInit.textContent = (w.full_name||'?').split(' ').map(n=>n[0]).join('').slice(0,2).toUpperCase()
+    }
+    // „Ruka" jen u pracovníka, který fotku opravdu má — jinak nemá co zvětšovat.
+    if (wdAvatarWrap) {
+      wdAvatarWrap.style.cursor = w.avatar_url ? 'pointer' : 'default'
+      wdAvatarWrap.title = w.avatar_url ? 'Zobrazit fotku ve velkém' : 'Pracovník nemá nahranou fotku'
     }
   }
   const wdFullnameInput = document.getElementById('wd-fullname-input')
@@ -20167,7 +20513,7 @@ async function loadWdDocs(id) {
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:20px;height:20px"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/></svg>
       </div>
       <div style="flex:1;min-width:0">
-        <div style="font-size:14px;font-weight:800;color:#211D1A;line-height:1.25">${types[d.doc_type]||d.doc_type}</div>
+        ${wdDocTypeHtml(d, wid)}
         <div style="font-size:11.5px;color:#9a9082;margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${d.file_name||'—'}</div>
         <div style="display:flex;flex-wrap:wrap;gap:5px;margin-top:7px">
           <span style="display:inline-flex;align-items:center;background:${col.bg};color:${col.c};border:1px solid ${col.b};font-size:11px;font-weight:800;padding:3px 9px;border-radius:14px">${si.label}</span>
@@ -20296,8 +20642,11 @@ async function loadWdContracts(id) {
   if (!data?.length) { div.innerHTML='<div style="color:var(--text3);text-align:center;padding:20px">Žádné smlouvy</div>'; return }
   const sL = { admin_pending:'⏳ Čeká na admina', pending:'⏳ Čeká na OSVČ', signed_electronic:'✅ Podepsána', signed_scan:'✅ Podepsána (sken)', rejected:'❌ Zamítnuta' }
   const sP = { admin_pending:'pa', pending:'pa', signed_electronic:'pg', signed_scan:'pg', rejected:'pr' }
+  const stIdx = await loadContractStorageIndex()
+  const wName = (typeof currentWorkerProfile !== 'undefined' && currentWorkerProfile?.full_name) || 'smlouva'
   div.innerHTML = data.map(c => `
-    <div style="padding:10px 12px;border-bottom:1px solid var(--brd);display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+    <div style="padding:10px 12px;border-bottom:1px solid var(--brd)">
+     <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
       <div style="flex:1;min-width:120px">
         <div style="font-size:13px;font-weight:600">${c.title}</div>
         <div style="font-size:11px;color:var(--text3)">${c.created_at?.slice(0,10)||'—'}</div>
@@ -20306,13 +20655,12 @@ async function loadWdContracts(id) {
       ${c.company_signed_at ? `<span style="font-size:10px;color:var(--green);font-weight:600;white-space:nowrap">🏢 Firma podepsala ${c.company_signed_at.slice(0,10)}</span>` : ''}
       <div style="display:flex;gap:4px;flex-wrap:wrap;flex-shrink:0">
         ${c.file_url ? `<button onclick="openPdfUrl('${c.file_url}')" style="font-size:11px;padding:2px 8px;border:1px solid var(--blue);border-radius:5px;cursor:pointer;background:none;color:var(--blue);font-family:inherit">PDF</button>` : ''}
-        ${c.admin_signature_url ? `<button onclick="openPdfUrl('${c.admin_signature_url}')" style="font-size:11px;padding:2px 8px;border:1px solid var(--amber);border-radius:5px;cursor:pointer;background:none;color:var(--amber);font-family:inherit">Adm.podpis</button>` : ''}
-        ${c.signature_url ? `<button onclick="openPdfUrl('${c.signature_url}')" style="font-size:11px;padding:2px 8px;border:1px solid var(--green);border-radius:5px;cursor:pointer;background:none;color:var(--green);font-family:inherit">OSVČ podpis</button>` : ''}
-        ${c.company_signature_url ? `<button onclick="openPdfUrl('${c.company_signature_url}')" style="font-size:11px;padding:2px 8px;border:1px solid var(--blue);border-radius:5px;cursor:pointer;background:none;color:var(--blue);font-family:inherit"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:1em;height:1em;flex-shrink:0;vertical-align:-2px"><rect x="4" y="2" width="16" height="20" rx="1"/><path d="M9 22v-4h6v4M8 6h.01M12 6h.01M16 6h.01M8 10h.01M12 10h.01M16 10h.01M8 14h.01M12 14h.01M16 14h.01"/></svg> Podpis firmy</button>` : ''}
         ${c.status==='admin_pending' ? `<button onclick="openAdminSignModal('${c.id}','${(c.title||'').replace(/'/g,String.fromCharCode(39))}','${c.file_url||''}')" style="font-size:11px;padding:2px 8px;border:none;border-radius:5px;cursor:pointer;background:var(--blue);color:#fff;font-family:inherit;font-weight:700">Podepsat</button>` : ''}
         ${!c.signature_url ? `<button onclick="openSignForWorker('${c.id}','${(c.title||'').replace(/'/g,String.fromCharCode(39))}','${c.file_url||''}')" style="font-size:11px;padding:2px 8px;border:none;border-radius:5px;cursor:pointer;background:var(--green);color:#fff;font-family:inherit;font-weight:700">Za OSVČ</button>` : ''}
         <button onclick="deleteContract('${c.id}','${(c.title||'').replace(/'/g,String.fromCharCode(39))}','${c.file_url||''}','${c.admin_signature_url||''}','${c.signature_url||''}')" style="font-size:11px;padding:2px 8px;border:1px solid var(--red);border-radius:5px;cursor:pointer;background:none;color:var(--red);font-family:inherit"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:1em;height:1em;flex-shrink:0;vertical-align:-2px"><path d="M3 6h18M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6M14 11v6"/></svg> </button>
       </div>
+     </div>
+     ${contractVersionsHtml(c, stIdx, wName)}
     </div>`).join('')
 }
 
