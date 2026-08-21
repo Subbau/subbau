@@ -308,7 +308,7 @@ button:not(.x-close) > svg:first-child{margin-right:6px}
 .tl-tm{font-size:12px;font-weight:700;color:var(--text3)}
 
 /* Toast */
-.toast{position:fixed;bottom:100px;left:50%;transform:translateX(-50%);background:#211D1A;color:#fff;padding:12px 20px;border-radius:12px;font-size:14px;font-weight:700;z-index:999999;opacity:0;transition:opacity .2s;white-space:nowrap;max-width:90vw;text-align:center;box-shadow:0 4px 20px rgba(0,0,0,0.3)}
+.toast{position:fixed;bottom:100px;left:50%;transform:translateX(-50%);background:#211D1A;color:#fff;padding:12px 20px;border-radius:12px;font-size:14px;font-weight:700;z-index:999999;opacity:0;transition:opacity .2s;white-space:normal;overflow-wrap:anywhere;line-height:1.35;max-width:90vw;text-align:center;box-shadow:0 4px 20px rgba(0,0,0,0.3)}
 .toast.on{opacity:1}
 
 /* Pending screen */
@@ -2742,7 +2742,7 @@ button:not(.x-close) > svg:first-child{margin-right:6px}
   </div>
 </div>
 
-<div id="offline-banner" style="display:none;position:fixed;top:0;left:0;right:0;z-index:99999;background:#c0392b;color:#fff;text-align:center;padding:10px;font-size:14px;font-weight:700">
+<div id="offline-banner" style="display:none;position:fixed;top:0;left:0;right:0;z-index:99999;background:#c0392b;color:#fff;text-align:center;padding:calc(10px + env(safe-area-inset-top)) 10px 10px;font-size:14px;font-weight:700">
   ⚡ Žádné internetové připojení — záznamy nelze uložit
 </div>
 <div class="toast" id="toast"></div>
@@ -3150,11 +3150,16 @@ async function renderWorkerPDFPage(pageNum) {
   }
 
   // Pevné místo podpisu od admina → ukaž značku rovnou, bez kliknutí.
+  // Značka patří jen na tu stranu, kde se podpis opravdu umístil. Bez skrytí
+  // by po přelistování visela nad cizí stranou a podpis by se do PDF vložil
+  // někam jinam, než kam pracovník klepl.
+  const marker0 = document.getElementById('worker-sig-marker')
   if (workerPdfState.lockedSig && workerPdfState.sigPage === pageNum) {
     const cx = (workerPdfState.sigX || 0) * scale
     const cy = scaledVp.height - (workerPdfState.sigY || 0) * scale
-    const marker0 = document.getElementById('worker-sig-marker')
     if (marker0) { marker0.style.display = 'block'; marker0.style.left = cx + 'px'; marker0.style.top = cy + 'px' }
+  } else if (workerPdfState.lockedSig && marker0) {
+    marker0.style.display = 'none'
   }
 
   // Drag worker marker — jen když místo podpisu není pevně dané adminem
@@ -3180,6 +3185,8 @@ async function renderWorkerPDFPage(pageNum) {
       const sc2 = workerPdfState.scale || 1
       workerPdfState.sigX = nL / sc2
       workerPdfState.sigY = scaledVp.height / sc2 - nT / sc2
+      // Podpis patří na stranu, kterou má pracovník právě před sebou
+      workerPdfState.sigPage = workerPdfState.currentPage
     })
     wMarker.addEventListener('pointerup', () => {
       if (workerPdfState.lockedSig || !wDragging) return
@@ -3296,8 +3303,7 @@ async function submitWorkerSignWithPlacement() {
       finalY = (cssH / sc) - (mTop / sc)
     }
 
-    // Debug toast - ukáže kde presne podpis ide
-    showToast('Podpis: X=' + Math.round(finalX) + ' Y=' + Math.round(finalY) + ' (strana/' + pageW.toFixed(0) + 'x' + pageH.toFixed(0) + ')')
+    console.log('[podpis] X=' + Math.round(finalX) + ' Y=' + Math.round(finalY) + ' strana ' + pageW.toFixed(0) + 'x' + pageH.toFixed(0))
 
     page.drawImage(sigImg, {
       x: Math.max(5, Math.min(finalX - sw/2, pageW - sw - 5)),
@@ -3329,11 +3335,20 @@ async function submitWorkerSignWithPlacement() {
         }
       } catch(e) { console.warn('[company-sign] upload PDF selhal/timeout:', e?.message) }
 
+      // Bez uloženého podepsaného PDF se smlouva NESMÍ označit za podepsanou.
+      // Jinak firma vidí „Vertrag unterschrieben“, správce „Firma podepsala“,
+      // ale podepsaný soubor nikde není a přes odkaz už podepsat nejde —
+      // podpis existoval jen v paměti a zavřením okna zmizí.
+      if (!cSignedUrl) {
+        throw new Error('SIGN_UPLOAD_FAILED')
+      }
+
       const upd = {
-        company_signed_at: new Date().toISOString()
+        company_signed_at: new Date().toISOString(),
+        company_signature_url: cSignedUrl,
+        file_url: cSignedUrl
         // sign_token ponecháváme — firma se přes odkaz vrátí ke smlouvě ke stažení
       }
-      if (cSignedUrl) { upd.company_signature_url = cSignedUrl; upd.file_url = cSignedUrl }
       const { error: cDbErr } = await updateContractFile(cId, upd)
       if (cDbErr) throw new Error(cDbErr.message)
 
@@ -3362,7 +3377,15 @@ async function submitWorkerSignWithPlacement() {
     closeSignModal()
     if (typeof loadMobContracts === 'function') loadMobContracts()
   } catch(e) {
-    showToast('❌ Chyba: ' + e.message)
+    // Neuložený podpis dostane srozumitelnou hlášku v jazyce podepisujícího;
+    // okno zůstane otevřené, ať jde podpis rovnou zopakovat.
+    if (e && e.message === 'SIGN_UPLOAD_FAILED') {
+      showToast(signLangDE
+        ? '❌ Speichern fehlgeschlagen — bitte erneut unterschreiben'
+        : '❌ Podpis se nepodařilo uložit — zkuste to prosím znovu')
+    } else {
+      showToast('❌ Chyba: ' + e.message)
+    }
   } finally {
     if (btn) { btn.textContent = signLangDE ? '✍️ Unterschrift speichern' : '✍️ Uložit podpis do smlouvy'; btn.disabled = false }
   }
@@ -4347,6 +4370,82 @@ function installApp() {
   showAndroidInstallGuide()
 }
 
+// ===== Nabídka instalace po registraci =====
+// Nový OSVČ si appku často neumí stáhnout sám. Hned po registraci mu proto
+// nabídneme instalaci — s možností odložit, ať ho to neblokuje.
+function _instalaceMozna() {
+  return isMobile() && !isAppInstalled()
+}
+
+function nabidniInstalaci(duvod, pokus) {
+  if (!_instalaceMozna()) return
+  // „Připomenout později“ platí den; do té doby nabídku neukazuj
+  const odlozeno = parseInt(lsGet('instalace-pripomenout') || '0', 10)
+  if (odlozeno && Date.now() < odlozeno) return
+
+  let ov = document.getElementById('install-offer-modal')
+  // Už je otevřená — nic dalšího neřeš (jinak by se čekání níž zacyklilo,
+  // protože tohle okno samo je „otevřený dialog“)
+  if (ov && ov.style.display === 'flex') return
+
+  // Průvodce prvním přihlášením nebo jiné otevřené okno má přednost —
+  // zkus to za chvíli znovu, ať se dvě okna nepřekrývají. Nejvýš desetkrát,
+  // pak to vzdej; nabídka se ukáže při příštím přihlášení.
+  const kolikatePokus = pokus || 1
+  if (typeof _jeOtevrenyDialog === 'function' && _jeOtevrenyDialog()) {
+    if (kolikatePokus < 10) setTimeout(() => nabidniInstalaci(duvod, kolikatePokus + 1), 3000)
+    return
+  }
+
+  if (ov) { ov.style.display = 'flex'; return }
+  ov = document.createElement('div')
+  ov.id = 'install-offer-modal'
+  ov.style.cssText = 'position:fixed;inset:0;z-index:10030;background:rgba(33,29,26,.65);display:flex;align-items:center;justify-content:center;padding:20px'
+  const naviciKrok = isIOS()
+    ? 'V Safari klepnete dole na <b>Sdílet</b> a zvolíte <b>Přidat na plochu</b>.'
+    : 'Potvrdíte <b>Nainstalovat</b> a aplikace se přidá na plochu telefonu.'
+  ov.innerHTML = `
+    <div style="background:#fff;border-radius:20px;padding:26px 24px calc(24px + env(safe-area-inset-bottom));width:100%;max-width:420px;box-shadow:0 16px 48px rgba(0,0,0,.35);position:relative;max-height:90vh;overflow-y:auto">
+      <button class="x-close" onclick="zavritNabidkuInstalace()" title="Zavřít" aria-label="Zavřít" style="position:absolute;top:12px;right:12px;width:36px;height:36px;border-radius:50%;background:#f2efe9;border:none;color:#6b6157;cursor:pointer;font-family:inherit;display:flex;align-items:center;justify-content:center"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" style="width:19px;height:19px;display:block"><path d="M18 6L6 18M6 6l12 12"/></svg></button>
+      <div style="width:56px;height:56px;border-radius:16px;background:#faf0dc;color:#9a6b15;display:flex;align-items:center;justify-content:center;margin-bottom:15px">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:29px;height:29px"><rect x="5" y="2" width="14" height="20" rx="2.5"/><path d="M12 6v8"/><path d="m8.5 10.5 3.5 3.5 3.5-3.5"/></svg>
+      </div>
+      <div style="font-size:19px;font-weight:800;color:#211D1A;margin-bottom:7px">Stáhněte si aplikaci do telefonu</div>
+      <p style="font-size:13.5px;color:#6b6157;line-height:1.6;margin:0 0 14px">
+        Docházku pak zapisujete jedním klepnutím z plochy — nemusíte pokaždé hledat odkaz v prohlížeči.
+        ${naviciKrok}
+      </p>
+      <div style="background:#faf9f6;border:1px solid var(--brd);border-radius:12px;padding:12px 14px;font-size:12.5px;color:#6b6157;line-height:1.55;margin-bottom:20px">
+        Nespěchá to — aplikace funguje i v prohlížeči. Nainstalovat si ji můžete kdykoli později
+        tlačítkem <b>Stáhnout aplikaci</b> na přihlašovací obrazovce.
+      </div>
+      <button onclick="spustitInstalaciZNabidky()" style="width:100%;padding:15px;background:#1d9e75;color:#fff;border:none;border-radius:13px;font-size:15.5px;font-weight:800;cursor:pointer;font-family:inherit">Nainstalovat teď</button>
+      <button onclick="odlozitInstalaci()" style="width:100%;margin-top:9px;padding:13px;background:none;color:#6b6157;border:1.5px solid var(--brd);border-radius:12px;font-size:14px;font-weight:700;cursor:pointer;font-family:inherit">Připomenout později</button>
+    </div>`
+  document.body.appendChild(ov)
+}
+
+function zavritNabidkuInstalace() {
+  const ov = document.getElementById('install-offer-modal')
+  if (ov) ov.style.display = 'none'
+}
+
+function odlozitInstalaci() {
+  // Den pokoj. Pak se nabídka ukáže znovu při přihlášení.
+  try {
+    lsSet('instalace-pripomenout', String(Date.now() + 24 * 60 * 60 * 1000))
+    if (currentUser?.id) lsSet('install_nudge_at_' + currentUser.id, String(Date.now()))
+  } catch(e) {}
+  zavritNabidkuInstalace()
+  showToast('👍 Připomeneme zítra')
+}
+
+function spustitInstalaciZNabidky() {
+  zavritNabidkuInstalace()
+  try { lsSet('instalace-pripomenout', String(Date.now() + 24 * 60 * 60 * 1000)) } catch(e) {}
+  installApp()
+}
+
 function showAndroidInstallGuide() {
   let ov = document.getElementById('android-install-guide')
   if (ov) { ov.style.display = 'flex'; return }
@@ -4420,31 +4519,12 @@ function checkInstallNudge() {
   setTimeout(() => showInstallNudge(), 2500)
 }
 
+// Připomenutí po přihlášení používá stejné okno jako nabídka po registraci,
+// ať pracovník nevidí dvě různě vypadající vyzvání ke stejné věci.
 function showInstallNudge() {
   if (!currentUser || !isMobile() || isAppInstalled()) return  // mezitím se mohla nainstalovat nebo odhlásit
-  // Průvodce (první přihlášení) nebo jiné okno má přednost — zkus to znovu za chvíli,
-  // ať se to nebije, a nepočítej to jako "už ukázáno".
-  if (typeof _jeOtevrenyDialog === 'function' && _jeOtevrenyDialog()) {
-    setTimeout(() => showInstallNudge(), 3000)
-    return
-  }
   lsSet('install_nudge_at_' + (currentUser?.id || 'anon'), String(Date.now()))
-  let ov = document.getElementById('install-nudge')
-  if (ov) { ov.style.display = 'flex'; return }
-  ov = document.createElement('div')
-  ov.id = 'install-nudge'
-  ov.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:99998;display:flex;align-items:flex-end;justify-content:center;padding:0'
-  ov.onclick = (e) => { if (e.target === ov) ov.style.display = 'none' }
-  ov.innerHTML = `
-    <div style="background:#fff;width:100%;max-width:480px;border-radius:20px 20px 0 0;padding:24px 22px calc(24px + env(safe-area-inset-bottom));box-shadow:0 -4px 30px rgba(0,0,0,.3);text-align:center">
-      <div style="width:40px;height:4px;background:#ddd;border-radius:2px;margin:0 auto 18px"></div>
-      <div style="font-size:32px;margin-bottom:8px">📲</div>
-      <div style="font-size:18px;font-weight:800;margin-bottom:6px">Přidejte si appku na plochu</div>
-      <div style="font-size:13px;color:#777;margin-bottom:20px">Pak ji otevřete jedním klepnutím jako jinou appku — nemusíte hledat prohlížeč ani se znovu přihlašovat.</div>
-      <button onclick="document.getElementById('install-nudge').style.display='none'; installApp()" style="width:100%;padding:13px;background:#211D1A;color:#fff;border:none;border-radius:12px;font-size:15px;font-weight:700;cursor:pointer;font-family:inherit;margin-bottom:8px">Stáhnout aplikaci</button>
-      <button onclick="document.getElementById('install-nudge').style.display='none'" style="width:100%;padding:11px;background:none;color:#777;border:none;font-size:13px;cursor:pointer;font-family:inherit">Teď ne</button>
-    </div>`
-  document.body.appendChild(ov)
+  nabidniInstalaci('prihlaseni')
 }
 
 // Vrátí datum v MÍSTNÍM čase jako YYYY-MM-DD (ne UTC — jinak se večer den posune)
@@ -4862,7 +4942,6 @@ function showAdmin(profile) {
   loadAttendanceWorkers()
   loadTeams()
   loadDocuments()
-  loadContracts()
   loadCompanies()
   loadWorkerInvoices()
   setKWChip()
@@ -5671,7 +5750,23 @@ async function doRegister() {
     }
     let { error: profileErrNoSession } = await insertProfileResilient(baseProfileNS)
     if (profileErrNoSession) {
+      // Účet v Auth vznikl, ale řádek v profiles ne (typicky RLS bez session).
+      // Bez něj se registrace neobjeví v Čekajících registracích a nikdo o ní neví —
+      // proto NESMÍ padnout zelené potvrzení. Formulář necháme otevřený.
       console.warn('Profile insert without session failed:', profileErrNoSession.message)
+      registrationInProgress = false
+      btn.textContent = 'Odeslat registraci →'
+      btn.disabled = false
+      const errEl = document.getElementById('reg-err') || document.getElementById('login-err')
+      if (errEl) {
+        errEl.style.display = 'block'
+        errEl.style.background = 'var(--red-l)'
+        errEl.style.color = 'var(--red)'
+        errEl.textContent = '❌ Registraci se nepodařilo dokončit. Zkuste to prosím znovu, nebo se ozvěte SubBau — účet zatím nevznikl.'
+      } else {
+        showToast('❌ Registraci se nepodařilo dokončit — ozvěte se prosím SubBau')
+      }
+      return
     }
   }
 
@@ -5683,6 +5778,8 @@ async function doRegister() {
     // Máme session → přesměruj na pending screen
     registrationInProgress = false
     showPending()
+    // Nový OSVČ často neví, jak si appku dostat na plochu — nabídneme mu to rovnou
+    setTimeout(() => nabidniInstalaci('registrace'), 700)
   } else {
     // Bez session (email potvrzení) → skryj form, ukaž zprávu
     document.getElementById('form-register').style.display = 'none'
@@ -5694,6 +5791,7 @@ async function doRegister() {
       loginErr.style.color = 'var(--green)'
       loginErr.textContent = '✅ Registrace odeslána! Čekejte na schválení administrátorem nebo zkontrolujte email.'
     }
+    setTimeout(() => nabidniInstalaci('registrace'), 700)
   }
 }
 
@@ -5735,6 +5833,17 @@ async function doLogout() {
   if (_rtWatchdogInt) { clearInterval(_rtWatchdogInt); _rtWatchdogInt = null }
   if (_rtRetryTimer) { clearTimeout(_rtRetryTimer); _rtRetryTimer = null }
   _rtRetryDelay = 2000
+  // Chatové kanály a časovače, které by po odhlášení tikaly dál
+  if (typeof chatRealtimeSub !== 'undefined' && chatRealtimeSub) { try { sb.removeChannel(chatRealtimeSub) } catch(e) {} chatRealtimeSub = null }
+  if (typeof adminChatRealtimeSub !== 'undefined' && adminChatRealtimeSub) { try { sb.removeChannel(adminChatRealtimeSub) } catch(e) {} adminChatRealtimeSub = null }
+  if (typeof invoiceRealtimeSub !== 'undefined' && invoiceRealtimeSub) { try { sb.removeChannel(invoiceRealtimeSub) } catch(e) {} invoiceRealtimeSub = null }
+  if (window._adminChatBadgeInt) { clearInterval(window._adminChatBadgeInt); window._adminChatBadgeInt = null }
+  if (window._osvecChatBadgeInt) { clearInterval(window._osvecChatBadgeInt); window._osvecChatBadgeInt = null }
+  if (window._audioKeepAliveInt) { clearInterval(window._audioKeepAliveInt); window._audioKeepAliveInt = null }
+  if (typeof _rtFallbackInt !== 'undefined' && _rtFallbackInt) { clearInterval(_rtFallbackInt); _rtFallbackInt = null }
+  // Odemčené Provize platí jen pro toho, kdo heslo zadal. Bez tohohle by se
+  // na stejném počítači dostal k sazbám a odměnám i další přihlášený správce.
+  try { sessionStorage.removeItem('provizeUnlocked') } catch(e) {}
   try { await sb.auth.signOut() } catch(e) { console.error('signOut error:', e) }
   showLogin()  // Vždy přejdi na login, i kdyby event selhal
 }
@@ -5874,54 +5983,6 @@ async function showWorkerActivity(workerId, workerName) {
   <div class="stat"><div class="stat-val">${logins.length ? new Date(logins[0].logged_at || logins[0]).toLocaleDateString('cs-CZ') : '—'}</div><div class="stat-lbl">Poslední přihlášení</div></div>
 </div>
 ${rows || '<div class="empty">Žádná přihlášení za posledních 30 dní</div>'}
-
-<!-- Checkout dialog - Co jste dnes dělali -->
-<div id="checkout-dialog" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:9999;align-items:center;justify-content:center;padding:16px">
-  <div style="background:#fff;border-radius:20px;padding:24px;width:100%;max-width:400px;box-shadow:0 8px 32px rgba(0,0,0,.3)">
-    <div style="font-size:17px;font-weight:800;margin-bottom:4px;color:#211D1A">Zaznamenat odchod</div>
-    <div id="checkout-time-label" style="font-size:13px;color:#666;margin-bottom:20px"></div>
-    <div style="margin-bottom:14px">
-      <label style="font-size:12px;font-weight:700;color:#211D1A;display:block;margin-bottom:6px">Na jaké stavbě jste pracoval? *</label>
-      <input type="text" id="checkout-site" placeholder="např. Praha - Vinohrady, Brno - centrum..." 
-        style="width:100%;padding:12px;border:2px solid #e0e0e0;border-radius:10px;font-size:14px;font-family:inherit;box-sizing:border-box"
-        onfocus="this.style.borderColor='#211D1A'" onblur="this.style.borderColor='#e0e0e0'">
-    </div>
-    <div style="margin-bottom:20px">
-      <label style="font-size:12px;font-weight:700;color:#211D1A;display:block;margin-bottom:6px">Co jste dnes dělal? *</label>
-      <textarea id="checkout-desc" rows="3" placeholder="např. Zednictví, betonáž základů, montáž lešení..."
-        style="width:100%;padding:12px;border:2px solid #e0e0e0;border-radius:10px;font-size:14px;font-family:inherit;resize:vertical;box-sizing:border-box"
-        onfocus="this.style.borderColor='#211D1A'" onblur="this.style.borderColor='#e0e0e0'"></textarea>
-    </div>
-    <div style="display:flex;gap:10px">
-      <button onclick="confirmCheckout()" 
-        style="flex:1;padding:14px;background:#211D1A;color:#E8A13A;border:none;border-radius:12px;font-size:14px;font-weight:800;cursor:pointer;font-family:inherit">
-        Zaznamenat odchod
-      </button>
-      <button onclick="cancelCheckout()"
-        style="padding:14px 18px;background:none;border:2px solid #e0e0e0;border-radius:12px;font-size:14px;cursor:pointer;font-family:inherit">
-        Zpět
-      </button>
-    </div>
-  </div>
-</div>
-
-<!-- Signature Preview Overlay -->
-<div id="sig-preview-overlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.95);z-index:19999;flex-direction:column">
-  <div style="background:#211D1A;padding:12px 16px;display:flex;justify-content:space-between;align-items:center;flex-shrink:0;border-bottom:2px solid #E8A13A">
-    <div>
-      <div style="color:#E8A13A;font-weight:800;font-size:15px">Náhled podepsané smlouvy</div>
-      <div style="color:#999;font-size:12px;margin-top:2px">Zkontrolujte umístění podpisu před uložením</div>
-    </div>
-    <button class="x-close" onclick="closeSigPreview()" style="background:rgba(255,255,255,.1);border:none;color:#fff;font-size:20px;cursor:pointer;padding:4px 10px;border-radius:6px"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:20px;height:20px;display:block"><path d="M18 6L6 18M6 6l12 12"/></svg></button>
-  </div>
-  <div style="flex:1;overflow:auto;background:#555;display:flex;align-items:flex-start;justify-content:center;padding:16px">
-    <iframe id="sig-preview-frame" style="width:100%;max-width:800px;height:600px;min-height:400px;border:none;border-radius:8px;background:#fff"></iframe>
-  </div>
-  <div style="background:#211D1A;padding:14px 16px;display:flex;gap:10px;border-top:1px solid #333;flex-shrink:0">
-    <button onclick="retrySigning()" style="flex:1;padding:13px;background:#333;color:#fff;border:none;border-radius:12px;font-size:14px;font-weight:700;cursor:pointer;font-family:inherit"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:1em;height:1em;flex-shrink:0;vertical-align:-2px"><path d="M9 14L4 9l5-5"/><path d="M4 9h11a4 4 0 0 1 0 8h-1"/></svg> Zkusit znovu</button>
-    <button onclick="confirmAndSaveSignature()" id="sig-preview-confirm-btn" style="flex:2;padding:13px;background:#E8A13A;color:#211D1A;border:none;border-radius:12px;font-size:15px;font-weight:800;cursor:pointer;font-family:inherit">Uložit a odeslat ✓</button>
-  </div>
-</div>
 </body></html>`
 
   const blob = new Blob([html], {type:'text/html;charset=utf-8'})
@@ -6330,9 +6391,12 @@ async function generateProvizeFirmReport(firmName, mode) {
       .in('worker_id', ids).gte('work_date', startStr).lte('work_date', endStr)
 
     const nowStr2 = new Date().toTimeString().slice(0, 8)
+    const dnesStr2 = localDateStr()
     function hoursOf(a) {
       if (a.total_hours) return a.total_hours
-      if (a.check_in && !a.check_out) return calcHours(a.check_in, nowStr2, a.break_start, a.break_end)
+      // Starý neuzavřený den se nesmí počítat „do teď“ — provize by vyšla z vymyšleného
+      // čísla. Stejně to řeší týdenní přehled i výkaz: nedokončený minulý den = 0 h.
+      if (a.check_in && !a.check_out && a.work_date === dnesStr2) return calcHours(a.check_in, nowStr2, a.break_start, a.break_end)
       return 0
     }
     const hoursByWorker = {}
@@ -6449,9 +6513,11 @@ async function renderProvizeContent() {
     .gte('work_date', fetchStart).lte('work_date', fetchEnd)
 
   const nowStr = now.toTimeString().slice(0, 8)
+  const dnesStrStat = localDateStr()
   function hoursOf(a) {
     if (a.total_hours) return a.total_hours
-    if (a.check_in && !a.check_out) return calcHours(a.check_in, nowStr, a.break_start, a.break_end)
+    // Neuzavřený den z minulosti = 0 h (jinak by statistika rostla sama od sebe)
+    if (a.check_in && !a.check_out && a.work_date === dnesStrStat) return calcHours(a.check_in, nowStr, a.break_start, a.break_end)
     return 0
   }
 
@@ -7006,9 +7072,11 @@ async function loadDashboard() {
   const kw = getKW()
   const { data: att } = await sb.from('attendance').select('*').eq('kw',kw.week).eq('kw_year',kw.year)
   const nowStrDash = new Date().toTimeString().slice(0,8)
+  const dnesStrDash = localDateStr()
   const totalH = att?.reduce((s,a) => {
     if (a.total_hours) return s + a.total_hours
-    if (a.check_in && !a.check_out) return s + calcHours(a.check_in, nowStrDash, a.break_start, a.break_end)
+    // Běžící hodiny jen u dneška — starý zapomenutý odchod se nepočítá
+    if (a.check_in && !a.check_out && a.work_date === dnesStrDash) return s + calcHours(a.check_in, nowStrDash, a.break_start, a.break_end)
     return s
   }, 0) || 0
   document.getElementById('stat-hours').textContent = totalH.toFixed(1)+'h'
@@ -7035,7 +7103,7 @@ async function loadDashboard() {
       <td>${r.work_date ? new Date(r.work_date).toLocaleDateString('cs-CZ') : '—'}</td>
       <td>${r.check_in?.slice(0,5)||'—'}</td>
       <td>${r.check_out?.slice(0,5)||'—'}</td>
-      <td><b>${r.check_out ? (r.total_hours||0)+'h' : r.check_in ? calcHours(r.check_in, new Date().toTimeString().slice(0,8), r.break_start, r.break_end)+'h ▶' : '—'}</b></td>
+      <td><b>${r.check_out ? (r.total_hours||0)+'h' : (r.check_in && r.work_date === todayStrDash) ? calcHours(r.check_in, new Date().toTimeString().slice(0,8), r.break_start, r.break_end)+'h ▶' : r.check_in ? '—' : '—'}</b></td>
       <td style="font-size:12px">${r.location_address ? (r.address_source === 'manual' ? '✍️ ' : '📍 ') + r.location_address : '—'}</td>
     </tr>`).join('')
   // Klik na řádek otevře detail pracovníka (docházka, smlouvy, dokumenty)
@@ -7487,40 +7555,6 @@ async function loadAttendanceWorkers() {
   loadTodayTimeline()
 }
 
-async function recordAttendance(type) {
-  const workerId = document.getElementById('att-worker').value
-  const site = document.getElementById('att-site').value
-  const now = new Date()
-  const timeStr = now.toTimeString().slice(0,8)
-  const kw = getKW()
-
-  if (type === 'in') {
-    const { data, error } = await sb.from('attendance').insert({
-      worker_id: workerId, work_date: localDateStr(now),
-      check_in: timeStr, location_address: site,
-      location_lat: gpsLat, location_lng: gpsLng,
-      kw: kw.week, kw_year: kw.year,
-      is_saturday: now.getDay()===6
-    }).select().single()
-    if (!error) { todayAttId = data?.id; showToast('✅ Příchod zaznamenán — '+timeStr) }
-  } else if (type === 'out' && todayAttId) {
-    const { data: rec } = await sb.from('attendance').select('check_in,break_start,break_end').eq('id',todayAttId).single()
-    const hours = calcHours(rec?.check_in, timeStr, rec?.break_start, rec?.break_end)
-    // Zobraz dialog "Co jste dnes dělali?"
-    pendingCheckout = { timeStr, hours }
-    showCheckoutDialog()
-    return  // Pokračuje v showCheckoutDialog → confirmCheckout()
-  } else if (type === 'break-start' && todayAttId) {
-    await sb.from('attendance').update({ break_start: timeStr }).eq('id', todayAttId)
-    showToast('☕ Přestávka začala')
-  } else if (type === 'break-end' && todayAttId) {
-    await sb.from('attendance').update({ break_end: timeStr }).eq('id', todayAttId)
-    showToast('▶ Práce pokračuje')
-  } else {
-    showToast('Nejprve zaznamenejte příchod')
-  }
-  loadTodayTimeline()
-}
 
 async function loadTodayTimeline() {
   const today = localDateStr()
@@ -7917,6 +7951,10 @@ function dayStatusFor(worker, dateStr, attSet, vacList) {
 
 // Den má problém, když chybí příchod/odchod nebo jsou hodiny mimo rozumný rozsah
 function attHasProblem(rec) {
+  // Běžící dnešní směna (přišel, ještě neodešel) není závada — jinak by dopoledne
+  // svítel žlutý vykřičník u každého, kdo je zrovna v práci, a správce by si na
+  // falešná varování zvykl.
+  if (rec.check_in && !rec.check_out && rec.work_date === localDateStr()) return false
   if (!rec.check_in || !rec.check_out) return true          // chybí příchod nebo odchod
   const h = rec.total_hours
   if (h != null && (h < 1 || h > 14)) return true           // podezřele krátký/dlouhý den
@@ -7996,8 +8034,17 @@ async function renderCalendar() {
   const startStr = localDateStr(start), endStr = localDateStr(end)
 
   // Docházka v rozsahu (s časy pro detekci problémů)
-  const { data: att } = await sb.from('attendance').select('worker_id, work_date, check_in, check_out, break_start, break_end, total_hours')
+  // Supabase vrací nejvýš 1000 řádků. U měsíčního pohledu s hodně lidmi se sem
+  // vejde i víc — proto řadíme a bereme s rezervou; kdyby to nestačilo, řekneme to
+  // nahlas místo aby se dny tiše obarvily jako „plán“, ačkoli se v nich pracovalo.
+  const CAL_LIMIT = 5000
+  const { data: att, error: attErr } = await sb.from('attendance')
+    .select('worker_id, work_date, check_in, check_out, break_start, break_end, total_hours')
     .gte('work_date', startStr).lte('work_date', endStr)
+    .order('work_date', { ascending: true })
+    .limit(CAL_LIMIT)
+  if (attErr) showToast('⚠️ Docházku se nepodařilo načíst — kalendář může být neúplný')
+  else if (att && att.length >= CAL_LIMIT) showToast('⚠️ Kalendář ukazuje jen část docházky — zvolte kratší období')
   const attSet = new Set((att||[]).map(a => a.worker_id + '|' + a.work_date))
   const attMap = {}
   ;(att||[]).forEach(a => { attMap[a.worker_id + '|' + a.work_date] = a })
@@ -8245,13 +8292,15 @@ async function deleteDocument(docId) {
     })
     .filter(Boolean)
 
+  // Nejdřív řádek v databázi, teprve pak soubor. Opačné pořadí umělo nechat
+  // v seznamu doklad, jehož „Zobrazit“ končí chybou 404.
+  const { error } = await sb.from('documents').delete().eq('id', docId)
+  if (error) { showToast('❌ ' + docSaveErrorText(error)); return }
+
   for (const path of toRemove) {
     try { await sb.storage.from('documents').remove([path]) }
     catch(e) { console.warn('Doc storage delete:', e) }
   }
-
-  const { error } = await sb.from('documents').delete().eq('id', docId)
-  if (error) { showToast('❌ Chyba: ' + error.message); return }
 
   showToast('🗑 Dokument smazán')
   loadDocuments()
@@ -8311,6 +8360,9 @@ async function loadSitePhotosAdmin() {
     const res = await sb.from('site_photos')
       .select('*, worker:profiles!worker_id(full_name, profession)')
       .order('created_at', { ascending: false }).limit(300)
+    // supabase-js chybu nevyhazuje, vrací ji v objektu — bez tohohle by se
+    // záložní dotaz bez joinu nikdy nespustil a správce by viděl prázdnou galerii
+    if (res.error) throw res.error
     data = res.data || []
   } catch (e) {
     console.warn('[admin fotky] load s joinem selhal, zkouším bez:', e?.message)
@@ -8807,8 +8859,8 @@ function chatBubble(msg, isMine, senderName) {
   }
   return `<div style="display:flex;flex-direction:column;align-items:${isMine?'flex-end':'flex-start'};margin-bottom:6px">
     ${name}
-    <div style="max-width:80%;padding:10px 14px;border-radius:${isMine?'18px 18px 4px 18px':'18px 18px 18px 4px'};background:${isMine?'#E8A13A':'#fff'};color:${isMine?'#211D1A':'#211D1A'};font-size:14px;line-height:1.5;box-shadow:0 1px 3px rgba(0,0,0,0.1)">
-      ${msg.message}
+    <div style="max-width:80%;padding:10px 14px;border-radius:${isMine?'18px 18px 4px 18px':'18px 18px 18px 4px'};background:${isMine?'#E8A13A':'#fff'};color:${isMine?'#211D1A':'#211D1A'};font-size:14px;line-height:1.5;box-shadow:0 1px 3px rgba(0,0,0,0.1);overflow-wrap:anywhere;word-break:break-word;white-space:pre-wrap">
+      ${String(msg.message == null ? '' : msg.message).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')}
     </div>
     <div style="font-size:10px;color:var(--text3);margin-top:2px;padding:0 4px">${time}${receipt}</div>
   </div>`
@@ -9026,8 +9078,11 @@ async function loadAdminChatList() {
     if (chatOpen && activeChatWorkerId === wid) return total  // otevřená konverzace
     return total + count
   }, 0)
-  const badge = document.getElementById('admin-chat-badge')
-  if (badge) { badge.textContent = effectiveUnread; badge.style.display = effectiveUnread > 0 ? 'inline' : 'none' }
+  // Odznak je v DOM dvakrát (postranní menu i mobilní zásuvka) — aktualizuj oba
+  document.querySelectorAll('#admin-chat-badge').forEach(badge => {
+    badge.textContent = effectiveUnread
+    badge.style.display = effectiveUnread > 0 ? 'inline' : 'none'
+  })
 
   // Seřaď — nejprve s nepřečtenými, pak s poslední zprávou
   workers.sort((a, b) => {
@@ -9205,7 +9260,12 @@ const tutorialSteps = [
         </div>
         <div onclick="tutGo(6)" style="display:flex;align-items:center;gap:12px;background:#2a2521;border-left:3px solid #c0392b;border-radius:12px;padding:13px 14px;cursor:pointer">
           <span style="font-size:20px;flex-shrink:0">📄</span>
-          <span style="flex:1"><span style="display:block;color:#fff;font-size:15.5px;font-weight:800">Doklady a jak je nahrát</span><span style="display:block;color:#9a9082;font-size:13.5px;margin-top:2px">Bez nich vás nepošleme na stavbu</span></span>
+          <span style="flex:1"><span style="display:block;color:#fff;font-size:15.5px;font-weight:800">Doklady, které potřebujeme</span><span style="display:block;color:#9a9082;font-size:13.5px;margin-top:2px">Bez nich vás nepošleme na stavbu</span></span>
+          <span style="color:#E8A13A;font-size:18px">›</span>
+        </div>
+        <div onclick="tutGo(7)" style="display:flex;align-items:center;gap:12px;background:#2a2521;border-left:3px solid #c0392b;border-radius:12px;padding:13px 14px;cursor:pointer">
+          <span style="font-size:20px;flex-shrink:0">📷</span>
+          <span style="flex:1"><span style="display:block;color:#fff;font-size:15.5px;font-weight:800">Jak doklad nahrát</span><span style="display:block;color:#9a9082;font-size:13.5px;margin-top:2px">Vyfotíte telefonem, pár klepnutí</span></span>
           <span style="color:#E8A13A;font-size:18px">›</span>
         </div>
         <div onclick="tutGo(8)" style="display:flex;align-items:center;gap:12px;background:#2a2521;border-left:3px solid #1d9e75;border-radius:12px;padding:13px 14px;cursor:pointer">
@@ -9260,7 +9320,7 @@ const tutorialSteps = [
         <div style="font-size:20px">🚪</div>
         <div>
           <div class="tut-flow-title" style="color:#c0392b">3. Konec — Konec směny</div>
-          <div class="tut-flow-desc">Bílé tlačítko s červeným rámečkem <b style="color:#fff">Konec směny</b> pod hlavním tlačítkem. Čas odchodu se uloží <b style="color:#fff">okamžitě</b>.</div>
+          <div class="tut-flow-desc">Bílé tlačítko s červeným rámečkem <b style="color:#fff">Konec směny</b> pod hlavním tlačítkem. Aplikace si čas odchodu zapamatuje hned, jak klepnete — do systému ho uloží až po vyplnění okna, které se objeví vzápětí. <b style="color:#fff">O minuty nepřijdete</b>, počítá se čas klepnutí.</div>
         </div>
       </div>
 
@@ -9274,7 +9334,7 @@ const tutorialSteps = [
 
       <div style="background:#c0392b22;border:1px solid #c0392b;border-radius:12px;padding:14px;margin-top:16px">
         <div style="color:#ff6b6b;font-size:15px;font-weight:800;margin-bottom:6px">⚠️ Tohle okno nejde přeskočit</div>
-        <div style="color:#ffbbb3;font-size:14px;line-height:1.6">Bez stavby a popisu práce směnu neuzavřete. Když aplikaci zavřete, okno vyskočí znovu při dalším otevření. Je to proto, že <b style="color:#fff">bez popisu práce nemůžeme vystavit fakturu ani výkaz</b> — Němci to vyžadují.</div>
+        <div style="color:#ffbbb3;font-size:14px;line-height:1.6">Bez stavby a popisu práce směnu neuzavřete. Kdyby se aplikace zavřela, okno se i s původním časem odchodu vrátí, jakmile ji zase otevřete. Je to proto, že <b style="color:#fff">bez popisu práce nemůžeme vystavit fakturu ani výkaz</b> — Němci to vyžadují.</div>
       </div>
 
       <div style="background:#211D1A;border-radius:12px;padding:14px;margin-top:10px">
@@ -9307,7 +9367,7 @@ const tutorialSteps = [
       <div style="background:#211D1A;border-radius:12px;padding:14px;margin-bottom:9px;border-left:3px solid #1d9e75">
         <div style="color:#fff;font-size:15px;font-weight:800;margin-bottom:5px">Příchod</div>
         <div style="color:#aaa;font-size:14px;line-height:1.7">
-          Přijdete-li <b style="color:#fff">před sedmou</b>, počítá se od 7:00 (dřív než začíná směna se nepracuje).<br>
+          Příchod <b style="color:#fff">před sedmou</b> se zaokrouhlí nahoru na nejbližší půlhodinu, nejpozději na 7:00 — 6:00 → 6:00, 6:20 → 6:30, 6:40 → 7:00. Práci před sedmou nám ale vždycky nahlaste dopředu.<br>
           Po sedmé máte <b style="color:#fff">10 minut hájení</b>: 7:01–7:10 se počítá jako <b style="color:#1d9e75">7:00</b>.<br>
           Od 11. minuty se skáče na další půlhodinu: 7:11 → <b style="color:#ff6b6b">7:30</b>.
         </div>
@@ -9315,7 +9375,7 @@ const tutorialSteps = [
 
       <div style="background:#211D1A;border-radius:12px;padding:14px;margin-bottom:9px;border-left:3px solid #e6a800">
         <div style="color:#fff;font-size:15px;font-weight:800;margin-bottom:5px">Přestávka</div>
-        <div style="color:#aaa;font-size:14px;line-height:1.7">Kratší pauza než půl hodiny se počítá jako <b style="color:#fff">celých 30 minut</b>. Když si dáte 10 minut, odečte se stejně 30.</div>
+        <div style="color:#aaa;font-size:14px;line-height:1.7">Každá pauza kratší než půl hodiny se počítá jako <b style="color:#fff">celých 30 minut</b> — a platí to pro každou zvlášť. Tři desetiminutové pauzy = 90 minut pryč. Vyplatí se dát si za den jednu pauzu místo několika krátkých.</div>
       </div>
 
       <div style="background:#211D1A;border-radius:12px;padding:14px;margin-bottom:16px;border-left:3px solid #c0392b">
@@ -9348,12 +9408,12 @@ const tutorialSteps = [
 
       <div style="background:#211D1A;border-radius:12px;padding:14px;margin-bottom:10px;border-left:3px solid #e6a800">
         <div style="color:#fff;font-size:15px;font-weight:800;margin-bottom:5px">Poloha se nenačetla?</div>
-        <div style="color:#aaa;font-size:14px;line-height:1.7">V hale, v suterénu nebo se zakázanou polohou se to stává. Objeví se pole <b style="color:#fff">Zadat adresu stavby ručně</b> — napište ulici a město a klepněte na <b style="color:#fff">Použít tuto adresu</b>. Stejně tak si adresu můžete kdykoliv přepsat odkazem pod tlačítky.</div>
+        <div style="color:#aaa;font-size:14px;line-height:1.7">V hale, v suterénu nebo se zakázanou polohou se to stává. Objeví se pole <b style="color:#fff">Zadat adresu stavby ručně</b> — napište ulici a město a klepněte na <b style="color:#fff">Použít tuto adresu</b>. Stejně tak si adresu můžete přepsat odkazem pod tlačítky — kromě dnů, do kterých už zasáhla kancelář SubBau; tam platí její zápis a aplikace vám to řekne.</div>
       </div>
 
       <div style="background:#211D1A;border-radius:12px;padding:14px;margin-bottom:10px;border-left:3px solid #9c3b22">
         <div style="color:#fff;font-size:15px;font-weight:800;margin-bottom:5px">Byl jsem dnes na dvou stavbách</div>
-        <div style="color:#aaa;font-size:14px;line-height:1.7">Během směny klepněte na <b style="color:#fff">Druhá stavba dnes</b>, zadejte adresu (nebo si nechte zaznamenat polohu) a napište, co jste tam dělal. Uloží se to jako samostatný záznam dne.</div>
+        <div style="color:#aaa;font-size:14px;line-height:1.7">Během směny klepněte na <b style="color:#fff">Druhá stavba dnes</b> a zadejte adresu (nebo si nechte zaznamenat polohu); popis práce doporučujeme, povinný není. Uloží se jako samostatný záznam dne kvůli doložení, kde jste byl — <b style="color:#fff">hodiny se dál počítají z jedné směny</b> (příchod a odchod), druhá stavba k nim nic nepřidává.</div>
       </div>
 
       <div style="background:#211D1A;border-radius:12px;padding:14px;border-left:3px solid #1d9e75">
@@ -9383,7 +9443,7 @@ const tutorialSteps = [
         <div class="tut-step-num" style="background:#1d9e75">2</div>
         <div>
           <div class="tut-step-title">Vyberte týden a napište jméno vedoucího</div>
-          <div class="tut-step-desc">Hodiny si aplikace natáhne sama z docházky. Jméno vedoucího je nepovinné, ale hodí se.</div>
+          <div class="tut-step-desc">Hodiny si aplikace natáhne sama z docházky. <b style="color:#fff">Jméno vedoucího vyplňte</b> — bez něj podpis neuložíte.</div>
         </div>
       </div>
       <div class="tut-step-box" style="border-color:#1d9e75">
@@ -9428,8 +9488,8 @@ const tutorialSteps = [
       <div class="tut-step-box" style="border-color:#E8A13A">
         <div class="tut-step-num" style="background:#E8A13A">2</div>
         <div>
-          <div class="tut-step-title">Zkontrolujte IBAN a SWIFT</div>
-          <div class="tut-step-desc">Vyplňujete jen poprvé, pak už je aplikace zná. Ať sedí — na tenhle účet chodí peníze.</div>
+          <div class="tut-step-title">Zkontrolujte fakturační údaje</div>
+          <div class="tut-step-desc"><b style="color:#fff">Jméno (nebo firmu), adresu sídla, IČO a IBAN</b> — bez nich fakturu nevystavíte, aplikace vás na chybějící údaj upozorní. Vyplňujete jen poprvé, pak už je zná. IBAN si ověřte, na ten účet chodí peníze.</div>
         </div>
       </div>
       <div class="tut-step-box" style="border-color:#E8A13A">
@@ -9443,15 +9503,16 @@ const tutorialSteps = [
         <div class="tut-step-num" style="background:#E8A13A">4</div>
         <div>
           <div class="tut-step-title">Vytvořit fakturu → odeslat</div>
-          <div class="tut-step-desc">Ukáže se náhled na jednu stránku A4. Pod ním <b style="color:#1d9e75">Odeslat společnosti SubBau</b> — faktura nám rovnou přistane ve složce. Nebo ji pošlete na <b style="color:#E8A13A">faktury@subbau.cz</b>. Pro sebe si ji uložíte přes <b style="color:#E8A13A">Uložit PDF</b>.</div>
+          <div class="tut-step-desc">Ukáže se náhled na jednu stránku A4 — zavřete ho křížkem vpravo nahoře vedle lupy. Pod náhledem je <b style="color:#1d9e75">Odeslat společnosti SubBau</b>: náhled se pak zavře a objeví se potvrzení, že faktura dorazila. Nebo ji pošlete na <b style="color:#E8A13A">faktury@subbau.cz</b>. Pro sebe si ji uložíte přes <b style="color:#E8A13A">Uložit PDF</b>.</div>
         </div>
       </div>
 
       <div style="background:#211D1A;border-radius:12px;padding:14px;margin-top:14px;border-left:3px solid #3b7dd8">
         <div style="color:#fff;font-size:15px;font-weight:800;margin-bottom:6px">🔒 Co nastavuje SubBau</div>
         <div style="color:#aaa;font-size:14px;line-height:1.7">
-          <b style="color:#fff">Hodinovou sazbu</b>, <b style="color:#fff">splatnost</b> a <b style="color:#fff">komu se fakturuje</b> (odběratele) nastavujeme my — proto ta pole nejdou přepsat. Je to tak schválně, aby faktura vždy seděla s domluvou.<br>
-          Kdyby tam bylo něco špatně nebo tam chyběl odběratel, <b style="color:#fff">ozvěte se Bibianě</b>.
+          <b style="color:#fff">Hodinovou sazbu</b>, <b style="color:#fff">splatnost</b> a <b style="color:#fff">komu se fakturuje</b> (odběratele) nastavujeme my. Jakmile je máme vyplněné, pole jsou zašedlá a nejdou přepsat — aby faktura vždy seděla s domluvou.<br>
+          Když jsou pole ještě odemčená nebo po vás aplikace chce zadat sazbu, znamená to, že je zatím nemáme nastavené. <b style="color:#fff">Nevyplňujte si je sami a ozvěte se Bibianě.</b><br>
+          Totéž u odběratele: svítí-li červené <b style="color:#fff">Nenastaveno</b>, fakturu nevystavujte — aplikace se zeptá, jestli ji má poslat na výchozí firmu, a to je skoro vždycky špatně.
         </div>
       </div>
 
@@ -9495,9 +9556,9 @@ const tutorialSteps = [
         <div style="font-size:22px">📝</div>
         <div>
           <div class="tut-doc-title">Žádost o A1</div>
-          <div class="tut-doc-desc">Než vám A1 vystaví, nahrajte alespoň žádost</div>
+          <div class="tut-doc-desc">Nahrajte ji, než vám A1 vystaví. Aplikace ji ale jako A1 nebere — bude vás dál upozorňovat, že A1 chybí, dokud nenahrajete hotový formulář.</div>
         </div>
-        <span class="tut-badge orange">Zatím místo A1</span>
+        <span class="tut-badge orange">Nenahrazuje A1</span>
       </div>
       <div class="tut-doc-card" style="border-color:#e6a800">
         <div style="font-size:22px">🏠</div>
@@ -9515,7 +9576,7 @@ const tutorialSteps = [
 
       <div style="background:#c0392b22;border:1px solid #c0392b;border-radius:12px;padding:14px;margin-top:10px">
         <div style="color:#ff6b6b;font-size:15px;font-weight:800;margin-bottom:6px">🔔 Aplikace vám to bude připomínat</div>
-        <div style="color:#ffbbb3;font-size:14px;line-height:1.6">Dokud něco chybí, uvidíte v Dokumentech žlutý pruh a po přihlášení vyskočí připomínka. Není to buzerace — bez papírů vám nemůžeme dát práci.</div>
+        <div style="color:#ffbbb3;font-size:14px;line-height:1.6">Dokud něco chybí, uvidíte v Dokumentech žlutý pruh se seznamem a jednou denně vyskočí připomínka — když ji zavřete, ten den už se neukáže. Není to buzerace — bez papírů vám nemůžeme dát práci.</div>
       </div>
     `
   },
@@ -9550,7 +9611,7 @@ const tutorialSteps = [
         <div class="tut-step-num" style="background:#3b7dd8">4</div>
         <div>
           <div class="tut-step-title">U občanky otočte a vyfoťte druhou stranu</div>
-          <div class="tut-step-desc">Aplikace vás na ni sama vyzve a obě strany spojí do jednoho PDF.</div>
+          <div class="tut-step-desc">Po dobré fotce vás aplikace na druhou stranu sama vyzve. Když upozorní na špatnou fotku, přefoťte ji a pak klepněte na <b style="color:#fff">Druhá strana →</b>. Nahrávejte až s oběma stranami — tlačítko <b style="color:#fff">Nahrát (jen přední strana)</b> odešle doklad nekompletní a my ho vrátíme.</div>
         </div>
       </div>
       <div class="tut-step-box" style="border-color:#3b7dd8">
@@ -9573,7 +9634,7 @@ const tutorialSteps = [
 
       <div style="background:#211D1A;border-radius:12px;padding:14px;margin-top:10px">
         <div style="color:#E8A13A;font-size:15px;font-weight:800;margin-bottom:6px">🕑 Co se děje potom</div>
-        <div style="color:#aaa;font-size:14px;line-height:1.7">Doklad je nejdřív <b style="color:#fff">Čeká na kontrolu</b> — projdeme ho ručně a schválíme. Když je nečitelný, uvidíte u něj červené <b style="color:#fff">Nahrát znovu</b> i důvod, proč jsme ho vrátili.</div>
+        <div style="color:#aaa;font-size:14px;line-height:1.7">Doklad je nejdřív <b style="color:#fff">Čeká na schválení</b> — projdeme ho ručně. Když ho vrátíme, změní se na <b style="color:#fff">Odmítnuto — nahrajte znovu</b> a bývá pod ním důvod i červené tlačítko <b style="color:#fff">Nahrát znovu</b>.</div>
       </div>
     `
   },
@@ -9608,7 +9669,7 @@ const tutorialSteps = [
         <div class="tut-step-num" style="background:#1d9e75">4</div>
         <div>
           <div class="tut-step-title">Klepněte, kam má podpis přijít</div>
-          <div class="tut-step-desc">Objeví se žlutý rámeček, kterým můžete posunout. Někdy je místo <b>určené předem námi</b> — pak s ním nehnete a jen se podepíšete.</div>
+          <div class="tut-step-desc">Objeví se žlutý rámeček <b>„Podpis bude zde“</b>, kterým můžete posunout. Když místo <b>určíme předem my</b>, uvidíte místo něj malé červené kolečko se značkou podpisu a nahoře hlášku o tom, že místo určil administrátor — klepání do PDF pak nic nedělá, jen se podepíšete.</div>
         </div>
       </div>
       <div class="tut-step-box" style="border-color:#1d9e75">
@@ -9642,7 +9703,7 @@ const tutorialSteps = [
         <div style="color:#fff;font-size:16px;font-weight:800;margin-bottom:8px">🔄 Turnus (pracovní cyklus)</div>
         <div style="color:#aaa;font-size:14.5px;line-height:1.7">
           Jezdíte-li v cyklu (třeba 3 týdny práce, týden doma), nastavte si ho: Profil → <b style="color:#fff">Turnus</b>.<br>
-          Zadáte <b>kolik týdnů pracujete</b>, <b>kolik máte volno</b>, <b>od kdy cyklus začal</b> a jestli chodíte <b>i v sobotu</b>. Neděle je volná vždycky.<br>
+          Zadáte <b>kolik týdnů pracujete</b>, <b>kolik máte volno</b>, jestli chodíte <b>i v sobotu</b> a <b>od kdy cyklus začal</b> (první den práce). Obě čísla i datum vyplňte najednou — jinak se turnus neuloží. Nakonec klepněte na <b>Uložit</b>. Neděle je volná vždycky.<br>
           Díky tomu víme dopředu, kdy s vámi počítat na stavbě.
         </div>
       </div>
@@ -9694,12 +9755,12 @@ const tutorialSteps = [
 
       <div style="background:#211D1A;border-radius:12px;padding:14px;margin-top:10px">
         <div style="color:#E8A13A;font-size:15px;font-weight:800;margin-bottom:6px">🔔 Zprávy od nás</div>
-        <div style="color:#aaa;font-size:14px;line-height:1.6">Chodí do Profilu na dlaždici <b style="color:#fff">Zprávy</b> — červené kolečko znamená nepřečtenou zprávu. Posíláme tudy změnu stavby, změnu pracovní doby nebo novou smlouvu k podpisu.</div>
+        <div style="color:#aaa;font-size:14px;line-height:1.6">Chodí do Profilu na dlaždici <b style="color:#fff">Zprávy</b> — červené kolečko znamená nepřečtenou zprávu. Jakmile dlaždici otevřete, kolečko zmizí; zprávy se tím označí jako přečtené, i když je jen proletíte. Posíláme tudy změnu stavby, změnu pracovní doby nebo novou smlouvu k podpisu.</div>
       </div>
 
       <div style="background:#211D1A;border-radius:12px;padding:14px;margin-top:10px">
         <div style="color:#E8A13A;font-size:15px;font-weight:800;margin-bottom:6px">📲 Dejte si appku na plochu</div>
-        <div style="color:#aaa;font-size:14px;line-height:1.6">V Profilu dole je <b style="color:#fff">Stáhnout aplikaci do telefonu</b>. Pak ji otevřete jedním klepnutím jako každou jinou aplikaci a nemusíte se pořád přihlašovat.</div>
+        <div style="color:#aaa;font-size:14px;line-height:1.6">V Profilu — hned v horní kartě s vašimi údaji — je <b style="color:#fff">Stáhnout aplikaci do telefonu</b>. Ukáže se jen na telefonu a jen dokud aplikaci nemáte nainstalovanou; jinak ji najdete i na přihlašovací obrazovce. Pak ji otevřete jedním klepnutím jako každou jinou aplikaci a nemusíte se pořád přihlašovat.</div>
       </div>
     `
   },
@@ -9884,20 +9945,6 @@ async function closeTutorialAndMark() {
 }
 
 // ============ SMLOUVY ============
-async function loadContracts() {
-  const { data } = await sb.from('contracts').select('id,title,status,file_url,signature_url,admin_signature_url,signed_at,admin_signed_at,created_at, worker:profiles!worker_id(full_name)').order('created_at',{ascending:false})
-  const tbody = document.getElementById('contracts-table')
-  const statusLabels = {admin_pending:'⏳ Čeká na podpis admina',pending:'✅ Čeká na podpis OSVČ',signed_electronic:'✅ Podepsána elektronicky',signed_scan:'✅ Podepsána (sken)',rejected:'❌ Zamítnuta'}
-  if (!data?.length) { tbody.innerHTML='<tr><td colspan="5" style="text-align:center;color:var(--text3);padding:20px">Žádné smlouvy</td></tr>'; return }
-  tbody.innerHTML = data.map(c=>`
-    <tr>
-      <td><b>${c.worker?.full_name||'—'}</b></td>
-      <td>${c.title}</td>
-      <td><span class="pill ${c.status==='pending'?'pa':c.status.includes('signed')?'pg':'pr'}">${statusLabels[c.status]||c.status}</span></td>
-      <td style="font-size:12px">${c.created_at?.slice(0,10)}</td>
-      <td>${c.status==='pending'?`<button style="font-size:11px;padding:3px 8px;border:1px solid var(--brd);border-radius:6px;cursor:pointer;background:none;font-family:inherit"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:1em;height:1em;flex-shrink:0;vertical-align:-2px"><rect x="2" y="4" width="20" height="16" rx="2"/><path d="M22 7l-10 6L2 7"/></svg> Připomenout</button>`:''}</td>
-    </tr>`).join('')
-}
 
 // ============ FAKTURY ============
 // ===== SLOŽKA FAKTURY (admin) =====
@@ -10102,11 +10149,11 @@ async function downloadInvoicePdf(id) {
     const resp = await fetch(url)
     if (!resp.ok) throw new Error('HTTP ' + resp.status)
     const blob = await resp.blob()
-    const url = URL.createObjectURL(blob)
+    const blobUrl = URL.createObjectURL(blob)
     const a = document.createElement('a')
-    a.href = url; a.download = name
+    a.href = blobUrl; a.download = name
     document.body.appendChild(a); a.click(); a.remove()
-    setTimeout(() => URL.revokeObjectURL(url), 30000)
+    setTimeout(() => URL.revokeObjectURL(blobUrl), 30000)
   } catch (e) {
     console.warn('[faktury] stažení selhalo, otevírám v prohlížeči:', e?.message)
     openPdfUrl(url)
@@ -10162,21 +10209,6 @@ function refreshInvoiceBadge() {
   })
 }
 
-async function loadInvoices() {
-  const { data: clients } = await sb.from('clients').select('id,name')
-  const sel = document.getElementById('inv-client')
-  if (sel) sel.innerHTML = clients?.map(c=>`<option value="${c.id}">${c.name}</option>`).join('') || '<option>—</option>'
-  const { data } = await sb.from('invoices').select('*, client:clients(name)').order('created_at',{ascending:false})
-  const tbody = document.getElementById('invoices-table')
-  if (!data?.length) { tbody.innerHTML='<tr><td colspan="4" style="text-align:center;color:var(--text3);padding:20px">Žádné faktury</td></tr>'; return }
-  tbody.innerHTML = data.map(i=>`
-    <tr>
-      <td>Týden ${i.kw}/${i.kw_year}</td>
-      <td>${i.client?.name||'—'}</td>
-      <td style="font-weight:700;color:var(--blue)">€${(i.total_amount||0).toFixed(2)}</td>
-      <td><span class="pill ${i.status==='paid'?'pg':i.status==='overdue'?'pr':i.status==='sent'?'pb':'pq'}">${i.status}</span></td>
-    </tr>`).join('')
-}
 
 async function generateInvoice() {
   showToast('📄 Faktura se generuje...')
@@ -11053,6 +11085,29 @@ async function fillInvoiceCustomerFromTeam(workerId, teamId) {
 // Checkout dialog
 let pendingCheckout = null
 
+// Rozdělaný odchod (čeká na vyplnění „kde a co jsem dělal") přežije zavření appky.
+// Bez tohohle se čas odchodu držel jen v paměti — kdo appku zavřel, musel směnu
+// ukončit znovu a už s pozdějším časem, který pak kancelář ručně opravovala.
+const _ODCHOD_KLIC = 'rozdelany-odchod'
+function ulozRozdelanyOdchod(p) {
+  try { lsSet(_ODCHOD_KLIC, JSON.stringify({ ...p, den: localDateStr(), worker: currentUser?.id || '' })) } catch(e) {}
+}
+function zapomenRozdelanyOdchod() {
+  try { localStorage.removeItem(_ODCHOD_KLIC) } catch(e) {}
+}
+function nactiRozdelanyOdchod() {
+  try {
+    const raw = lsGet(_ODCHOD_KLIC)
+    if (!raw) return null
+    const p = JSON.parse(raw)
+    // Platí jen pro dnešek a pro přihlášeného pracovníka — jinak zahoď
+    if (!p || p.den !== localDateStr() || (p.worker && currentUser?.id && p.worker !== currentUser.id)) {
+      zapomenRozdelanyOdchod(); return null
+    }
+    return p
+  } catch(e) { return null }
+}
+
 // Zápis "kde a co jsem dělal" je u konce směny POVINNÝ — dialog v tomto režimu
 // nejde zavřít (ani tlačítkem Zpět, ani stažením dolů). Volitelný je jen
 // průběžný zápis během dne (dayWorkLogMode).
@@ -11190,6 +11245,7 @@ function cancelCheckout() {
   document.getElementById('checkout-dialog').style.display = 'none'
   disarmCheckoutBackGuard()
   pendingCheckout = null
+  zapomenRozdelanyOdchod()
   resetCheckoutDialogToDefault()
   dayWorkLogMode = false
   clearCheckoutPhotos()
@@ -11227,7 +11283,7 @@ async function confirmCheckout() {
       // SubBau směnu mezitím uzavřel sám — jeho časy mají přednost před našimi
       const dEl = document.getElementById('checkout-dialog'); if (dEl) dEl.style.display = 'none'
       disarmCheckoutBackGuard()
-      pendingCheckout = null; todayAttId = null; todayRecord = null
+      pendingCheckout = null; zapomenRozdelanyOdchod(); todayAttId = null; todayRecord = null
       clearCheckoutPhotos()
       showToast('ℹ️ Tuto směnu už uzavřel SubBau — platí jeho zápis')
       getTodayRecord(); loadMobWeek()
@@ -11261,7 +11317,7 @@ async function confirmCheckout() {
   }
   if (error) {
     console.error('[checkout] update error:', error)
-    showToast('❌ Směnu se nepodařilo uzavřít: ' + error.message)
+    showToast(chybaText(error, 'Směna se neuzavřela'))
     return
   }
   if (keptByAdmin) showToast('ℹ️ Stavbu a popis u tohoto dne vyplnil SubBau — jeho zápis zůstává')
@@ -11276,6 +11332,7 @@ async function confirmCheckout() {
   document.getElementById('checkout-dialog').style.display = 'none'
   disarmCheckoutBackGuard()
   pendingCheckout = null
+  zapomenRozdelanyOdchod()
   todayAttId = null
   todayRecord = null
   showToast('✅ Směna ukončena a zapsána')
@@ -11569,7 +11626,7 @@ async function saveDayWorkLog() {
   if (adminOwnsField(rec, 'work_description')) keptByAdmin = true; else upd.work_description = desc
   if (Object.keys(upd).length) {
     const { error } = await sb.from('attendance').update(upd).eq('id', todayAttId)
-    if (error) { showToast('❌ Chyba: ' + error.message); return }
+    if (error) { showToast(chybaText(error, 'Zápis se neuložil')); return }
   }
   // Aktualizuj lokální kopii
   if (todayRecord) {
@@ -11616,6 +11673,47 @@ async function getTodayRecord() {
     .order('check_in', {ascending: false})
 
   if (error) { console.error('[getTodayRecord]', error); updateMobStav(null, []); return }
+
+  // Směna přes půlnoc: kdo nastoupil včera večer a ještě neodešel, má záznam
+  // pod VČEREJŠÍM datem. Bez tohohle dohledání by mu karta po půlnoci spadla
+  // na „Začít směnu“ a rozdělanou směnu by už neměl jak ukončit.
+  let vceraOtevrena = null
+  if (!(data || []).some(r => r.check_in && !r.check_out)) {
+    try {
+      const v = new Date(); v.setDate(v.getDate() - 1)
+      const { data: vc } = await sb.from('attendance').select('*')
+        .eq('worker_id', currentUser.id)
+        .eq('work_date', localDateStr(v))
+        .is('check_out', null)
+        .not('check_in', 'is', null)
+        .order('check_in', {ascending: false})
+        .limit(1)
+      if (vc && vc[0]) vceraOtevrena = vc[0]
+    } catch(e) { /* bez dohledání se chová jako dřív */ }
+  }
+  if (vceraOtevrena) {
+    todayAttId = vceraOtevrena.id
+    todayRecord = { ...vceraOtevrena }
+    updateMobStav(vceraOtevrena, (data || []).concat([vceraOtevrena]))
+    if (typeof updateGpsStrip === 'function') updateGpsStrip()
+    return
+  }
+
+  // Rozdělaný odchod z dneška (appka se zavřela před vyplněním dialogu) — vrať ho
+  const rozdelany = nactiRozdelanyOdchod()
+  if (rozdelany && !pendingCheckout) {
+    const porad = (data || []).find(r => r.id === rozdelany.attId && !r.check_out)
+    if (porad) {
+      pendingCheckout = { timeStr: rozdelany.timeStr, hours: rozdelany.hours, attId: rozdelany.attId }
+      todayAttId = porad.id
+      todayRecord = { ...porad }
+      updateMobStav(porad, data)
+      if (typeof updateGpsStrip === 'function') updateGpsStrip()
+      showCheckoutDialog()
+      return
+    }
+    zapomenRozdelanyOdchod()   // směnu už mezitím někdo uzavřel
+  }
 
   if (data && data.length > 0) {
     // Aktivní SMĚNA = má příchod, ale ještě nemá odchod.
@@ -11832,13 +11930,27 @@ async function mobCheckin(type) {
     if (type === 'in') {
       // Zkontroluj jestli není aktivní neukončená SMĚNA (má příchod, chybí odchod).
       // Záznamy "2. stavba" (bez check_in) sem nepatří — proto filtrujeme na check_in not null.
-      const { data: activeRows } = await sb.from('attendance').select('id,check_in')
-        .eq('worker_id', currentUser.id)
-        .eq('work_date', today)
-        .is('check_out', null)
-        .not('check_in', 'is', null)
-        .order('check_in', { ascending: false })
-        .limit(1)
+      // Pozor: bez kontroly chyby a bez časového limitu by selhaný dotaz vypadal
+      // stejně jako „žádná běžící směna“ — a založil by se druhý příchod, kterým
+      // by ranní směna zůstala viset otevřená s 0 h.
+      let activeRows = null, activeErr = null
+      try {
+        const res = await withTimeout(sb.from('attendance').select('id,check_in')
+          .eq('worker_id', currentUser.id)
+          .eq('work_date', today)
+          .is('check_out', null)
+          .not('check_in', 'is', null)
+          .order('check_in', { ascending: false })
+          .limit(1), 15000)
+        activeRows = res.data; activeErr = res.error
+      } catch (e) { activeErr = e }
+      if (activeErr) {
+        clearTimeout(_stuckGuard)
+        checkinInProgress = false
+        window.zapisProbiha = false
+        showToast('⚠️ Slabý signál — příchod se nezapsal, zkuste to prosím znovu')
+        return
+      }
       const active = activeRows && activeRows[0]
 
       if (active) {
@@ -11862,7 +11974,7 @@ async function mobCheckin(type) {
         is_saturday: now.getDay() === 6
       }).select().single(), 12000)
 
-      if (error) { showToast('❌ Chyba příchodu: ' + error.message); checkinInProgress = false; return }
+      if (error) { showToast(chybaText(error, 'Příchod se nezapsal')); checkinInProgress = false; return }
       todayAttId = data.id
       todayRecord = { ...data }  // Ulož lokálně okamžitě
       // Aktualizuj UI ihned z čerstvých dat — nezávisle na serveru
@@ -11923,7 +12035,7 @@ async function mobCheckin(type) {
           return
         }
         const { error } = await withTimeout(sb.from('attendance').update({ break_start: timeStr, break_end: null }).eq('id', todayAttId), 12000)
-        if (error) { showToast('❌ Chyba: ' + error.message); checkinInProgress = false; return }
+        if (error) { showToast(chybaText(error, 'Začátek pauzy se nezapsal')); checkinInProgress = false; return }
         updated.break_start = timeStr
         updated.break_end = null
         todayRecord = { ...updated }  // Aktualizuj lokální kopii
@@ -11945,7 +12057,7 @@ async function mobCheckin(type) {
           // Kdyby sloupec breaks neexistoval, ulož aspoň break_end (zpětná kompatibilita)
           console.warn('[break-end] update s breaks selhal, zkouším bez:', error.message)
           const { error: e2 } = await withTimeout(sb.from('attendance').update({ break_end: timeStr }).eq('id', todayAttId), 12000)
-          if (e2) { showToast('❌ Chyba: ' + e2.message); checkinInProgress = false; return }
+          if (e2) { showToast(chybaText(e2, 'Konec pauzy se nezapsal')); checkinInProgress = false; return }
         }
         updated.break_end = timeStr
         updated.breaks = existingBreaks
@@ -11971,14 +12083,26 @@ async function mobCheckin(type) {
             window.zapisProbiha = false
             return
           }
-          // Pokud jde ven s otevřenou pauzou, uzavři pauzu na čas odchodu, ať se správně odečte
+          // Pokud jde ven s otevřenou pauzou, uzavři pauzu na čas odchodu, ať se správně odečte.
+          // Musí se dopsat i do pole `breaks` — attBreakMinutes mu dává přednost před
+          // break_start/break_end, takže pauza zapsaná jen do sloupců by se u dne
+          // s víc pauzami vůbec neodečetla a den by vyšel o půl hodiny delší.
           try {
             if (current.break_start && !current.break_end) {
-              await sb.from('attendance').update({ break_end: timeStr }).eq('id', todayAttId)
+              const bl = Array.isArray(current.breaks) ? current.breaks.slice() : []
+              bl.push({ bs: current.break_start.slice(0,5), be: timeStr.slice(0,5) })
+              const { error: bErr } = await sb.from('attendance').update({ break_end: timeStr, breaks: bl }).eq('id', todayAttId)
+              if (bErr) await sb.from('attendance').update({ break_end: timeStr }).eq('id', todayAttId)
+              else updated.breaks = bl
               updated.break_end = timeStr
             }
             if (current.break2_start && !current.break2_end) {
-              await sb.from('attendance').update({ break2_end: timeStr }).eq('id', todayAttId)
+              const bl2 = Array.isArray(updated.breaks) ? updated.breaks.slice()
+                        : (Array.isArray(current.breaks) ? current.breaks.slice() : [])
+              bl2.push({ bs: current.break2_start.slice(0,5), be: timeStr.slice(0,5) })
+              const { error: b2Err } = await sb.from('attendance').update({ break2_end: timeStr, breaks: bl2 }).eq('id', todayAttId)
+              if (b2Err) await sb.from('attendance').update({ break2_end: timeStr }).eq('id', todayAttId)
+              else updated.breaks = bl2
               updated.break2_end = timeStr
             }
           } catch(e) { /* i kdyby se nepovedlo, pokračuj s odchodem */ }
@@ -12011,7 +12135,7 @@ async function mobCheckin(type) {
           const { error: outErr } = await withTimeout(sb.from('attendance').update({
             check_out: timeStr, total_hours: h
           }).eq('id', todayAttId), 12000)
-          if (outErr) { showToast('❌ Chyba odchodu: ' + outErr.message); checkinInProgress = false; return }
+          if (outErr) { showToast(chybaText(outErr, 'Odchod se nezapsal')); checkinInProgress = false; return }
           updated.check_out = timeStr
           updated.total_hours = h
           todayAttId = null
@@ -12026,10 +12150,11 @@ async function mobCheckin(type) {
 
         // Bez zápisu „kde a co jsem dělal" se směna NEUZAVŘE. Čas odchodu si držíme
         // stranou (aby se pracovníkovi neukrojily minuty, než dopíše) a do databáze
-        // ho spolu s hodinami zapíše až confirmCheckout(). Kdo dialog obejde zavřením
-        // appky, má směnu dál rozdělanou a musí ji ukončit znovu — zpětné dopisování
-        // starších dnů appka nenabízí, to řeší SubBau ručně.
+        // ho spolu s hodinami zapíše až confirmCheckout(). Ukládáme ho i do telefonu —
+        // kdyby se appka zavřela (hovor, nízká baterie), po dalším otevření se dialog
+        // vrátí i s původním časem odchodu a pracovník nepřijde o minuty.
         pendingCheckout = { timeStr, hours: h, attId: todayAttId }
+        ulozRozdelanyOdchod(pendingCheckout)
         let freshRec = updated
         try {
           const { data: fr } = await withTimeout(sb.from('attendance').select('*').eq('id', todayAttId).single(), 8000)
@@ -12080,11 +12205,14 @@ async function mobCheckin(type) {
 
 async function editMobAttEntry(attId, currentSite, currentDesc) {
   // Jednoduchý inline dialog pre OSVČ
+  // Dvojité ťuknutí na tlačítko úpravy jinak vyrobí dvě vrstvy se stejným id
+  // a uživatel je musí zavírat dvakrát
+  document.getElementById('mob-att-edit-overlay')?.remove()
   const overlay = document.createElement('div')
   overlay.id = 'mob-att-edit-overlay'
   overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:9999;display:flex;align-items:flex-end;justify-content:center;padding:0'
   overlay.innerHTML = `
-    <div style="background:#fff;border-radius:20px 20px 0 0;padding:24px;width:100%;max-width:500px">
+    <div style="background:#fff;border-radius:20px 20px 0 0;padding:24px 24px calc(24px + env(safe-area-inset-bottom));width:100%;max-width:500px;max-height:88vh;overflow-y:auto;-webkit-overflow-scrolling:touch">
       <div style="width:40px;height:4px;background:var(--brd);border-radius:2px;margin:0 auto 16px"></div>
       <div style="font-size:15px;font-weight:800;margin-bottom:16px">Upravit záznam</div>
       <div class="fg" style="margin-bottom:12px">
@@ -12127,9 +12255,13 @@ async function saveMobAttEntry(attId) {
     construction_site: site,
     work_description: desc
   }).eq('id', attId).eq('worker_id', currentUser.id)  // bezpečnostní check
-  if (error) { showToast('Chyba: ' + error.message); return }
-  document.getElementById('mob-att-edit-overlay').remove()
-  showToast('Zaznam upraven!')
+  if (error) {
+    // Panel necháme otevřený i s vyplněným textem, ať jde uložení rovnou zopakovat
+    showToast('❌ Neuložilo se — zkuste to prosím znovu, text zůstal vyplněný')
+    return
+  }
+  document.getElementById('mob-att-edit-overlay')?.remove()
+  showToast('✅ Záznam upraven')
   loadMobWeek()
 }
 
@@ -12292,8 +12424,10 @@ async function checkMissingDocsAlert() {
     if (role === 'admin') return   // adminovi nic nevyskakuje
 
     // Jednou za den stačí – ať to není otravné při každém otevření.
+    // localStorage, ne sessionStorage — jinak okno vyskočí při každém studeném
+    // startu PWA, klidně pětkrát denně, a pracovník ho začne odklikávat naslepo.
     const todayKey = 'docs-alert-' + new Date().toISOString().slice(0, 10)
-    if (sessionStorage.getItem(todayKey) === 'zavreno') return
+    if (lsGet(todayKey) === 'zavreno') return
 
     const { data, error } = await sb.from('documents').select('doc_type,status').eq('worker_id', currentUser.id)
     if (error) return
@@ -12323,7 +12457,7 @@ async function checkMissingDocsAlert() {
 function closeDocsAlert() {
   const overlay = document.getElementById('docs-alert-overlay')
   if (overlay) overlay.style.display = 'none'
-  try { sessionStorage.setItem('docs-alert-' + new Date().toISOString().slice(0, 10), 'zavreno') } catch (e) {}
+  try { lsSet('docs-alert-' + new Date().toISOString().slice(0, 10), 'zavreno') } catch (e) {}
 }
 
 // „Nahrát teď" – zavře okno a hodí člověka rovnou do sekce Dokumenty.
@@ -12544,6 +12678,7 @@ function validateValidUntil(type, value) {
 
 function onDocTypeChange() {
   uploadStep = 1
+  uvolniScanPages()
   scanPages = []
   selectedFile = null
   selectedFile2 = null
@@ -12669,7 +12804,15 @@ function setPickInputs(_side) {
   if (pickBtn) pickBtn.setAttribute('for', side === 2 ? 'upload-file-2' : 'upload-file')
 }
 
+// Vyfocená stránka drží blob URL. Bez uvolnění se hromadí v paměti telefonu,
+// dokud se stránka neobnoví — u průvodce, kde se fotí a maže dokola, to roste.
+function uvolniScanPages() {
+  try { scanPages.forEach(p => { if (p && p.url) URL.revokeObjectURL(p.url) }) } catch(e) {}
+}
+
 function removeScanPage(index) {
+  const p = scanPages[index]
+  if (p && p.url) { try { URL.revokeObjectURL(p.url) } catch(e) {} }
   scanPages.splice(index, 1)
   renderUploadStep()
 }
@@ -12719,6 +12862,7 @@ async function handleFileSelect(input, side) {
     selectedFile2 = file
   } else {
     selectedFile = file
+    uvolniScanPages()
     scanPages = []
   }
   input.value = ''
@@ -12746,6 +12890,7 @@ async function handleFileSelect(input, side) {
 function resetUploadForm() {
   selectedFile = null
   selectedFile2 = null
+  uvolniScanPages()
   scanPages = []
   uploadStep = 1
   ;['upload-cam','upload-file','upload-cam-2','upload-file-2'].forEach(id => {
@@ -13433,7 +13578,10 @@ async function checkDocumentReadability(file, docType) {
   // PDF vždy; u OP/Pasu i obrázek (fotka/sken)
   const isPdf = file.type === 'application/pdf' || /\.pdf$/i.test(file.name)
   const isImage = file.type.startsWith('image/') || /\.(jpe?g|png|heic|webp)$/i.test(file.name)
-  const imageAllowed = (docType === 'op' || docType === 'pas')
+  // Fotku ber u všech dokladů, které průvodce vede k focení (card:true) — jinak
+  // se u „Povolení k pobytu“ a „Víza“ vyfocený doklad vždy odmítne a dlaždice je
+  // na telefonu nepoužitelná. U ostatních typů se fotky předem sloučí do PDF.
+  const imageAllowed = !!(DOC_TYPE_BY_ID[docType] && DOC_TYPE_BY_ID[docType].card)
   if (!isPdf && !(imageAllowed && isImage)) {
     return { readable: false, reason: imageAllowed
       ? 'Nahrajte PDF nebo fotku/sken dokladu'
@@ -13736,18 +13884,29 @@ async function uploadDocument() {
   })
 
   if (dbErr) {
+    // Soubor v úložišti, ke kterému není řádek v databázi, by nikdo nenašel — ukliď ho
+    try { await sb.storage.from('documents').remove([filePath]) } catch(e) {}
     showToast('❌ ' + docSaveErrorText(dbErr))
     btn.disabled = false; btn.textContent = '📤 Nahrát'; progress.style.display = 'none'
     return
   }
 
-  // 4b. Zadní strana (u vícestranných dokladů) → druhé PDF jako samostatný záznam
+  // 4b. Zadní strana (u vícestranných dokladů) → druhé PDF jako samostatný záznam.
+  // Když je zadní strana fotka (přední byla PDF), musí se převést — jinak by se
+  // uložila surová fotka pojmenovaná .pdf a správci se otevře rozbité okno.
+  // A když se nepovede uložit, NESMÍ padnout zelené „Dokument uložen!“ — pracovník
+  // by byl přesvědčený, že nahrál obě strany, a správce by doklad vrátil jako neúplný.
+  let zadniStranaChyba = ''
   if (selectedFile2 && isMulti) {
-    const filePath2 = `${currentUser.id}/${docType}_${Date.now()}_strana2.pdf`
-    const { error: stErr2 } = await sb.storage.from('documents').upload(filePath2, selectedFile2, { upsert: true, contentType: 'application/pdf' })
-    if (!stErr2) {
+    try {
+      let blob2 = selectedFile2
+      const je2Obrazek = (selectedFile2.type || '').startsWith('image/') || /\.(jpe?g|png|heic|webp)$/i.test(selectedFile2.name || '')
+      if (je2Obrazek) blob2 = await imagesToPdfBlob([selectedFile2])
+      const filePath2 = `${currentUser.id}/${docType}_${Date.now()}_strana2.pdf`
+      const { error: stErr2 } = await sb.storage.from('documents').upload(filePath2, blob2, { upsert: true, contentType: 'application/pdf' })
+      if (stErr2) throw stErr2
       const { data: u2 } = sb.storage.from('documents').getPublicUrl(filePath2)
-      await sb.from('documents').insert({
+      const { error: dbErr2 } = await sb.from('documents').insert({
         worker_id: currentUser.id,
         doc_type: docType,
         file_name: docType + '_strana2_' + new Date().toISOString().slice(0,10) + '.pdf',
@@ -13758,7 +13917,25 @@ async function uploadDocument() {
         uploaded_by: currentUser.id,
         uploaded_at: new Date().toISOString()
       })
+      if (dbErr2) {
+        // Soubor v úložišti bez řádku v databázi by nikdo nenašel — ukliď ho
+        await sb.storage.from('documents').remove([filePath2]).catch(() => {})
+        throw dbErr2
+      }
+    } catch (e) {
+      console.error('[uploadDocument] zadní strana selhala:', e)
+      zadniStranaChyba = e?.message || 'neznámá chyba'
     }
+  }
+
+  if (zadniStranaChyba) {
+    showToast('⚠️ Přední strana uložena, zadní ne — zkuste ji prosím nahrát znovu')
+    if (status) { status.style.display='block'; status.style.background='var(--red-l)'; status.style.color='var(--red)'; status.textContent='⚠️ Zadní strana se neuložila. Nahrajte ji prosím znovu.' }
+    loadMobDocs()
+    btn.disabled = false
+    btn.textContent = '📤 Nahrát'
+    progress.style.display = 'none'
+    return
   }
 
   showToast(validUntil ? ('✅ Dokument uložen! Platnost do ' + validUntil) : '✅ Dokument uložen!')
@@ -13973,8 +14150,12 @@ async function loadInvoiceForm() {
     el.value = val == null ? '' : val
   }
 
-  fktSetType(p.supplier_type === 'sro' ? 'sro' : 'osoba')
-  fktSetVat(!!p.is_vat_payer)
+  // Přepínače se z profilu smí přenastavit jen dokud pracovník nic nerozepsal —
+  // jinak by mu uprostřed psaní skočil typ zpátky na OSVČ a smazal název firmy.
+  if (!_fktDirty) {
+    fktSetType(p.supplier_type === 'sro' ? 'sro' : 'osoba')
+    fktSetVat(!!p.is_vat_payer)
+  }
   set('fkt-name', p.full_name)
   set('fkt-company', p.company_name)
   set('fkt-addr', invoiceSupplierAddress(p))
@@ -14255,6 +14436,9 @@ function loadAdminViewData(name) {
   if(name === 'dashboard') { loadDashboard(); checkDocumentAlerts(); loadDocumentAlertsStat(); refreshPendingRegistrations() }
   if(name === 'pracovnici') { loadWorkers() }
   if(name === 'dokumenty') { loadDocuments() }
+  // Bez tohohle zůstalo v Oznámeních natrvalo „Načítám…“, když se seznam
+  // při přihlášení nestihl načíst — a nové oznámení od druhého správce se neukázalo.
+  if(name === 'oznameni') { loadActiveAnnouncements() }
 }
 
 // Rozepsaný formulář se nesmí přepsat pod rukama — obnovu na pozadí kvůli tomu
@@ -15224,17 +15408,23 @@ async function applyManualAddress() {
     getTodayRecord()
     return
   }
+  // Na uložení se musí počkat. Dřív se zápis pustil na pozadí, panel se hned
+  // zavřel a padlo „✅ Adresa nastavena“ — a když zápis selhal, přiletěla chyba
+  // až potom, s panelem zavřeným a bez možnosti adresu doplnit znovu.
   if (todayAttId) {
     const upd = { manual_address: val, location_address: val, address_source: 'manual' }
     if (!haveGps) { upd.gps_address = null; upd.location_lat = null; upd.location_lng = null }
-    sb.from('attendance').update(upd).eq('id', todayAttId)
-      .then(({ error }) => {
-        if (error) {
-          console.warn('[ruční adresa] update s manual_address selhal, zkouším bez:', error.message)
-          sb.from('attendance').update({ location_address: val, address_source: 'manual' }).eq('id', todayAttId)
-            .then(({ error: e2 }) => { if (e2) showToast('❌ Chyba uložení: ' + e2.message) })
-        }
-      })
+    let { error } = await sb.from('attendance').update(upd).eq('id', todayAttId)
+    if (error) {
+      // Starší databáze nemusí mít sloupec manual_address — zkus zápis bez něj
+      console.warn('[ruční adresa] update s manual_address selhal, zkouším bez:', error.message)
+      const r2 = await sb.from('attendance').update({ location_address: val, address_source: 'manual' }).eq('id', todayAttId)
+      error = r2.error
+    }
+    if (error) {
+      showToast(chybaText(error, 'Adresa se neuložila'))
+      return   // panel zůstane otevřený i s vyplněnou adresou
+    }
   }
   const wrap = document.getElementById('mob-manual-addr')
   if (wrap) wrap.style.display = 'none'
@@ -15250,9 +15440,12 @@ function startClock() {
     const c=document.getElementById('mob-clock'); if(c)c.textContent=n.toTimeString().slice(0,8)
     const d=document.getElementById('mob-date'); if(d)d.textContent=['Ne','Po','Út','St','Čt','Pá','So'][n.getDay()]+' '+n.getDate()+'.'+(n.getMonth()+1)+'.'
   }
+  // Po vypršení session se stopClock nevolá, takže by se při novém přihlášení
+  // založily hodiny podruhé a ten první interval by už nešlo zastavit.
+  if (clockInt) { clearInterval(clockInt); clockInt = null }
   tick(); clockInt=setInterval(tick,1000)
 }
-function stopClock(){if(clockInt)clearInterval(clockInt)}
+function stopClock(){ if(clockInt){ clearInterval(clockInt); clockInt = null } }
 
 // ===== HEARTBEAT — "online" stav pracovníka =====
 let heartbeatInt = null
@@ -15320,10 +15513,16 @@ async function exportKW() {
     workers[wid].total += h
   })
 
-  const days = [...new Set(att.map(r => {
-    const d = new Date(r.work_date)
-    return d.toLocaleDateString('cs-CZ', {weekday:'short', day:'2-digit', month:'2-digit'})
-  }))].sort()
+  // Sloupce staví ze sedmi dat týdne, ne z nalezených záznamů. Dřív se řadily
+  // podle českých názvů dnů (abecedně vyšlo Ne, Po, Pá, So, St, Út, Čt) a dny
+  // bez zapsané docházky ze sestavy úplně vypadly.
+  const days = []
+  for (let i = 0; i < 7; i++) {
+    const d = new Date(startDate)
+    d.setDate(startDate.getDate() + i)
+    if (d > endDate) break
+    days.push(d.toLocaleDateString('cs-CZ', {weekday:'short', day:'2-digit', month:'2-digit'}))
+  }
 
   const totalAll = Object.values(workers).reduce((s, w) => s + w.total, 0)
 
@@ -15366,89 +15565,6 @@ async function exportKW() {
     </tr></tfoot>
   </table>
   <div style="margin-top:30px;font-size:11px;color:#999">Vygenerováno: ${new Date().toLocaleString('cs-CZ')} | SubBau Docházkový systém</div>
-  
-<!-- PRINT OVERLAY - pro PDF export bez popup okna -->
-<div id="print-overlay" style="display:none;position:fixed;inset:0;background:#e8e8e8;z-index:9999;flex-direction:column">
-  <div id="print-overlay-bar" style="background:#211D1A;padding:calc(10px + env(safe-area-inset-top)) 12px 10px;display:flex;gap:8px;align-items:center;flex-shrink:0;flex-wrap:wrap;border-bottom:2px solid #E8A13A"></div>
-  <div id="print-scroll" style="flex:1;overflow-y:auto;-webkit-overflow-scrolling:touch;padding:16px 12px calc(24px + env(safe-area-inset-bottom))">
-    <div id="print-content" style="max-width:800px;margin:0 auto;background:#fff;padding:24px;box-shadow:0 4px 24px rgba(0,0,0,.15)"></div>
-  </div>
-</div>
-<style>
-/* Tisk přímo z náhledu (overlay): když má <html> třídu printing-now, ukaž JEN výkaz */
-@media print {
-  html.printing-now, html.printing-now body {
-    height: auto !important; overflow: visible !important;
-    margin: 0 !important; padding: 0 !important;
-  }
-  html.printing-now body > *:not(#print-overlay) { display: none !important; }
-  html.printing-now #print-overlay {
-    display: block !important; position: static !important;
-    width: auto !important; height: auto !important;
-    background: #fff !important; padding: 0 !important; margin: 0 !important;
-    overflow: visible !important;
-  }
-  html.printing-now #print-scroll {
-    overflow: visible !important; padding: 0 !important; height: auto !important; flex: none !important;
-  }
-  html.printing-now #print-overlay-bar { display: none !important; }
-  html.printing-now #print-content {
-    max-width: none !important; width: auto !important; margin: 0 !important;
-    box-shadow: none !important; padding: 0 !important; background: #fff !important;
-  }
-  html.printing-now .no-print { display: none !important; }
-  @page { size: A4 portrait; margin: 10mm; }
-}
-</style>
-
-
-<!-- Checkout dialog - Co jste dnes dělali -->
-<div id="checkout-dialog" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:9999;align-items:center;justify-content:center;padding:16px">
-  <div style="background:#fff;border-radius:20px;padding:24px;width:100%;max-width:400px;box-shadow:0 8px 32px rgba(0,0,0,.3)">
-    <div style="font-size:17px;font-weight:800;margin-bottom:4px;color:#211D1A">Zaznamenat odchod</div>
-    <div id="checkout-time-label" style="font-size:13px;color:#666;margin-bottom:20px"></div>
-    <div style="margin-bottom:14px">
-      <label style="font-size:12px;font-weight:700;color:#211D1A;display:block;margin-bottom:6px">Na jaké stavbě jste pracoval? *</label>
-      <input type="text" id="checkout-site" placeholder="např. Praha - Vinohrady, Brno - centrum..." 
-        style="width:100%;padding:12px;border:2px solid #e0e0e0;border-radius:10px;font-size:14px;font-family:inherit;box-sizing:border-box"
-        onfocus="this.style.borderColor='#211D1A'" onblur="this.style.borderColor='#e0e0e0'">
-    </div>
-    <div style="margin-bottom:20px">
-      <label style="font-size:12px;font-weight:700;color:#211D1A;display:block;margin-bottom:6px">Co jste dnes dělal? *</label>
-      <textarea id="checkout-desc" rows="3" placeholder="např. Zednictví, betonáž základů, montáž lešení..."
-        style="width:100%;padding:12px;border:2px solid #e0e0e0;border-radius:10px;font-size:14px;font-family:inherit;resize:vertical;box-sizing:border-box"
-        onfocus="this.style.borderColor='#211D1A'" onblur="this.style.borderColor='#e0e0e0'"></textarea>
-    </div>
-    <div style="display:flex;gap:10px">
-      <button onclick="confirmCheckout()" 
-        style="flex:1;padding:14px;background:#211D1A;color:#E8A13A;border:none;border-radius:12px;font-size:14px;font-weight:800;cursor:pointer;font-family:inherit">
-        Zaznamenat odchod
-      </button>
-      <button onclick="cancelCheckout()"
-        style="padding:14px 18px;background:none;border:2px solid #e0e0e0;border-radius:12px;font-size:14px;cursor:pointer;font-family:inherit">
-        Zpět
-      </button>
-    </div>
-  </div>
-</div>
-
-<!-- Signature Preview Overlay -->
-<div id="sig-preview-overlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.95);z-index:19999;flex-direction:column">
-  <div style="background:#211D1A;padding:12px 16px;display:flex;justify-content:space-between;align-items:center;flex-shrink:0;border-bottom:2px solid #E8A13A">
-    <div>
-      <div style="color:#E8A13A;font-weight:800;font-size:15px">Náhled podepsané smlouvy</div>
-      <div style="color:#999;font-size:12px;margin-top:2px">Zkontrolujte umístění podpisu před uložením</div>
-    </div>
-    <button class="x-close" onclick="closeSigPreview()" style="background:rgba(255,255,255,.1);border:none;color:#fff;font-size:20px;cursor:pointer;padding:4px 10px;border-radius:6px"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:20px;height:20px;display:block"><path d="M18 6L6 18M6 6l12 12"/></svg></button>
-  </div>
-  <div style="flex:1;overflow:auto;background:#555;display:flex;align-items:flex-start;justify-content:center;padding:16px">
-    <iframe id="sig-preview-frame" style="width:100%;max-width:800px;height:600px;min-height:400px;border:none;border-radius:8px;background:#fff"></iframe>
-  </div>
-  <div style="background:#211D1A;padding:14px 16px;display:flex;gap:10px;border-top:1px solid #333;flex-shrink:0">
-    <button onclick="retrySigning()" style="flex:1;padding:13px;background:#333;color:#fff;border:none;border-radius:12px;font-size:14px;font-weight:700;cursor:pointer;font-family:inherit"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:1em;height:1em;flex-shrink:0;vertical-align:-2px"><path d="M9 14L4 9l5-5"/><path d="M4 9h11a4 4 0 0 1 0 8h-1"/></svg> Zkusit znovu</button>
-    <button onclick="confirmAndSaveSignature()" id="sig-preview-confirm-btn" style="flex:2;padding:13px;background:#E8A13A;color:#211D1A;border:none;border-radius:12px;font-size:15px;font-weight:800;cursor:pointer;font-family:inherit">Uložit a odeslat ✓</button>
-  </div>
-</div>
 </body></html>`
 
   // Otevři print okno
@@ -17059,14 +17175,25 @@ function editAttRecord(id, date, ci, co, bs, be) {
   setEditTime('be', be ? be.slice(0,5) : '')
   setEditTime('bs2', '')
   setEditTime('be2', '')
-  // Načti stavbu + popis + 2. přestávku z DB
-  sb.from('attendance').select('construction_site,work_description,break2_start,break2_end').eq('id',id).single().then(({data:attData}) => {
-    document.getElementById('edit-att-site').value = attData?.construction_site || ''
-    document.getElementById('edit-att-desc').value = attData?.work_description || ''
-    setEditTime('bs2', attData?.break2_start ? attData.break2_start.slice(0,5) : '')
-    setEditTime('be2', attData?.break2_end ? attData.break2_end.slice(0,5) : '')
-    updateEditHoursPreview()
-  })
+  // Načti stavbu + popis + 2. přestávku z DB.
+  // Dokud dotaz nedoběhne, drž tlačítko Uložit zamčené — jinak by správce uložil
+  // prázdná políčka a z hotového dne by zmizela stavba, popis i druhá pauza
+  // (a hodiny by se přepočítaly nahoru).
+  const ulozBtn = document.querySelector('#edit-att-modal button[onclick="saveEditAttRecord()"]')
+  if (ulozBtn) { ulozBtn.disabled = true; ulozBtn.dataset.puvodni = ulozBtn.textContent; ulozBtn.textContent = 'Načítám…' }
+  sb.from('attendance').select('construction_site,work_description,break2_start,break2_end').eq('id',id).single()
+    .then(({data:attData, error:attErr}) => {
+      if (attErr || !attData) {
+        showToast('❌ Záznam se nepodařilo načíst — zavřete okno a zkuste to znovu')
+        return   // tlačítko zůstane zamčené, ať se nepřepíše, co se nenačetlo
+      }
+      document.getElementById('edit-att-site').value = attData.construction_site || ''
+      document.getElementById('edit-att-desc').value = attData.work_description || ''
+      setEditTime('bs2', attData.break2_start ? attData.break2_start.slice(0,5) : '')
+      setEditTime('be2', attData.break2_end ? attData.break2_end.slice(0,5) : '')
+      if (ulozBtn) { ulozBtn.disabled = false; ulozBtn.textContent = ulozBtn.dataset.puvodni || 'Uložit' }
+      updateEditHoursPreview()
+    })
   document.getElementById('edit-att-modal').style.display = 'flex'
   updateEditHoursPreview()
 }
@@ -17074,7 +17201,8 @@ function editAttRecord(id, date, ci, co, bs, be) {
 // Otevře edit modal z TÝDENNÍHO PŘEHLEDU — s výběrem dne v rámci týdne.
 // workerId = id pracovníka, week/year = KW. Volitelně focusDate = den, který předvybrat.
 const _DAY_NAMES = {1:'Po',2:'Út',3:'St',4:'Čt',5:'Pá',6:'So',7:'Ne'}
-let _weekEditRecords = {}   // dateStr -> attendance record (nebo undefined)
+let _weekEditRecords = {}   // dateStr -> POLE záznamů dne (den může mít víc směn)
+let _weekEditVybrany = {}   // dateStr -> index záznamu, který se právě upravuje
 async function openWeekEdit(workerId, week, year, workerName, focusDate) {
   if (!workerId) return
   document.getElementById('edit-att-worker').value = workerId
@@ -17085,12 +17213,21 @@ async function openWeekEdit(workerId, week, year, workerName, focusDate) {
   // Ukaž týdenní lištu, schovej ruční pole data
   document.getElementById('edit-att-weekbar').style.display = 'block'
   document.getElementById('edit-att-date-wrap').style.display = 'none'
+  // Tlačítko mohlo zůstat zamčené z předchozího otevření přes detail pracovníka
+  const ulozBtnW = document.querySelector('#edit-att-modal button[onclick="saveEditAttRecord()"]')
+  if (ulozBtnW) { ulozBtnW.disabled = false; ulozBtnW.textContent = ulozBtnW.dataset.puvodni || 'Uložit změny' }
 
   // Načti všechny záznamy pracovníka za daný týden
-  const { data } = await sb.from('attendance')
+  const { data, error: weekErr } = await sb.from('attendance')
     .select('*').eq('worker_id', workerId).eq('kw', week).eq('kw_year', year)
+    .order('check_in', { ascending: true, nullsFirst: false })
+  if (weekErr) showToast('⚠️ Docházku týdne se nepodařilo načíst')
   _weekEditRecords = {}
-  ;(data||[]).forEach(r => { _weekEditRecords[r.work_date] = r })
+  _weekEditVybrany = {}
+  ;(data||[]).forEach(r => {
+    if (!_weekEditRecords[r.work_date]) _weekEditRecords[r.work_date] = []
+    _weekEditRecords[r.work_date].push(r)
+  })
 
   // Postav den-picker (Po–Ne) s hodinami; zvýrazni dny se záznamem
   const weekStart = getWeekStartDate(week, year)
@@ -17101,8 +17238,10 @@ async function openWeekEdit(workerId, week, year, workerName, focusDate) {
   for (let i = 1; i <= 7; i++) {
     const d = new Date(weekStart); d.setDate(weekStart.getDate() + (i-1))
     const ds = localDateStr(d)
-    const rec = _weekEditRecords[ds]
-    const hasData = !!rec
+    const denZaznamy = _weekEditRecords[ds] || []
+    const hasData = denZaznamy.length > 0
+    // Na tlačítku hodiny za CELÝ den, tedy součet všech směn
+    const denHodin = denZaznamy.reduce((sum, r) => sum + (r.total_hours || 0), 0)
     if (hasData && !firstWithData) firstWithData = ds
     const isToday = ds === todayStr
     html += `<button type="button" class="edit-day-btn" data-date="${ds}"
@@ -17110,7 +17249,8 @@ async function openWeekEdit(workerId, week, year, workerName, focusDate) {
       style="flex:1;padding:7px 2px;border-radius:8px;border:1.5px solid ${hasData?'var(--blue)':'var(--brd)'};
       background:${hasData?'var(--blue-l)':'#fff'};cursor:pointer;font-family:inherit;text-align:center;${isToday?'box-shadow:0 0 0 2px var(--amber) inset':''}">
       <div style="font-size:10px;color:var(--text3)">${_DAY_NAMES[i]}</div>
-      <div style="font-size:11px;font-weight:700;color:${hasData?'var(--blue)':'var(--text3)'}">${hasData?((rec.total_hours||0)+'h'):'—'}</div>
+      <div style="font-size:11px;font-weight:700;color:${hasData?'var(--blue)':'var(--text3)'}">${hasData?(denHodin+'h'):'—'}</div>
+      ${denZaznamy.length > 1 ? `<div style="font-size:9px;color:var(--amber);font-weight:800">${denZaznamy.length}×</div>` : ''}
     </button>`
   }
   picker.innerHTML = html
@@ -17121,15 +17261,42 @@ async function openWeekEdit(workerId, week, year, workerName, focusDate) {
   pickEditDay(pick)
 }
 
-// Vybere den v týdenním editu a naplní pole z načteného záznamu (nebo prázdné pro nový)
-function pickEditDay(ds) {
+// Vybere den v týdenním editu a naplní pole z načteného záznamu (nebo prázdné pro nový).
+// `idx` = který ze záznamů dne (den může mít víc směn nebo záznam „2. stavba“).
+function pickEditDay(ds, idx) {
   // zvýrazni aktivní tlačítko
   document.querySelectorAll('.edit-day-btn').forEach(b => {
     const active = b.dataset.date === ds
     b.style.outline = active ? '2px solid var(--blue)' : 'none'
     b.style.outlineOffset = active ? '1px' : '0'
   })
-  const rec = _weekEditRecords[ds]
+  const denZaznamy = _weekEditRecords[ds] || []
+  const poradi = (typeof idx === 'number') ? idx : (_weekEditVybrany[ds] || 0)
+  _weekEditVybrany[ds] = Math.min(poradi, Math.max(0, denZaznamy.length - 1))
+  const rec = denZaznamy[_weekEditVybrany[ds]]
+
+  // Má-li den víc záznamů, nabídni výběr — jinak by správce naslepo upravoval
+  // jeden z nich a den by skončil se dvěma započtenými směnami.
+  const vyberBox = document.getElementById('edit-att-smeny')
+  if (vyberBox) {
+    if (denZaznamy.length > 1) {
+      vyberBox.style.display = 'block'
+      vyberBox.innerHTML = '<div style="font-size:11px;color:var(--text3);margin-bottom:5px">Tento den má víc záznamů — vyberte, který upravujete:</div>'
+        + '<div style="display:flex;gap:6px;flex-wrap:wrap">'
+        + denZaznamy.map((r, i) => {
+            const popis = r.check_in
+              ? (r.check_in.slice(0,5) + '–' + (r.check_out ? r.check_out.slice(0,5) : '…'))
+              : (r.construction_site ? '2. stavba' : 'záznam ' + (i+1))
+            const akt = i === _weekEditVybrany[ds]
+            return `<button type="button" onclick="pickEditDay('${ds}',${i})" style="padding:6px 11px;border-radius:8px;border:1.5px solid ${akt?'var(--blue)':'var(--brd)'};background:${akt?'var(--blue-l)':'#fff'};color:${akt?'var(--blue)':'var(--text2)'};font-size:12px;font-weight:700;cursor:pointer;font-family:inherit">${popis} · ${(r.total_hours||0)}h</button>`
+          }).join('')
+        + '</div>'
+    } else {
+      vyberBox.style.display = 'none'
+      vyberBox.innerHTML = ''
+    }
+  }
+
   document.getElementById('edit-att-id').value = rec?.id || ''
   document.getElementById('edit-att-date').value = ds
   if (rec) {
@@ -17146,8 +17313,6 @@ function pickEditDay(ds) {
     // Nový den — předvyplň příchod 7:00, odchod minuty 00 (hodinu dopíše admin), pauzu nech prázdnou
     setEditTime('ci', '7:00')
     setEditTime('co', '')
-    document.getElementById('edit-att-co-m').value = '00'   // minuty odchodu = 00
-    syncTimeField('co')
     setEditTime('bs', '')
     setEditTime('be', '')
     setEditTime('bs2', '')
@@ -17776,21 +17941,43 @@ async function generateInvoiceMob(lang = 'en', override = null) {
   }
   // Chybí něco z fakturačních údajů? Kartu rozbal, ať pracovník vidí kam psát —
   // sbalená by mu hláška ukazovala na pole, které není na obrazovce.
-  if (!override && (!iban || !rate)) fktSetDetailsOpen(true)
+  if (!override && (!iban || !rate || !fktFilledIn())) fktSetDetailsOpen(true)
   if (!iban) { showToast('⚠️ Zadejte IBAN'); return }
   if (!rate) { showToast('⚠️ Zadejte hodinovou sazbu'); return }
+  // Bez IČO a adresy sídla faktura neobstojí jako daňový doklad a účetní ji vrátí.
+  // Řekneme to hned a konkrétně, ať se to pracovník nedozví až telefonem.
+  if (!override) {
+    const chybi = []
+    const vv = id => (document.getElementById(id)?.value || '').trim()
+    if (!(_fktType === 'sro' ? (vv('fkt-company') || vv('fkt-name')) : vv('fkt-name'))) chybi.push('jméno')
+    if (!vv('fkt-addr')) chybi.push('adresu sídla')
+    if (!vv('fkt-ic')) chybi.push('IČO')
+    if (chybi.length) { showToast('⚠️ Doplňte prosím ' + chybi.join(', ')); return }
+  }
 
   showToast('⏳ Načítám docházku...')
 
   // Načti hodiny za vybraný týden
-  const { data: att } = await sb.from('attendance')
+  const { data: att, error: attErr } = await sb.from('attendance')
     .select('*')
     .eq('worker_id', workerId)
     .eq('kw', parseInt(week))
     .eq('kw_year', parseInt(year))
 
+  // Bez kontroly chyby by selhaný dotaz vypadal jako „týden bez docházky“
+  // a vystavila by se faktura na nula hodin.
+  if (attErr) { showToast('⚠️ Docházku se nepodařilo načíst — zkuste to prosím znovu'); return }
+
   const totalHours = (att || []).reduce((s,r) => s + (r.total_hours||0), 0)
   const totalAmount = Math.round(totalHours * rate * 100) / 100
+
+  // Faktura na 0 h je skoro vždycky zapomenutý odchod, ne skutečnost.
+  if (totalHours <= 0) {
+    const stejne = confirm('Za týden ' + week + '/' + year + ' není zapsaná žádná odpracovaná doba.\n\n'
+      + 'Faktura by byla na 0 hodin a 0 €. Nejspíš chybí zapsaný odchod — ozvěte se SubBau.\n\n'
+      + 'Opravdu chcete fakturu vystavit?')
+    if (!stejne) return
+  }
 
   // Data faktury. Admin může vystavit i zpětně — pak se použije jeho datum
   // vystavení a splatnost se počítá od něj, ne od dneška.
@@ -17800,7 +17987,10 @@ async function generateInvoiceMob(lang = 'en', override = null) {
     if (!isNaN(zadane)) today = zadane
     else showToast('⚠️ Datum vystavení není platné — použil jsem dnešek')
   }
-  const dueDate = new Date(today.getTime() + dueDays * 86400000)
+  // Přičítat milisekundy nejde — den návratu z letního času má 25 h a splatnost
+  // by vyšla o den dřív. setDate posune kalendářní den správně.
+  const dueDate = new Date(today.getTime())
+  dueDate.setDate(dueDate.getDate() + dueDays)
   const fmt = d => d.toLocaleDateString('en-GB').replace(/\//g, '.')
   const invoiceNum = `${year}${week.toString().padStart(2,'0')}`
 
@@ -17841,12 +18031,28 @@ async function generateInvoiceMob(lang = 'en', override = null) {
       }
     } catch(e) { console.warn('[faktura] údaje odběratele se nepodařilo dotáhnout:', e?.message) }
   }
+  // Bez nastaveného odběratele se dřív tiše dosadila výchozí firma a faktura
+  // odešla na někoho, komu vystavená být neměla. Pracovník to zjistil, až mu ji
+  // vrátili. Teď se na to zeptáme nahlas.
   const customerData = profileCust?.invoice_customer_name ? {
     name: profileCust.invoice_customer_name,
     address: profileCust.invoice_customer_address || '',
     id: profileCust.invoice_customer_id || '',
     vatId: profileCust.invoice_customer_vat || ''
-  } : {
+  } : null
+  if (!customerData) {
+    if (override) {
+      showToast('⚠️ U pracovníka není nastavený odběratel — doplňte ho v jeho profilu')
+      return
+    }
+    const presto = confirm('SubBau vám zatím nenastavil odběratele — komu se má fakturovat.\n\n'
+      + 'Aplikace by fakturu vystavila na výchozí firmu:\n'
+      + 'Treskower Zimmermann und Dachdecker GmbH\n\n'
+      + 'Pokud si nejste jistý, fakturu nevystavujte a ozvěte se SubBau.\n\n'
+      + 'Přesto pokračovat?')
+    if (!presto) return
+  }
+  const cust0 = customerData || {
     name: 'Treskower Zimmermann und Dachdecker GmbH',
     address: 'Ahornallee 9, 16818 Märkisch Linden/ OT Werder, Germany',
     id: '198456703',
@@ -17865,7 +18071,7 @@ async function generateInvoiceMob(lang = 'en', override = null) {
     swift, dueDays,
     serviceDesc, serviceDescTrans, serviceDescSub, periodFrom, periodTo,
     totalHours, rate, totalAmount, week, year,
-    customer: customerData,
+    customer: cust0,
     // pro uložení do složky Faktury (nezobrazuje se na faktuře)
     workerId, byAdmin: !!override, supplierType: prof.supplier_type || 'osoba',
     issueISO: iso(today), dueISO: iso(dueDate),
@@ -17948,20 +18154,21 @@ function renderInvoice(d, lang = 'en') {
   // co vyjede z tiskárny — jen menší.
   content.innerHTML = `
   <div id="invoice-page" style="font-family:-apple-system,'Segoe UI',Arial,sans-serif;font-size:9.5pt;color:#211D1A;background:#fff;width:794px;padding:0;line-height:1.5;display:flex;flex-direction:column;min-height:1123px">
+  <div id="invoice-body" style="display:flex;flex-direction:column;justify-content:space-between;min-height:842px">
 
-    <!-- TOP BAR: brand + title -->
-    <div style="display:flex;justify-content:space-between;align-items:flex-start;padding:20px 30px 14px">
+    <!-- TOP BAR: nadpis vlevo, číslo faktury vpravo -->
+    <div style="display:flex;justify-content:space-between;align-items:flex-start;padding:24px 30px 16px">
       <div>
-        <div style="display:flex;gap:4px">
+        <div style="font-size:17pt;font-weight:800;letter-spacing:.5px;line-height:1.1">FAKTURA</div>
+        <div style="font-size:8pt;color:#9a9a9a;letter-spacing:.5px">Rechnung · Invoice</div>
+        <div style="display:flex;gap:4px;margin-top:8px">
           <div style="width:26px;height:3px;background:#C4573A;border-radius:2px"></div>
           <div style="width:26px;height:3px;background:#E8A13A;border-radius:2px"></div>
           <div style="width:26px;height:3px;background:#8B5930;border-radius:2px"></div>
         </div>
       </div>
       <div style="text-align:right">
-        <div style="font-size:17pt;font-weight:800;letter-spacing:.5px;line-height:1.1">FAKTURA</div>
-        <div style="font-size:8pt;color:#9a9a9a;letter-spacing:.5px">Rechnung · Invoice</div>
-        <div style="margin-top:6px;display:inline-block;background:#faf6ee;border:1.5px solid #E8A13A;padding:5px 14px;border-radius:8px">
+        <div style="display:inline-block;background:#faf6ee;border:1.5px solid #E8A13A;padding:5px 14px;border-radius:8px">
           <span style="font-size:7pt;color:#8B5930;letter-spacing:.5px">Č. · Nr. · No.&nbsp;&nbsp;</span><span style="font-size:13pt;font-weight:800;color:#211D1A;vertical-align:middle">${d.invoiceNum}</span>
         </div>
       </div>
@@ -17974,18 +18181,18 @@ function renderInvoice(d, lang = 'en') {
       <tr>
         <td style="width:50%;vertical-align:top;padding:15px 16px 15px 30px">
           <div style="font-size:7pt;font-weight:700;text-transform:uppercase;color:#C4573A;letter-spacing:1px;margin-bottom:6px">${L.supplier}</div>
-          <div style="font-size:12pt;font-weight:800;margin-bottom:3px">${d.workerName}</div>
-          ${d.workerAddr ? `<div style="font-size:9pt;color:#5a5a5a;margin-bottom:2px">${d.workerAddr}</div>` : ''}
-          ${d.workerIC ? `<div style="font-size:9pt;color:#5a5a5a">${L.id}: <b style="color:#211D1A">${d.workerIC}</b></div>` : ''}
-          ${d.workerVat ? `<div style="font-size:9pt;color:#5a5a5a">${L.vatId}: <b style="color:#211D1A">${d.workerVat}</b></div>` : ''}
+          <div style="font-size:12pt;font-weight:800;margin-bottom:3px">${escHtml(d.workerName || '')}</div>
+          ${d.workerAddr ? `<div style="font-size:9pt;color:#5a5a5a;margin-bottom:2px">${escHtml(d.workerAddr)}</div>` : ''}
+          ${d.workerIC ? `<div style="font-size:9pt;color:#5a5a5a">${L.id}: <b style="color:#211D1A">${escHtml(d.workerIC)}</b></div>` : ''}
+          ${d.workerVat ? `<div style="font-size:9pt;color:#5a5a5a">${L.vatId}: <b style="color:#211D1A">${escHtml(d.workerVat)}</b></div>` : ''}
           <div style="display:inline-block;font-size:8pt;font-weight:700;margin-top:6px;padding:3px 10px;border-radius:20px;${d.isVatPayer ? 'color:#1a56a0;background:#e8f0fb;border:1px solid #b8cdec' : 'color:#7a6a55;background:#f6f4ef;border:1px solid #e0d8c9'}">${L.vatNote}</div>
         </td>
         <td style="width:50%;vertical-align:top;padding:15px 30px 15px 16px;border-left:1px solid #ececec">
           <div style="font-size:7pt;font-weight:700;text-transform:uppercase;color:#9a9a9a;letter-spacing:1px;margin-bottom:6px">${L.customer}</div>
-          <div style="font-size:11pt;font-weight:800;margin-bottom:3px">${cust.name}</div>
-          <div style="font-size:9pt;color:#5a5a5a;white-space:pre-line;margin-bottom:2px">${cust.address}</div>
-          ${cust.id ? `<div style="font-size:9pt;color:#5a5a5a">${L.id}: <b style="color:#211D1A">${cust.id}</b></div>` : ''}
-          ${cust.vatId ? `<div style="font-size:9pt;color:#5a5a5a">${L.vatId}: <b style="color:#211D1A">${cust.vatId}</b></div>` : ''}
+          <div style="font-size:11pt;font-weight:800;margin-bottom:3px">${escHtml(cust.name || '')}</div>
+          <div style="font-size:9pt;color:#5a5a5a;white-space:pre-line;margin-bottom:2px">${escHtml(cust.address || '')}</div>
+          ${cust.id ? `<div style="font-size:9pt;color:#5a5a5a">${L.id}: <b style="color:#211D1A">${escHtml(cust.id)}</b></div>` : ''}
+          ${cust.vatId ? `<div style="font-size:9pt;color:#5a5a5a">${L.vatId}: <b style="color:#211D1A">${escHtml(cust.vatId)}</b></div>` : ''}
         </td>
       </tr>
     </table>
@@ -18012,8 +18219,8 @@ function renderInvoice(d, lang = 'en') {
           <div style="font-size:6.5pt;font-weight:700;text-transform:uppercase;color:#C4573A;letter-spacing:.8px;padding-top:7px;margin-bottom:3px">${L.paymentInfo}</div>
           <table style="border-collapse:collapse">
             <tr>
-              <td style="padding:0 20px 0 0;white-space:nowrap"><span style="font-size:7pt;color:#9a9a9a">${L.iban}</span> <b style="font-size:9pt">${d.iban}</b></td>
-              <td style="padding:0 20px 0 0;white-space:nowrap"><span style="font-size:7pt;color:#9a9a9a">${L.swift}</span> <b style="font-size:9pt">${d.swift}</b></td>
+              <td style="padding:0 20px 0 0;white-space:nowrap"><span style="font-size:7pt;color:#9a9a9a">${L.iban}</span> <b style="font-size:9pt">${escHtml(d.iban || '')}</b></td>
+              <td style="padding:0 20px 0 0;white-space:nowrap"><span style="font-size:7pt;color:#9a9a9a">${L.swift}</span> <b style="font-size:9pt">${escHtml(d.swift || '')}</b></td>
               <td style="padding:0 20px 0 0;white-space:nowrap"><span style="font-size:7pt;color:#9a9a9a">VS</span> <b style="font-size:9pt">${varSymbol}</b></td>
               <td style="padding:0;white-space:nowrap"><span style="font-size:7pt;color:#9a9a9a">KS</span> <b style="font-size:9pt">${constSymbol}</b></td>
             </tr>
@@ -18078,10 +18285,7 @@ function renderInvoice(d, lang = 'en') {
       </tr>
     </table>
 
-    <!-- FOOTER -->
-    <div style="border-top:1px solid #ececec;margin-top:auto;padding:8px 30px;font-size:7pt;color:#c2c2c2;text-align:center;letter-spacing:.5px">
-      Faktura · Rechnung · Invoice &nbsp;·&nbsp; 1/1
-    </div>
+  </div>
   </div>`
 
   overlay.style.display = 'block'
@@ -18392,11 +18596,13 @@ async function sendInvoiceToSubbau() {
       showToast(invoiceErrorText(error))
       return
     }
-    showToast(row.pdf_url
-      ? '✅ Faktura odeslána do SubBau'
-      : '✅ Faktura odeslána — PDF se nenahrálo, SubBau vidí aspoň údaje')
-    // Trvalé potvrzení pod tlačítky. updateInvoiceSendUi() ho pak nesmí přepsat.
+    // Trvalé potvrzení pod tlačítky (kdyby si pracovník náhled otevřel znovu)
     _invSentNote = '✅ Odesláno ' + new Date().toLocaleString('cs-CZ') + ' — SubBau ji má ve složce Faktury.'
+    // Náhled zavři a ukaž jediné jasné potvrzení
+    showInvoiceSentModal(row.pdf_url
+      ? 'Faktura č. ' + (d.invoiceNum || '') + ' je ve složce Faktury u SubBau. Nemusíte nic dalšího dělat.'
+      : 'Faktura č. ' + (d.invoiceNum || '') + ' je u SubBau ve složce Faktury, ale PDF se nepodařilo nahrát — údaje z faktury vidí, samotný soubor ne.',
+      !row.pdf_url)
   } catch (e) {
     console.error('[faktura] odeslání:', e)
     showToast('❌ Odeslání selhalo: ' + (e?.message || e))
@@ -18432,11 +18638,19 @@ async function emailInvoiceToSubbau() {
         const up = await uploadInvoicePdf(out.blob, d.workerId, d.invoiceNum)
         row.pdf_path = up.path; row.pdf_url = up.url
       } catch (e) { console.warn('[faktura] PDF k e-mailu se nenahrálo:', e?.message) }
+      // Faktura, která odešla jen mailem a není ve složce, se u správce snadno ztratí —
+      // pracovník o tom musí vědět, ne vidět čisté ✅.
       const error = await storeInvoiceRow(row)
-      if (error) console.warn('[faktura] e-mail odešel, zápis do složky ne:', error.message)
-      showToast('✅ Faktura odeslána na ' + INVOICE_EMAIL)
-      _invSentNote = '✅ Odesláno e-mailem na ' + INVOICE_EMAIL + '.'
-      updateInvoiceSendUi()
+      if (error) {
+        console.warn('[faktura] e-mail odešel, zápis do složky ne:', error.message)
+        _invSentNote = '⚠️ Odesláno e-mailem na ' + INVOICE_EMAIL + ', ale do složky Faktury se nezapsala — dejte prosím vědět SubBau.'
+        updateInvoiceSendUi()
+        showInvoiceSentModal('Faktura odešla e-mailem na ' + INVOICE_EMAIL + ', ale do složky Faktury se nezapsala. Dejte prosím vědět SubBau.', true)
+      } else {
+        _invSentNote = '✅ Odesláno e-mailem na ' + INVOICE_EMAIL + '.'
+        updateInvoiceSendUi()
+        showInvoiceSentModal('Faktura č. ' + (d.invoiceNum || '') + ' odešla e-mailem na ' + INVOICE_EMAIL + '.')
+      }
       return
     }
     console.warn('[faktura] server e-mail neposlal:', sent.reason)
@@ -19432,7 +19646,10 @@ async function openPdfFillModal(contractId, title, fileUrl) {
     await pdfFillRenderPage(1)
     if (loading) loading.style.display = 'none'
   } catch(e) {
-    if (loading) { loading.textContent = 'Chyba: ' + e.message }
+    // Závoj je position:absolute přes celý dialog — kdyby zůstal viset,
+    // pohltí kliknutí na křížek Zavřít a z okna se nedá dostat ven.
+    if (loading) loading.style.display = 'none'
+    showToast('❌ PDF se nepodařilo načíst: ' + e.message)
     console.error('openPdfFillModal:', e)
   }
 }
@@ -19487,11 +19704,28 @@ function pdfFillFontDelta(d) {
   document.getElementById('pdf-fill-fontsize').textContent = pdfFillState.fontSize
 }
 
+// Široké tabulky v administraci se musí dát odrolovat do stran. Karta má
+// overflow:hidden kvůli zaobleným rohům, takže na úzkém okně (nebo na telefonu)
+// se pravé sloupce — Stav, Docházka, Přístup s tlačítky — useknou a nejde na ně
+// kliknout. Obalíme je proto rolovacím rámečkem, stejně jako je to u KW přehledu.
+function obalTabulkyRolovanim() {
+  document.querySelectorAll('.card > table').forEach(t => {
+    if (t._rolovaniHotovo) return
+    t._rolovaniHotovo = true
+    const w = document.createElement('div')
+    w.style.cssText = 'overflow-x:auto;-webkit-overflow-scrolling:touch;max-width:100%'
+    t.parentElement.insertBefore(w, t)
+    w.appendChild(t)
+  })
+}
+
 // Klik na stage → nové textové pole
 document.addEventListener('DOMContentLoaded', () => {
   const stage = document.getElementById('pdf-fill-stage')
   if (stage) stage.addEventListener('click', onPdfStageClick)
+  obalTabulkyRolovanim()
 })
+;(function(){ if (document.readyState !== 'loading') obalTabulkyRolovanim() })()
 // fallback: připoj listener i hned (DOMContentLoaded už mohl proběhnout)
 ;(function attachStage(){
   const stage = document.getElementById('pdf-fill-stage')
@@ -21023,11 +21257,16 @@ function applyAttendanceRules(record) {
   // --- 3. ODCHOD ---
   // Zaokrouhlí se DOLŮ na celou půlhodinu (16:25→16:00, 16:45→16:30, 15:50→15:30).
   let adjCo = Math.floor(co / 30) * 30
-  if (co < SHIFT.end) flags.earlyOut = true
+  // Směna přes půlnoc: odchod vyjde „dřív“ než příchod, protože už je další den.
+  // Bez přičtení 24 h by celá noční směna spadla na 0 h — stejné přetočení
+  // dělá i calcHours u běžící směny.
+  const presPulnoc = adjCo < adjCi
+  if (presPulnoc) adjCo += 24 * 60
+  if (!presPulnoc && co < SHIFT.end) flags.earlyOut = true
   else {
     const ot = adjCo - SHIFT.end
     if (ot > 0) flags.overtime = ot
-    if (co >= SHIFT.abnormal) flags.abnormal = true
+    if (presPulnoc || co >= SHIFT.abnormal) flags.abnormal = true
   }
 
   // --- 4. VÝPOČET HODIN ---
@@ -21046,7 +21285,7 @@ function applyAttendanceRules(record) {
 
   return {
     checkIn: minToTime(adjCi),
-    checkOut: minToTime(adjCo),
+    checkOut: minToTime(adjCo % (24 * 60)),
     breakStart: minToTime(adjBs),
     breakEnd: minToTime(adjBe),
     break2Start: minToTime(bs2),
@@ -21098,10 +21337,18 @@ async function _gtranslateTry(text, target) {
   window._transCache = window._transCache || {}
   const key = target + '::' + text
   if (window._transCache[key]) return window._transCache[key]
+  // Překladová služba je jen ozdoba — když je pomalá nebo nedostupná (německá
+  // mobilní síť), NESMÍ zdržet export PDF. Bez limitu čeká fetch klidně minuty
+  // a správce kouká na „⏳ Generuji PDF…“, které se nikam nehne.
+  const fetchSLimitem = (u, ms = 3000) => {
+    const ac = typeof AbortController !== 'undefined' ? new AbortController() : null
+    const t = setTimeout(() => { try { ac && ac.abort() } catch(e) {} }, ms)
+    return fetch(u, ac ? { signal: ac.signal } : undefined).finally(() => clearTimeout(t))
+  }
   // 1) Google Translate (gtx) — bez klíče
   try {
     const url = 'https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=' + target + '&dt=t&q=' + encodeURIComponent(text)
-    const res = await fetch(url)
+    const res = await fetchSLimitem(url)
     if (res.ok) {
       const data = await res.json()
       const translated = (data[0] || []).map(seg => seg[0]).join('')
@@ -21111,7 +21358,7 @@ async function _gtranslateTry(text, target) {
   // 2) Fallback: MyMemory API (bez klíče, limit ~1000/den)
   try {
     const url2 = 'https://api.mymemory.translated.net/get?q=' + encodeURIComponent(text) + '&langpair=cs|' + target
-    const res2 = await fetch(url2)
+    const res2 = await fetchSLimitem(url2)
     if (res2.ok) {
       const d2 = await res2.json()
       const t2 = d2?.responseData?.translatedText
@@ -21401,6 +21648,30 @@ function closeUploadForWorker() {
 
 // Chybu zápisu dokladu přeloží do lidské řeči. Nejčastější případ: databáze má
 // starý seznam povolených typů a nový typ (žádost o A1, pobyt, vízum) odmítne.
+// Řemeslník na stavbě nemá šanci poznat, co znamená „TypeError: Failed to fetch“
+// nebo „new row violates row-level security policy“. Tahle funkce z technické
+// hlášky udělá větu, ze které pozná, jestli má zkusit znovu, nebo komu volat.
+function chybaText(err, coSeDelo) {
+  const m = String((err && (err.message || err)) || '')
+  const uvod = coSeDelo ? coSeDelo + ' — ' : ''
+  if (!navigator.onLine || /Failed to fetch|NetworkError|Load failed|timeout|network/i.test(m)) {
+    return '⚠️ ' + uvod + 'slabý signál. Zkuste to prosím za chvíli znovu.'
+  }
+  if (/JWT|token|session|Unauthorized|401|expired/i.test(m)) {
+    return '⚠️ ' + uvod + 'přihlášení vypršelo. Přihlaste se prosím znovu.'
+  }
+  if (/row-level security|policy|permission|42501|403/i.test(m)) {
+    return '⚠️ ' + uvod + 'zápis nepovolen. Ozvěte se prosím SubBau.'
+  }
+  if (/column|does not exist|schema cache|relation|42703|42P01/i.test(m)) {
+    return '⚠️ ' + uvod + 'aplikace potřebuje aktualizaci. Ozvěte se prosím SubBau.'
+  }
+  if (/duplicate|unique|23505/i.test(m)) {
+    return '⚠️ ' + uvod + 'záznam už existuje.'
+  }
+  return '⚠️ ' + uvod + 'nepodařilo se to uložit. Zkuste to prosím znovu.'
+}
+
 function docSaveErrorText(err) {
   const msg = (err && err.message) || ''
   if (/documents_doc_type_check|doc_type.*check constraint/i.test(msg)) {
@@ -21691,9 +21962,11 @@ async function loadWdFinance() {
   // Načti hodiny z evidence
   const { data: att } = await sb.from('attendance').select('*').eq('worker_id',currentWorkerId).eq('kw',week).eq('kw_year',year)
   const nowStrFin = new Date().toTimeString().slice(0,8)
+  const dnesStrFin = localDateStr()
   const hoursWorked = att?.reduce((s,r) => {
     if (r.total_hours) return s + r.total_hours
-    if (r.check_in && !r.check_out) return s + calcHours(r.check_in, nowStrFin, r.break_start, r.break_end)
+    // Neuzavřený den z minulosti = 0 h, ať výdělek nesedí na vymyšleném čísle
+    if (r.check_in && !r.check_out && r.work_date === dnesStrFin) return s + calcHours(r.check_in, nowStrFin, r.break_start, r.break_end)
     return s
   }, 0) || 0
 
@@ -21748,6 +22021,34 @@ async function loadWdFinance() {
 function closeInvoiceOverlay() {
   const ov = document.getElementById('invoice-overlay')
   if (ov) ov.style.display = 'none'
+  const wm = document.getElementById('worker-modal')
+  const sent = document.getElementById('inv-sent-modal')
+  const jineOkno = (wm && wm.style.display === 'flex') || (sent && sent.style.display === 'flex')
+  document.body.style.overflow = jineOkno ? 'hidden' : ''
+}
+
+// Po odeslání se náhled zavře a zůstane jediné okno s potvrzením — pracovník
+// tak jasně vidí, že je hotovo, a nemusí náhled zavírat sám.
+function showInvoiceSentModal(text, varovani) {
+  closeInvoiceOverlay()
+  const m = document.getElementById('inv-sent-modal')
+  if (!m) { showToast(text); return }
+  const t = document.getElementById('inv-sent-text')
+  if (t) t.textContent = text || ''
+  const nadpis = document.getElementById('inv-sent-title')
+  const ikona = document.getElementById('inv-sent-icon')
+  if (nadpis) nadpis.textContent = varovani ? 'Faktura odeslána — s výhradou' : 'Faktura odeslána'
+  if (ikona) {
+    ikona.style.background = varovani ? '#fdf3e3' : '#e1f5ee'
+    ikona.style.color = varovani ? '#9a6b15' : '#1d9e75'
+  }
+  m.style.display = 'flex'
+  document.body.style.overflow = 'hidden'
+}
+
+function closeInvoiceSentModal() {
+  const m = document.getElementById('inv-sent-modal')
+  if (m) m.style.display = 'none'
   const wm = document.getElementById('worker-modal')
   document.body.style.overflow = (wm && wm.style.display === 'flex') ? 'hidden' : ''
 }
@@ -22005,12 +22306,15 @@ async function saveWorkerNotes() {
 
 async function toggleAccessFromModal() {
   if(!currentWorkerId) return
-  const { data: w } = await sb.from('profiles').select('is_active').eq('id',currentWorkerId).maybeSingle()
+  const { data: w, error: readErr } = await sb.from('profiles').select('is_active').eq('id',currentWorkerId).maybeSingle()
+  if (readErr || !w) { showToast('❌ Profil se nepodařilo načíst — zkuste to prosím znovu'); return }
   // Stejné chování jako v Přístupech: odebraný nesvítí jako čekající registrace, obnovený je schválený
   const upd = w.is_active
     ? { is_active: false, registration_status: 'removed' }
     : { is_active: true, registration_status: 'approved' }
-  await sb.from('profiles').update(upd).eq('id',currentWorkerId)
+  // Bez kontroly chyby by se ukázalo „Přístup odebrán“ i tehdy, kdy zůstal aktivní
+  const { error: updErr } = await sb.from('profiles').update(upd).eq('id',currentWorkerId)
+  if (updErr) { showToast('❌ Změna přístupu se neuložila: ' + updErr.message); return }
   showToast(w.is_active?'🔒 Přístup odebrán':'✅ Přístup obnoven')
   openWorkerModal(currentWorkerId)
   loadWorkers()
@@ -22119,7 +22423,12 @@ function tichaObnovaDat() {
   if (!_tichaObnovaBezi()) return
   try {
     // ADMIN: která sekce je zrovna otevřená (.view.on → id "v-<nazev>")
-    const adminView = document.querySelector('.view.on')
+    // Hledej jen uvnitř #app — jinak by se pracovníkovi na stavbě každou minutu
+    // spouštěl na pozadí celý admin dashboard (dotazy na všechny pracovníky,
+    // týmy i docházku celého týdne) a zbytečně žral data a baterii.
+    const adminView = (currentProfile && currentProfile.role === 'admin')
+      ? document.querySelector('#app .view.on')
+      : null
     if (adminView && adminView.id && adminView.id.indexOf('v-') === 0) {
       const name = adminView.id.slice(2)
       if (name === 'dashboard' && typeof loadDashboard === 'function') loadDashboard()
@@ -22219,6 +22528,20 @@ document.addEventListener('visibilitychange', () => {
 
 
 <!-- FAKTURA OVERLAY -->
+<!-- Potvrzení po odeslání faktury. Náhled se zavře a zůstane tohle jediné okno,
+     ať pracovník jasně vidí, že je hotovo. Zavírá se křížkem i tlačítkem. -->
+<div id="inv-sent-modal" style="display:none;position:fixed;inset:0;z-index:10020;background:rgba(33,29,26,.6);align-items:center;justify-content:center;padding:20px">
+  <div style="background:#fff;border-radius:20px;padding:26px 24px calc(24px + env(safe-area-inset-bottom));width:100%;max-width:400px;box-shadow:0 16px 48px rgba(0,0,0,.35);position:relative">
+    <button class="x-close" onclick="closeInvoiceSentModal()" title="Zavřít" aria-label="Zavřít" style="position:absolute;top:12px;right:12px;width:36px;height:36px;border-radius:50%;background:#f2efe9;border:none;color:#6b6157;cursor:pointer;font-family:inherit;display:flex;align-items:center;justify-content:center"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" style="width:19px;height:19px;display:block"><path d="M18 6L6 18M6 6l12 12"/></svg></button>
+    <div id="inv-sent-icon" style="width:56px;height:56px;border-radius:16px;background:#e1f5ee;color:#1d9e75;display:flex;align-items:center;justify-content:center;margin-bottom:16px">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" style="width:30px;height:30px"><path d="M20 6 9 17l-5-5"/></svg>
+    </div>
+    <div id="inv-sent-title" style="font-size:19px;font-weight:800;color:#211D1A;margin-bottom:7px">Faktura odeslána</div>
+    <div id="inv-sent-text" style="font-size:13.5px;color:#6b6157;line-height:1.6;margin-bottom:22px"></div>
+    <button onclick="closeInvoiceSentModal()" style="width:100%;padding:15px;background:#1d9e75;color:#fff;border:none;border-radius:13px;font-size:15.5px;font-weight:800;cursor:pointer;font-family:inherit">Hotovo</button>
+  </div>
+</div>
+
 <div id="invoice-overlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.9);z-index:10000;overflow-y:auto;padding:0">
   <div style="max-width:860px;margin:0 auto;padding:0 12px 24px">
     <div id="invoice-topbar" style="display:flex;justify-content:space-between;align-items:center;gap:8px;padding:calc(14px + env(safe-area-inset-top)) 4px 12px">
@@ -22226,6 +22549,7 @@ document.addEventListener('visibilitychange', () => {
       <div style="display:flex;align-items:center;gap:10px">
         <div id="invoice-topbar-num" style="color:#9a9082;font-size:12px;font-weight:600"></div>
         <button onclick="toggleInvoiceZoom()" title="Přiblížit / oddálit" style="display:flex;align-items:center;gap:6px;padding:7px 11px;background:rgba(255,255,255,.15);color:#fff;border:none;border-radius:9px;cursor:pointer;font-family:inherit;font-size:12px;font-weight:700"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:15px;height:15px;flex-shrink:0"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3M8 11h6"/><path d="M11 8v6" id="inv-zoom-plus"/></svg><span id="inv-zoom-label">Přiblížit</span></button>
+        <button class="x-close" onclick="closeInvoiceOverlay()" title="Zavřít náhled" aria-label="Zavřít náhled" style="display:flex;align-items:center;justify-content:center;width:36px;height:34px;background:rgba(255,255,255,.15);color:#fff;border:none;border-radius:9px;cursor:pointer;font-family:inherit;flex-shrink:0"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" style="width:17px;height:17px;display:block"><path d="M18 6L6 18M6 6l12 12"/></svg></button>
       </div>
     </div>
     <!-- Náhled faktury: bílý list A4 zmenšený na šířku obrazovky -->
@@ -22243,7 +22567,6 @@ document.addEventListener('visibilitychange', () => {
       <div style="display:flex;gap:8px;align-items:stretch;margin-top:11px">
         <button onclick="saveInvoicePdf()" style="flex:1 1 auto;min-width:0;padding:10px;background:transparent;color:#E8A13A;border:1px solid rgba(232,161,58,.45);border-radius:9px;font-weight:700;cursor:pointer;font-family:inherit;font-size:12.5px;display:flex;align-items:center;justify-content:center;gap:6px"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:15px;height:15px;flex-shrink:0"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="M7 10l5 5 5-5"/><path d="M12 15V3"/></svg><span>Uložit PDF</span></button>
         <button onclick="printInvoiceOnePage()" style="flex:0 0 auto;padding:10px 14px;background:transparent;color:#cfc7bd;border:1px solid rgba(255,255,255,.25);border-radius:9px;cursor:pointer;font-family:inherit;font-size:12.5px;font-weight:700;display:flex;align-items:center;justify-content:center;gap:6px"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:15px;height:15px;flex-shrink:0"><path d="M6 9V2h12v7M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2"/><rect x="6" y="14" width="12" height="8"/></svg><span>Tisk</span></button>
-        <button class="x-close" onclick="closeInvoiceOverlay()" title="Zavřít" style="flex:0 0 46px;display:flex;align-items:center;justify-content:center;padding:10px 0;background:transparent;color:#cfc7bd;border:1px solid rgba(255,255,255,.25);border-radius:9px;cursor:pointer;font-family:inherit"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:17px;height:17px;display:block"><path d="M18 6L6 18M6 6l12 12"/></svg></button>
       </div>
 
       <!-- Druhá cesta, jak fakturu doručit — pro toho, kdo radši pošle e-mail -->
@@ -22262,7 +22585,9 @@ document.addEventListener('visibilitychange', () => {
 <style>
 @media print {
   /* Faktura se tiskne VŽDY na jednu stránku A4 — malé okraje a žádné zalomení uvnitř */
-  @page { size: A4 portrait; margin: 8mm; }
+  /* margin:0 potlačí hlavičku a patičku prohlížeče (adresa, datum, „Stránka 1 z 1“).
+     Okraje si drží sama faktura svým vnitřním odsazením. */
+  @page { size: A4 portrait; margin: 0; }
   html, body { height:auto!important; overflow:visible!important; margin:0!important; padding:0!important; }
   body > *:not(#invoice-overlay) { display: none !important; }
   #invoice-overlay { position:static!important; background:white!important; padding:0!important; overflow:visible!important; }
@@ -22339,6 +22664,8 @@ document.addEventListener('visibilitychange', () => {
       <div id="edit-att-workername" style="font-size:14px;font-weight:700;color:var(--text1);margin-bottom:8px"></div>
       <label style="font-size:12px;font-weight:600;display:block;margin-bottom:6px">Vyberte den</label>
       <div id="edit-att-daypicker" style="display:flex;gap:4px"></div>
+      <!-- Ukáže se jen u dne, který má víc záznamů (druhá směna nebo „2. stavba“) -->
+      <div id="edit-att-smeny" style="display:none;margin-top:9px;padding:9px 10px;background:#faf9f6;border:1px solid var(--brd);border-radius:9px"></div>
     </div>
     <div class="fg" id="edit-att-date-wrap">
       <label>Datum</label>
