@@ -10746,17 +10746,25 @@ async function loadTeams() {
       .in('role', ['osvec', 'partak']).order('full_name'))
   }
 
-  // Načti podskupiny (subteams). Pokud tabulka neexistuje, jen prázdné pole.
-  let subteams = []
+  // Načti podskupiny (subteams). Když filtr is_active selže (sloupec v tabulce chybí), zkus to
+  // bez něj — jinak by zůstalo prázdno a všichni lidé zařazení do podskupin by ze seznamu zmizeli.
+  let subteams = [], subteamsError = null
   try {
-    const { data: st } = await sb.from('subteams').select('*').eq('is_active', true).order('name')
+    let { data: st, error: stErr } = await sb.from('subteams').select('*').eq('is_active', true).order('name')
+    if (stErr) {
+      const retry = await sb.from('subteams').select('*').order('name')
+      st = retry.data; stErr = retry.error
+      if (st) st = st.filter(x => x.is_active !== false)
+    }
     subteams = st || []
-  } catch(e) { subteams = [] }
+    subteamsError = stErr || null
+  } catch(e) { subteams = []; subteamsError = e }
 
   _teamsCache = teams || []
   _workersCache = workers || []
   _subteamsCache = subteams
   window._subteamsCache = subteams
+  window._subteamsError = subteamsError
   // Načti firmy pro dropdown navázání firmy k týmu
   const { data: comps } = await sb.from('companies').select('id, name').order('name')
   _teamCompaniesCache = comps || []
@@ -10768,8 +10776,12 @@ function filterTeams() { renderTeams() }
 // Vykreslí členy týmu seskupené podle podskupin (subteams), + ovládání podskupin
 function renderTeamMembers(t, members, qWorker, profLabels) {
   const subs = (_subteamsCache||[]).filter(s => String(s.team_id) === String(t.id))
+  const subIds = new Set(subs.map(s => String(s.id)))
   const inSub = sid => members.filter(m => String(m.subteam_id) === String(sid))
-  const noSub = members.filter(m => !m.subteam_id)
+  // Do „bez skupiny" patří i ti, jejichž subteam_id ukazuje mimo tento tým (zbytek po přesunu
+  // z jiné firmy nebo smazaná podskupina) — jinak by se v seznamu vůbec neukázali,
+  // přestože je počítadlo členů započítá.
+  const noSub = members.filter(m => !m.subteam_id || !subIds.has(String(m.subteam_id)))
 
   // Rozbalovátko pro přesun člena: bez skupiny + všechny podskupiny tohoto týmu
   const moveOptions = (curSid) => `
@@ -10837,7 +10849,9 @@ async function createSubteam(teamId) {
   if (name === null) return
   const nm = name.trim()
   if (!nm) { showToast('⚠️ Zadejte název'); return }
-  const { error } = await sb.from('subteams').insert({ team_id: teamId, name: nm, is_active: true })
+  let { error } = await sb.from('subteams').insert({ team_id: teamId, name: nm, is_active: true })
+  if (error && /is_active/i.test(error.message || ''))
+    ;({ error } = await sb.from('subteams').insert({ team_id: teamId, name: nm }))
   if (error) {
     if (/relation .*subteams.* does not exist/i.test(error.message))
       showToast('❌ Chybí tabulka subteams — spusťte SQL v Supabase')
@@ -10921,8 +10935,13 @@ function renderTeams() {
     )
   }
 
+  const stErr = window._subteamsError
+  const stWarn = stErr
+    ? `<div style="background:#fdf3e3;border:1px solid var(--amber);border-radius:10px;padding:10px 12px;margin-bottom:10px;font-size:12px;color:var(--text2);line-height:1.5">⚠️ Podskupiny se nepodařilo načíst, proto se nezobrazují a nejdou zakládat.<br>Lidé zařazení do podskupin jsou zatím vypsaní jako „bez skupiny", takže o nikoho nepřijdete.<br><span style="color:var(--text3)">Detail: ${String(stErr.message || stErr).replace(/</g,'&lt;')}</span></div>`
+    : ''
+
   if (teams.length && shownTeams.length) {
-    div.innerHTML = shownTeams.map(t => {
+    div.innerHTML = stWarn + shownTeams.map(t => {
       let members = workers.filter(w => w.team_id === t.id)
       // Barva podle firmy — stejná paleta jako pilulky "🏢 Firma" jinde v appce,
       // aby šlo na první pohled poznat, kde jedna firma končí a druhá začíná.
@@ -11346,7 +11365,9 @@ async function loadUnassignedForModal() {
 }
 
 async function addToTeam(workerId, teamId) {
-  const { error } = await sb.from('profiles').update({ team_id: teamId }).eq('id', workerId)
+  // Podskupina patří ke starému týmu — při přesunu musí pryč, jinak by člověk v novém týmu
+  // zůstal viset v cizí podskupině a v seznamu členů by se neukázal.
+  const { error } = await updateWorkerTeam(workerId, teamId)
   if (error) { showToast('Chyba: ' + error.message); return }
   await logTeamAssignment(workerId, teamId)
   await fillInvoiceCustomerFromTeam(workerId, teamId)
@@ -11357,15 +11378,24 @@ async function addToTeam(workerId, teamId) {
 
 async function removeFromTeam(workerId) {
   await closeTeamAssignment(workerId)
-  const { error } = await sb.from('profiles').update({ team_id: null }).eq('id', workerId)
+  const { error } = await updateWorkerTeam(workerId, null)
   if (error) { showToast('Chyba: ' + error.message); return }
   showToast('Odebrano ze skupiny')
   loadTeams()
 }
 
+// Nastaví pracovníkovi tým a zároveň ho uvolní ze staré podskupiny.
+// Fallback bez subteam_id je pro případ, že sloupec v profiles ještě neexistuje.
+async function updateWorkerTeam(workerId, teamId) {
+  let res = await sb.from('profiles').update({ team_id: teamId, subteam_id: null }).eq('id', workerId)
+  if (res.error && /subteam_id/i.test(res.error.message || ''))
+    res = await sb.from('profiles').update({ team_id: teamId }).eq('id', workerId)
+  return res
+}
+
 async function assignToTeam(workerId, teamId) {
   if (!teamId) return
-  const { error } = await sb.from('profiles').update({ team_id: teamId }).eq('id', workerId)
+  const { error } = await updateWorkerTeam(workerId, teamId)
   if (error) { showToast('Chyba: ' + error.message); return }
   await logTeamAssignment(workerId, teamId)
   await fillInvoiceCustomerFromTeam(workerId, teamId)
