@@ -7296,8 +7296,11 @@ async function computeLongDayAlerts() {
     if (!startedAt || !endedAt) return
     if (endedAt < startedAt) endedAt.setDate(endedAt.getDate() + 1)  // odchod až po půlnoci
     const cutoff = new Date(startedAt); cutoff.setHours(LONG_DAY_HOUR, 0, 0, 0)
-    if (endedAt <= cutoff) return   // skončil do 19:00 → běžný den
-    items.push({ ...r, _kind: 'long', _startedAt: startedAt, _endedAt: endedAt, _hours: r.total_hours || 0 })
+    const hod = r.total_hours || 0
+    // Alarm spouštěl jen čas odchodu (po 19:00). Den s nesmyslným počtem hodin
+    // tím propadl na dashboardu bez povšimnutí.
+    if (endedAt <= cutoff && hod <= 14) return   // skončil do 19:00 a hodiny dávají smysl
+    items.push({ ...r, _kind: 'long', _startedAt: startedAt, _endedAt: endedAt, _hours: hod })
   })
 
   window.unclosedWorkerIds = openIds
@@ -7582,6 +7585,7 @@ async function loadTodayTimeline() {
     if (!byWorker[wid]) {
       byWorker[wid] = {
         worker_id: r.worker_id, id: r.id,
+        ids: [],              // VŠECHNY záznamy dne — koš musí smazat celý sloučený řádek
         name: r.worker?.full_name || '—',
         profession: r.worker?.profession || '',
         check_in: null, check_out: null,
@@ -7591,6 +7595,7 @@ async function loadTodayTimeline() {
       }
     }
     const g = byWorker[wid]
+    if (r.id) g.ids.push(r.id)
     const ci = r.check_in ? r.check_in.slice(0,5) : null
     const co = r.check_out ? r.check_out.slice(0,5) : null
     if (ci && (!g.check_in || ci < g.check_in)) g.check_in = ci
@@ -7670,7 +7675,7 @@ async function loadTodayTimeline() {
               <td class="td-open" style="padding:10px;cursor:pointer;font-size:12px;color:var(--text2);max-width:240px;line-height:1.4">${addrCell}</td>
               <td class="td-open" style="padding:10px;cursor:pointer;font-size:12px;color:var(--text2);max-width:220px">${desc}</td>
               <td style="padding:10px;text-align:center">
-                <button onclick="deleteTodayRecord('${g.id}','${safeName}')" title="Smazat dnešní záznam" style="background:none;border:1px solid var(--brd);border-radius:6px;padding:5px 9px;cursor:pointer;color:var(--red);font-family:inherit"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:1em;height:1em;flex-shrink:0;vertical-align:-2px"><path d="M3 6h18M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6M14 11v6"/></svg> </button>
+                <button onclick="deleteTodayRecord('${g.ids.join(',')}','${safeName}')" title="Smazat dnešní docházku" style="background:none;border:1px solid var(--brd);border-radius:6px;padding:5px 9px;cursor:pointer;color:var(--red);font-family:inherit"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:1em;height:1em;flex-shrink:0;vertical-align:-2px"><path d="M3 6h18M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6M14 11v6"/></svg> </button>
               </td>
             </tr>`
         }).join('')}
@@ -7697,8 +7702,14 @@ async function loadTodayTimeline() {
 // Admin — smazání dnešního docházkového záznamu (s potvrzením)
 async function deleteTodayRecord(id, name) {
   if (!id) return
-  if (!confirm('Opravdu smazat dnešní záznam docházky pro ' + (name || 'tohoto pracovníka') + '?\n\nTato akce je nevratná.')) return
-  const { error } = await sb.from('attendance').delete().eq('id', id)
+  // Řádek v přehledu je sloučený za celý den (víc směn, případně i „2. stavba“).
+  // Dřív se mazal jen ten nejstarší, řádek se po obnovení vrátil s hodinami té
+  // druhé směny a admin měl dojem, že mazání nefunguje.
+  const ids = String(id).split(',').filter(Boolean)
+  if (!ids.length) return
+  const kolik = ids.length > 1 ? '\n\nDen má ' + ids.length + ' záznamy — smažou se všechny.' : ''
+  if (!confirm('Opravdu smazat dnešní docházku pro ' + (name || 'tohoto pracovníka') + '?' + kolik + '\n\nTato akce je nevratná.')) return
+  const { error } = await sb.from('attendance').delete().in('id', ids)
   if (error) { showToast('❌ Chyba mazání: ' + error.message); return }
   showToast('🗑 Záznam smazán')
   refreshAttendanceEverywhere()
@@ -8047,7 +8058,14 @@ async function renderCalendar() {
   else if (att && att.length >= CAL_LIMIT) showToast('⚠️ Kalendář ukazuje jen část docházky — zvolte kratší období')
   const attSet = new Set((att||[]).map(a => a.worker_id + '|' + a.work_date))
   const attMap = {}
-  ;(att||[]).forEach(a => { attMap[a.worker_id + '|' + a.work_date] = a })
+  // Den s víc záznamy (druhá směna, „2. stavba“) má v mapě místo jen pro jeden.
+  // Ať v ní vždycky zůstane ten problémový — jinak čistý záznam schová den
+  // s nesmyslnými hodinami, nebo naopak záznam bez příchodu obarví den v pořádku.
+  ;(att||[]).forEach(a => {
+    const k = a.worker_id + '|' + a.work_date
+    const stavajici = attMap[k]
+    if (!stavajici || (!attHasProblem(stavajici) && attHasProblem(a))) attMap[k] = a
+  })
   window._calAttMap = attMap
 
   // Nepřítomnosti — dovolená i nemoc (překryv s rozsahem).
@@ -10071,7 +10089,7 @@ function renderWorkerInvoices() {
       <td style="white-space:nowrap">${r.kw ? 'KW ' + r.kw + '/' + r.kw_year : '—'}${r.period_from ? `<div style="font-size:11px;color:var(--text3)">${_invDmy(r.period_from)} – ${_invDmy(r.period_to)}</div>` : ''}</td>
       <td style="font-size:12px">${escAttr(r.customer_name || '—')}</td>
       <td style="text-align:right;white-space:nowrap">${(Number(r.total_hours) || 0).toFixed(2)} h</td>
-      <td style="text-align:right;white-space:nowrap;font-weight:700">${(Number(r.total_amount) || 0).toFixed(2)} €</td>
+      <td style="text-align:right;white-space:nowrap;font-weight:700">${(Number(r.total_amount) || 0).toFixed(2)} €${(Number(r.cash_paid) || 0) > 0 ? `<div style="font-size:11px;font-weight:600;color:var(--text3)">hotově −${(Number(r.cash_paid) || 0).toFixed(2)} €</div><div style="font-size:11px;font-weight:700;color:var(--green)">na účet ${((Number(r.total_amount) || 0) - (Number(r.cash_paid) || 0)).toFixed(2)} €</div>` : ''}</td>
       <td style="white-space:nowrap;font-size:12px">${dt(r.sent_at)}${r.sent_via === 'email' ? '<div style="font-size:11px;color:var(--text3)">e-mailem</div>' : ''}</td>
       <td>${statusPill(r.status)}</td>
       <td>
@@ -10079,6 +10097,7 @@ function renderWorkerInvoices() {
           ${r.pdf_url ? `<button onclick="openPdfUrl('${jsStr(r.pdf_url)}')" style="font-size:11px;padding:3px 8px;border:1px solid var(--blue);border-radius:6px;cursor:pointer;background:var(--bg2);color:var(--blue);font-family:inherit"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:1em;height:1em;flex-shrink:0;vertical-align:-2px"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg> Zobrazit</button>` : '<span style="font-size:11px;color:var(--text3)">bez PDF</span>'}
           ${r.pdf_url ? `<button onclick="downloadInvoicePdf('${jsStr(r.id)}')" style="font-size:11px;padding:3px 8px;border:1px solid var(--brd);border-radius:6px;cursor:pointer;background:#fff;font-family:inherit"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:1em;height:1em;flex-shrink:0;vertical-align:-2px"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="M7 10l5 5 5-5"/><path d="M12 15V3"/></svg> Stáhnout</button>` : ''}
           ${r.pdf_url ? `<button onclick="printInvoicePdf('${jsStr(r.pdf_url)}')" style="font-size:11px;padding:3px 8px;border:1px solid var(--brd);border-radius:6px;cursor:pointer;background:#fff;font-family:inherit"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:1em;height:1em;flex-shrink:0;vertical-align:-2px"><path d="M6 9V2h12v7M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2"/><rect x="6" y="14" width="12" height="8"/></svg> Tisk</button>` : ''}
+          <button onclick="openInvoiceEdit('${jsStr(r.id)}')" title="Upravit fakturu — záloha v hotovosti" style="font-size:11px;padding:3px 8px;border:1px solid var(--brd);border-radius:6px;cursor:pointer;background:#fff;font-family:inherit"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:1em;height:1em;flex-shrink:0;vertical-align:-2px"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/></svg> Upravit</button>
           ${(r.status || 'new') === 'new' ? `<button onclick="setInvoiceStatus('${jsStr(r.id)}','seen')" style="font-size:11px;padding:3px 8px;border:1px solid var(--green);border-radius:6px;cursor:pointer;background:var(--green-l);color:var(--green);font-family:inherit"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:1em;height:1em;flex-shrink:0;vertical-align:-2px"><path d="M20 6 9 17l-5-5"/></svg> Vyřídit</button>` : ''}
           ${(r.status || 'new') !== 'paid' ? `<button onclick="setInvoiceStatus('${jsStr(r.id)}','paid')" style="font-size:11px;padding:3px 8px;border:1px solid var(--amber);border-radius:6px;cursor:pointer;background:var(--amber-l);color:var(--amber);font-family:inherit">Zaplaceno</button>` : ''}
           <button onclick="deleteWorkerInvoice('${jsStr(r.id)}')" title="Smazat" style="font-size:11px;padding:3px 8px;border:1px solid var(--red);border-radius:6px;cursor:pointer;background:none;color:var(--red);font-family:inherit"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:1em;height:1em;flex-shrink:0;vertical-align:-2px"><path d="M3 6h18M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6M14 11v6"/></svg></button>
@@ -10112,13 +10131,17 @@ function renderInvoiceStats(rows) {
   const sum = rows.reduce((s, r) => s + (Number(r.total_amount) || 0), 0)
   const hours = rows.reduce((s, r) => s + (Number(r.total_hours) || 0), 0)
   const nove = rows.filter(r => (r.status || 'new') === 'new').length
+  // Zálohy vyplacené v hotovosti — na účet se posílá jen zbytek
+  const cash = rows.reduce((s, r) => s + (Number(r.cash_paid) || 0), 0)
   const card = (label, value, cls, color) =>
     `<div class="sc ${cls}"><div class="sc-lbl">${label}</div><div class="sc-val"${color ? ` style="color:${color}"` : ''}>${value}</div></div>`
   box.innerHTML =
     card('Faktur ve výběru', rows.length, 'b') +
     card('Nevyřízené', nove, nove ? 'r' : 'g', nove ? 'var(--red)' : 'var(--green)') +
     card('Hodin celkem', hours.toFixed(1) + ' h', 'p') +
-    card('Částka celkem', sum.toFixed(2) + ' €', 'a')
+    card('Částka celkem', sum.toFixed(2) + ' €', 'a') +
+    (cash > 0 ? card('Zálohy v hotovosti', '−' + cash.toFixed(2) + ' €', 'r', 'var(--red)')
+              + card('K odeslání na účet', (sum - cash).toFixed(2) + ' €', 'g', 'var(--green)') : '')
 }
 
 async function setInvoiceStatus(id, status) {
@@ -10180,6 +10203,186 @@ function printInvoicePdf(rawUrl) {
   document.body.appendChild(frame)
   // Když se PDF do pár vteřin nenačte, nenech admina čekat
   setTimeout(() => { if (!done) { frame.remove(); openPdfUrl(url) } }, 6000)
+}
+
+// ===== ÚPRAVA FAKTURY — SMÍ JEN SUBBAU =====
+// Pracovník fakturu jen vystaví a odešle. Zálohu vyplacenou v hotovosti do ní
+// dopisuje SubBau — pracovník o ní při vystavení nemusí vědět a hlavně si ji
+// nesmí zadat sám (v databázi to hlídá RLS, viz supabase-migrace-faktura-zaloha.sql).
+
+// Datum ve tvaru, v jakém ho tiskne faktura (23.08.2026)
+function _invFmtDate(iso) {
+  if (!iso) return ''
+  const d = new Date(String(iso).slice(0, 10) + 'T00:00:00')
+  return isNaN(d) ? '' : String(d.getDate()).padStart(2, '0') + '.'
+    + String(d.getMonth() + 1).padStart(2, '0') + '.' + d.getFullYear()
+}
+
+// Poskládá z uloženého řádku zpátky data pro renderInvoice. Údaje se berou
+// VÝHRADNĚ z uloženého řádku, ne z profilu — faktura je daňový doklad a musí
+// zůstat v podobě, v jaké byla vystavená. Dopisuje se do ní jedině záloha.
+function invoiceDataFromRow(r, extra) {
+  const e = extra || {}
+  return {
+    invoiceNum: r.invoice_number || '',
+    today: _invFmtDate(r.issue_date),
+    dueDate: _invFmtDate(r.due_date),
+    workerName: r.supplier_name || '',
+    workerAddr: r.supplier_address || '',
+    workerIC: r.supplier_ic || '',
+    workerVat: r.supplier_dic || '',
+    isVatPayer: !!r.is_vat_payer,
+    workerEmail: e.email || null,
+    workerPhone: e.phone || null,
+    iban: r.iban || '',
+    swift: r.swift || '',
+    dueDays: r.due_days || 14,
+    serviceDesc: r.item_description || '',
+    serviceDescTrans: '',
+    serviceDescSub: r.kw ? `KW ${r.kw}/${r.kw_year} · ${_invFmtDate(r.period_from)} – ${_invFmtDate(r.period_to)}` : '',
+    periodFrom: _invFmtDate(r.period_from),
+    periodTo: _invFmtDate(r.period_to),
+    totalHours: Number(r.total_hours) || 0,
+    rate: Number(r.hourly_rate) || 0,
+    totalAmount: Number(r.total_amount) || 0,
+    week: r.kw, year: r.kw_year,
+    customer: {
+      name: r.customer_name || '', address: r.customer_address || '',
+      id: r.customer_ic || '', vatId: r.customer_dic || ''
+    },
+    cashPaid: Number(r.cash_paid) || 0,
+    cashPaidNote: r.cash_paid_note || '',
+    workerId: r.worker_id, byAdmin: true,
+    supplierType: r.supplier_type || 'osoba',
+    issueISO: r.issue_date || null, dueISO: r.due_date || null,
+    periodFromISO: r.period_from || null, periodToISO: r.period_to || null
+  }
+}
+
+let _invEditId = null
+
+function openInvoiceEdit(id) {
+  const r = _invCache.find(x => x.id === id)
+  if (!r) { showToast('⚠️ Faktura se nenašla — načtěte složku znovu'); return }
+  _invEditId = id
+  const total = Number(r.total_amount) || 0
+  const cash = Number(r.cash_paid) || 0
+  document.getElementById('invedit-title').textContent = 'Faktura č. ' + (r.invoice_number || '')
+  document.getElementById('invedit-sub').textContent =
+    (r.worker?.full_name || r.supplier_name || '') + (r.kw ? '  ·  KW ' + r.kw + '/' + r.kw_year : '')
+  document.getElementById('invedit-total').textContent = total.toFixed(2) + ' €'
+  const amt = document.getElementById('invedit-cash')
+  amt.value = cash > 0 ? String(cash) : ''
+  amt.max = String(total)
+  document.getElementById('invedit-note').value = r.cash_paid_note || ''
+  invEditRecalc()
+  document.getElementById('invedit-dialog').style.display = 'flex'
+  setTimeout(() => { try { amt.focus() } catch (e) {} }, 120)
+}
+
+function closeInvoiceEdit() {
+  const d = document.getElementById('invedit-dialog')
+  if (d) d.style.display = 'none'
+  _invEditId = null
+}
+
+// Průběžně ukazuje, kolik po odečtení zálohy zbývá poslat na účet
+function invEditRecalc() {
+  const r = _invCache.find(x => x.id === _invEditId)
+  if (!r) return
+  const total = Number(r.total_amount) || 0
+  const raw = String(document.getElementById('invedit-cash')?.value || '').replace(',', '.')
+  let cash = parseFloat(raw)
+  if (!isFinite(cash) || cash < 0) cash = 0
+  const over = cash > total + 0.0001
+  const rest = Math.max(0, total - Math.min(cash, total))
+  const out = document.getElementById('invedit-rest')
+  if (out) {
+    out.textContent = rest.toFixed(2) + ' €'
+    out.style.color = over ? 'var(--red)' : 'var(--text)'
+  }
+  const warn = document.getElementById('invedit-warn')
+  if (warn) {
+    warn.style.display = over ? 'block' : 'none'
+    warn.textContent = over ? '⚠️ Záloha je vyšší než celá faktura (' + total.toFixed(2) + ' €)' : ''
+  }
+  const btn = document.getElementById('invedit-save-btn')
+  if (btn) { btn.disabled = over; btn.style.opacity = over ? '0.5' : '1' }
+}
+
+// Uloží zálohu a PŘEPÍŠE PDF. Bez přepsání PDF by v databázi seděla nová částka,
+// ale ve složce by pořád viselo staré PDF bez zálohy — a tisklo by se to špatné.
+async function saveInvoiceEdit() {
+  const r = _invCache.find(x => x.id === _invEditId)
+  if (!r) { showToast('⚠️ Faktura se nenašla'); return }
+  const total = Number(r.total_amount) || 0
+  const raw = String(document.getElementById('invedit-cash')?.value || '').replace(',', '.')
+  let cash = parseFloat(raw)
+  if (!isFinite(cash) || cash < 0) cash = 0
+  if (cash > total + 0.0001) { showToast('⚠️ Záloha nesmí být vyšší než faktura'); return }
+  cash = Math.round(Math.min(cash, total) * 100) / 100
+  const note = String(document.getElementById('invedit-note')?.value || '').trim().slice(0, 200)
+
+  const btn = document.getElementById('invedit-save-btn')
+  if (btn) { btn.disabled = true; btn.textContent = 'Přepisuji fakturu…' }
+  const finish = (msg) => {
+    if (btn) { btn.disabled = false; btn.textContent = 'Uložit a přepsat PDF' }
+    if (msg) showToast(msg)
+  }
+
+  // Kontakt na fakturu se do složky neukládá — dotáhni ho z profilu, ať
+  // přepsaná faktura vypadá stejně jako ta původní.
+  let extra = {}
+  try {
+    const { data: prof } = await sb.from('profiles').select('email, phone').eq('id', r.worker_id).maybeSingle()
+    if (prof) extra = { email: prof.email, phone: prof.phone }
+  } catch (e) { console.warn('[faktura] kontakt se nepodařilo dotáhnout:', e?.message) }
+
+  // 1) Vykresli fakturu znovu — už se zálohou
+  const dataForRender = invoiceDataFromRow({ ...r, cash_paid: cash, cash_paid_note: note }, extra)
+  try {
+    renderInvoice(dataForRender, 'en')
+  } catch (e) {
+    console.error('[faktura] překreslení selhalo:', e)
+    finish('❌ Fakturu se nepodařilo vykreslit: ' + (e?.message || e))
+    return
+  }
+
+  // 2) Nové PDF a nahrání do složky pracovníka
+  let uploaded = null
+  try {
+    const out = await buildInvoicePdf()
+    uploaded = await uploadInvoicePdf(out.blob, r.worker_id, r.invoice_number)
+  } catch (e) {
+    console.error('[faktura] nové PDF se nepodařilo vytvořit:', e)
+    closeInvoiceOverlay()
+    finish('❌ Nové PDF se nepodařilo vytvořit: ' + (e?.message || e))
+    return
+  }
+  closeInvoiceOverlay()
+
+  // 3) Zápis do databáze
+  const upd = { cash_paid: cash, cash_paid_note: note || null, edited_at: new Date().toISOString() }
+  if (uploaded) { upd.pdf_url = uploaded.url; upd.pdf_path = uploaded.path }
+  let { error } = await sb.from('worker_invoices').update(upd).eq('id', r.id)
+  if (error && /cash_paid|edited_at|column|schema cache/i.test(error.message || '')) {
+    finish('❌ Chybí migrace — spusťte v Supabase soubor supabase-migrace-faktura-zaloha.sql')
+    return
+  }
+  if (error) { finish('❌ Uložení selhalo: ' + error.message); return }
+
+  // Staré PDF ať ve Storage nezůstává ležet
+  if (uploaded && r.pdf_path && r.pdf_path !== uploaded.path) {
+    try { await sb.storage.from('documents').remove([r.pdf_path]) }
+    catch (e) { console.warn('[faktura] staré PDF nešlo smazat:', e?.message) }
+  }
+
+  Object.assign(r, upd)
+  renderWorkerInvoices()
+  closeInvoiceEdit()
+  finish(cash > 0
+    ? '✅ Záloha ' + cash.toFixed(2) + ' € zapsána — faktura i PDF přepsány'
+    : '✅ Záloha zrušena — faktura i PDF přepsány')
 }
 
 async function deleteWorkerInvoice(id) {
@@ -11253,6 +11456,11 @@ function cancelCheckout() {
 
 async function confirmCheckout() {
   if (!pendingCheckout) return
+  // Druhé klepnutí během ukládání (upload fotek trvá sekundy) spustilo funkci
+  // znovu: druhý běh viděl už zapsaný check_out, zavolal clearCheckoutPhotos()
+  // a nedokončený upload prvního běhu přišel o zbytek fronty — fotky ze stavby
+  // tiše zmizely.
+  if (window.zapisProbiha) { showToast('⏳ Ukládám…'); return }
   const attId = pendingCheckout.attId || todayAttId
   if (!attId) return
   const siteEl = document.getElementById('checkout-site')
@@ -11360,10 +11568,17 @@ async function captureSecondSiteGps() {
   const st = document.getElementById('ss-gps-status')
   if (st) { st.style.display = 'block'; st.textContent = '📡 Zjišťuji polohu…' }
   try {
-    const addr = await captureLocationNow()   // naplní gpsLat/gpsLng, vrátí adresu
-    _ssGpsLat = (typeof gpsLat !== 'undefined') ? gpsLat : null
-    _ssGpsLng = (typeof gpsLng !== 'undefined') ? gpsLng : null
+    // captureLocationNow() zapisuje do GLOBÁLNÍCH gpsAddr/gpsLat/gpsLng. Bez zálohy
+    // by se adresa druhé stavby potichu dopsala i k hlavní směně a uložila se jako
+    // „naposledy použitá stavba“. Odložíme si je a po měření vrátíme zpátky.
+    const zalohaAddr = gpsAddr, zalohaLat = gpsLat, zalohaLng = gpsLng
+    const addr = await captureLocationNow()
+    // Prázdná adresa = měření selhalo a v gpsLat/gpsLng je pořád poloha z PRVNÍ
+    // stavby. Ta se k druhé stavbě nesmí přilepit ani ji označit za ověřenou GPS.
     _ssGpsAddr = addr || ''
+    _ssGpsLat = _ssGpsAddr ? ((typeof gpsLat !== 'undefined') ? gpsLat : null) : null
+    _ssGpsLng = _ssGpsAddr ? ((typeof gpsLng !== 'undefined') ? gpsLng : null) : null
+    gpsAddr = zalohaAddr; gpsLat = zalohaLat; gpsLng = zalohaLng
     if (_ssGpsAddr) {
       if (st) st.textContent = '📍 ' + _ssGpsAddr
       const siteEl = document.getElementById('ss-site')
@@ -11376,7 +11591,11 @@ async function captureSecondSiteGps() {
   }
 }
 
+let _ssSaving = false
 async function saveSecondSite() {
+  // Dialog se zavírá až po návratu awaitu — druhé klepnutí zakládalo druhý
+  // identický řádek. Ve výkazu pak měl den tři řádky.
+  if (_ssSaving) { showToast('⏳ Ukládám…'); return }
   const siteEl = document.getElementById('ss-site')
   const descEl = document.getElementById('ss-desc')
   const site = siteEl?.value.trim()
@@ -11394,12 +11613,24 @@ async function saveSecondSite() {
     construction_site: site,
     location_address: site,
     work_description: desc || null,
-    address_source: _ssGpsLat != null ? 'gps' : 'manual',
+    // 'gps' jen když se ukládá TA adresa, kterou měření vrátilo. Když si ji
+    // pracovník napsal sám (nebo ji po měření přepsal), je to 'manual'.
+    address_source: (_ssGpsAddr && site === _ssGpsAddr) ? 'gps' : 'manual',
     manual_note: '2. stavba'
   }
-  if (_ssGpsLat != null) { row.location_lat = _ssGpsLat; row.location_lng = _ssGpsLng }
+  if (row.address_source === 'gps' && _ssGpsLat != null) { row.location_lat = _ssGpsLat; row.location_lng = _ssGpsLng }
 
-  const { error } = await sb.from('attendance').insert(row)
+  // zapisProbiha blokuje tichou auto-obnovu dat — saveSecondSite ho jako jediná
+  // zapisovací cesta v souboru nenastavovala.
+  _ssSaving = true
+  window.zapisProbiha = true
+  let error
+  try {
+    ;({ error } = await sb.from('attendance').insert(row))
+  } finally {
+    _ssSaving = false
+    window.zapisProbiha = false
+  }
   if (error) {
     console.error('[druhá stavba] insert error:', error)
     showToast('❌ Chyba uložení: ' + error.message)
@@ -11454,9 +11685,12 @@ function clearCheckoutPhotos() {
 // i k záznamu docházky (attendance.photo_urls). Nepovinné; chyba neblokuje uložení směny.
 async function uploadCheckoutPhotos(attId) {
   if (!attId || _checkoutPhotoQueue.length === 0) return []
+  // Frontu si zkopíruj — clearCheckoutPhotos() zvenčí ji jinak uprostřed
+  // uploadu podřízne a zbytek fotek se nenahraje.
+  const fronta = _checkoutPhotoQueue.slice()
   const uploaded = []
-  for (let i = 0; i < _checkoutPhotoQueue.length; i++) {
-    const { file } = _checkoutPhotoQueue[i]
+  for (let i = 0; i < fronta.length; i++) {
+    const { file } = fronta[i]
     try {
       const ext = (file.name.split('.').pop() || 'jpg').toLowerCase().replace(/[^a-z0-9]/g, '') || 'jpg'
       // cesta podle pracovníka (stejně jako volné focení), ať RLS sedí
@@ -11881,6 +12115,17 @@ async function mobCheckin(type) {
     return
   }
   if (checkinInProgress) { showToast('⏳ Počkejte...'); return }
+  // Adresa stavby je povinná. Když ji GPS nezachytila, musí ji pracovník dopsat
+  // ručně — jinak by ve výkazu zůstal den bez místa a nedalo by se dohledat,
+  // kde se pracovalo. Příchod (type 'in') tím nikdy neblokujeme: GPS se rozjíždí
+  // až po něm a směna musí jít začít vždycky.
+  if (type !== 'in' && attAddressMissing()) {
+    showManualAddress('📍 Adresa stavby chybí — vyplňte ji, teprve pak jde pokračovat', true)
+    const el = document.getElementById('mob-manual-street')
+    if (el) setTimeout(() => { try { el.focus() } catch (e) {} }, 350)
+    showToast('📍 Nejdřív vyplňte adresu stavby')
+    return
+  }
   // Když currentUser chybí (Chrome občas ztratí proměnnou) — zkus ho dotáhnout ze session
   if (!currentUser) {
     // 1) aktivní session
@@ -11961,14 +12206,18 @@ async function mobCheckin(type) {
         return
       }
 
-      // Vytvoř nový záznam (nová směna)
+      // Vytvoř nový záznam (nová směna) — VŽDY bez adresy.
+      // Příchod je nová směna, klidně na jiné stavbě, a polohu hned potom znovu
+      // změří askAddressIfNeeded(). Dřív se sem kopírovaly globální gpsAddr/gpsLat/
+      // gpsLng z předchozí směny, takže druhý příchod téhož dne zdědil adresu
+      // i souřadnice ranní stavby a tvářil se jako ověřený GPS záznam.
       const { data, error } = await withTimeout(sb.from('attendance').insert({
         worker_id: currentUser.id,
         work_date: today,
         check_in: timeStr,
-        location_address: gpsAddr || null,
-        location_lat: gpsLat || null,
-        location_lng: gpsLng || null,
+        location_address: null,
+        location_lat: null,
+        location_lng: null,
         kw: kw.week,
         kw_year: kw.year,
         is_saturday: now.getDay() === 6
@@ -12072,6 +12321,20 @@ async function mobCheckin(type) {
           checkinInProgress = false
           return
         }
+        // Odchod pár minut po příchodu = skoro vždy omyl (překlep ve stavbě,
+        // ověřovací klepnutí). Zeptáme se, jinak vznikne tichý záznam s 0 h.
+        // Noční směna sem nespadne — u ní je coMin < ciMin a podmínka neplatí.
+        {
+          const ciMin = timeToMin(current.check_in)
+          const coMin = timeToMin(timeStr)
+          if (ciMin !== null && coMin !== null && coMin >= ciMin && coMin - ciMin < 15) {
+            if (!confirm('Od příchodu uplynulo jen ' + (coMin - ciMin) + ' min.\n\nOpravdu ukončit směnu?\n\n• OK = ukončit (den se zapíše na 0 h)\n• Zrušit = zpět do práce')) {
+              updateMobStav(current, [current])
+              checkinInProgress = false
+              return
+            }
+          }
+        }
         // Neukončená pauza? (pauza běží — má začátek, ale ne konec)
         const openBreak = (current.break_start && !current.break_end) ||
                           (current.break2_start && !current.break2_end)
@@ -12171,7 +12434,7 @@ async function mobCheckin(type) {
         // „co jsem dnes dělal" se ukáže vždycky, ať odchod neuvízne na otázce na adresu.
         if (stillNoAddr) {
           if (gpsAddr) saveGpsAddressSilently(todayAttId)
-          else showManualAddress('📍 Adresa stavby chybí — doplňte ji prosím ručně')
+          else showManualAddress('📍 Adresa stavby chybí — bez ní nejde pokračovat, doplňte ji ručně', true)
         }
         showCheckoutDialog()
         checkinInProgress = false
@@ -15128,13 +15391,13 @@ async function startLocationForCheckIn(attId) {
   try {
     const perm = await getGpsPermission()
     if (perm === 'denied') {
-      showManualAddress('📍 Poloha je v prohlížeči zakázaná — zadejte adresu stavby ručně')
+      showManualAddress('📍 Poloha je zakázaná — adresu stavby proto musíte zadat ručně', true)
       return
     }
     getGPS(true)
   } catch(e) {
     console.warn('[poloha] start při příchodu selhal:', e?.message || e)
-    showManualAddress('📍 Polohu se nepodařilo spustit — zadejte adresu stavby ručně')
+    showManualAddress('📍 Polohu se nepodařilo spustit — adresu stavby musíte zadat ručně', true)
   }
 }
 
@@ -15162,6 +15425,16 @@ function saveGpsAddressSilently(attId) {
 
 function askAddressIfNeeded(attId, actionLabel) {
   // Adresa potvrzena, když máme jakoukoli adresu: zobrazovanou, GPS, ruční nebo stavbu
+  // PŘÍCHOD = nová směna, klidně na jiné stavbě → polohu měříme VŽDY znovu, a to
+  // JEŠTĚ NEŽ se ptáme, jestli nějaká adresa už je. Kdyby kontrola hasAddr stála
+  // první, druhý příchod téhož dne by se z funkce rovnou vrátil a nová poloha by
+  // se nikdy nezměřila.
+  if (actionLabel === 'Příchod') {
+    gpsAddr = ''; gpsLat = null; gpsLng = null
+    startLocationForCheckIn(attId)
+    return
+  }
+  // Adresa je potvrzená, když máme jakoukoliv: zobrazovanou, GPS, ruční nebo stavbu
   const r = todayRecord || {}
   const hasAddr = !!(
     (r.location_address || '').trim() ||
@@ -15170,12 +15443,10 @@ function askAddressIfNeeded(attId, actionLabel) {
     (r.construction_site || '').trim()
   )
   if (hasAddr) return  // adresa už jednou zadaná → znovu se neptat
-  // Na adresu se OSVČ neptáme dialogem. Když ji poloha zná, potichu ji dopíšeme.
+  // Během dne (přestávka, odchod) polohu nebudíme — šetříme baterku. Když ji
+  // appka zná už z příchodu, potichu ji dopíšeme, jinak nabídneme ruční zadání.
   if (gpsAddr) { saveGpsAddressSilently(attId); return }
-  // Poloha se pouští jen při příchodu. Během dne (přestávka, odchod) už ji nebudíme —
-  // šetříme baterku — a místo toho nabídneme ruční zadání adresy.
-  if (actionLabel === 'Příchod') startLocationForCheckIn(attId)
-  else showManualAddress('📍 Adresa stavby zatím chybí — doplňte ji prosím ručně')
+  showManualAddress('📍 Adresa stavby chybí — bez ní nejde pokračovat, doplňte ji ručně', true)
 }
 
 let _gpsWatchId = null
@@ -15220,7 +15491,7 @@ function getGPS(force) {
   if (!navigator.geolocation) {
     if (g) g.textContent = 'GPS nedostupná'
     if (mg) mg.textContent = 'GPS nedostupná'
-    showManualAddress('Poloha není dostupná — zadejte adresu ručně')
+    showManualAddress('Poloha není dostupná — adresu stavby musíte zadat ručně', true)
     return
   }
 
@@ -15268,7 +15539,7 @@ function getGPS(force) {
     stopGPS()   // nepovedlo se → dál to nezkoušej, baterka
     if (g) g.textContent = '⚠️ Poloha se nenačetla'
     if (mg) mg.textContent = '⚠️ Poloha se nenačetla'
-    showManualAddress('Polohu se nepodařilo načíst — zadejte adresu ručně nebo zkuste znovu')
+    showManualAddress('Polohu se nepodařilo načíst — adresu stavby musíte zadat ručně', true)
   }, { enableHighAccuracy: true, timeout: 15000, maximumAge: 0 })
   updateGpsStrip()   // měření běží → ukaž proužek s průběhem a tlačítky
 
@@ -15281,7 +15552,7 @@ function getGPS(force) {
       stopGPS()   // 20 s a nic → GPS vypni, ať nemele naprázdno
       if (g) g.textContent = '⚠️ Poloha trvá dlouho'
       if (mg) mg.textContent = '⚠️ Poloha trvá dlouho'
-      showManualAddress('Poloha se načítá dlouho — zadejte adresu ručně nebo zkuste znovu')
+      showManualAddress('Poloha se načítá dlouho — adresu stavby zadejte ručně', true)
     }
   }, 20000)
 
@@ -15367,19 +15638,44 @@ function getGPS(force) {
     if (!resolved || acc > 100) {
       showManualAddress(acc > 100
         ? `Poloha je nepřesná (±${Math.round(acc)} m) — raději zadejte adresu stavby ručně`
-        : 'Přesnou adresu se nepodařilo zjistit — doplňte ulici, číslo a město')
+        : 'Adresu se nepodařilo zjistit, mám jen souřadnice — dopište ulici, číslo a město',
+        !resolved)   // jen souřadnice = adresa chybí → povinné vyplnění
     }
   }
 }
 
 
 // Ruční zadání adresy pracoviště (když GPS selže nebo je nepřesná)
-function showManualAddress(reasonText) {
+// reasonText = proč se ptáme, required = bez adresy se nedá pokračovat.
+// Povinný režim se pozná na první pohled (červený rámeček) a panel sjede do
+// zorného pole — dřív se dal přehlédnout a pracovník ho jednoduše přeskočil.
+function showManualAddress(reasonText, required) {
   const wrap = document.getElementById('mob-manual-addr')
   if (!wrap) return
   wrap.style.display = 'block'
   const hint = document.getElementById('mob-manual-addr-hint')
   if (hint && reasonText) hint.textContent = reasonText
+  if (!required) return
+  _addressRequired = true
+  wrap.style.borderColor = 'var(--red)'
+  wrap.style.borderWidth = '2px'
+  if (hint) hint.style.color = 'var(--red)'
+  try { wrap.scrollIntoView({ behavior: 'smooth', block: 'center' }) } catch (e) {}
+}
+
+// Adresa stavby je povinná. Když ji zachytí GPS, pracovník nepíše nic. Když ne,
+// musí ji dopsat ručně — do té doby nejde dát pauzu ani odchod.
+let _addressRequired = false
+
+function attAddressMissing() {
+  const r = todayRecord
+  if (!r || !r.check_in || r.check_out) return false   // hlídá se jen běžící směna
+  return !(
+    (r.location_address || '').trim() ||
+    (r.gps_address || '').trim() ||
+    (r.manual_address || '').trim() ||
+    (r.construction_site || '').trim()
+  )
 }
 async function applyManualAddress() {
   const street = (document.getElementById('mob-manual-street')?.value || '').trim()
@@ -15427,7 +15723,14 @@ async function applyManualAddress() {
     }
   }
   const wrap = document.getElementById('mob-manual-addr')
-  if (wrap) wrap.style.display = 'none'
+  if (wrap) {
+    wrap.style.display = 'none'
+    wrap.style.borderColor = 'var(--brd)'
+    wrap.style.borderWidth = '1.5px'
+  }
+  const hintEl = document.getElementById('mob-manual-addr-hint')
+  if (hintEl) hintEl.style.color = 'var(--text2)'
+  _addressRequired = false
   // Bez GPS → zastav GPS sledování (jen ruční záznam). S GPS → nech doběhnout.
   if (!haveGps) { _manualAddressLocked = true; gpsLat = null; gpsLng = null; stopGPS() }
   else stopGPS()
@@ -16553,6 +16856,9 @@ async function exportWorkerKW(workerId, workerName, week, year, lang, foreman, r
     const isRunning = !r.check_out && r.check_in && r.work_date === todayStrExp
     const h = liveHours(r).toFixed(2)
     const adj2 = (r.check_in && r.check_out) ? applyAttendanceRules(r) : null
+    // Záznam bez příchodu i odchodu je zápis druhé stavby (manual_note '2. stavba').
+    // Bez označení vypadá ve výkazu jako rozbitý den „— – —, 0.00 h“.
+    const jenStavba = !r.check_in && !r.check_out
     const ci = adj2?.checkIn || r.check_in?.slice(0,5) || '—'
     const co = adj2?.checkOut || r.check_out?.slice(0,5) || (isRunning ? '▶ probíhá' : '—')
     const allBreaks = attAllBreaks(r)
@@ -16566,7 +16872,7 @@ async function exportWorkerKW(workerId, workerName, week, year, lang, foreman, r
         <div style="font-size:10px;color:#444;margin-top:1px">${dateFull}</div>
       </td>
       <td style="padding:5px 7px;border:1px solid #ccc;vertical-align:top;width:118px;font-size:10px">
-        <div><b>${ci}</b> – <b>${co}</b></div>
+        <div>${jenStavba ? '<b>2. stavba</b>' : `<b>${ci}</b> – <b>${co}</b>`}</div>
         ${allBreaks.map(b => `<div style="color:#888;font-size:9px">${b.bs}–${b.be||'?'}</div>`).join('')}
         <div style="margin-top:1px;font-weight:700">${h} h</div>
       </td>
@@ -17653,10 +17959,16 @@ async function saveManualAttendance() {
     .eq('work_date', date)
     .order('check_in')
 
+  // Ruční zápis je pro daný den KONEČNÝ. Dřív se přepsal jen nejstarší záznam
+  // a druhá směna dne si nechala svoje hodiny — den se pak sčítal dvakrát.
+  // Záznamy „2. stavba“ (bez check_in) se nemažou, ty s časy dne nesouvisí.
   const existing = existingAll?.[0] || null
+  const duplicity = (existingAll || []).slice(1).filter(d => d.check_in)
 
   if (existing) {
-    const countMsg = existingAll.length > 1 ? ` (${existingAll.length} záznamy — aktualizuji první)` : ''
+    const countMsg = duplicity.length
+      ? ` — den má ${existingAll.length} záznamy, první přepíšu a zbylých ${duplicity.length} smažu`
+      : ''
     if (!confirm(`Pro tento den již existuje záznam (${existing.check_in?.slice(0,5)} → ${existing.check_out?.slice(0,5)||'?'})${countMsg}. Přepsat?`)) return
     window.zapisProbiha = true
     let error
@@ -17671,6 +17983,11 @@ async function saveManualAttendance() {
         breaks: breaksArr,
         total_hours: hours,
         location_address: site || null,
+        // Adresu napsala kancelář — nesmí u ní zůstat příznak 'gps' ani souřadnice
+        // z původního měření, jinak se ručně psaný text tváří jako ověřená poloha.
+        address_source: site ? 'manual' : null,
+        location_lat: null,
+        location_lng: null,
         manual_note: note || null,
         is_manual: true,
         // Sobotu dopisujeme i při úpravě — dřív se nastavila jen u nového záznamu,
@@ -17681,6 +17998,12 @@ async function saveManualAttendance() {
       window.zapisProbiha = false
     }
     if (error) { showToast('❌ Chyba: ' + error.message); return }
+    // Bez tohohle by duplicitní směna dne „přepsání“ přežila a její hodiny by se
+    // dál sčítaly do týdne, do výkazu i do faktury.
+    if (duplicity.length) {
+      const { error: delErr } = await sb.from('attendance').delete().in('id', duplicity.map(d => d.id))
+      if (delErr) showToast('⚠️ Duplicitní záznamy dne se nepodařilo smazat: ' + delErr.message)
+    }
     showToast('✅ Záznam aktualizován — ' + hours + 'h')
   } else {
     // Nový záznam
@@ -17699,6 +18022,11 @@ async function saveManualAttendance() {
         breaks: breaksArr,
         total_hours: hours,
         location_address: site || null,
+        // Adresu napsala kancelář — nesmí u ní zůstat příznak 'gps' ani souřadnice
+        // z původního měření, jinak se ručně psaný text tváří jako ověřená poloha.
+        address_source: site ? 'manual' : null,
+        location_lat: null,
+        location_lng: null,
         kw: kw.week,
         kw_year: kw.year,
         is_saturday: isSaturdayDate(date),
@@ -18093,7 +18421,14 @@ function renderInvoice(d, lang = 'en') {
   // CZK prepočet (fixed EUR/CZK kurz alebo z profilu)
   const eurCzkRate = 24.21
   d.eurCzkRate = eurCzkRate     // uloží se s fakturou, ať se archiv později nepřepočítá
-  const totalCZK = (d.totalAmount * eurCzkRate).toFixed(2).replace('.', ',')
+  // Záloha vyplacená v hotovosti. Zadává ji výhradně SubBau (pracovník o ní při
+  // vystavení faktury nemusí vědet), a nikdy nesmí přesáhnout celou fakturu —
+  // jinak by „k úhradě“ vyšlo záporné číslo a doklad by neobstál.
+  const invTotal = Number(d.totalAmount) || 0
+  const cashPaid = Math.min(Math.max(Number(d.cashPaid) || 0, 0), invTotal)
+  const toPay = invTotal - cashPaid
+  // Do korun přepočítáváme to, co se opravdu posílá na účet, ne původní součet
+  const totalCZK = (toPay * eurCzkRate).toFixed(2).replace('.', ',')
   const rateStr = `${eurCzkRate.toFixed(2)} CZK / 1 EUR`
 
   // Variabilný symbol = číslo faktúry
@@ -18140,6 +18475,8 @@ function renderInvoice(d, lang = 'en') {
     vatReasonSub: 'Přenesená daňová povinnost · Steuerschuldnerschaft des Leistungsempfängers'
       + (d.isVatPayer ? '' : '<br>Dodavatel není plátcem DPH · Kein USt-Zahler · Not VAT registered'),
     totalAmount: 'Celková částka · Gesamtbetrag · Total amount',
+    cashPaid: 'Uhrazeno v hotovosti · Bar erhalten · Paid in cash',
+    alreadyPaid: 'Zálohou předem · Vorschuss · Advance payment',
     exchangeRate: 'Kurz · Kurs · Rate',
     dueDays: `Splatnost · Fällig · Due: ${d.dueDays||14} dní/Tage/days`,
     email: 'Email', phone: 'Telefon · Tel. · Phone',
@@ -18269,13 +18606,20 @@ function renderInvoice(d, lang = 'en') {
               <td style="padding:2px 0;font-size:8.5pt;text-align:right;font-weight:600;white-space:nowrap">${d.totalAmount.toFixed(2)} €</td>
             </tr>
             <tr>
-              <td style="padding:2px 0 6px;font-size:8pt;color:#5a5a5a;border-bottom:1px solid #ececec">${L.vatRow} 0 %</td>
-              <td style="padding:2px 0 6px;font-size:8.5pt;text-align:right;font-weight:600;white-space:nowrap;border-bottom:1px solid #ececec">0,00 €</td>
+              <td style="padding:2px 0 6px;font-size:8pt;color:#5a5a5a;${cashPaid > 0 ? '' : 'border-bottom:1px solid #ececec'}">${L.vatRow} 0 %</td>
+              <td style="padding:2px 0 6px;font-size:8.5pt;text-align:right;font-weight:600;white-space:nowrap;${cashPaid > 0 ? '' : 'border-bottom:1px solid #ececec'}">0,00 €</td>
             </tr>
+            ${cashPaid > 0 ? `<tr>
+              <td style="padding:2px 0 6px;font-size:8pt;color:#5a5a5a;border-bottom:1px solid #ececec">${L.cashPaid}</td>
+              <td style="padding:2px 0 6px;font-size:8.5pt;text-align:right;font-weight:600;white-space:nowrap;border-bottom:1px solid #ececec">− ${cashPaid.toFixed(2)} €</td>
+            </tr>` : ''}
             <tr>
               <td style="padding:7px 0 0;font-size:8pt;font-weight:800;color:#C4573A;text-transform:uppercase;letter-spacing:.3px;line-height:1.3">${L.forPayment}</td>
-              <td style="padding:7px 0 0;text-align:right;font-size:13pt;font-weight:800;color:#211D1A;white-space:nowrap">${d.totalAmount.toFixed(2)} €</td>
+              <td style="padding:7px 0 0;text-align:right;font-size:13pt;font-weight:800;color:#211D1A;white-space:nowrap">${toPay.toFixed(2)} €</td>
             </tr>
+            ${cashPaid > 0 ? `<tr>
+              <td colspan="2" style="padding:3px 0 0;font-size:6.5pt;color:#9a9a9a;line-height:1.35">${L.alreadyPaid}: ${cashPaid.toFixed(2)} € ${escHtml(d.cashPaidNote || '')}</td>
+            </tr>` : ''}
             <tr>
               <td style="padding:2px 0;font-size:6.5pt;color:#9a9a9a">${rateStr}</td>
               <td style="padding:2px 0;font-size:7pt;text-align:right;color:#9a9a9a;white-space:nowrap">${totalCZK} CZK</td>
@@ -18522,7 +18866,8 @@ function invoiceErrorText(error) {
     return '❌ Složka Faktury není v databázi — SubBau musí spustit supabase-migrace-faktury.sql'
   }
   if (/row-level security|policy|permission|42501/i.test(m)) {
-    return '⚠️ Fakturu za tento týden už SubBau vyřídil — opravu domluvte telefonicky'
+    // Odeslanou fakturu smí měnit už jen SubBau — pracovníkovi to zakazuje RLS.
+    return '⚠️ Faktura za tento týden je už odeslaná a měnit ji smí jen SubBau — ozvěte se nám'
   }
   return '❌ Fakturu se nepodařilo odeslat: ' + m
 }
@@ -21260,11 +21605,22 @@ function applyAttendanceRules(record) {
   // Směna přes půlnoc: odchod vyjde „dřív“ než příchod, protože už je další den.
   // Bez přičtení 24 h by celá noční směna spadla na 0 h — stejné přetočení
   // dělá i calcHours u běžící směny.
-  const presPulnoc = adjCo < adjCi
+  // POZOR: půlnoc se pozná z PŮVODNÍCH časů, ne ze zaokrouhlených. Zaokrouhlení
+  // tlačí příchod nahoru a odchod dolů, takže u krátké směny (10:11 → 10:11)
+  // vycházel odchod „dřív“ než příchod, den se vyhodnotil jako noční a napočítal
+  // se na 23,5 h.
+  const presPulnoc = co < ci
   if (presPulnoc) adjCo += 24 * 60
+  // Když zaokrouhlení srazí odchod před příchod, není to noční směna — je to
+  // krátká směna uvnitř jedné půlhodiny. Takový den je prostě 0 h, ne záporný.
+  if (adjCo < adjCi) adjCo = adjCi
   if (!presPulnoc && co < SHIFT.end) flags.earlyOut = true
   else {
-    const ot = adjCo - SHIFT.end
+    // U směny přes půlnoc leží konec směny až v NÁSLEDUJÍCÍM dni — adjCo má v sobě
+    // přičtených 24 h. Bez stejného posunu u SHIFT.end vycházel noční směně
+    // 22:00 → 06:00 přesčas 14 h k odpracovaným 8 h.
+    const konecSmeny = presPulnoc ? SHIFT.end + 24 * 60 : SHIFT.end
+    const ot = adjCo - konecSmeny
     if (ot > 0) flags.overtime = ot
     if (presPulnoc || co >= SHIFT.abnormal) flags.abnormal = true
   }
@@ -21465,7 +21821,9 @@ async function loadWdAttendance() {
   tbody.innerHTML = summaryHtml + data.map(r => {
     const adj = r.check_in && r.check_out ? applyAttendanceRules(r) : { checkIn: r.check_in?.slice(0,5), checkOut: r.check_out?.slice(0,5), breakStart: r.break_start?.slice(0,5), breakEnd: r.break_end?.slice(0,5), hours: r.total_hours||0, flags: {} }
     let hoursDisplay = '—'
-    if (r.total_hours) {
+    // 0 je falsy → uzavřený den s 0 h se vykreslil jako „—“, což se čte jako
+    // „chybí údaj“. Právě u těchhle záznamů je nejdůležitější, aby byly vidět.
+    if (r.total_hours != null && r.check_out) {
       hoursDisplay = `<b style="color:var(--blue)">${r.total_hours}h</b>`
     } else if (r.check_in && !r.check_out) {
       const isToday = r.work_date === localDateStr()
@@ -23048,6 +23406,48 @@ document.addEventListener('visibilitychange', () => {
 
 
 <!-- Address pick dialog (příchod/přestávka/odchod) -->
+<!-- ÚPRAVA FAKTURY — jen pro SubBau. Pracovník se sem nedostane (sekce Faktury
+     je v adminu) a v databázi mu úpravu zakazuje RLS. -->
+<div id="invedit-dialog" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:10050;align-items:center;justify-content:center;padding:16px">
+  <div style="background:#fff;border-radius:20px;padding:24px;width:100%;max-width:440px;box-shadow:0 8px 32px rgba(0,0,0,.3);max-height:90vh;overflow:auto">
+    <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px;margin-bottom:2px">
+      <div>
+        <div id="invedit-title" style="font-size:18px;font-weight:800;color:#211D1A">Faktura</div>
+        <div id="invedit-sub" style="font-size:12.5px;color:#7a7168;margin-top:2px"></div>
+      </div>
+      <button type="button" onclick="closeInvoiceEdit()" aria-label="Zavřít" style="background:none;border:none;font-size:24px;line-height:1;color:#9a9a9a;cursor:pointer;padding:0 2px;font-family:inherit">&times;</button>
+    </div>
+
+    <div style="background:#faf7f2;border-radius:12px;padding:14px;margin:16px 0">
+      <div style="display:flex;justify-content:space-between;font-size:13px;padding:3px 0">
+        <span style="color:#7a7168">Fakturováno celkem</span>
+        <b id="invedit-total" style="font-weight:700">0,00 €</b>
+      </div>
+      <div style="display:flex;justify-content:space-between;font-size:15px;padding:6px 0 0;border-top:1px solid #e8e0d4;margin-top:6px">
+        <span style="color:#7a7168;font-weight:600">Zbývá poslat na účet</span>
+        <b id="invedit-rest" style="font-weight:800">0,00 €</b>
+      </div>
+    </div>
+
+    <label style="display:block;font-size:12px;color:#7a7168;font-weight:700;margin-bottom:5px">Uhrazená část v hotovosti (€)</label>
+    <input type="text" inputmode="decimal" id="invedit-cash" placeholder="např. 250" oninput="invEditRecalc()"
+           style="width:100%;padding:12px;border:1.5px solid #d8cfc0;border-radius:10px;font-size:16px;font-family:inherit;box-sizing:border-box">
+    <div style="font-size:11.5px;color:#9a9a9a;margin-top:5px;line-height:1.5">Kolik jste pracovníkovi vyplatil předem v hotovosti. Na faktuře se to odečte od částky k úhradě. Prázdné pole nebo 0 = žádná záloha.</div>
+    <div id="invedit-warn" style="display:none;font-size:12px;color:#9c3b22;font-weight:600;margin-top:6px"></div>
+
+    <label style="display:block;font-size:12px;color:#7a7168;font-weight:700;margin:14px 0 5px">Poznámka k záloze (nepovinné)</label>
+    <input type="text" id="invedit-note" maxlength="200" placeholder="např. vyplaceno 20.08.2026"
+           style="width:100%;padding:12px;border:1.5px solid #d8cfc0;border-radius:10px;font-size:16px;font-family:inherit;box-sizing:border-box">
+    <div style="font-size:11.5px;color:#9a9a9a;margin-top:5px;line-height:1.5">Vytiskne se drobným písmem pod částkou k úhradě.</div>
+
+    <button type="button" id="invedit-save-btn" onclick="saveInvoiceEdit()"
+            style="width:100%;margin-top:18px;padding:14px;background:#211D1A;color:#E8A13A;border:none;border-radius:12px;font-size:15px;font-weight:800;cursor:pointer;font-family:inherit">Uložit a přepsat PDF</button>
+    <button type="button" onclick="closeInvoiceEdit()"
+            style="width:100%;margin-top:8px;padding:11px;background:none;color:#7a7168;border:none;border-radius:12px;font-size:13.5px;font-weight:600;cursor:pointer;font-family:inherit">Zrušit</button>
+    <div style="font-size:11px;color:#9a9a9a;margin-top:12px;line-height:1.55;text-align:center">Uložením se faktura vykreslí znovu a staré PDF ve složce se přepíše novým.</div>
+  </div>
+</div>
+
 <div id="addr-dialog" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:10000;align-items:center;justify-content:center;padding:16px">
   <div style="background:#fff;border-radius:20px;padding:24px;width:100%;max-width:400px;box-shadow:0 8px 32px rgba(0,0,0,.3)">
     <div id="addr-dialog-title" style="font-size:18px;font-weight:800;margin-bottom:4px;color:#211D1A">Adresa pracoviště</div>
