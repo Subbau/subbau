@@ -16593,16 +16593,32 @@ async function savePdfDirect(html, filename) {
         }
       }
 
+      // Blok, který si v HTML řekne o page-break-before, dostane vždy vlastní list.
+      // Bez toho se dva krátké výkazy vešly na jednu stránku a nešly rozdat po jednom.
+      const chceNovyList = el =>
+        /page-break-before\s*:\s*always|break-before\s*:\s*(page|always)/i.test(el.getAttribute('style') || '')
+
+      let cekaNovyList = false   // předchozí blok skončil rozseknutý přes stránky
+
       for (let i = 0; i < breakBlocks.length; i++) {
         const el = breakBlocks[i]
         const img = await renderEl(el)
         const blockMM = (img.h * usableW) / img.w
+        const naCistemListu = firstOnPage && cursorY === margin
+
+        if (cekaNovyList) {
+          pdf.addPage(); cursorY = margin; firstOnPage = true; cekaNovyList = false
+        } else if (chceNovyList(el) && !naCistemListu) {
+          pdf.addPage(); cursorY = margin; firstOnPage = true
+        }
 
         if (blockMM > usableH) {
-          // Blok je vyšší než stránka → na novou stránku a rozsekni napříč stránkami.
-          if (!firstOnPage) { pdf.addPage(); }
+          // Blok je vyšší než stránka → začni na čistém listu a rozsekni ho přes stránky.
+          if (!(firstOnPage && cursorY === margin)) { pdf.addPage(); cursorY = margin; firstOnPage = true }
           addSliced(img, margin)
-          pdf.addPage(); cursorY = margin; firstOnPage = true
+          firstOnPage = false
+          // Novou stránku přidej až u dalšího bloku, ať PDF nekončí prázdným listem.
+          cekaNovyList = true
           continue
         }
         // Vejde se na stránku celý — pokud se nevejde do zbytku, nová stránka.
@@ -23474,7 +23490,7 @@ document.addEventListener('visibilitychange', () => {
             style="width:100%;margin-top:18px;padding:14px;background:#211D1A;color:#E8A13A;border:none;border-radius:12px;font-size:15px;font-weight:800;cursor:pointer;font-family:inherit">Uložit a přepsat PDF</button>
     <button type="button" onclick="closeInvoiceEdit()"
             style="width:100%;margin-top:8px;padding:11px;background:none;color:#7a7168;border:none;border-radius:12px;font-size:13.5px;font-weight:600;cursor:pointer;font-family:inherit">Zrušit</button>
-    <div style="font-size:11px;color:#9a9a9a;margin-top:12px;line-height:1.55;text-align:center">Uložením se faktura vykreslí znovu a staré PDF ve složce se přepíše novým.</div>
+    <div style="font-size:11px;color:#9a9a9a;margin-top:12px;line-height:1.55;text-align:center">Uložením se faktura vykreslí znovu se zálohou. Původní verze od pracovníka zůstane uložená — otevřete ji ve složce Faktury tlačítkem „Původní“.</div>
   </div>
 </div>
 
