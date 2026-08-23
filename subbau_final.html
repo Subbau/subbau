@@ -11237,6 +11237,16 @@ async function generateTeamAttendancePdf(teamId, teamName) {
   // Přehled sazeb: kolik lidí dělá za kterou hodinovou sazbu (+ za jaké profese
   // a kolik hodin dohromady). Zabalený do značek RATES-START/END — v liště
   // náhledu se dá zaškrtávátkem přidat, nebo vynechat.
+  // Provize (marže SubBau) — jen pro admina, jinak se nenačítají ani nezobrazí.
+  const _provMap = {}
+  if (smiVidetProvize()) {
+    try {
+      let pv = await sb.from('worker_commissions').select('worker_id, provize').in('worker_id', ids)
+      if (pv.error) pv = await sb.from('worker_commissions').select('worker_id, provize')
+      ;(pv.data || []).forEach(p => { if (p.provize != null) _provMap[p.worker_id] = Number(p.provize) })
+    } catch(e) { console.warn('[team-pdf] provize:', e?.message) }
+  }
+
   const _rateMap = new Map()
   Object.values(byWorker).forEach(w => {
     const rt = Number(w.rate) || 0
@@ -11271,6 +11281,58 @@ async function generateTeamAttendancePdf(teamId, teamName) {
     </table>
   </div><!--RATES-END-->`
 
+  // Přehled provizí: kolik lidí dělá za kterou provizi, kolik to dělá za jejich
+  // odpracované hodiny (provize × hodiny) a dole součet všech provizí.
+  // Značky COMM-START/END — v liště náhledu se dá zaškrtávátkem vynechat.
+  let commSummary = ''
+  if (smiVidetProvize()) {
+    const _commMap = new Map()
+    Object.entries(byWorker).forEach(([wid, w]) => {
+      const pv = Number(_provMap[wid]) || 0
+      const key = pv.toFixed(2)
+      if (!_commMap.has(key)) _commMap.set(key, { provize: pv, people: 0, hours: 0, profs: {} })
+      const g = _commMap.get(key)
+      g.people++
+      g.hours += (w.total || 0)
+      const pl = profLabel(w.prof) || 'Bez zařazení'
+      g.profs[pl] = (g.profs[pl] || 0) + 1
+    })
+    const _commGroups = [..._commMap.values()].sort((a, b) => b.provize - a.provize)
+    const _commTotal = _commGroups.reduce((s, g) => s + g.provize * (g.hours || 0), 0)
+    const _commHours = _commGroups.reduce((s, g) => s + (g.hours || 0), 0)
+    const _commPeople = _commGroups.reduce((s, g) => s + g.people, 0)
+    const _commRows = _commGroups.map(g => `<tr>
+        <td style="padding:5px 8px;border:1px solid #ddd;font-weight:800;color:#1d6b3f;white-space:nowrap">${g.provize ? _eur(g.provize) + ' / h' : 'Provize neuvedena'}</td>
+        <td style="padding:5px 8px;border:1px solid #ddd;text-align:center;font-weight:800;font-size:14px">${g.people}</td>
+        <td style="padding:5px 8px;border:1px solid #ddd;color:#555">${Object.entries(g.profs).sort((x, y) => y[1] - x[1]).map(([pl, c]) => c + '\u00d7 ' + pl).join(' · ')}</td>
+        <td style="padding:5px 8px;border:1px solid #ddd;text-align:center;font-weight:700;white-space:nowrap">${g.hours.toFixed(2)} h</td>
+        <td style="padding:5px 8px;border:1px solid #ddd;text-align:right;font-weight:800;white-space:nowrap;color:#1d6b3f">${_eur(g.provize * (g.hours || 0))}</td>
+      </tr>`).join('')
+    const _commLine = _commGroups.map(g => g.people + '\u00d7 ' + (g.provize ? _eur(g.provize) : 'bez provize')).join('  ·  ')
+    commSummary = `<!--COMM-START--><div style="margin-top:14px;padding-top:12px;border-top:1px solid #eee;page-break-inside:avoid;break-inside:avoid">
+      <div style="font-size:10px;letter-spacing:.5px;color:#888;text-transform:uppercase;text-align:center">Commission · Provision · Přehled provizí</div>
+      <div style="text-align:center;font-size:13px;font-weight:800;color:#211D1A;margin:4px 0 8px">${_commLine}</div>
+      <table style="width:100%;border-collapse:collapse;font-size:11px">
+        <thead><tr style="background:#f3f3f3">
+          <th style="text-align:left;padding:5px 8px;border:1px solid #ddd">Provize</th>
+          <th style="text-align:center;padding:5px 8px;border:1px solid #ddd;width:56px">Lidí</th>
+          <th style="text-align:left;padding:5px 8px;border:1px solid #ddd">Profese</th>
+          <th style="text-align:center;padding:5px 8px;border:1px solid #ddd;width:74px">Hodin</th>
+          <th style="text-align:right;padding:5px 8px;border:1px solid #ddd;width:92px">Provize celkem</th>
+        </tr></thead>
+        <tbody>${_commRows}</tbody>
+        <tfoot><tr style="background:#eef7f1">
+          <td style="padding:6px 8px;border:1px solid #ddd;font-weight:800">CELKEM PROVIZE</td>
+          <td style="padding:6px 8px;border:1px solid #ddd;text-align:center;font-weight:800">${_commPeople}</td>
+          <td style="padding:6px 8px;border:1px solid #ddd"></td>
+          <td style="padding:6px 8px;border:1px solid #ddd;text-align:center;font-weight:800;white-space:nowrap">${_commHours.toFixed(2)} h</td>
+          <td style="padding:6px 8px;border:1px solid #ddd;text-align:right;font-weight:800;font-size:13px;color:#1d6b3f;white-space:nowrap">${_eur(_commTotal)}</td>
+        </tr></tfoot>
+      </table>
+      <div style="font-size:9px;color:#aaa;margin-top:4px;text-align:right">Interní údaj — provize × odpracované hodiny</div>
+    </div><!--COMM-END-->`
+  }
+
   const printHTML = `<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Weekly Report ${(teamName||'')} ${periodLabel}</title>
   <style>
     *{box-sizing:border-box}
@@ -11292,6 +11354,7 @@ async function generateTeamAttendancePdf(teamId, teamName) {
     <div style="font-size:14px;font-weight:800;color:#9c3b22">👥 ${(teamName||'Tým').replace(/</g,'&lt;')}</div>
     <div style="margin:4px 0 0;font-size:11px;color:#555">${periodLabel} &nbsp;|&nbsp; ${workerCount} prac. · workers</div>
     ${rateSummary}
+    ${commSummary}
     <div style="text-align:center;margin-top:14px;padding-top:12px;border-top:1px solid #eee">
       <div style="font-size:10px;letter-spacing:.5px;color:#888;text-transform:uppercase">Total hours · Gesamtstunden · Celkem odpracováno</div>
       <div style="font-size:26px;font-weight:800;margin-top:3px;color:#211D1A">${grandTotal.toFixed(2)} h</div>
@@ -16655,36 +16718,46 @@ function showPrintPreview(html, filename) {
   // Mezera (roztáhne zbytek doprava)
   const spacer = document.createElement('div'); spacer.style.flex = '1'; bar.appendChild(spacer)
 
-  // Zaškrtávátko pro volitelný blok (přehled sazeb v týmovém výkazu).
-  // Ukáže se jen tam, kde takový blok v dokumentu opravdu je.
-  if (/<!--RATES-START-->/.test(html)) {
+  // Zaškrtávátka pro volitelné bloky (přehled sazeb / přehled provizí v týmovém
+  // výkazu). Ukážou se jen tam, kde takový blok v dokumentu opravdu je.
+  const _optBlocks = [
+    { tag: 'RATES', key: 'sb_pdf_rates', label: 'Přehled sazeb' },
+    { tag: 'COMM',  key: 'sb_pdf_comm',  label: 'Přehled provizí' }
+  ]
+  const _optBoxes = []
+  const applyOpts = () => {
+    let out = window._printHtmlMaster || ''
+    _optBoxes.forEach(o => {
+      try { localStorage.setItem(o.key, o.cb.checked ? '1' : '0') } catch(e) {}
+      if (!o.cb.checked) out = out.replace(new RegExp('<!--' + o.tag + '-START-->[\\s\\S]*?<!--' + o.tag + '-END-->', 'g'), '')
+    })
+    window._lastPrintHtml = out
+    const f = document.getElementById('__sb_preview_iframe')
+    if (!f) return
+    try {
+      const d = f.contentDocument || f.contentWindow.document
+      d.open(); d.write(out); d.close()
+      const refit = () => { try { f.style.height = (Math.max(d.body.scrollHeight, d.documentElement.scrollHeight) + 4) + 'px' } catch(e) {} }
+      setTimeout(refit, 60); setTimeout(refit, 300)
+    } catch(e) {}
+  }
+  _optBlocks.forEach(o => {
+    if (html.indexOf('<!--' + o.tag + '-START-->') === -1) return
     const lbl = document.createElement('label')
     lbl.className = 'no-print'
     lbl.style.cssText = 'display:flex;align-items:center;gap:7px;color:#fff;font-size:13px;font-weight:600;cursor:pointer;padding:9px 12px;background:rgba(255,255,255,.15);border-radius:10px;white-space:nowrap;user-select:none'
     const cb = document.createElement('input')
     cb.type = 'checkbox'
     cb.style.cssText = 'width:16px;height:16px;accent-color:#E8A13A;cursor:pointer;margin:0'
-    try { cb.checked = localStorage.getItem('sb_pdf_rates') !== '0' } catch(e) { cb.checked = true }
+    try { cb.checked = localStorage.getItem(o.key) !== '0' } catch(e) { cb.checked = true }
     lbl.appendChild(cb)
-    lbl.appendChild(document.createTextNode('Přehled sazeb'))
-    const applyOpt = () => {
-      try { localStorage.setItem('sb_pdf_rates', cb.checked ? '1' : '0') } catch(e) {}
-      const master = window._printHtmlMaster || ''
-      const out = cb.checked ? master : master.replace(/<!--RATES-START-->[\s\S]*?<!--RATES-END-->/g, '')
-      window._lastPrintHtml = out
-      const f = document.getElementById('__sb_preview_iframe')
-      if (!f) return
-      try {
-        const d = f.contentDocument || f.contentWindow.document
-        d.open(); d.write(out); d.close()
-        const refit = () => { try { f.style.height = (Math.max(d.body.scrollHeight, d.documentElement.scrollHeight) + 4) + 'px' } catch(e) {} }
-        setTimeout(refit, 60); setTimeout(refit, 300)
-      } catch(e) {}
-    }
-    cb.onchange = applyOpt
+    lbl.appendChild(document.createTextNode(o.label))
+    cb.onchange = applyOpts
     bar.appendChild(lbl)
-    if (!cb.checked) setTimeout(applyOpt, 120)   // zapamatované „bez sazeb“ — přepiš náhled
-  }
+    _optBoxes.push({ tag: o.tag, key: o.key, cb })
+  })
+  // zapamatovaná volba „bez bloku“ — přepiš náhled
+  if (_optBoxes.some(o => !o.cb.checked)) setTimeout(applyOpts, 120)
 
   // Uložit PDF (hlavní akce)
   bar.appendChild(mkBtn('📄 Uložit PDF', '#E8A13A', '#211D1A', () => savePdfDirect(window._lastPrintHtml, window._lastPrintName)))
