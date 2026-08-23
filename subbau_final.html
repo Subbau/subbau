@@ -6305,25 +6305,29 @@ function updateProvizeCommissionDisplay(workerId, newProv) {
   const newDay = newProv * idx.hoursDay
   const newWeek = newProv * idx.hoursWeek
   const newMonth = newProv * idx.hoursMonth
+  const newYear = newProv * (idx.hoursYear || 0)
   const deltaDay = newDay - oldProv * idx.hoursDay
   const deltaWeek = newWeek - oldProv * idx.hoursWeek
   const deltaMonth = newMonth - oldProv * idx.hoursMonth
+  const deltaYear = newYear - oldProv * (idx.hoursYear || 0)
   idx.prov = newProv
   const dEl = document.getElementById('pv-d-' + workerId); if (dEl) dEl.textContent = eur(newDay)
   const wEl = document.getElementById('pv-w-' + workerId); if (wEl) wEl.textContent = eur(newWeek)
   const mEl = document.getElementById('pv-m-' + workerId); if (mEl) mEl.textContent = eur(newMonth)
   const ft = window._provizeFirmTotals && window._provizeFirmTotals[idx.firmIdx]
   if (ft) {
-    ft.day += deltaDay; ft.week += deltaWeek; ft.month += deltaMonth
+    ft.day += deltaDay; ft.week += deltaWeek; ft.month += deltaMonth; ft.year = (ft.year || 0) + deltaYear
     const fd = document.getElementById('pv-fd-' + idx.firmIdx); if (fd) fd.textContent = eur(ft.day)
     const fw = document.getElementById('pv-fw-' + idx.firmIdx); if (fw) fw.textContent = eur(ft.week)
     const fm = document.getElementById('pv-fm-' + idx.firmIdx); if (fm) fm.textContent = eur(ft.month)
   }
   const g = window._provizeGrand
   if (g) {
-    g.week += deltaWeek; g.month += deltaMonth
+    g.week += deltaWeek; g.month += deltaMonth; g.year = (g.year || 0) + deltaYear
     const gw = document.getElementById('pv-gw'); if (gw) gw.textContent = eur(g.week)
     const gm = document.getElementById('pv-gm'); if (gm) gm.textContent = eur(g.month)
+    const gy = document.getElementById('pv-gy'); if (gy) gy.textContent = eur(g.year)
+    const gv = document.getElementById('pv-gv'); if (gv) gv.textContent = eur(g.year * 0.21)
   }
 }
 async function toggleProvizePaid(checkbox, workerId, mode, periodKey) {
@@ -6479,6 +6483,9 @@ async function renderProvizeContent() {
   const [dStart, dEnd] = provizeDayRange(anchor)
   const [wStart, wEnd] = provizePeriodRange('week', anchor)
   const [mStart, mEnd] = provizePeriodRange('month', anchor)
+  // Roční provize = celý kalendářní rok vybraného data (1. 1. – 31. 12.)
+  const yStart = new Date(anchor.getFullYear(), 0, 1)
+  const yEnd = new Date(anchor.getFullYear(), 11, 31)
 
   const [{ data: workers }, provResult, { data: teams }, { data: companies }] = await Promise.all([
     sb.from('profiles').select('id, full_name, hourly_rate_worker, team_id').in('role', ['osvec', 'partak']).eq('is_active', true).order('full_name'),
@@ -6511,15 +6518,25 @@ async function renderProvizeContent() {
   function firmOf(w) { return provizeFirmOf(w, teamById, companyNameById) }
 
   const now = new Date()
-  // Rozsah dotazu: pokrýt den, týden i měsíc kolem vybraného data (týden může přesahovat do jiného měsíce) i dnešek
-  const rangeStart = new Date(Math.min(dStart.getTime(), wStart.getTime(), mStart.getTime(), now.getTime()))
-  const rangeEnd = new Date(Math.max(dEnd.getTime(), wEnd.getTime(), mEnd.getTime(), now.getTime()))
+  // Rozsah dotazu: pokrýt den, týden, měsíc i celý rok kolem vybraného data (týden může přesahovat do jiného měsíce/roku) i dnešek
+  const rangeStart = new Date(Math.min(dStart.getTime(), wStart.getTime(), mStart.getTime(), yStart.getTime(), now.getTime()))
+  const rangeEnd = new Date(Math.max(dEnd.getTime(), wEnd.getTime(), mEnd.getTime(), yEnd.getTime(), now.getTime()))
   const fetchStart = localDateStr(rangeStart)
   const fetchEnd = localDateStr(rangeEnd)
 
-  const { data: att } = await sb.from('attendance')
-    .select('worker_id, work_date, check_in, check_out, break_start, break_end, total_hours')
-    .gte('work_date', fetchStart).lte('work_date', fetchEnd)
+  // Celý rok docházky se nevejde do výchozího limitu Supabase (~1000 řádků), proto načítáme
+  // po stránkách — bez toho by roční provize tiše ukazovala jen zlomek odpracovaných hodin.
+  const att = []
+  const ATT_PAGE = 1000
+  for (let fromRow = 0; fromRow < 200000; fromRow += ATT_PAGE) {
+    const { data: page, error: pageErr } = await sb.from('attendance')
+      .select('worker_id, work_date, check_in, check_out, break_start, break_end, total_hours')
+      .gte('work_date', fetchStart).lte('work_date', fetchEnd)
+      .order('id').range(fromRow, fromRow + ATT_PAGE - 1)
+    if (pageErr || !page || !page.length) break
+    att.push(...page)
+    if (page.length < ATT_PAGE) break
+  }
 
   const nowStr = now.toTimeString().slice(0, 8)
   const dnesStrStat = localDateStr()
@@ -6533,9 +6550,10 @@ async function renderProvizeContent() {
   const dStartStr = localDateStr(dStart), dEndStr = localDateStr(dEnd)
   const wStartStr = localDateStr(wStart), wEndStr = localDateStr(wEnd)
   const mStartStr = localDateStr(mStart), mEndStr = localDateStr(mEnd)
+  const yStartStr = localDateStr(yStart), yEndStr = localDateStr(yEnd)
 
   const byWorker = {}
-  ;(workers || []).forEach(w => { byWorker[w.id] = { day: 0, week: 0, month: 0 } })
+  ;(workers || []).forEach(w => { byWorker[w.id] = { day: 0, week: 0, month: 0, year: 0 } })
   ;(att || []).forEach(a => {
     const bucket = byWorker[a.worker_id]
     if (!bucket) return
@@ -6543,6 +6561,7 @@ async function renderProvizeContent() {
     if (a.work_date >= dStartStr && a.work_date <= dEndStr) bucket.day += h
     if (a.work_date >= wStartStr && a.work_date <= wEndStr) bucket.week += h
     if (a.work_date >= mStartStr && a.work_date <= mEndStr) bucket.month += h
+    if (a.work_date >= yStartStr && a.work_date <= yEndStr) bucket.year += h
   })
 
   // Uhrazeno je vždy vázané na týden (kolem vybraného data), bez ohledu na zvolený režim navigace — best-effort, tabulka nemusí ještě existovat
@@ -6569,7 +6588,7 @@ async function renderProvizeContent() {
   }
 
   const rows = (workers || []).map(w => {
-    const hrs = byWorker[w.id] || { day: 0, week: 0, month: 0 }
+    const hrs = byWorker[w.id] || { day: 0, week: 0, month: 0, year: 0 }
     const rate = w.hourly_rate_worker || 0
     const prov = provMap[w.id] || 0
     const pay = payMap[w.id] || null
@@ -6579,11 +6598,12 @@ async function renderProvizeContent() {
     return {
       id: w.id, name: w.full_name, firm: firmOf(w), rate, prov,
       terms,
-      hoursDay: hrs.day, hoursWeek: hrs.week, hoursMonth: hrs.month,
-      commDay: prov * hrs.day, commWeek: prov * hrs.week, commMonth: prov * hrs.month,
+      hoursDay: hrs.day, hoursWeek: hrs.week, hoursMonth: hrs.month, hoursYear: hrs.year,
+      commDay: prov * hrs.day, commWeek: prov * hrs.week, commMonth: prov * hrs.month, commYear: prov * hrs.year,
       // kolik si za týden vydělá sám pracovník (sazba × odpracované hodiny)
       earnWeek: rate * hrs.week,
-      paid, dueDate: dueInfo.due, overdue: !paid && dueInfo.overdue
+      // Kdo v daném týdnu nemá jedinou odpracovanou hodinu, nemá co fakturovat — nesmí svítit „nezaplaceno"
+      paid, dueDate: dueInfo.due, overdue: !paid && dueInfo.overdue && hrs.week > 0
     }
   })
 
@@ -6600,7 +6620,7 @@ async function renderProvizeContent() {
 
   const eur = n => n.toLocaleString('cs-CZ', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + ' €'
   const TERMS_OPTIONS = ['7/7', '7/10', '7/14', '14/14']
-  let weekGrandTotal = 0, monthGrandTotal = 0, earnGrandTotal = 0
+  let weekGrandTotal = 0, monthGrandTotal = 0, yearGrandTotal = 0, earnGrandTotal = 0
 
   // Index pro rychlý přepočet Odměny po uložení provize bez znovuvykreslení celé tabulky (viz updateProvizeCommissionDisplay)
   window._provizeIndex = {}
@@ -6611,10 +6631,10 @@ async function renderProvizeContent() {
     const isNoFirm = firm === 'Bez firmy'
     const gc = groupColor(firm, 'company')
     const safeFirm = firm.replace(/'/g, String.fromCharCode(39))
-    let fDay = 0, fWeek = 0, fMonth = 0, fEarn = 0, fPaidCount = 0
+    let fDay = 0, fWeek = 0, fMonth = 0, fYear = 0, fEarn = 0, fPaidCount = 0
     const memberRows = members.map(r => {
-      fDay += r.commDay; fWeek += r.commWeek; fMonth += r.commMonth; fEarn += r.earnWeek; if (r.paid) fPaidCount++
-      window._provizeIndex[r.id] = { hoursDay: r.hoursDay, hoursWeek: r.hoursWeek, hoursMonth: r.hoursMonth, prov: r.prov, rate: r.rate, firmIdx }
+      fDay += r.commDay; fWeek += r.commWeek; fMonth += r.commMonth; fYear += r.commYear; fEarn += r.earnWeek; if (r.paid) fPaidCount++
+      window._provizeIndex[r.id] = { hoursDay: r.hoursDay, hoursWeek: r.hoursWeek, hoursMonth: r.hoursMonth, hoursYear: r.hoursYear, prov: r.prov, rate: r.rate, firmIdx }
       const termsOpts = TERMS_OPTIONS.map(t => `<option value="${t}" ${r.terms === t ? 'selected' : ''}>${t}</option>`).join('')
       const rowBg = r.paid ? 'background:var(--green-l)' : (r.overdue ? 'background:var(--red-l)' : '')
       const dueLabel = paymentTermsColumnMissing
@@ -6632,8 +6652,8 @@ async function renderProvizeContent() {
         <td><select onchange="saveProvizeTerms(this,'${r.id}')" style="padding:6px 8px;border:1.5px solid var(--brd);border-radius:7px;font-size:13px;font-family:inherit">${termsOpts}</select>${dueLabel}</td>
       </tr>`
     }).join('')
-    weekGrandTotal += fWeek; monthGrandTotal += fMonth; earnGrandTotal += fEarn
-    window._provizeFirmTotals[firmIdx] = { day: fDay, week: fWeek, month: fMonth, earn: fEarn }
+    weekGrandTotal += fWeek; monthGrandTotal += fMonth; yearGrandTotal += fYear; earnGrandTotal += fEarn
+    window._provizeFirmTotals[firmIdx] = { day: fDay, week: fWeek, month: fMonth, year: fYear, earn: fEarn }
     return `
     <div class="card" style="border-left:6px solid ${gc.border};margin-bottom:16px">
       <div class="card-h" style="flex-wrap:wrap;gap:10px">
@@ -6666,7 +6686,7 @@ async function renderProvizeContent() {
     </div>`
   }).join('')
 
-  window._provizeGrand = { week: weekGrandTotal, month: monthGrandTotal, earnWeek: earnGrandTotal }
+  window._provizeGrand = { week: weekGrandTotal, month: monthGrandTotal, year: yearGrandTotal, earnWeek: earnGrandTotal }
 
   el.innerHTML = `
     <div class="card" style="margin-bottom:16px">
@@ -6690,6 +6710,8 @@ async function renderProvizeContent() {
         <div class="stats" style="grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;margin-bottom:0">
           <div class="sc b"><div class="sc-lbl" style="font-size:12px">Týdenní provize</div><div class="sc-val" id="pv-gw" style="color:var(--blue);font-size:24px">${eur(weekGrandTotal)}</div></div>
           <div class="sc b"><div class="sc-lbl" style="font-size:12px">Měsíční provize</div><div class="sc-val" id="pv-gm" style="color:var(--blue);font-size:24px">${eur(monthGrandTotal)}</div></div>
+          <div class="sc b"><div class="sc-lbl" style="font-size:12px">Roční provize ${anchor.getFullYear()}</div><div class="sc-val" id="pv-gy" style="color:var(--blue);font-size:24px">${eur(yearGrandTotal)}</div></div>
+          <div class="sc a"><div class="sc-lbl" style="font-size:12px">DPH 21 % z roční provize</div><div class="sc-val" id="pv-gv" style="color:var(--amber);font-size:24px">${eur(yearGrandTotal * 0.21)}</div></div>
           <div class="sc g"><div class="sc-lbl" style="font-size:12px">Výdělek pracovníků (týden)</div><div class="sc-val" id="pv-ge" style="color:var(--green);font-size:24px">${eur(earnGrandTotal)}</div></div>
           <div class="sc g"><div class="sc-lbl" style="font-size:12px">Firem</div><div class="sc-val" style="color:var(--green);font-size:24px">${firmNames.length}</div></div>
           <div class="sc g"><div class="sc-lbl" style="font-size:12px">Pracovníků</div><div class="sc-val" style="color:var(--green);font-size:24px">${rows.length}</div></div>
