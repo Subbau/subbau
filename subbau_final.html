@@ -10844,22 +10844,56 @@ function renderTeamMembers(t, members, qWorker, profLabels) {
 }
 
 // === Podskupiny (subteams) — CRUD ===
+
+// Najde v týmu podskupiny se stejným názvem (velikost písmen a mezery neřeší).
+// Slouží jako pojistka proti dvojímu založení: než něco vložíme podruhé,
+// vždycky se nejdřív podíváme, jestli už to v databázi náhodou není.
+async function findSubteamsByName(teamId, nm) {
+  const { data } = await sb.from('subteams').select('*').eq('team_id', teamId)
+  const key = String(nm||'').trim().toLowerCase()
+  // Skryté (is_active = false) se nepočítají — jinak by smazaný název nešlo použít znovu
+  return (data || []).filter(s => s.is_active !== false && String(s.name || '').trim().toLowerCase() === key)
+}
+
 async function createSubteam(teamId) {
+  if (window._subteamBusy) return                 // druhé kliknutí, než doběhne první
   const name = prompt('Název podskupiny (např. Parta A):')
   if (name === null) return
   const nm = name.trim()
   if (!nm) { showToast('⚠️ Zadejte název'); return }
-  let { error } = await sb.from('subteams').insert({ team_id: teamId, name: nm, is_active: true })
-  if (error && /is_active/i.test(error.message || ''))
-    ;({ error } = await sb.from('subteams').insert({ team_id: teamId, name: nm }))
-  if (error) {
-    if (/relation .*subteams.* does not exist/i.test(error.message))
-      showToast('❌ Chybí tabulka subteams — spusťte SQL v Supabase')
-    else showToast('❌ Chyba: ' + error.message)
-    return
-  }
-  showToast('✅ Podskupina vytvořena')
-  loadTeams()
+  window._subteamBusy = true
+  try {
+    // Stejný název už v tomhle týmu je → nezakládej druhý stejný
+    const existing = await findSubteamsByName(teamId, nm)
+    if (existing.length) { showToast('⚠️ Podskupina „' + nm + '“ už v tomto týmu je'); return }
+
+    let { error } = await sb.from('subteams').insert({ team_id: teamId, name: nm, is_active: true })
+    if (error) {
+      // Opakovat se smí JEN když opravdu chybí sloupec is_active. Dřív stačilo,
+      // aby se „is_active“ objevilo kdekoli v textu chyby — a když řádek přesto
+      // vznikl, druhý pokus založil podskupinu podruhé.
+      const missingCol = /is_active/i.test(error.message || '') && (
+        error.code === 'PGRST204' || error.code === '42703' ||
+        /does not exist|schema cache|could not find/i.test(error.message || ''))
+      const already = await findSubteamsByName(teamId, nm)
+      if (already.length) error = null              // řádek přes hlášenou chybu vznikl
+      else if (missingCol) ({ error } = await sb.from('subteams').insert({ team_id: teamId, name: nm }))
+    }
+    if (error) {
+      if (/relation .*subteams.* does not exist/i.test(error.message || ''))
+        showToast('❌ Chybí tabulka subteams — spusťte SQL v Supabase')
+      else showToast('❌ Chyba: ' + error.message)
+      return
+    }
+    // Poslední pojistka: kdyby přes všechno vznikly dva stejné řádky, nech jen ten první.
+    const rows = await findSubteamsByName(teamId, nm)
+    if (rows.length > 1) {
+      rows.sort((a, b) => String(a.created_at||'').localeCompare(String(b.created_at||'')) || String(a.id).localeCompare(String(b.id)))
+      for (const dup of rows.slice(1)) await sb.from('subteams').delete().eq('id', dup.id)
+    }
+    showToast('✅ Podskupina vytvořena')
+    loadTeams()
+  } finally { window._subteamBusy = false }
 }
 
 async function renameSubteam(subteamId, oldName) {
@@ -11063,7 +11097,7 @@ async function generateTeamAttendancePdf(teamId, teamName) {
   const periodLabel = `KW${week}/${year} (${sd.toLocaleDateString('cs-CZ')} – ${ed.toLocaleDateString('cs-CZ')})`
 
   const { data: att } = await sb.from('attendance')
-    .select('*, worker:profiles!worker_id(full_name, profession)')
+    .select('*, worker:profiles!worker_id(full_name, profession, hourly_rate_worker)')
     .in('worker_id', ids)
     .gte('work_date', startStr).lte('work_date', endStr)
     .order('work_date').order('check_in')
@@ -11093,7 +11127,7 @@ async function generateTeamAttendancePdf(teamId, teamName) {
   const byWorker = {}
   att.forEach(r => {
     const wid = r.worker_id
-    if (!byWorker[wid]) byWorker[wid] = { name: r.worker?.full_name || '—', prof: r.worker?.profession || '', rows: [], total: 0 }
+    if (!byWorker[wid]) byWorker[wid] = { name: r.worker?.full_name || '—', prof: r.worker?.profession || '', rate: Number(r.worker?.hourly_rate_worker) || 0, rows: [], total: 0 }
     byWorker[wid].rows.push(r)
     byWorker[wid].total += (r.total_hours || 0)
   })
@@ -11200,6 +11234,43 @@ async function generateTeamAttendancePdf(teamId, teamName) {
   }))
   const sections = sectionsArr.join('')
 
+  // Přehled sazeb: kolik lidí dělá za kterou hodinovou sazbu (+ za jaké profese
+  // a kolik hodin dohromady). Zabalený do značek RATES-START/END — v liště
+  // náhledu se dá zaškrtávátkem přidat, nebo vynechat.
+  const _rateMap = new Map()
+  Object.values(byWorker).forEach(w => {
+    const rt = Number(w.rate) || 0
+    const key = rt.toFixed(2)
+    if (!_rateMap.has(key)) _rateMap.set(key, { rate: rt, people: 0, hours: 0, profs: {} })
+    const g = _rateMap.get(key)
+    g.people++
+    g.hours += (w.total || 0)
+    const pl = profLabel(w.prof) || 'Bez zařazení'
+    g.profs[pl] = (g.profs[pl] || 0) + 1
+  })
+  const _rateGroups = [..._rateMap.values()].sort((a, b) => b.rate - a.rate)
+  const _eur = n => n.toFixed(2).replace('.', ',') + ' €'
+  const _rateRows = _rateGroups.map(g => `<tr>
+      <td style="padding:5px 8px;border:1px solid #ddd;font-weight:800;color:#9c3b22;white-space:nowrap">${g.rate ? _eur(g.rate) + ' / h' : 'Sazba neuvedena'}</td>
+      <td style="padding:5px 8px;border:1px solid #ddd;text-align:center;font-weight:800;font-size:14px">${g.people}</td>
+      <td style="padding:5px 8px;border:1px solid #ddd;color:#555">${Object.entries(g.profs).sort((x, y) => y[1] - x[1]).map(([pl, c]) => c + '\u00d7 ' + pl).join(' · ')}</td>
+      <td style="padding:5px 8px;border:1px solid #ddd;text-align:center;font-weight:700;white-space:nowrap">${g.hours.toFixed(2)} h</td>
+    </tr>`).join('')
+  const _rateLine = _rateGroups.map(g => g.people + '\u00d7 ' + (g.rate ? _eur(g.rate) : 'bez sazby')).join('  ·  ')
+  const rateSummary = `<!--RATES-START--><div style="margin-top:14px;padding-top:12px;border-top:1px solid #eee;page-break-inside:avoid;break-inside:avoid">
+    <div style="font-size:10px;letter-spacing:.5px;color:#888;text-transform:uppercase;text-align:center">Rates · Stundensätze · Přehled sazeb</div>
+    <div style="text-align:center;font-size:13px;font-weight:800;color:#211D1A;margin:4px 0 8px">${_rateLine}</div>
+    <table style="width:100%;border-collapse:collapse;font-size:11px">
+      <thead><tr style="background:#f3f3f3">
+        <th style="text-align:left;padding:5px 8px;border:1px solid #ddd">Hodinová sazba</th>
+        <th style="text-align:center;padding:5px 8px;border:1px solid #ddd;width:56px">Lidí</th>
+        <th style="text-align:left;padding:5px 8px;border:1px solid #ddd">Profese</th>
+        <th style="text-align:center;padding:5px 8px;border:1px solid #ddd;width:74px">Hodin</th>
+      </tr></thead>
+      <tbody>${_rateRows}</tbody>
+    </table>
+  </div><!--RATES-END-->`
+
   const printHTML = `<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Weekly Report ${(teamName||'')} ${periodLabel}</title>
   <style>
     *{box-sizing:border-box}
@@ -11220,6 +11291,7 @@ async function generateTeamAttendancePdf(teamId, teamName) {
     <div style="height:1px;background:#eee;margin:12px 0"></div>
     <div style="font-size:14px;font-weight:800;color:#9c3b22">👥 ${(teamName||'Tým').replace(/</g,'&lt;')}</div>
     <div style="margin:4px 0 0;font-size:11px;color:#555">${periodLabel} &nbsp;|&nbsp; ${workerCount} prac. · workers</div>
+    ${rateSummary}
     <div style="text-align:center;margin-top:14px;padding-top:12px;border-top:1px solid #eee">
       <div style="font-size:10px;letter-spacing:.5px;color:#888;text-transform:uppercase">Total hours · Gesamtstunden · Celkem odpracováno</div>
       <div style="font-size:26px;font-weight:800;margin-top:3px;color:#211D1A">${grandTotal.toFixed(2)} h</div>
@@ -16527,6 +16599,7 @@ function printViaOverlay(html) { showPrintPreview(html, 'prehled-hodin.html') }
 // Náhled v overlay + spolehlivý tisk přes iframe (funguje i v Safari)
 function showPrintPreview(html, filename) {
   window._lastPrintHtml = html
+  window._printHtmlMaster = html          // původní verze včetně volitelných bloků
   window._lastPrintName = filename || 'export.html'
   const overlay = document.getElementById('print-overlay')
   const printContent = document.getElementById('print-content')
@@ -16581,6 +16654,38 @@ function showPrintPreview(html, filename) {
   bar.appendChild(closeBtn)
   // Mezera (roztáhne zbytek doprava)
   const spacer = document.createElement('div'); spacer.style.flex = '1'; bar.appendChild(spacer)
+
+  // Zaškrtávátko pro volitelný blok (přehled sazeb v týmovém výkazu).
+  // Ukáže se jen tam, kde takový blok v dokumentu opravdu je.
+  if (/<!--RATES-START-->/.test(html)) {
+    const lbl = document.createElement('label')
+    lbl.className = 'no-print'
+    lbl.style.cssText = 'display:flex;align-items:center;gap:7px;color:#fff;font-size:13px;font-weight:600;cursor:pointer;padding:9px 12px;background:rgba(255,255,255,.15);border-radius:10px;white-space:nowrap;user-select:none'
+    const cb = document.createElement('input')
+    cb.type = 'checkbox'
+    cb.style.cssText = 'width:16px;height:16px;accent-color:#E8A13A;cursor:pointer;margin:0'
+    try { cb.checked = localStorage.getItem('sb_pdf_rates') !== '0' } catch(e) { cb.checked = true }
+    lbl.appendChild(cb)
+    lbl.appendChild(document.createTextNode('Přehled sazeb'))
+    const applyOpt = () => {
+      try { localStorage.setItem('sb_pdf_rates', cb.checked ? '1' : '0') } catch(e) {}
+      const master = window._printHtmlMaster || ''
+      const out = cb.checked ? master : master.replace(/<!--RATES-START-->[\s\S]*?<!--RATES-END-->/g, '')
+      window._lastPrintHtml = out
+      const f = document.getElementById('__sb_preview_iframe')
+      if (!f) return
+      try {
+        const d = f.contentDocument || f.contentWindow.document
+        d.open(); d.write(out); d.close()
+        const refit = () => { try { f.style.height = (Math.max(d.body.scrollHeight, d.documentElement.scrollHeight) + 4) + 'px' } catch(e) {} }
+        setTimeout(refit, 60); setTimeout(refit, 300)
+      } catch(e) {}
+    }
+    cb.onchange = applyOpt
+    bar.appendChild(lbl)
+    if (!cb.checked) setTimeout(applyOpt, 120)   // zapamatované „bez sazeb“ — přepiš náhled
+  }
+
   // Uložit PDF (hlavní akce)
   bar.appendChild(mkBtn('📄 Uložit PDF', '#E8A13A', '#211D1A', () => savePdfDirect(window._lastPrintHtml, window._lastPrintName)))
 }
