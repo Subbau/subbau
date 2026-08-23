@@ -10097,6 +10097,7 @@ function renderWorkerInvoices() {
           ${r.pdf_url ? `<button onclick="openPdfUrl('${jsStr(r.pdf_url)}')" style="font-size:11px;padding:3px 8px;border:1px solid var(--blue);border-radius:6px;cursor:pointer;background:var(--bg2);color:var(--blue);font-family:inherit"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:1em;height:1em;flex-shrink:0;vertical-align:-2px"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg> Zobrazit</button>` : '<span style="font-size:11px;color:var(--text3)">bez PDF</span>'}
           ${r.pdf_url ? `<button onclick="downloadInvoicePdf('${jsStr(r.id)}')" style="font-size:11px;padding:3px 8px;border:1px solid var(--brd);border-radius:6px;cursor:pointer;background:#fff;font-family:inherit"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:1em;height:1em;flex-shrink:0;vertical-align:-2px"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="M7 10l5 5 5-5"/><path d="M12 15V3"/></svg> Stáhnout</button>` : ''}
           ${r.pdf_url ? `<button onclick="printInvoicePdf('${jsStr(r.pdf_url)}')" style="font-size:11px;padding:3px 8px;border:1px solid var(--brd);border-radius:6px;cursor:pointer;background:#fff;font-family:inherit"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:1em;height:1em;flex-shrink:0;vertical-align:-2px"><path d="M6 9V2h12v7M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2"/><rect x="6" y="14" width="12" height="8"/></svg> Tisk</button>` : ''}
+          ${r.original_pdf_url ? `<button onclick="openPdfUrl('${jsStr(r.original_pdf_url)}')" title="Faktura tak, jak ji poslal pracovník — ještě bez zálohy" style="font-size:11px;padding:3px 8px;border:1px dashed var(--brd);border-radius:6px;cursor:pointer;background:#fff;color:var(--text3);font-family:inherit"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:1em;height:1em;flex-shrink:0;vertical-align:-2px"><path d="M3 3v5h5"/><path d="M3.05 13A9 9 0 1 0 6 5.3L3 8"/><path d="M12 7v5l3 2"/></svg> Původní</button>` : ''}
           <button onclick="openInvoiceEdit('${jsStr(r.id)}')" title="Upravit fakturu — záloha v hotovosti" style="font-size:11px;padding:3px 8px;border:1px solid var(--brd);border-radius:6px;cursor:pointer;background:#fff;font-family:inherit"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:1em;height:1em;flex-shrink:0;vertical-align:-2px"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/></svg> Upravit</button>
           ${(r.status || 'new') === 'new' ? `<button onclick="setInvoiceStatus('${jsStr(r.id)}','seen')" style="font-size:11px;padding:3px 8px;border:1px solid var(--green);border-radius:6px;cursor:pointer;background:var(--green-l);color:var(--green);font-family:inherit"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:1em;height:1em;flex-shrink:0;vertical-align:-2px"><path d="M20 6 9 17l-5-5"/></svg> Vyřídit</button>` : ''}
           ${(r.status || 'new') !== 'paid' ? `<button onclick="setInvoiceStatus('${jsStr(r.id)}','paid')" style="font-size:11px;padding:3px 8px;border:1px solid var(--amber);border-radius:6px;cursor:pointer;background:var(--amber-l);color:var(--amber);font-family:inherit">Zaplaceno</button>` : ''}
@@ -10364,33 +10365,62 @@ async function saveInvoiceEdit() {
   // 3) Zápis do databáze
   const upd = { cash_paid: cash, cash_paid_note: note || null, edited_at: new Date().toISOString() }
   if (uploaded) { upd.pdf_url = uploaded.url; upd.pdf_path = uploaded.path }
+
+  // Faktura v podobě, v jaké přišla od pracovníka, se při PRVNÍ úpravě odloží
+  // stranou a od té chvíle se už nikdy nepřepíše — i po desáté opravě zálohy
+  // jde ukázat, co doopravdy přišlo z mobilu.
+  if (uploaded && !r.original_pdf_path && r.pdf_path) {
+    upd.original_pdf_url = r.pdf_url
+    upd.original_pdf_path = r.pdf_path
+  }
+
+  let bezPuvodni = false
   let { error } = await sb.from('worker_invoices').update(upd).eq('id', r.id)
+  // Sloupce na původní verzi ještě nemusí být v databázi. Fakturu kvůli tomu
+  // neblokuj — zálohu ulož i bez nich a řekni nahlas, co chybí.
+  if (error && /original_pdf/i.test(error.message || '')) {
+    bezPuvodni = true
+    delete upd.original_pdf_url
+    delete upd.original_pdf_path
+    ;({ error } = await sb.from('worker_invoices').update(upd).eq('id', r.id))
+  }
   if (error && /cash_paid|edited_at|column|schema cache/i.test(error.message || '')) {
     finish('❌ Chybí migrace — spusťte v Supabase soubor supabase-migrace-faktura-zaloha.sql')
     return
   }
   if (error) { finish('❌ Uložení selhalo: ' + error.message); return }
 
-  // Staré PDF ať ve Storage nezůstává ležet
-  if (uploaded && r.pdf_path && r.pdf_path !== uploaded.path) {
+  // Původní PDF se NEMAŽE — drží se jako doklad. Uklidí se jen předchozí přepsaná
+  // verze, ať se ve složce nehromadí. Když se původní verzi nepodařilo zaevidovat,
+  // nemaže se nic: osiřelý soubor je menší škoda než ztracená faktura.
+  const puvodniPath = upd.original_pdf_path || r.original_pdf_path || null
+  if (uploaded && puvodniPath && r.pdf_path && r.pdf_path !== uploaded.path && r.pdf_path !== puvodniPath) {
     try { await sb.storage.from('documents').remove([r.pdf_path]) }
-    catch (e) { console.warn('[faktura] staré PDF nešlo smazat:', e?.message) }
+    catch (e) { console.warn('[faktura] předchozí přepsané PDF nešlo smazat:', e?.message) }
   }
 
   Object.assign(r, upd)
   renderWorkerInvoices()
   closeInvoiceEdit()
+  if (bezPuvodni) {
+    finish('⚠️ Záloha zapsána, ale původní verzi neuchovám — spusťte v Supabase soubor supabase-migrace-faktura-original.sql')
+    return
+  }
+  const dovetek = r.original_pdf_url ? ' — původní verze zůstala uložená' : ''
   finish(cash > 0
-    ? '✅ Záloha ' + cash.toFixed(2) + ' € zapsána — faktura i PDF přepsány'
-    : '✅ Záloha zrušena — faktura i PDF přepsány')
+    ? '✅ Záloha ' + cash.toFixed(2) + ' € zapsána, PDF přepsáno' + dovetek
+    : '✅ Záloha zrušena, PDF přepsáno' + dovetek)
 }
 
 async function deleteWorkerInvoice(id) {
   const r = _invCache.find(x => x.id === id)
   const kdo = r?.worker?.full_name || r?.supplier_name || ''
   if (!confirm('Smazat fakturu ' + (r?.invoice_number || '') + (kdo ? ' od ' + kdo : '') + '?\nTato akce je nevratná.')) return
-  if (r?.pdf_path) {
-    try { await sb.storage.from('documents').remove([r.pdf_path]) }
+  // Smazat obě verze — přepsanou i tu původní od pracovníka, ať po faktuře
+  // nezůstane ve složce osiřelý soubor, na který se už nikdo nedostane.
+  const kSmazani = [r?.pdf_path, r?.original_pdf_path].filter(p => p && typeof p === 'string')
+  if (kSmazani.length) {
+    try { await sb.storage.from('documents').remove([...new Set(kSmazani)]) }
     catch (e) { console.warn('[faktury] PDF ze Storage nešlo smazat:', e?.message) }
   }
   const { error } = await sb.from('worker_invoices').delete().eq('id', id)
