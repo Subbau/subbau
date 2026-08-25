@@ -7504,6 +7504,77 @@ function groupColor(name, kind) {
   return { bg: `hsl(${hue}, 38%, 94%)`, text: `hsl(${hue}, 40%, 30%)`, border: `hsl(${hue}, 32%, 72%)` }
 }
 
+// ===== BARVY FAKTUR =====
+// Každý pracovník, který zapisuje docházku, dostane jednu barvu a drží si ji.
+// U faktury je pak vidět barevný proužek, takže se dá v seznamu poznat, čí
+// faktura to je, ještě než člověk přečte jméno. Když se pracovníkovi docházka
+// zablokuje, odebere přístup nebo se smaže, barva se uvolní a dostane ji někdo
+// další (viz uvolniBarvuFaktury / prideliBarvyFaktur).
+//
+// Odstíny jsou vybrané ručně, ne dopočítané. Počítané barvy (jako u firem
+// v groupColor) se po pár lidech začnou plést dohromady — tyhle jsou zvolené
+// tak, aby šly rozeznat i vedle sebe. Šestnáct stačí; kdyby pracovníků bylo
+// víc, začnou se barvy opakovat a paletu je potřeba rozšířit.
+const INVOICE_COLORS = [
+  '#9c3b22', '#2f6f4e', '#2a5d8f', '#8a5a10',
+  '#6b3fa0', '#0f766e', '#a03050', '#4a7a35',
+  '#b06010', '#1f6a7a', '#7a3f8f', '#455a8f',
+  '#8c4a2f', '#6f6a20', '#8f3060', '#2d6b5f'
+]
+
+// Z indexu udělá barvu. Kdo index nemá (null), nemá ani barvu.
+function invoiceColor(idx) {
+  if (idx == null || idx < 0) return null
+  return INVOICE_COLORS[idx % INVOICE_COLORS.length]
+}
+
+// Uvolní barvu pracovníka, aby ji mohl dostat někdo jiný. Volá se při
+// zablokování docházky i odebrání přístupu. Smazání profilu barvu uvolní samo.
+async function uvolniBarvuFaktury(workerId) {
+  try {
+    await sb.from('profiles').update({ invoice_color: null }).eq('id', workerId)
+  } catch (e) {
+    // Když sloupec ještě neexistuje (nespuštěná migrace), nic se neděje —
+    // barvy prostě zatím nejsou a zbytek appky běží dál.
+    console.warn('uvolniBarvuFaktury:', e?.message)
+  }
+}
+
+// Doplní barvu těm, kdo ve složce Faktury vystupují, ještě ji nemají a mají
+// docházku povolenou. Bere vždycky nejnižší volné číslo, ať se paleta využívá
+// odspodu a barvy po uvolnění zase padnou k někomu jinému.
+async function prideliBarvyFaktur(rows) {
+  const bezBarvy = new Map()
+  ;(rows || []).forEach(r => {
+    const w = r.worker
+    if (!r.worker_id || !w) return
+    if (w.invoice_color != null) return
+    if (w.can_track_hours === false || w.is_active === false) return
+    bezBarvy.set(r.worker_id, w)
+  })
+  if (!bezBarvy.size) return false
+
+  const { data: zabrane, error } = await sb.from('profiles')
+    .select('invoice_color').not('invoice_color', 'is', null)
+  if (error) return false          // migrace neproběhla — barvy zatím vynecháme
+
+  const obsazene = new Set((zabrane || []).map(x => x.invoice_color))
+  let zmena = false
+
+  for (const [id, w] of bezBarvy) {
+    let idx = 0
+    while (idx < INVOICE_COLORS.length && obsazene.has(idx)) idx++
+    if (idx >= INVOICE_COLORS.length) break   // paleta došla, zbytek zůstane bez barvy
+    const { error: upErr } = await sb.from('profiles').update({ invoice_color: idx }).eq('id', id)
+    if (upErr) continue
+    obsazene.add(idx)
+    w.invoice_color = idx                     // ať se překreslí hned, bez dalšího dotazu
+    zmena = true
+  }
+
+  return zmena
+}
+
 function groupCellHtml(teamName, subName) {
   if (!teamName && !subName) return '<span style="color:var(--text3)">—</span>'
   let html = '<div style="display:flex;flex-direction:column;gap:4px;align-items:flex-start">'
@@ -7612,6 +7683,7 @@ async function toggleAccess(id, current) {
   const { data, error } = await sb.from('profiles').update(upd).eq('id', id).select('id,is_active')
   if (error) { showToast('❌ Chyba: ' + error.message); return }
   if (!data || !data.length) { showToast('❌ Změna se neuložila (zkontrolujte oprávnění)'); return }
+  if (current) await uvolniBarvuFaktury(id)   // odebraný přístup barvu taky uvolní
   showToast(current ? '🔒 Přístup odebrán' : '✅ Přístup obnoven')
   loadWorkers()
 }
@@ -7623,6 +7695,10 @@ async function toggleTracking(id, currentlyCan) {
   const { data, error } = await sb.from('profiles').update({ can_track_hours: newVal }).eq('id', id).select('id,can_track_hours')
   if (error) { showToast('❌ Chyba: ' + error.message + ' (existuje sloupec can_track_hours?)'); return }
   if (!data || !data.length) { showToast('❌ Změna se neuložila (zkontrolujte oprávnění)'); return }
+  // Barva faktury patří tomu, kdo docházku zapisuje. Po zablokování se uvolní,
+  // ať ji může dostat někdo další — po povolení dostane volnou barvu znovu sám
+  // (přidělí se při příštím otevření složky Faktury).
+  if (!newVal) await uvolniBarvuFaktury(id)
   showToast(newVal ? '✅ Docházka povolena' : '🚫 Docházka zablokována')
   loadWorkers()
 }
@@ -10347,9 +10423,20 @@ let _invTableMissing = false
 
 async function loadWorkerInvoices() {
   const tbody = document.getElementById('inv-table')
-  const { data, error } = await sb.from('worker_invoices')
-    .select('*, worker:profiles(full_name, profession)')
+  // Kód z CRM a barvu bereme živě z profilu — barva je vlastnost pracovníka,
+  // ne dokladu, takže když se přidělí jinak, projeví se to i u starších faktur.
+  let { data, error } = await sb.from('worker_invoices')
+    .select('*, worker:profiles(full_name, profession, crm_code, invoice_color, can_track_hours, is_active)')
     .order('sent_at', { ascending: false })
+  if (error) {
+    // Bez spuštěné migrace sloupce chybí — načti aspoň to, co bylo dřív,
+    // ať složka Faktury nehlásí chybu a jen se neukáže kód a barva.
+    ;({ data, error } = await sb.from('worker_invoices')
+      .select('*, worker:profiles(full_name, profession)')
+      .order('sent_at', { ascending: false }))
+  } else {
+    if (await prideliBarvyFaktur(data)) { /* barvy doplněny do načtených řádků */ }
+  }
 
   if (error) {
     // Nejčastější důvod: ještě neproběhla migrace. Řekni to rovnou a srozumitelně.
@@ -10454,10 +10541,15 @@ function renderWorkerInvoices() {
     return `<span class="pill ${cls}">${label}</span>`
   }
 
-  tbody.innerHTML = rows.map(r => `
+  tbody.innerHTML = rows.map(r => {
+    // Barva je vlastnost pracovníka, ne dokladu — proto se bere živě z profilu.
+    // Kód naopak z řádku faktury, ten je zmrazený k okamžiku vystavení.
+    const barva = invoiceColor(r.worker?.invoice_color)
+    const kod = r.crm_code || r.worker?.crm_code || ''
+    return `
     <tr>
-      <td><b>${escAttr(r.worker?.full_name || r.supplier_name || '—')}</b>${r.supplier_name && r.worker?.full_name && r.supplier_name !== r.worker.full_name ? `<div style="font-size:11px;color:var(--text3)">${escAttr(r.supplier_name)}</div>` : ''}</td>
-      <td style="font-weight:700;white-space:nowrap">${escAttr(r.invoice_number || '—')}</td>
+      <td style="border-left:5px solid ${barva || 'transparent'}"><b>${escAttr(r.worker?.full_name || r.supplier_name || '—')}</b>${r.supplier_name && r.worker?.full_name && r.supplier_name !== r.worker.full_name ? `<div style="font-size:11px;color:var(--text3)">${escAttr(r.supplier_name)}</div>` : ''}</td>
+      <td style="font-weight:700;white-space:nowrap">${escAttr(r.invoice_number || '—')}${kod ? `<div style="font-size:11.5px;font-weight:800;letter-spacing:.03em;color:${barva || 'var(--text3)'}">${escAttr(kod)}</div>` : ''}</td>
       <td style="white-space:nowrap">${r.kw ? 'KW ' + r.kw + '/' + r.kw_year : '—'}${r.period_from ? `<div style="font-size:11px;color:var(--text3)">${_invDmy(r.period_from)} – ${_invDmy(r.period_to)}</div>` : ''}</td>
       <td style="font-size:12px">${escAttr(r.customer_name || '—')}</td>
       <td style="text-align:right;white-space:nowrap">${(Number(r.total_hours) || 0).toFixed(2)} h</td>
@@ -10477,7 +10569,8 @@ function renderWorkerInvoices() {
           <button onclick="deleteWorkerInvoice('${jsStr(r.id)}')" title="Smazat" style="font-size:11px;padding:3px 8px;border:1px solid var(--red);border-radius:6px;cursor:pointer;background:none;color:var(--red);font-family:inherit"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:1em;height:1em;flex-shrink:0;vertical-align:-2px"><path d="M3 6h18M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6M14 11v6"/></svg></button>
         </div>
       </td>
-    </tr>`).join('')
+    </tr>`
+  }).join('')
 }
 
 // Hodnota, která jde dovnitř onclick="fn('…')". escAttr apostrof neřeší, a řádek
@@ -10661,6 +10754,10 @@ function invoiceDataFromRow(r, extra) {
   const e = extra || {}
   return {
     invoiceNum: r.invoice_number || '',
+    // Kód zůstává tak, jak byl v době vystavení — faktura je daňový doklad.
+    // Barva je naopak vlastnost pracovníka, tu předává volající v `extra`.
+    crmCode: r.crm_code || '',
+    invoiceColorIdx: e.invoiceColorIdx ?? null,
     today: _invFmtDate(r.issue_date),
     dueDate: _invFmtDate(r.due_date),
     workerName: r.supplier_name || '',
@@ -10770,8 +10867,12 @@ async function saveInvoiceEdit() {
   // přepsaná faktura vypadá stejně jako ta původní.
   let extra = {}
   try {
-    const { data: prof } = await sb.from('profiles').select('email, phone').eq('id', r.worker_id).maybeSingle()
-    if (prof) extra = { email: prof.email, phone: prof.phone }
+    // invoice_color tu musí být taky — bez něj by přepsané PDF přišlo o barevný
+    // rámeček a vypadalo jinak než faktura, kterou pracovník poslal.
+    let prof = null
+    ;({ data: prof } = await sb.from('profiles').select('email, phone, invoice_color').eq('id', r.worker_id).maybeSingle())
+    if (!prof) ({ data: prof } = await sb.from('profiles').select('email, phone').eq('id', r.worker_id).maybeSingle())
+    if (prof) extra = { email: prof.email, phone: prof.phone, invoiceColorIdx: prof.invoice_color ?? null }
   } catch (e) { console.warn('[faktura] kontakt se nepodařilo dotáhnout:', e?.message) }
 
   // 1) Vykresli fakturu znovu — už se zálohou
@@ -19149,6 +19250,9 @@ async function generateInvoiceMob(lang = 'en', override = null) {
     serviceDesc, serviceDescTrans, serviceDescSub, periodFrom, periodTo,
     totalHours, rate, totalAmount, week, year,
     customer: cust0,
+    // Kód karty z CRM (X12) a barva pracovníka — kód se tiskne pod číslo faktury,
+    // barva dělá slabý rámeček. Obojí je z profilu; kód se pak uloží i k faktuře.
+    crmCode: prof.crm_code || '', invoiceColorIdx: prof.invoice_color ?? null,
     // pro uložení do složky Faktury (nezobrazuje se na faktuře)
     workerId, byAdmin: !!override, supplierType: prof.supplier_type || 'osoba',
     issueISO: iso(today), dueISO: iso(dueDate),
@@ -19239,7 +19343,7 @@ function renderInvoice(d, lang = 'en') {
   // v PDF a na telefonu se čísla schovala za okraj. Teď je náhled přesně to,
   // co vyjede z tiskárny — jen menší.
   content.innerHTML = `
-  <div id="invoice-page" style="font-family:-apple-system,'Segoe UI',Arial,sans-serif;font-size:9.5pt;color:#211D1A;background:#fff;width:794px;padding:0;line-height:1.5;display:flex;flex-direction:column;min-height:1123px">
+  <div id="invoice-page" style="font-family:-apple-system,'Segoe UI',Arial,sans-serif;font-size:9.5pt;color:#211D1A;background:#fff;width:794px;padding:0;line-height:1.5;display:flex;flex-direction:column;min-height:1123px;border:2px solid ${invoiceColor(d.invoiceColorIdx) || 'transparent'}">
   <div id="invoice-body" style="display:flex;flex-direction:column;justify-content:space-between;min-height:842px">
 
     <!-- TOP BAR: nadpis vlevo, číslo faktury vpravo -->
@@ -19257,6 +19361,7 @@ function renderInvoice(d, lang = 'en') {
         <div style="display:inline-block;background:#faf6ee;border:1.5px solid #E8A13A;padding:5px 14px;border-radius:8px">
           <span style="font-size:7pt;color:#8B5930;letter-spacing:.5px">Č. · Nr. · No.&nbsp;&nbsp;</span><span style="font-size:13pt;font-weight:800;color:#211D1A;vertical-align:middle">${d.invoiceNum}</span>
         </div>
+        ${d.crmCode ? `<div style="font-size:8pt;font-weight:800;letter-spacing:.06em;color:${invoiceColor(d.invoiceColorIdx) || '#8B5930'};margin-top:3px">${d.crmCode}</div>` : ''}
       </div>
     </div>
 
@@ -19548,6 +19653,7 @@ function invoiceRowFromLast(sentVia) {
   return {
     worker_id: d.workerId,
     invoice_number: String(d.invoiceNum || ''),
+    crm_code: d.crmCode || null,
     kw: parseInt(d.week) || null,
     kw_year: parseInt(d.year) || null,
     period_from: d.periodFromISO || null,
