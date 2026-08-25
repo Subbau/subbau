@@ -942,7 +942,7 @@ button:not(.x-close) > svg:first-child{margin-right:6px}
               <div class="card-h" style="flex-wrap:wrap;gap:10px"><h4 style="margin:0">Dnešní docházka — přesné časy</h4>
                 <div class="card-search" style="width:210px">
                   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>
-                  <input type="text" id="today-search" oninput="filterTableRows('today-search','#today-timeline .today-row')" placeholder="Hledat jméno…">
+                  <input type="text" id="today-search" oninput="filterTableRows('today-search','#today-timeline .today-row')" placeholder="Hledat jméno, firmu, partu…">
                 </div>
                 <span id="today-search-info" style="display:none;width:100%;font-size:12px;color:var(--text3)"></span>
                 <button class="btn-pri" style="font-size:12px;padding:5px 12px" onclick="exportKW()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:1em;height:1em;flex-shrink:0;vertical-align:-2px"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="M7 10l5 5 5-5"/><path d="M12 15V3"/></svg> Export PDF</button></div>
@@ -6295,6 +6295,7 @@ function updateProvizeEarningsDisplay(workerId, newRate) {
   const eur = n => n.toLocaleString('cs-CZ', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + ' €'
   const newEarn = newRate * idx.hoursWeek
   const delta = newEarn - (idx.rate || 0) * idx.hoursWeek
+  const deltaDay = newRate * idx.hoursDay - (idx.rate || 0) * idx.hoursDay
   idx.rate = newRate
   const eEl = document.getElementById('pv-e-' + workerId); if (eEl) eEl.textContent = eur(newEarn)
   const ft = window._provizeFirmTotals && window._provizeFirmTotals[idx.firmIdx]
@@ -6305,7 +6306,9 @@ function updateProvizeEarningsDisplay(workerId, newRate) {
   const g = window._provizeGrand
   if (g) {
     g.earnWeek = (g.earnWeek || 0) + delta
+    g.earnDay = (g.earnDay || 0) + deltaDay
     const ge = document.getElementById('pv-ge'); if (ge) ge.textContent = eur(g.earnWeek)
+    const ged = document.getElementById('pv-ged'); if (ged) ged.textContent = eur(g.earnDay)
   }
 }
 async function saveProvizeCommission(input, workerId) {
@@ -6346,7 +6349,8 @@ function updateProvizeCommissionDisplay(workerId, newProv) {
   }
   const g = window._provizeGrand
   if (g) {
-    g.week += deltaWeek; g.month += deltaMonth; g.year = (g.year || 0) + deltaYear
+    g.day = (g.day || 0) + deltaDay; g.week += deltaWeek; g.month += deltaMonth; g.year = (g.year || 0) + deltaYear
+    const gd = document.getElementById('pv-gd'); if (gd) gd.textContent = eur(g.day)
     const gw = document.getElementById('pv-gw'); if (gw) gw.textContent = eur(g.week)
     const gm = document.getElementById('pv-gm'); if (gm) gm.textContent = eur(g.month)
     const gy = document.getElementById('pv-gy'); if (gy) gy.textContent = eur(g.year)
@@ -6501,6 +6505,8 @@ async function renderProvizeContent() {
   const anchor = provizeAnchor
   const mode = provizeMode
   const periodLabel = provizePeriodLabel(mode, anchor)
+  // Denní provize se počítá vždy k vybranému dni, i když se listuje po týdnech/měsících
+  const dayLabel = anchor.toLocaleDateString('cs-CZ', { weekday: 'short', day: 'numeric', month: 'numeric' })
   const weekKey = provizePeriodKey('week', anchor)
 
   const [dStart, dEnd] = provizeDayRange(anchor)
@@ -6623,8 +6629,8 @@ async function renderProvizeContent() {
       terms,
       hoursDay: hrs.day, hoursWeek: hrs.week, hoursMonth: hrs.month, hoursYear: hrs.year,
       commDay: prov * hrs.day, commWeek: prov * hrs.week, commMonth: prov * hrs.month, commYear: prov * hrs.year,
-      // kolik si za týden vydělá sám pracovník (sazba × odpracované hodiny)
-      earnWeek: rate * hrs.week,
+      // kolik si vydělá sám pracovník (sazba × odpracované hodiny)
+      earnWeek: rate * hrs.week, earnDay: rate * hrs.day,
       // Kdo v daném týdnu nemá jedinou odpracovanou hodinu, nemá co fakturovat — nesmí svítit „nezaplaceno"
       paid, dueDate: dueInfo.due, overdue: !paid && dueInfo.overdue && hrs.week > 0
     }
@@ -6643,7 +6649,7 @@ async function renderProvizeContent() {
 
   const eur = n => n.toLocaleString('cs-CZ', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + ' €'
   const TERMS_OPTIONS = ['7/7', '7/10', '7/14', '14/14']
-  let weekGrandTotal = 0, monthGrandTotal = 0, yearGrandTotal = 0, earnGrandTotal = 0
+  let dayGrandTotal = 0, weekGrandTotal = 0, monthGrandTotal = 0, yearGrandTotal = 0, earnGrandTotal = 0, earnDayGrandTotal = 0
 
   // Index pro rychlý přepočet Odměny po uložení provize bez znovuvykreslení celé tabulky (viz updateProvizeCommissionDisplay)
   window._provizeIndex = {}
@@ -6654,9 +6660,9 @@ async function renderProvizeContent() {
     const isNoFirm = firm === 'Bez firmy'
     const gc = groupColor(firm, 'company')
     const safeFirm = firm.replace(/'/g, String.fromCharCode(39))
-    let fDay = 0, fWeek = 0, fMonth = 0, fYear = 0, fEarn = 0, fPaidCount = 0
+    let fDay = 0, fWeek = 0, fMonth = 0, fYear = 0, fEarn = 0, fEarnDay = 0, fPaidCount = 0
     const memberRows = members.map(r => {
-      fDay += r.commDay; fWeek += r.commWeek; fMonth += r.commMonth; fYear += r.commYear; fEarn += r.earnWeek; if (r.paid) fPaidCount++
+      fDay += r.commDay; fWeek += r.commWeek; fMonth += r.commMonth; fYear += r.commYear; fEarn += r.earnWeek; fEarnDay += r.earnDay; if (r.paid) fPaidCount++
       window._provizeIndex[r.id] = { hoursDay: r.hoursDay, hoursWeek: r.hoursWeek, hoursMonth: r.hoursMonth, hoursYear: r.hoursYear, prov: r.prov, rate: r.rate, firmIdx }
       const termsOpts = TERMS_OPTIONS.map(t => `<option value="${t}" ${r.terms === t ? 'selected' : ''}>${t}</option>`).join('')
       const rowBg = r.paid ? 'background:var(--green-l)' : (r.overdue ? 'background:var(--red-l)' : '')
@@ -6675,7 +6681,7 @@ async function renderProvizeContent() {
         <td><select onchange="saveProvizeTerms(this,'${r.id}')" style="padding:6px 8px;border:1.5px solid var(--brd);border-radius:7px;font-size:13px;font-family:inherit">${termsOpts}</select>${dueLabel}</td>
       </tr>`
     }).join('')
-    weekGrandTotal += fWeek; monthGrandTotal += fMonth; yearGrandTotal += fYear; earnGrandTotal += fEarn
+    dayGrandTotal += fDay; weekGrandTotal += fWeek; monthGrandTotal += fMonth; yearGrandTotal += fYear; earnGrandTotal += fEarn; earnDayGrandTotal += fEarnDay
     window._provizeFirmTotals[firmIdx] = { day: fDay, week: fWeek, month: fMonth, year: fYear, earn: fEarn }
     return `
     <div class="card" style="border-left:6px solid ${gc.border};margin-bottom:16px">
@@ -6709,7 +6715,7 @@ async function renderProvizeContent() {
     </div>`
   }).join('')
 
-  window._provizeGrand = { week: weekGrandTotal, month: monthGrandTotal, year: yearGrandTotal, earnWeek: earnGrandTotal }
+  window._provizeGrand = { day: dayGrandTotal, week: weekGrandTotal, month: monthGrandTotal, year: yearGrandTotal, earnWeek: earnGrandTotal, earnDay: earnDayGrandTotal }
 
   el.innerHTML = `
     <div class="card" style="margin-bottom:16px">
@@ -6731,10 +6737,12 @@ async function renderProvizeContent() {
       <div style="padding:4px 16px 16px">
         <div style="font-size:14px;color:var(--text2);margin-bottom:10px;font-weight:600">Zobrazené období: ${periodLabel}</div>
         <div class="stats" style="grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;margin-bottom:0">
+          <div class="sc a"><div class="sc-lbl" style="font-size:12px">Denní provize<div style="font-weight:400;font-size:10.5px;color:var(--text3)">${dayLabel} — všechny firmy</div></div><div class="sc-val" id="pv-gd" style="color:var(--amber);font-size:24px">${eur(dayGrandTotal)}</div></div>
           <div class="sc b"><div class="sc-lbl" style="font-size:12px">Týdenní provize</div><div class="sc-val" id="pv-gw" style="color:var(--blue);font-size:24px">${eur(weekGrandTotal)}</div></div>
           <div class="sc b"><div class="sc-lbl" style="font-size:12px">Měsíční provize</div><div class="sc-val" id="pv-gm" style="color:var(--blue);font-size:24px">${eur(monthGrandTotal)}</div></div>
           <div class="sc b"><div class="sc-lbl" style="font-size:12px">Roční provize ${anchor.getFullYear()}</div><div class="sc-val" id="pv-gy" style="color:var(--blue);font-size:24px">${eur(yearGrandTotal)}</div></div>
           <div class="sc a"><div class="sc-lbl" style="font-size:12px">DPH 21 % z roční provize</div><div class="sc-val" id="pv-gv" style="color:var(--amber);font-size:24px">${eur(yearGrandTotal * 0.21)}</div></div>
+          <div class="sc g"><div class="sc-lbl" style="font-size:12px">Výdělek pracovníků (den)<div style="font-weight:400;font-size:10.5px;color:var(--text3)">${dayLabel}</div></div><div class="sc-val" id="pv-ged" style="color:var(--green);font-size:24px">${eur(earnDayGrandTotal)}</div></div>
           <div class="sc g"><div class="sc-lbl" style="font-size:12px">Výdělek pracovníků (týden)</div><div class="sc-val" id="pv-ge" style="color:var(--green);font-size:24px">${eur(earnGrandTotal)}</div></div>
           <div class="sc g"><div class="sc-lbl" style="font-size:12px">Firem</div><div class="sc-val" style="color:var(--green);font-size:24px">${firmNames.length}</div></div>
           <div class="sc g"><div class="sc-lbl" style="font-size:12px">Pracovníků</div><div class="sc-val" style="color:var(--green);font-size:24px">${rows.length}</div></div>
@@ -7622,14 +7630,52 @@ async function loadTodayTimeline() {
   if (!div) return
   div.innerHTML = '<div style="text-align:center;color:var(--text3);font-size:13px">Načítám…</div>'
 
-  // Všechny dnešní záznamy všech pracovníků
-  const { data } = await sb.from('attendance')
-    .select('*, worker:profiles(full_name,profession)')
-    .eq('work_date', today)
-    .order('check_in', { ascending: true })
+  // Všechny dnešní záznamy všech pracovníků + firma a podskupina, podle kterých se řadí
+  const [{ data }, { data: tmTeams }, { data: tmComps }, { data: tmSubs }] = await Promise.all([
+    sb.from('attendance')
+      .select('*, worker:profiles(full_name,profession,team_id,subteam_id)')
+      .eq('work_date', today)
+      .order('check_in', { ascending: true }),
+    sb.from('teams').select('id, name, company_id'),
+    sb.from('companies').select('id, name'),
+    sb.from('subteams').select('id, name, team_id')
+  ])
+
+  const teamById = {}
+  ;(tmTeams || []).forEach(t => { teamById[t.id] = t })
+  const companyNameById = {}
+  ;(tmComps || []).forEach(c => { companyNameById[c.id] = c.name })
+  const subteamById = {}
+  ;(tmSubs || []).forEach(x => { subteamById[x.id] = x })
+
+  // Bubliny nad tabulkou: kolik lidí je dnes v práci celkem a kolik u které firmy.
+  // Vykreslují se i když dnešek nemá jediný záznam — jinak by po ránu zmizely úplně.
+  function todayBubblesHtml(list) {
+    const perFirm = new Map()
+    list.forEach(g => {
+      const f = g.firm || 'Bez firmy'
+      if (!perFirm.has(f)) perFirm.set(f, { total: 0, running: 0 })
+      const b = perFirm.get(f)
+      b.total++
+      if (g.running) b.running++
+    })
+    const names = [...perFirm.keys()].sort((a, b) => a.localeCompare(b, 'cs'))
+    const noFirmIdx = names.indexOf('Bez firmy')
+    if (noFirmIdx !== -1) { names.splice(noFirmIdx, 1); names.push('Bez firmy') }
+    const runningTotal = list.filter(g => g.running).length
+    return `
+      <div class="stats" style="grid-template-columns:repeat(auto-fit,minmax(138px,1fr));gap:9px;margin:0 0 14px">
+        <div class="sc b"><div class="sc-lbl">Dnes v práci</div><div class="sc-val" style="color:var(--blue)">${list.length}</div><div class="sc-sub">${runningTotal} právě pracuje</div></div>
+        ${names.map(f => {
+          const b = perFirm.get(f)
+          const c = groupColor(f, 'company')
+          return `<div class="sc" style="border-top:3px solid ${c.border};background:${c.bg}"><div class="sc-lbl" style="color:${c.text};font-weight:800">🏢 ${f}</div><div class="sc-val" style="color:${c.text}">${b.total}</div><div class="sc-sub">${b.running} právě pracuje</div></div>`
+        }).join('')}
+      </div>`
+  }
 
   if (!data?.length) {
-    div.innerHTML = '<div style="text-align:center;color:var(--text3);font-size:13px">Žádné záznamy pro dnešek</div>'
+    div.innerHTML = todayBubblesHtml([]) + '<div style="text-align:center;color:var(--text3);font-size:13px">Žádné záznamy pro dnešek</div>'
     return
   }
 
@@ -7640,11 +7686,17 @@ async function loadTodayTimeline() {
   data.forEach(r => {
     const wid = r.worker_id || r.id
     if (!byWorker[wid]) {
+      const t = r.worker?.team_id ? teamById[r.worker.team_id] : null
+      const firm = t
+        ? ((t.company_id && companyNameById[t.company_id]) ? companyNameById[t.company_id] : (cleanTeamName(t.name) || 'Bez firmy'))
+        : 'Bez firmy'
       byWorker[wid] = {
         worker_id: r.worker_id, id: r.id,
         ids: [],              // VŠECHNY záznamy dne — koš musí smazat celý sloučený řádek
         name: r.worker?.full_name || '—',
         profession: r.worker?.profession || '',
+        firm,
+        sub: r.worker?.subteam_id ? (subteamById[r.worker.subteam_id]?.name || '') : '',
         check_in: null, check_out: null,
         breaks: [],           // [{bs,be}] ze všech záznamů
         gpsAddr: null, manualAddr: null,
@@ -7688,7 +7740,68 @@ async function loadTodayTimeline() {
   Object.values(byWorker).forEach(g => g.breaks.sort((a,b) => (a.bs||'').localeCompare(b.bs||'')))
   const rows = Object.values(byWorker)
 
-  div.innerHTML = `
+  // Řazení: firma → podskupina → jméno. Kdo firmu nemá, jde nakonec.
+  rows.sort((a, b) => {
+    const an = a.firm === 'Bez firmy' ? 1 : 0, bn = b.firm === 'Bez firmy' ? 1 : 0
+    if (an !== bn) return an - bn
+    const fc = (a.firm || '').localeCompare(b.firm || '', 'cs')
+    if (fc) return fc
+    const sc = (a.sub || '').localeCompare(b.sub || '', 'cs')
+    if (sc) return sc
+    return (a.name || '').localeCompare(b.name || '', 'cs')
+  })
+
+  // Řádky pracovníků prokládané hlavičkou firmy, ať je vidět, kde jedna firma končí.
+  // Hlavičky mají třídu tbl-group — filterTableRows je při hledání schová, když pod nimi nic nezbude.
+  let lastFirm = null
+  const bodyHtml = rows.map(g => {
+          const hours = g.check_out
+            ? '<b style="color:var(--blue)">' + (g.total || 0) + 'h</b>'
+            : (g.running ? '<span style="color:var(--amber);font-weight:700">probíhá ▶</span>' : '—')
+          const safeName = (g.name||'pracovníka').replace(/'/g,"\\'")
+          const gc = groupColor(g.firm || 'Bez firmy', 'company')
+          let groupHead = ''
+          if (g.firm !== lastFirm) {
+            lastFirm = g.firm
+            const cnt = rows.filter(x => x.firm === g.firm).length
+            groupHead = `<tr class="tbl-group"><td colspan="8" style="padding:7px 10px;background:${gc.bg};border-top:2px solid ${gc.border}"><span style="font-size:12px;font-weight:800;color:${gc.text}">🏢 ${g.firm}</span><span style="font-size:11px;color:var(--text3);margin-left:8px">${cnt} v práci</span></td></tr>`
+          }
+          // Podskupina drobným písmem pod jménem — např. „Treskower · 👥 Parta A"
+          const subC = g.sub ? groupColor(g.sub, 'sub') : null
+          const groupLine = (g.firm || g.sub)
+            ? `<div style="font-size:10.5px;line-height:1.35;margin-top:2px;color:var(--text3)">${g.firm ? '🏢 ' + g.firm : ''}${(g.firm && g.sub) ? ' · ' : ''}${g.sub ? `<span style="color:${subC.text};font-weight:700">👥 ${g.sub}</span>` : ''}</div>`
+            : ''
+          // Pauzy vedle sebe (nesčítají se), každá jako samostatný odznak
+          const breaksHtml = g.breaks.length
+            ? g.breaks.map((b) => {
+                const beTxt = b.be || '<span style="color:var(--amber)">…</span>'
+                return '<span style="display:inline-block;background:var(--amber-l,#faf0dc);color:#9a6b15;border-radius:6px;padding:2px 7px;margin:1px 3px 1px 0;font-size:12px;white-space:nowrap">' + b.bs + '–' + beTxt + '</span>'
+              }).join('')
+            : '<span style="color:var(--text3)">—</span>'
+          // Adresa: GPS i ruční, oba pokud jsou
+          const addrParts = []
+          if (g.gpsAddr) addrParts.push(`<div style="white-space:normal">📍 ${g.gpsAddr}</div>`)
+          if (g.manualAddr) addrParts.push(`<div style="white-space:normal">✍️ ${g.manualAddr}</div>`)
+          const addrCell = addrParts.length ? addrParts.join('') : '<span style="color:var(--text3)">—</span>'
+          const desc = g.descs.length ? g.descs.join('; ') : '—'
+          // Do hledání patří i firma a podskupina, ať jde vypsat celá parta najednou
+          const searchKey = [g.name, g.firm, g.sub].filter(Boolean).join(' ')
+          return groupHead + `
+            <tr class="today-row" data-id="${g.worker_id||''}" data-name="${searchKey.replace(/"/g,'&quot;')}" data-worker="${(g.name||'').replace(/"/g,'&quot;')}" style="border-top:0.5px solid var(--brd);border-left:4px solid ${gc.border}" title="Klikněte na časy pro úpravu hodin">
+              <td class="td-open today-name" title="Klikněte pro otevření profilu pracovníka" style="padding:10px;cursor:pointer"><b>${g.name||'—'}</b><br><small style="color:var(--text3)">${profLabel(g.profession)||''}</small>${groupLine}</td>
+              <td class="td-open" style="padding:10px;font-weight:700;color:var(--green);cursor:pointer;font-size:15px">${fmt(g.check_in)}</td>
+              <td class="td-open" style="padding:10px;color:var(--text2);cursor:pointer;min-width:130px">${breaksHtml}</td>
+              <td class="td-open" style="padding:10px;font-weight:700;color:${g.check_out?'var(--red)':'var(--text3)'};cursor:pointer;font-size:15px">${fmt(g.check_out)}</td>
+              <td class="td-open" style="padding:10px;text-align:right;font-weight:700;cursor:pointer">${hours}</td>
+              <td class="td-open" style="padding:10px;cursor:pointer;font-size:12px;color:var(--text2);max-width:240px;line-height:1.4">${addrCell}</td>
+              <td class="td-open" style="padding:10px;cursor:pointer;font-size:12px;color:var(--text2);max-width:220px">${desc}</td>
+              <td style="padding:10px;text-align:center">
+                <button onclick="deleteTodayRecord('${g.ids.join(',')}','${safeName}')" title="Smazat dnešní docházku" style="background:none;border:1px solid var(--brd);border-radius:6px;padding:5px 9px;cursor:pointer;color:var(--red);font-family:inherit"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:1em;height:1em;flex-shrink:0;vertical-align:-2px"><path d="M3 6h18M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6M14 11v6"/></svg> </button>
+              </td>
+            </tr>`
+        }).join('')
+
+  div.innerHTML = todayBubblesHtml(rows) + `
     <div style="overflow-x:auto">
     <table style="width:100%;border-collapse:collapse;font-size:13px;min-width:1080px">
       <thead>
@@ -7704,38 +7817,7 @@ async function loadTodayTimeline() {
         </tr>
       </thead>
       <tbody>
-        ${rows.map(g => {
-          const hours = g.check_out
-            ? '<b style="color:var(--blue)">' + (g.total || 0) + 'h</b>'
-            : (g.running ? '<span style="color:var(--amber);font-weight:700">probíhá ▶</span>' : '—')
-          const safeName = (g.name||'pracovníka').replace(/'/g,"\\'")
-          // Pauzy vedle sebe (nesčítají se), každá jako samostatný odznak
-          const breaksHtml = g.breaks.length
-            ? g.breaks.map((b) => {
-                const beTxt = b.be || '<span style="color:var(--amber)">…</span>'
-                return '<span style="display:inline-block;background:var(--amber-l,#faf0dc);color:#9a6b15;border-radius:6px;padding:2px 7px;margin:1px 3px 1px 0;font-size:12px;white-space:nowrap">' + b.bs + '–' + beTxt + '</span>'
-              }).join('')
-            : '<span style="color:var(--text3)">—</span>'
-          // Adresa: GPS i ruční, oba pokud jsou
-          const addrParts = []
-          if (g.gpsAddr) addrParts.push(`<div style="white-space:normal">📍 ${g.gpsAddr}</div>`)
-          if (g.manualAddr) addrParts.push(`<div style="white-space:normal">✍️ ${g.manualAddr}</div>`)
-          const addrCell = addrParts.length ? addrParts.join('') : '<span style="color:var(--text3)">—</span>'
-          const desc = g.descs.length ? g.descs.join('; ') : '—'
-          return `
-            <tr class="today-row" data-id="${g.worker_id||''}" data-name="${(g.name||'').replace(/"/g,'&quot;')}" style="border-top:0.5px solid var(--brd)" title="Klikněte na časy pro úpravu hodin">
-              <td class="td-open today-name" title="Klikněte pro otevření profilu pracovníka" style="padding:10px;cursor:pointer"><b>${g.name||'—'}</b><br><small style="color:var(--text3)">${profLabel(g.profession)||''}</small></td>
-              <td class="td-open" style="padding:10px;font-weight:700;color:var(--green);cursor:pointer;font-size:15px">${fmt(g.check_in)}</td>
-              <td class="td-open" style="padding:10px;color:var(--text2);cursor:pointer;min-width:130px">${breaksHtml}</td>
-              <td class="td-open" style="padding:10px;font-weight:700;color:${g.check_out?'var(--red)':'var(--text3)'};cursor:pointer;font-size:15px">${fmt(g.check_out)}</td>
-              <td class="td-open" style="padding:10px;text-align:right;font-weight:700;cursor:pointer">${hours}</td>
-              <td class="td-open" style="padding:10px;cursor:pointer;font-size:12px;color:var(--text2);max-width:240px;line-height:1.4">${addrCell}</td>
-              <td class="td-open" style="padding:10px;cursor:pointer;font-size:12px;color:var(--text2);max-width:220px">${desc}</td>
-              <td style="padding:10px;text-align:center">
-                <button onclick="deleteTodayRecord('${g.ids.join(',')}','${safeName}')" title="Smazat dnešní docházku" style="background:none;border:1px solid var(--brd);border-radius:6px;padding:5px 9px;cursor:pointer;color:var(--red);font-family:inherit"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:1em;height:1em;flex-shrink:0;vertical-align:-2px"><path d="M3 6h18M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6M14 11v6"/></svg> </button>
-              </td>
-            </tr>`
-        }).join('')}
+        ${bodyHtml}
       </tbody>
     </table>
     </div>
@@ -7750,7 +7832,7 @@ async function loadTodayTimeline() {
     if (!row || !row.dataset.id) return
     if (e.target.closest('.today-name')) { openWorkerModal(row.dataset.id); return }
     const kw = getKW(new Date())
-    openWeekEdit(row.dataset.id, kw.week, kw.year, row.dataset.name, today)
+    openWeekEdit(row.dataset.id, kw.week, kw.year, row.dataset.worker || row.dataset.name, today)
   }
   // Tabulka se překresluje po každé změně docházky — hledání držíme aktivní.
   filterTableRows('today-search', '#today-timeline .today-row')
@@ -7918,6 +8000,9 @@ async function loadKWData() {
   // Filtr podle hledání (jméno, firma nebo podskupina)
   const q = (document.getElementById('kw-search')?.value || '').trim().toLowerCase()
   let list = Object.values(workers)
+  // Zablokovaná docházka = omezený přístup → v přehledu se neukazuje (spravuje se v Pracovnících).
+  // Kdo ale v tom týdnu stihl něco odpracovat, zůstává, ať se odpracované hodiny neztratí.
+  list = list.filter(w => !w.blocked || w.total > 0)
   if (q) {
     list = list.filter(w => (w.name||'').toLowerCase().includes(q) || (w.firm||'').toLowerCase().includes(q) || (w.sub||'').toLowerCase().includes(q))
   }
@@ -10974,15 +11059,17 @@ async function loadTeams() {
   if (teamsErr) { div.innerHTML = '<div style="color:var(--red);padding:12px">Chyba: '+teamsErr.message+'</div>'; return }
   // Načti všechny pracovníky s jejich team_id (+ subteam_id, pokud sloupec existuje)
   let workers = null
-  ;({ data: workers } = await sb.from('profiles')
-    .select('id, full_name, profession, role, team_id, subteam_id')
-    .in('role', ['osvec', 'partak'])
-    .order('full_name'))
-  if (!workers) {
-    // Fallback: sloupec subteam_id ještě neexistuje → načti bez něj
+  // Postupně ubíráme sloupce, které nemusí být v databázi (subteam_id, can_track_hours) —
+  // ať se seznam členů načte i před spuštěním migrací, jen bez té které informace.
+  for (const cols of [
+    'id, full_name, profession, role, team_id, subteam_id, is_active, can_track_hours',
+    'id, full_name, profession, role, team_id, subteam_id, is_active',
+    'id, full_name, profession, role, team_id, is_active',
+    'id, full_name, profession, role, team_id'
+  ]) {
     ;({ data: workers } = await sb.from('profiles')
-      .select('id, full_name, profession, role, team_id')
-      .in('role', ['osvec', 'partak']).order('full_name'))
+      .select(cols).in('role', ['osvec', 'partak']).order('full_name'))
+    if (workers) break
   }
 
   // Načti podskupiny (subteams). Když filtr is_active selže (sloupec v tabulce chybí), zkus to
@@ -10998,6 +11085,22 @@ async function loadTeams() {
     subteams = st || []
     subteamsError = stErr || null
   } catch(e) { subteams = []; subteamsError = e }
+
+  // Úklid zbytků: kdo nemá skupinu, nebo mu podskupina ukazuje do jiné (či smazané) skupiny,
+  // nesmí mít subteam_id — jinak se mu odznak podskupiny ukazuje i po odpojení od firmy.
+  // Běží jen když se podskupiny opravdu načetly, ať chyba načtení nikomu nesmaže zařazení.
+  if (!subteamsError && (workers || []).some(w => 'subteam_id' in w)) {
+    const subOwner = {}
+    ;(subteams || []).forEach(x => { subOwner[String(x.id)] = String(x.team_id) })
+    const orphans = (workers || []).filter(w => w.subteam_id && (
+      !w.team_id || subOwner[String(w.subteam_id)] !== String(w.team_id)
+    ))
+    if (orphans.length) {
+      const { error: cleanErr } = await sb.from('profiles').update({ subteam_id: null }).in('id', orphans.map(o => o.id))
+      if (!cleanErr) orphans.forEach(o => { o.subteam_id = null })
+      else console.warn('[loadTeams] úklid podskupin:', cleanErr.message)
+    }
+  }
 
   _teamsCache = teams || []
   _workersCache = workers || []
@@ -11185,7 +11288,11 @@ function renderTeams() {
   if (!div) return
 
   const teams = _teamsCache
-  const workers = _workersCache
+  // Ve skupinách ukazujeme jen lidi, kteří sem opravdu patří. Kdo má odebraný přístup
+  // nebo zablokovanou docházku (omezený přístup), se spravuje v Pracovnících — tam se dá
+  // zase odblokovat a hned se sem vrátí. Cache (_workersCache) zůstává úplná, aby PDF
+  // docházky týmu pořád obsahovalo hodiny, které stihli odpracovat.
+  const workers = (_workersCache || []).filter(w => w.is_active !== false && w.can_track_hours !== false)
   const profLabels = {osvec:'OSVČ', partak:'Parťák'}
 
   const qTeam = (document.getElementById('team-search')?.value || '').trim().toLowerCase()
@@ -11677,8 +11784,18 @@ async function createTeam(name, location, companyId) {
 
 async function deleteTeam(teamId, teamName) {
   if (!confirm('Smazat skupinu "' + (teamName||'') + '"?\nPracovníci budou odřazeni (zůstanou v systému).')) return
-  const { error: upErr } = await sb.from('profiles').update({ team_id: null }).eq('team_id', teamId)
+  // Podskupiny patří ke smazané skupině — musí zmizet spolu s ní, jinak pracovníkovi
+  // zůstane viset odznak podskupiny, která už nikam nepatří.
+  let upRes = await sb.from('profiles').update({ team_id: null, subteam_id: null }).eq('team_id', teamId)
+  if (upRes.error && /subteam_id/i.test(upRes.error.message || ''))
+    upRes = await sb.from('profiles').update({ team_id: null }).eq('team_id', teamId)
+  const upErr = upRes.error
   if (upErr) { showToast('Chyba při odřazení: ' + upErr.message); return }
+  // Samotné podskupiny té skupiny už nemají koho seskupovat — smaž je (nebo aspoň skryj)
+  try {
+    const { error: stDelErr } = await sb.from('subteams').delete().eq('team_id', teamId)
+    if (stDelErr) await sb.from('subteams').update({ is_active: false }).eq('team_id', teamId)
+  } catch(e) { console.warn('[deleteTeam] podskupiny:', e?.message) }
   // 2. Zkus tvrdě smazat řádek
   const { error: delErr } = await sb.from('teams').delete().eq('id', teamId)
   if (delErr) {
@@ -11761,9 +11878,21 @@ async function removeFromTeam(workerId) {
 // Nastaví pracovníkovi tým a zároveň ho uvolní ze staré podskupiny.
 // Fallback bez subteam_id je pro případ, že sloupec v profiles ještě neexistuje.
 async function updateWorkerTeam(workerId, teamId) {
-  let res = await sb.from('profiles').update({ team_id: teamId, subteam_id: null }).eq('id', workerId)
+  let res = await sb.from('profiles').update({ team_id: teamId, subteam_id: null })
+    .eq('id', workerId).select('id, team_id, subteam_id')
   if (res.error && /subteam_id/i.test(res.error.message || ''))
-    res = await sb.from('profiles').update({ team_id: teamId }).eq('id', workerId)
+    res = await sb.from('profiles').update({ team_id: teamId }).eq('id', workerId).select('id, team_id')
+  // Kdyby podskupina i tak zůstala viset (starší řádek, jiné pravidlo v databázi),
+  // smaž ji ještě jednou samostatně — po odpojení od firmy nesmí zbýt žádný odznak podskupiny.
+  const row = res.data && res.data[0]
+  if (!res.error && row && row.subteam_id) {
+    await sb.from('profiles').update({ subteam_id: null }).eq('id', workerId)
+  }
+  // Lokální cache, ať překreslení ukáže správný stav i bez znovunačtení z databáze
+  if (!res.error) {
+    const w = (_workersCache || []).find(x => String(x.id) === String(workerId))
+    if (w) { w.team_id = teamId; w.subteam_id = null }
+  }
   return res
 }
 
@@ -16464,6 +16593,21 @@ function filterTableRows(inputId, rowSelector) {
     row.style.display = hit ? '' : 'none'
     if (hit) shown++
   })
+  // Hlavičky skupin (např. firmy v dnešní docházce) nejsou datové řádky — schovej ty,
+  // pod kterými po vyfiltrování nezbyl nikdo, ať nad prázdnem nevisí název firmy.
+  const bodies = new Set()
+  rows.forEach(r => { if (r.parentElement) bodies.add(r.parentElement) })
+  bodies.forEach(tb => {
+    let head = null, hasVisible = false
+    ;[...tb.children].forEach(tr => {
+      if (tr.classList.contains('tbl-group')) {
+        if (head) head.style.display = hasVisible ? '' : 'none'
+        head = tr; hasVisible = false
+      } else if (tr.style.display !== 'none') hasVisible = true
+    })
+    if (head) head.style.display = hasVisible ? '' : 'none'
+  })
+
   const info = document.getElementById(inputId + '-info')
   if (info) {
     if (q && shown === 0) {
