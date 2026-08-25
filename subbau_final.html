@@ -5143,6 +5143,11 @@ function _onAdminDbChange(table, payload) {
     _debouncedRefresh('dashboard', () => { loadDashboard(); checkDocumentAlerts(); loadDocumentAlertsStat() })
   }
   switch (table) {
+    case 'vacations':
+      // Nahlášená nepřítomnost — okno si samo ověří, jestli si ji zapsal pracovník
+      // sám a jestli ji admin už neodklikl.
+      _debouncedRefresh('vacalert', loadVacationAlerts)
+      break
     case 'profiles':
       _debouncedRefresh('workers', loadWorkers)
       _debouncedRefresh('pendingreg', refreshPendingRegistrations)
@@ -5371,7 +5376,7 @@ function startAdminRealtime() {
   if (_rtRetryTimer) { clearTimeout(_rtRetryTimer); _rtRetryTimer = null }
   // Nezakládej duplicitní kanál
   if (adminRealtimeSub) { try { sb.removeChannel(adminRealtimeSub) } catch(e) {} adminRealtimeSub = null }
-  const tables = ['profiles','documents','teams','team_assignments','subteams','companies','contracts','attendance','notifications','announcements','site_photos','chat_messages','doc_alert_dismissals']
+  const tables = ['profiles','documents','teams','team_assignments','subteams','companies','contracts','attendance','notifications','announcements','site_photos','chat_messages','doc_alert_dismissals','vacations']
   // Nový název kanálu při každém pokusu — server si po výpadku někdy drží ten starý
   let ch = sb.channel('admin-live-' + Date.now())
   tables.forEach(t => {
@@ -6947,6 +6952,124 @@ async function saveEditAccess() {
   }
 }
 
+// ============ UPOZORNĚNÍ NA NAHLÁŠENOU DOVOLENOU ============
+// Když si pracovník sám nahlásí dovolenou nebo nemoc, admin to má vidět hned —
+// ne až mu chybí na stavbě. Vyskočí okno se seznamem a tlačítkem OK; co odklikne,
+// se už neukáže ani jemu, ani druhému adminovi (odložení je v databázi).
+//
+// Co zapsal admin sám, se nehlásí: created_by je pak jeho id, ne pracovníkovo.
+// Záznamy z doby před migrací mají created_by prázdné a nehlásí se taky — jinak
+// by po nasazení naskočila naráz celá historie.
+const VAC_KEY_PREFIX = 'vac|'
+window._vacAlertDismissed = new Set()
+window._vacSharedOk = false
+
+async function loadVacationAlertDismissals() {
+  try {
+    const { data, error } = await sb.from('doc_alert_dismissals')
+      .select('dismiss_key').like('dismiss_key', VAC_KEY_PREFIX + '%')
+    if (error) throw error
+    window._vacAlertDismissed = new Set((data || []).map(r => String(r.dismiss_key).slice(VAC_KEY_PREFIX.length)))
+    window._vacSharedOk = true
+  } catch (e) {
+    // Bez tabulky odložení (nespuštěná migrace) si vystačíme s tímhle prohlížečem.
+    window._vacSharedOk = false
+  }
+}
+
+function isVacationAlertDismissed(id) {
+  if (window._vacSharedOk) return window._vacAlertDismissed.has(String(id))
+  if (window._vacAlertDismissed?.has(String(id))) return true
+  return lsGet('vac_alert_dismissed_' + id) === '1'
+}
+
+// Odklepnutí OK. Zapisuje se do stejné tabulky jako ostatní odložená upozornění,
+// takže co odklikne jeden admin, zmizí i druhému. Duplicita (23505) je v pořádku —
+// znamená, že to někdo odklikl dřív.
+async function dismissVacationAlerts(ids) {
+  const seznam = (ids || []).map(String).filter(Boolean)
+  if (!seznam.length) return
+
+  seznam.forEach(id => {
+    window._vacAlertDismissed.add(id)
+    lsSet('vac_alert_dismissed_' + id, '1')
+  })
+
+  try {
+    const { error } = await sb.from('doc_alert_dismissals').insert(
+      seznam.map(id => ({ dismiss_key: VAC_KEY_PREFIX + id, dismissed_by: currentUser?.id || null }))
+    )
+    if (error && error.code !== '23505') console.warn('[dovolená] odložení se neuložilo:', error.message)
+  } catch (e) { console.warn('[dovolená] odložení se neuložilo:', e?.message) }
+}
+
+function closeVacationAlert(ids) {
+  const ov = document.getElementById('vac-alert-modal')
+  if (ov) ov.remove()
+  if (ids) dismissVacationAlerts(ids)
+}
+
+// Načte nepřítomnosti, které si pracovníci nahlásili sami, a na ty dosud
+// neodkliknuté vyskočí okno. Volá se z dashboardu i z realtime.
+async function loadVacationAlerts() {
+  if (!_jeAdminPrihlasen()) return
+  // Okno už na obrazovce visí — nepřekresluj ho adminovi pod rukama.
+  if (document.getElementById('vac-alert-modal')) return
+
+  await loadVacationAlertDismissals()
+
+  // Nepřítomnosti starší než měsíc už nejsou novinka. Zároveň to drží seznam malý.
+  const hranice = new Date()
+  hranice.setDate(hranice.getDate() - 30)
+
+  let data = null
+  try {
+    const res = await sb.from('vacations')
+      .select('id, worker_id, date_from, date_to, note, type, created_by, worker:profiles(full_name)')
+      .not('created_by', 'is', null)
+      .gte('date_to', localDateStr(hranice))
+      .order('date_from', { ascending: false })
+      .limit(50)
+    if (res.error) return      // sloupec created_by ještě není → migrace neproběhla
+    data = res.data
+  } catch (e) { return }
+
+  // Vlastní nahlášení pozná podle toho, že zapisující je ten samý člověk.
+  const nove = (data || []).filter(v => String(v.created_by) === String(v.worker_id) && !isVacationAlertDismissed(v.id))
+  if (!nove.length) return
+
+  const ids = nove.map(v => v.id)
+  const radky = nove.map(v => {
+    const info = ABSENCE[absType(v)] || ABSENCE.dovolena
+    const jmeno = escAttr(v.worker?.full_name || 'Pracovník')
+    const pozn = absNote(v)
+    const kdy = _invDmy(v.date_from) + (v.date_to && v.date_to !== v.date_from ? ' – ' + _invDmy(v.date_to) : '')
+    return `
+      <div style="display:flex;align-items:flex-start;gap:11px;padding:11px 0;border-top:1px solid var(--brd)">
+        <span style="flex:0 0 auto;width:30px;height:30px;border-radius:9px;background:${info.bg};color:${info.color};display:flex;align-items:center;justify-content:center">${info.icon}</span>
+        <div style="min-width:0;flex:1">
+          <div style="font-size:15px;font-weight:800">${jmeno}</div>
+          <div style="font-size:13px;color:var(--text2)"><b style="color:${info.color}">${info.label}</b> · ${kdy}</div>
+          ${pozn ? `<div style="font-size:12.5px;color:var(--text3);margin-top:2px">${escAttr(pozn)}</div>` : ''}
+        </div>
+      </div>`
+  }).join('')
+
+  const ov = document.createElement('div')
+  ov.id = 'vac-alert-modal'
+  ov.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:300;display:flex;align-items:center;justify-content:center;padding:20px'
+  ov.innerHTML = `
+    <div style="background:#fff;width:100%;max-width:460px;border-radius:16px;padding:20px 20px 18px;box-shadow:0 20px 60px rgba(0,0,0,.35);max-height:80vh;overflow-y:auto">
+      <div style="font-size:17px;font-weight:800;margin-bottom:3px">🔔 ${nove.length === 1 ? 'Nahlášená nepřítomnost' : 'Nahlášené nepřítomnosti (' + nove.length + ')'}</div>
+      <div style="font-size:13px;color:var(--text3);margin-bottom:6px">${nove.length === 1 ? 'Pracovník si ji nahlásil sám z aplikace.' : 'Pracovníci si je nahlásili sami z aplikace.'}</div>
+      ${radky}
+      <button id="vac-alert-ok" style="width:100%;margin-top:16px;padding:13px;background:#211D1A;color:#fff;border:none;border-radius:11px;font-size:15px;font-weight:700;cursor:pointer;font-family:inherit">OK</button>
+    </div>`
+  document.body.appendChild(ov)
+  ov.querySelector('#vac-alert-ok').onclick = () => closeVacationAlert(ids)
+  playAdminBeep()
+}
+
 // ============ DASHBOARD ============
 
 async function approveWorkerRegistration(workerId, workerName) {
@@ -7188,6 +7311,9 @@ async function loadDashboard() {
 
   // 💬 Nepřečtené zprávy od pracovníků
   await loadChatAlerts()
+
+  // ☀️ Dovolená nebo nemoc, kterou si pracovník nahlásil sám
+  await loadVacationAlerts()
 
   const { data: teams } = await sb.from('teams').select('id').eq('is_active',true)
   document.getElementById('stat-teams').textContent = teams?.length || 0
@@ -18980,7 +19106,7 @@ async function loadDocumentAlertsStat() {
   try {
     // Ve stejné tabulce jsou i odložené registrace (prefix "preg|") — ty sem nepatří
     const { data: dis, error: disErr } = await sb.from('doc_alert_dismissals').select('dismiss_key')
-    if (!disErr && dis) dismissed = new Set(dis.map(x => x.dismiss_key).filter(k => !String(k).startsWith(PREG_KEY_PREFIX) && !String(k).startsWith(LONG_KEY_PREFIX) && !String(k).startsWith(CHAT_KEY_PREFIX)))
+    if (!disErr && dis) dismissed = new Set(dis.map(x => x.dismiss_key).filter(k => !String(k).startsWith(PREG_KEY_PREFIX) && !String(k).startsWith(LONG_KEY_PREFIX) && !String(k).startsWith(CHAT_KEY_PREFIX) && !String(k).startsWith(VAC_KEY_PREFIX)))
     else if (disErr) dismissed = window._docAlertDismissed || new Set()
   } catch(e) { dismissed = window._docAlertDismissed || new Set() }
   window._docAlertDismissed = dismissed
@@ -19107,6 +19233,7 @@ async function resetDocAlerts() {
       .not('dismiss_key', 'like', PREG_KEY_PREFIX + '%')
       .not('dismiss_key', 'like', LONG_KEY_PREFIX + '%')
       .not('dismiss_key', 'like', CHAT_KEY_PREFIX + '%')
+      .not('dismiss_key', 'like', VAC_KEY_PREFIX + '%')
   } catch(e) {}
   loadDocumentAlertsStat()
 }
@@ -21965,9 +22092,18 @@ function vacSetType(t) {
 // migrace), uloží se aspoň záznam bez druhu a nemoc se pozná z poznámky —
 // nikdy se tím pádem neztratí, jen se dočasně tváří jako dovolená.
 async function insertAbsence(row, type) {
-  const { error } = await sb.from('vacations').insert({ ...row, type })
+  // created_by = kdo záznam pořídil. U pracovníka je to on sám, u admina admin.
+  // Podle toho se pozná, jestli si dovolenou někdo nahlásil sám (a má se na ni
+  // upozornit na dashboardu), nebo mu ji zapsal SubBau.
+  const chybiSloupec = e => /column|schema cache/i.test(e?.message || '')
+  let { error } = await sb.from('vacations').insert({ ...row, type, created_by: currentUser?.id || null })
   if (!error) return { error: null, degraded: false }
-  if (!/column|schema cache/i.test(error.message || '')) return { error, degraded: false }
+  if (!chybiSloupec(error)) return { error, degraded: false }
+
+  // Bez sloupce created_by (neproběhla migrace) ulož aspoň druh nepřítomnosti.
+  ;({ error } = await sb.from('vacations').insert({ ...row, type }))
+  if (!error) return { error: null, degraded: false }
+  if (!chybiSloupec(error)) return { error, degraded: false }
   console.warn('[nepřítomnost] sloupec type chybí, ukládám bez něj:', error.message)
   const fallbackNote = type === 'nemoc'
     ? ('Nemoc' + (row.note ? ' — ' + row.note : ''))
