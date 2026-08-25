@@ -121,6 +121,14 @@ input[type=checkbox],input[type=radio]{width:auto;padding:0;border-radius:4px;-w
 .sb-a.on{background:linear-gradient(90deg,#E8A13A,#d8902a);color:#211D1A;font-weight:800;box-shadow:0 3px 12px rgba(232,161,58,.3)}
 .sb-a.on svg{color:#211D1A;opacity:1}
 .sb-a.on::before{content:"";position:absolute;left:-10px;top:50%;transform:translateY(-50%);width:4px;height:60%;border-radius:0 3px 3px 0;background:#E8A13A}
+/* Čeká nepřečtená zpráva od pracovníka — položka Chat se musí ozvat sama,
+   drobného odznaku si nikdo nevšiml. Po otevření chatu se třída sundá
+   a položka vypadá přesně jako předtím. Aktivní (zlatá) sekce má přednost. */
+.sb-a.sb-msg:not(.on){background:rgba(196,66,40,.20);color:#fff;font-weight:800;animation:sbMsgPuls 1.8s ease-in-out infinite}
+.sb-a.sb-msg:not(.on) svg{color:#ff8a70;opacity:1}
+.sb-a.sb-msg:not(.on):hover{background:rgba(196,66,40,.32)}
+@keyframes sbMsgPuls{0%,100%{box-shadow:inset 0 0 0 1.5px rgba(196,66,40,.55)}50%{box-shadow:inset 0 0 0 1.5px rgba(196,66,40,1),0 0 14px rgba(196,66,40,.45)}}
+@media (prefers-reduced-motion:reduce){.sb-a.sb-msg:not(.on){animation:none;box-shadow:inset 0 0 0 1.5px rgba(196,66,40,.9)}}
 .sb-foot{padding:14px;border-top:1px solid #3a322b;display:flex;align-items:center;gap:11px;background:rgba(0,0,0,.15);flex-shrink:0}
 .av{width:38px;height:38px;border-radius:11px;display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:800;flex-shrink:0;background:linear-gradient(135deg,#E8A13A,#d8902a);color:#211D1A;box-shadow:0 2px 8px rgba(232,161,58,.3)}
 .sb-fn{font-size:13px;font-weight:700;color:#fff}
@@ -805,6 +813,8 @@ button:not(.x-close) > svg:first-child{margin-right:6px}
 
         <!-- DASHBOARD -->
         <div id="v-dashboard" class="view on">
+          <!-- Nepřečtené zprávy od pracovníků -->
+          <div id="dash-chat-alerts" style="display:none;margin-bottom:16px"></div>
           <!-- Čekající registrace -->
           <div id="dash-pending-registrations" style="display:none;margin-bottom:16px"></div>
           <div id="dash-unclosed-shifts" style="display:none;margin-bottom:16px"></div>
@@ -4955,8 +4965,12 @@ function showAdmin(profile) {
   loadAdminChatList()
   loadDocumentAlertsStat()
   updateAdminChatBadge()
+  loadChatAlerts()
   if (window._adminChatBadgeInt) clearInterval(window._adminChatBadgeInt)
-  window._adminChatBadgeInt = setInterval(updateAdminChatBadge, 20000)
+  window._adminChatBadgeInt = setInterval(() => {
+    updateAdminChatBadge()
+    if (_activeAdminView() === 'dashboard') loadChatAlerts()
+  }, 20000)
   // Automaticky kontroluj nové čekající registrace každých 30 s (žádné ruční obnovování).
   // Hned po přihlášení si zapamatuj současný stav, ať se hlásí opravdu jen nové registrace.
   _lastPendingCount = null
@@ -5051,8 +5065,16 @@ function _onAdminDbChange(table, payload) {
   if (notify) playAdminBeep()
 
   const view = _activeAdminView()
-  // Chat má vlastní obnovu; tady jen zvuk (výše) — dál nepokračuj kvůli refreshi sekcí
-  if (table === 'chat_messages') return
+  // Sekce Chat se obnovuje sama; tady navíc odznak v menu a bublina na dashboardu,
+  // ať se nová zpráva ohlásí, i když admin zrovna kouká jinam. Dál už nepokračuj.
+  if (table === 'chat_messages') {
+    _debouncedRefresh('chat-alert', () => {
+      updateAdminChatBadge()
+      if (_activeAdminView() === 'dashboard') loadChatAlerts()
+    })
+    if (isInsert && payload?.new && payload.new.sender_role !== 'admin') upozorniNaZpravu(payload.new.worker_id)
+    return
+  }
   // Otevřená karta pracovníka se dorovná bez ohledu na to, která sekce je vidět
   _refreshOpenWorkerCard(table, payload)
   // Statistiky na dashboardu se týkají skoro všeho — drž je svěží
@@ -5100,6 +5122,7 @@ function _onAdminDbChange(table, payload) {
       // Jiný admin něco odložil/skryl → propiš to hned i sem
       _debouncedRefresh('pendingreg', refreshPendingRegistrations)
       if (view === 'dashboard') _debouncedRefresh('docstat', loadDocumentAlertsStat)
+      if (view === 'dashboard') _debouncedRefresh('chat-alert-dis', loadChatAlerts)
       break
   }
 }
@@ -7094,6 +7117,9 @@ async function loadDashboard() {
   updatePendingRegBadge(unseenPendingCount(pendingWorkersRaw))
   renderPendingRegDashboardBlock((pendingWorkersRaw || []).filter(w => !isPendingRegDismissed(w.id)))
 
+  // 💬 Nepřečtené zprávy od pracovníků
+  await loadChatAlerts()
+
   const { data: teams } = await sb.from('teams').select('id').eq('is_active',true)
   document.getElementById('stat-teams').textContent = teams?.length || 0
 
@@ -9071,10 +9097,222 @@ async function updateAdminChatBadge() {
     if (chatOpen && activeChatWorkerId === u.worker_id) return
     total++
   })
+  _setAdminChatNavAlert(total)
+}
+
+// ============ NEPŘEČTENÉ ZPRÁVY OD PRACOVNÍKŮ ============
+// Zprávy od OSVČ se ztrácely — jediným signálem byl drobný odznak u položky Chat,
+// kterého si nikdo nevšiml, a na část zpráv se proto neodpovědělo. Nepřečtené
+// konverzace se nově ukazují i jako bublina na dashboardu a položka Chat v menu
+// se viditelně rozsvítí. Jakmile si admin konverzaci otevře, zprávy se označí
+// jako přečtené a obojí zmizí samo — menu se vrátí přesně do původní podoby.
+// Bublinu na dashboardu jde navíc kdykoli ručně smazat.
+
+// Odznak u Chatu je v DOM dvakrát (postranní menu i mobilní zásuvka) — obsluž oba
+// a spolu s číslem přepni i zvýraznění celé položky.
+function _setAdminChatNavAlert(total) {
   document.querySelectorAll('#admin-chat-badge').forEach(badge => {
     badge.textContent = total
     badge.style.display = total > 0 ? 'inline' : 'none'
+    const polozka = badge.closest('.sb-a')
+    if (polozka) polozka.classList.toggle('sb-msg', total > 0)
   })
+}
+
+// Smazaná upozornění se ukládají do sdílené tabulky doc_alert_dismissals (stejně
+// jako odložené registrace), takže co smaže jeden admin, zmizí i ostatním.
+const CHAT_KEY_PREFIX = 'chat|'
+window._chatAlertDismissed = window._chatAlertDismissed || new Set()
+// Podařilo se přečíst sdílenou tabulku? Pak rozhoduje ona, ne paměť prohlížeče.
+window._chatAlertSharedOk = false
+
+// Klíč nese i id poslední zprávy — když pracovník napíše znovu, klíč se změní
+// a upozornění se objeví, i když bylo předtím smazané.
+function chatAlertKey(workerId, lastMsgId) { return CHAT_KEY_PREFIX + workerId + '|' + lastMsgId }
+
+async function loadChatAlertDismissals() {
+  try {
+    const { data, error } = await sb.from('doc_alert_dismissals')
+      .select('dismiss_key').like('dismiss_key', CHAT_KEY_PREFIX + '%')
+    if (error) throw error
+    window._chatAlertDismissed = new Set((data || []).map(r => String(r.dismiss_key)))
+    window._chatAlertSharedOk = true
+  } catch (e) {
+    window._chatAlertSharedOk = false
+    console.warn('[chat] smazaná upozornění se nenačetla ze společné databáze:', e?.message)
+  }
+}
+
+function isChatAlertDismissed(key) {
+  if (window._chatAlertSharedOk) return window._chatAlertDismissed.has(key)
+  if (window._chatAlertDismissed && window._chatAlertDismissed.has(key)) return true
+  return lsGet('chat_alert_dismissed_' + key) === '1'
+}
+
+// Ruční smazání bubliny z dashboardu. Odznak u Chatu schválně zůstane —
+// zpráva je pořád nepřečtená a někdo na ni má odpovědět.
+async function dismissChatAlert(key) {
+  window._chatAlertDismissed.add(key)
+  lsSet('chat_alert_dismissed_' + key, '1')
+  let chyba = ''
+  try {
+    const { error } = await sb.from('doc_alert_dismissals')
+      .insert({ dismiss_key: key, dismissed_by: currentUser?.id || null })
+    // Duplicita = kolega to už smazal, což je v pořádku
+    if (error && error.code !== '23505') throw error
+  } catch (e) { chyba = e?.message || 'neznámá chyba' }
+  if (chyba) {
+    console.warn('[chat] smazání se neuložilo do databáze:', chyba)
+    showToast('⚠️ Smazáno jen v tomto počítači — ostatním adminům upozornění zůstane. '
+      + (/row-level security|policy|permission|42501/i.test(chyba)
+          ? 'Spusťte migraci supabase-migrace-odlozene-registrace.sql'
+          : 'Databáze: ' + chyba))
+  }
+  loadChatAlerts()
+}
+
+// Vrátí zpět všechna smazaná upozornění na zprávy
+async function resetChatAlerts() {
+  window._chatAlertDismissed = new Set()
+  try { await sb.from('doc_alert_dismissals').delete().like('dismiss_key', CHAT_KEY_PREFIX + '%') } catch (e) {}
+  _forgetLocalChatAlerts(CHAT_KEY_PREFIX)
+  loadChatAlerts()
+}
+
+// Úklid lokální zálohy (localStorage) pro klíče začínající daným prefixem
+function _forgetLocalChatAlerts(prefix) {
+  try {
+    for (let i = localStorage.length - 1; i >= 0; i--) {
+      const k = localStorage.key(i)
+      if (k && k.indexOf('chat_alert_dismissed_' + prefix) === 0) localStorage.removeItem(k)
+    }
+  } catch (e) {}
+}
+
+// Konverzace je přečtená → smazání upozornění pro tohohle pracovníka už nedává smysl.
+// Bez tohohle úklidu by v tabulce zůstávaly mrtvé klíče od starých zpráv.
+async function clearChatAlertDismissals(workerId) {
+  const pref = CHAT_KEY_PREFIX + workerId + '|'
+  if (window._chatAlertDismissed) {
+    ;[...window._chatAlertDismissed].forEach(k => { if (String(k).indexOf(pref) === 0) window._chatAlertDismissed.delete(k) })
+  }
+  _forgetLocalChatAlerts(pref)
+  try { await sb.from('doc_alert_dismissals').delete().like('dismiss_key', pref + '%') }
+  catch (e) { console.warn('[chat] úklid smazaných upozornění:', e?.message) }
+}
+
+// U zprávy je podstatné hlavně to, jak dlouho už čeká na odpověď
+function chatAlertAge(iso) {
+  if (!iso) return ''
+  const min = Math.floor((Date.now() - new Date(iso).getTime()) / 60000)
+  if (min < 1) return 'právě teď'
+  if (min < 60) return 'před ' + min + ' min'
+  const h = Math.floor(min / 60)
+  if (h < 24) return 'před ' + h + ' h'
+  const d = Math.floor(h / 24)
+  return d === 1 ? 'včera' : 'před ' + d + ' dny'
+}
+
+// Bublina na dashboardu — jeden řádek = jedna konverzace, která čeká na odpověď
+async function loadChatAlerts() {
+  const box = document.getElementById('dash-chat-alerts')
+  if (!box) return
+  if (!currentUser || currentProfile?.role !== 'admin') { box.style.display = 'none'; return }
+
+  const { data: unread, error } = await sb.from('chat_messages')
+    .select('id, worker_id, message, created_at')
+    .eq('sender_role', 'osvec')
+    .eq('is_read', false)
+    .order('created_at', { ascending: false })
+  if (error) { box.style.display = 'none'; return }
+
+  // Seskup po pracovnících. Řazeno od nejnovější, takže první výskyt = poslední zpráva.
+  const konverzace = []
+  const podleId = {}
+  ;(unread || []).forEach(m => {
+    if (!podleId[m.worker_id]) {
+      podleId[m.worker_id] = { workerId: m.worker_id, pocet: 0, last: m }
+      konverzace.push(podleId[m.worker_id])
+    }
+    podleId[m.worker_id].pocet++
+  })
+
+  if (!konverzace.length) { box.style.display = 'none'; box.innerHTML = ''; return }
+
+  const { data: profs } = await sb.from('profiles')
+    .select('id, full_name').in('id', konverzace.map(k => k.workerId))
+  const jmena = {}
+  ;(profs || []).forEach(p => { jmena[p.id] = p.full_name })
+
+  await loadChatAlertDismissals()   // co smazali ostatní admini
+  const videt = konverzace.filter(k => !isChatAlertDismissed(chatAlertKey(k.workerId, k.last.id)))
+  const skryto = konverzace.length - videt.length
+
+  box.style.display = 'block'
+
+  // Všechno smazané → zůstane jen tenký proužek s cestou zpátky
+  if (!videt.length) {
+    box.innerHTML = `<div style="display:flex;align-items:center;justify-content:space-between;gap:10px;background:var(--bg);border:1px solid var(--brd);border-radius:8px;padding:8px 14px">
+      <span style="font-size:12px;color:var(--text3)">💬 ${skryto} ${skryto === 1 ? 'smazané upozornění na zprávu' : 'smazaných upozornění na zprávy'}</span>
+      <button onclick="resetChatAlerts()" style="font-size:11px;padding:4px 10px;border:1px solid var(--brd);border-radius:7px;background:#fff;color:var(--text3);cursor:pointer;font-family:inherit;font-weight:600">Zobrazit znovu</button>
+    </div>`
+    return
+  }
+
+  const celkem = videt.reduce((s, k) => s + k.pocet, 0)
+  const slovo = celkem === 1 ? 'nepřečtená zpráva' : (celkem < 5 ? 'nepřečtené zprávy' : 'nepřečtených zpráv')
+  box.innerHTML = `
+    <div style="background:var(--red-l);border-left:4px solid var(--red);border-radius:8px;padding:12px 16px">
+      <div style="font-size:13px;font-weight:700;color:var(--red);margin-bottom:8px;display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap">
+        <span>💬 ${celkem} ${slovo} od pracovníků — čeká na odpověď</span>
+        ${skryto ? `<button onclick="resetChatAlerts()" title="Zobrazit i smazaná upozornění" style="font-size:11px;padding:4px 10px;border:1px solid var(--brd);border-radius:7px;background:#fff;color:var(--text3);cursor:pointer;font-family:inherit;font-weight:600">Obnovit smazané (${skryto})</button>` : ''}
+      </div>
+      ${videt.map(k => {
+        const jmeno = jmena[k.workerId] || 'Pracovník'
+        const key = chatAlertKey(k.workerId, k.last.id)
+        const text = String(k.last.message || '').replace(/\s+/g, ' ').trim()
+        const nahled = text.length > 90 ? text.slice(0, 90) + '…' : text
+        return `<div style="display:flex;justify-content:space-between;align-items:center;padding:7px 0;border-bottom:1px solid rgba(0,0,0,0.08);gap:8px">
+          <div style="min-width:0">
+            <div style="font-size:13px;font-weight:700">${escAttr(jmeno)}${k.pocet > 1 ? ` <span style="background:var(--red);color:#fff;border-radius:10px;font-size:10px;padding:1px 7px">${k.pocet}</span>` : ''} <span style="font-size:11px;color:var(--text3);font-weight:600">· ${chatAlertAge(k.last.created_at)}</span></div>
+            <div style="font-size:12px;color:var(--text2);margin-top:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escAttr(nahled)}</div>
+          </div>
+          <div style="display:flex;gap:6px;flex-shrink:0">
+            <button onclick="openChatFromDashboard('${jsStr(k.workerId)}','${jsStr(jmeno)}')"
+              style="padding:6px 12px;background:#211D1A;color:#E8A13A;border:none;border-radius:6px;cursor:pointer;font-size:12px;font-weight:700;font-family:inherit;white-space:nowrap"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:1em;height:1em;flex-shrink:0;vertical-align:-2px"><path d="M21 11.5a8.38 8.38 0 0 1-9 8.5 8.5 8.5 0 0 1-3.8-.9L3 20l1.3-3.8A8.5 8.5 0 0 1 12 3a8.38 8.38 0 0 1 9 8.5z"/></svg> Odpovědět</button>
+            <button onclick="dismissChatAlert('${jsStr(key)}')" title="Smazat upozornění z dashboardu — zpráva zůstane nepřečtená a odznak u Chatu svítí dál"
+              style="padding:6px 11px;background:#fff;color:var(--text3);border:1px solid var(--brd);border-radius:6px;cursor:pointer;font-size:12px;font-weight:700;font-family:inherit;white-space:nowrap">Smazat</button>
+          </div>
+        </div>`
+      }).join('')}
+    </div>`
+}
+
+// Z dashboardu rovnou do konverzace — o klik míň, ať se odpověď neodkládá
+function openChatFromDashboard(workerId, workerName) {
+  sv('chat', null)
+  // sv() voláme bez tlačítka, takže zvýraznění v menu spadlo — vrať ho položce Chat
+  document.querySelectorAll('#admin-chat-badge').forEach(b => {
+    const polozka = b.closest('.sb-a')
+    if (polozka) polozka.classList.add('on')
+  })
+  if (typeof closeAdminDrawer === 'function') closeAdminDrawer()
+  openAdminChat(workerId, workerName)
+}
+
+// Hláška o nové zprávě. Pípnutí obstarává _onAdminDbChange, tady jen text na
+// obrazovku — a nejvýš jednou za 10 s, ať série zpráv neudělá pás hlášek.
+let _posledniUpozorneniZprava = 0
+async function upozorniNaZpravu(workerId) {
+  const ted = Date.now()
+  if (ted - _posledniUpozorneniZprava < 10000) return
+  _posledniUpozorneniZprava = ted
+  let jmeno = ''
+  try {
+    const { data } = await sb.from('profiles').select('full_name').eq('id', workerId).maybeSingle()
+    jmeno = data?.full_name || ''
+  } catch (e) {}
+  try { showToast(jmeno ? ('💬 Nová zpráva: ' + jmeno) : '💬 Nová zpráva od pracovníka') } catch (e) {}
 }
 
 // Enter to send on mobile chat
@@ -9129,10 +9367,7 @@ async function loadAdminChatList() {
     return total + count
   }, 0)
   // Odznak je v DOM dvakrát (postranní menu i mobilní zásuvka) — aktualizuj oba
-  document.querySelectorAll('#admin-chat-badge').forEach(badge => {
-    badge.textContent = effectiveUnread
-    badge.style.display = effectiveUnread > 0 ? 'inline' : 'none'
-  })
+  _setAdminChatNavAlert(effectiveUnread)
 
   // Seřaď — nejprve s nepřečtenými, pak s poslední zprávou
   workers.sort((a, b) => {
@@ -9202,9 +9437,13 @@ async function openAdminChat(workerId, workerName) {
     .eq('sender_role', 'osvec')
     .eq('is_read', false)
 
-  // Aktualizuj seznam a badge
+  // Konverzace je přečtená → skrytí bubliny už nemá co držet
+  await clearChatAlertDismissals(workerId)
+
+  // Aktualizuj seznam, odznak v menu i bublinu na dashboardu
   await loadAdminChatList()
   updateAdminChatBadge()
+  loadChatAlerts()
 
   // Realtime
   if (adminChatRealtimeSub) sb.removeChannel(adminChatRealtimeSub)
@@ -18432,7 +18671,7 @@ async function loadDocumentAlertsStat() {
   try {
     // Ve stejné tabulce jsou i odložené registrace (prefix "preg|") — ty sem nepatří
     const { data: dis, error: disErr } = await sb.from('doc_alert_dismissals').select('dismiss_key')
-    if (!disErr && dis) dismissed = new Set(dis.map(x => x.dismiss_key).filter(k => !String(k).startsWith(PREG_KEY_PREFIX) && !String(k).startsWith(LONG_KEY_PREFIX)))
+    if (!disErr && dis) dismissed = new Set(dis.map(x => x.dismiss_key).filter(k => !String(k).startsWith(PREG_KEY_PREFIX) && !String(k).startsWith(LONG_KEY_PREFIX) && !String(k).startsWith(CHAT_KEY_PREFIX)))
     else if (disErr) dismissed = window._docAlertDismissed || new Set()
   } catch(e) { dismissed = window._docAlertDismissed || new Set() }
   window._docAlertDismissed = dismissed
@@ -18558,6 +18797,7 @@ async function resetDocAlerts() {
       .neq('dismiss_key', '')
       .not('dismiss_key', 'like', PREG_KEY_PREFIX + '%')
       .not('dismiss_key', 'like', LONG_KEY_PREFIX + '%')
+      .not('dismiss_key', 'like', CHAT_KEY_PREFIX + '%')
   } catch(e) {}
   loadDocumentAlertsStat()
 }
