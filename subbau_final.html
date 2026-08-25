@@ -4375,14 +4375,18 @@ function installApp() {
   // Android/Chrome: pokud máme nativní nabídku, spusť ji OKAMŽITĚ (bez await před prompt)
   const dp = window._deferredInstallPrompt
   if (dp) {
-    dp.prompt()
-    dp.userChoice.then(res => {
-      if (res && res.outcome === 'accepted') {
-        const w = document.getElementById('install-app-wrap'); if (w) w.style.display = 'none'
-      }
-      // Prompt se dá použít jen jednou — zahoď ho. Chrome pošle nový, až bude chtít.
-      window._deferredInstallPrompt = null
-    }).catch(() => { window._deferredInstallPrompt = null })
+    // Nejdřív lidem řekneme, že Android ukáže varování a co s ním — jinak
+    // instalaci vzdají přesně v tu chvíli. Teprve pak nativní nabídka.
+    showAndroidInstallWarning(() => {
+      dp.prompt()
+      dp.userChoice.then(res => {
+        if (res && res.outcome === 'accepted') {
+          const w = document.getElementById('install-app-wrap'); if (w) w.style.display = 'none'
+        }
+        // Prompt se dá použít jen jednou — zahoď ho. Chrome pošle nový, až bude chtít.
+        window._deferredInstallPrompt = null
+      }).catch(() => { window._deferredInstallPrompt = null })
+    })
     return
   }
   // iPhone (Safari): nelze spustit tlačítkem → ukaž návod
@@ -4470,6 +4474,49 @@ function spustitInstalaciZNabidky() {
   installApp()
 }
 
+// Android ukáže při instalaci vlastní červené varování, že aplikace není
+// z Obchodu Play. S naší appkou není nic v nepořádku — webové aplikace v Obchodu
+// Play prostě nejsou a být nemůžou. Lidi se toho ale lekali a instalaci v půlce
+// vzdávali, tak je na to připravíme dopředu a řekneme jim, co zmáčknout.
+//
+// Ukazuje se jen na Androidu: na iPhonu se nic takového neděje, a obě místa,
+// odkud se tohle volá, jsou beztak jen pro Android.
+function showAndroidInstallWarning(pokracovat) {
+  const stare = document.getElementById('android-install-warning')
+  if (stare) stare.remove()
+
+  const ov = document.createElement('div')
+  ov.id = 'android-install-warning'
+  ov.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:99999;display:flex;align-items:flex-end;justify-content:center;padding:0'
+  ov.onclick = (e) => { if (e.target === ov) ov.remove() }
+  ov.innerHTML = `
+    <div style="background:#fff;width:100%;max-width:480px;border-radius:20px 20px 0 0;padding:24px 22px calc(24px + env(safe-area-inset-bottom));box-shadow:0 -4px 30px rgba(0,0,0,.3)">
+      <div style="width:40px;height:4px;background:#ddd;border-radius:2px;margin:0 auto 18px"></div>
+      <div style="font-size:18px;font-weight:800;margin-bottom:8px;text-align:center">Než začnete — telefon vás bude strašit</div>
+      <div style="font-size:14px;line-height:1.55;color:#444;margin-bottom:18px">
+        Android za chvíli ukáže <b>červené varování</b>, že aplikace není z Obchodu Play a může být nebezpečná.
+        <b>Nic se neděje.</b> Naše aplikace je webová, v Obchodu Play není a ani tam být nemůže — proto to hlásí u každého, kdo si ji instaluje.
+      </div>
+      <div style="display:flex;align-items:center;gap:14px;margin-bottom:14px">
+        <div style="width:34px;height:34px;background:#E8A13A;border-radius:10px;display:flex;align-items:center;justify-content:center;font-weight:800;flex-shrink:0">1</div>
+        <div style="font-size:14px;line-height:1.4">V tom červeném okně <b>odrolujte úplně dolů</b></div>
+      </div>
+      <div style="display:flex;align-items:center;gap:14px;margin-bottom:18px">
+        <div style="width:34px;height:34px;background:#E8A13A;border-radius:10px;display:flex;align-items:center;justify-content:center;font-weight:800;flex-shrink:0">2</div>
+        <div style="font-size:14px;line-height:1.4">Klepněte na <b>„Přesto nainstalovat"</b> (někdy „Nainstalovat i tak")</div>
+      </div>
+      <div style="background:#FFF8E1;border-radius:10px;padding:10px 12px;font-size:12.5px;color:#8B6914;margin-bottom:18px">💡 Na telefonech Xiaomi, Huawei a Honor bývá varování ještě delší. Postup je stejný — dolů a potvrdit.</div>
+      <button id="aiw-go" style="width:100%;padding:14px;background:#211D1A;color:#fff;border:none;border-radius:12px;font-size:15px;font-weight:700;cursor:pointer;font-family:inherit;margin-bottom:9px">Rozumím, nainstalovat</button>
+      <button id="aiw-cancel" style="width:100%;padding:11px;background:none;color:#777;border:none;border-radius:12px;font-size:14px;cursor:pointer;font-family:inherit">Teď ne</button>
+    </div>`
+  document.body.appendChild(ov)
+
+  // Instalační nabídku Chrome smí spustit jen kliknutí uživatele — proto se
+  // pokracovat() volá rovnou odsud z klepnutí na tlačítko, ne se zpožděním.
+  ov.querySelector('#aiw-go').onclick = () => { ov.remove(); try { pokracovat() } catch (e) { console.warn('instalace:', e?.message) } }
+  ov.querySelector('#aiw-cancel').onclick = () => ov.remove()
+}
+
 function showAndroidInstallGuide() {
   let ov = document.getElementById('android-install-guide')
   if (ov) { ov.style.display = 'flex'; return }
@@ -4494,7 +4541,8 @@ function showAndroidInstallGuide() {
         <div style="width:34px;height:34px;background:#E8A13A;border-radius:10px;display:flex;align-items:center;justify-content:center;font-weight:800;flex-shrink:0">3</div>
         <div style="font-size:14px;line-height:1.4">Potvrďte <b>Přidat / Nainstalovat</b> — hotovo!</div>
       </div>
-      <div style="background:#FFF8E1;border-radius:10px;padding:10px 12px;font-size:12px;color:#8B6914;margin-bottom:18px">💡 Tip: Musí být otevřené v <b>Chrome</b>. Pokud jste appku dříve smazali, automatická nabídka se nemusí objevit — proto ji přidejte ručně přes menu ⋮.</div>
+      <div style="background:#FFF8E1;border-radius:10px;padding:10px 12px;font-size:12px;color:#8B6914;margin-bottom:12px">💡 Tip: Musí být otevřené v <b>Chrome</b>. Pokud jste appku dříve smazali, automatická nabídka se nemusí objevit — proto ji přidejte ručně přes menu ⋮.</div>
+      <div style="background:#FDF0EC;border:1px solid #E8C4BA;border-radius:10px;padding:10px 12px;font-size:12.5px;color:#8a3b22;line-height:1.5;margin-bottom:18px">Android pak ukáže <b>červené varování</b>, že aplikace není z Obchodu Play. To je normální — webové aplikace v Obchodu Play nejsou. Odrolujte dolů a dejte <b>„Přesto nainstalovat"</b>.</div>
       <button onclick="document.getElementById('android-install-guide').style.display='none'" style="width:100%;padding:13px;background:#211D1A;color:#fff;border:none;border-radius:12px;font-size:15px;font-weight:700;cursor:pointer;font-family:inherit">Rozumím</button>
     </div>`
   document.body.appendChild(ov)
