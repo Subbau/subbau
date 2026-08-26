@@ -1214,6 +1214,19 @@ button:not(.x-close) > svg:first-child{margin-right:6px}
               <span class="hi c"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/><path d="M9 13h4M9 17h6"/></svg></span>
               <div><h4>Faktury od pracovníků</h4><div class="sub">Co OSVČ odešlou z appky, přistane tady</div></div>
             </div>
+            <button onclick="toggleVystavitFakturu()" class="btn-pri" style="font-size:13px;padding:9px 15px"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:1em;height:1em;flex-shrink:0;vertical-align:-2px"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6M12 18v-6M9 15h6"/></svg> Vystavit fakturu</button>
+          </div>
+
+          <!-- Vystavení faktury rovnou odsud — nemusí se kvůli tomu chodit
+               přes Pracovníky. Vyhledá se člověk a otevře se jeho karta
+               rovnou na fakturaci, kde je celý formulář. -->
+          <div id="vystavit-fakturu-box" class="card" style="display:none;margin-bottom:14px">
+            <div style="padding:14px">
+              <label style="font-size:12px;color:var(--text3);display:block;margin-bottom:6px">Komu fakturu vystavit?</label>
+              <input type="text" id="vf-search" oninput="hledatProFakturu()" placeholder="Napište jméno pracovníka…" autocomplete="off"
+                style="width:100%;padding:11px;border:1.5px solid var(--brd);border-radius:9px;font-size:15px;font-family:inherit;box-sizing:border-box">
+              <div id="vf-vysledky" style="margin-top:10px"></div>
+            </div>
           </div>
 
           <div class="stats" id="inv-stats" style="margin-bottom:14px;grid-template-columns:repeat(2,minmax(0,220px));justify-content:start"></div>
@@ -2310,7 +2323,8 @@ button:not(.x-close) > svg:first-child{margin-right:6px}
           </div>
           <div class="fg" style="margin-bottom:0">
             <label style="font-size:12px">Hodinová sazba (€ / h)</label>
-            <input type="number" id="inv-rate" placeholder="18" style="width:100%;padding:10px;border:1.5px solid var(--brd);border-radius:8px;font-size:16px;box-sizing:border-box;font-family:inherit">
+            <input type="number" id="inv-rate" placeholder="18" readonly style="width:100%;padding:10px;border:1.5px solid var(--brd);border-radius:8px;font-size:16px;box-sizing:border-box;font-family:inherit;background:#f1efe9;color:#555">
+            <div id="inv-rate-note" style="font-size:11.5px;color:var(--text3);margin-top:4px;line-height:1.45">Sazbu nastavuje SubBau — měnit ji nejde.</div>
           </div>
         </div>
         <div style="display:flex;align-items:center;gap:6px;font-size:11px;color:var(--text3);margin-bottom:2px">
@@ -10720,6 +10734,59 @@ let _invSortKey = 'sent'
 let _invSortDir = 'desc'
 let _invTableMissing = false
 
+// Vystavení faktury přímo ze složky Faktury. Nic se tu needituje — jen se
+// najde člověk a otevře se jeho karta na fakturaci, kde je hotový formulář.
+function toggleVystavitFakturu() {
+  const box = document.getElementById('vystavit-fakturu-box')
+  if (!box) return
+  const otevrit = box.style.display === 'none'
+  box.style.display = otevrit ? 'block' : 'none'
+  if (otevrit) {
+    const inp = document.getElementById('vf-search')
+    if (inp) { inp.value = ''; setTimeout(() => { try { inp.focus() } catch (e) {} }, 80) }
+    const out = document.getElementById('vf-vysledky')
+    if (out) out.innerHTML = '<div style="font-size:12.5px;color:var(--text3)">Začněte psát jméno.</div>'
+  }
+}
+
+async function hledatProFakturu() {
+  const dotaz = String(document.getElementById('vf-search')?.value || '').trim()
+  const out = document.getElementById('vf-vysledky')
+  if (!out) return
+  if (dotaz.length < 2) {
+    out.innerHTML = '<div style="font-size:12.5px;color:var(--text3)">Začněte psát jméno.</div>'
+    return
+  }
+
+  // Fakturovat může jen ten, kdo u nás dělá — zablokovaní a odebraní se nenabízí.
+  const { data, error } = await sb.from('profiles')
+    .select('id, full_name, profession, crm_code')
+    .in('role', ['osvec', 'partak']).eq('is_active', true)
+    .ilike('full_name', '%' + dotaz + '%').order('full_name').limit(8)
+
+  if (error) { out.innerHTML = '<div style="font-size:12.5px;color:var(--red)">Hledání selhalo: ' + escAttr(error.message) + '</div>'; return }
+  if (!data || !data.length) { out.innerHTML = '<div style="font-size:12.5px;color:var(--text3)">Nikdo takový tu není.</div>'; return }
+
+  out.innerHTML = data.map(w => `
+    <button type="button" onclick="vystavitFakturuPro('${jsStr(w.id)}')" style="display:flex;align-items:center;justify-content:space-between;gap:10px;width:100%;text-align:left;padding:10px 12px;margin-bottom:6px;background:#fff;border:1.5px solid var(--brd);border-radius:10px;cursor:pointer;font-family:inherit">
+      <span style="min-width:0">
+        <b style="font-size:14.5px;display:block">${escAttr(w.full_name || '—')}</b>
+        <span style="font-size:12px;color:var(--text3)">${escAttr(profLabel(w.profession) || '')}${w.crm_code ? ' · ' + escAttr(w.crm_code) : ''}</span>
+      </span>
+      <span style="font-size:12.5px;font-weight:700;color:var(--blue);white-space:nowrap">Vystavit →</span>
+    </button>`).join('')
+}
+
+function vystavitFakturuPro(workerId) {
+  toggleVystavitFakturu()
+  openWorkerModal(workerId)
+  // Karta se otevírá na profilu — přepni ji rovnou na fakturaci.
+  setTimeout(() => {
+    const zalozka = document.querySelector('.wd-tab[onclick*="finance"]')
+    wdTab('finance', zalozka)
+  }, 260)
+}
+
 async function loadWorkerInvoices() {
   const tbody = document.getElementById('inv-table')
   // Kód z CRM a barvu bereme živě z profilu — barva je vlastnost pracovníka,
@@ -15541,15 +15608,26 @@ async function loadInvoiceForm() {
   // Když si kartu pracovník sám otevřel, jeho volbu nepřebíjíme.
   fktSetDetailsOpen(_fktOpen == null ? !fktFilledIn() : _fktOpen)
 
-  // Sazbu určuje SubBau v Provizích — pracovník ji vidí, ale nepřepíše.
+  // Sazbu určuje SubBau v Provizích — pracovník ji jen vidí. Zamčená je VŽDYCKY,
+  // i když ji SubBau ještě nenastavil: dřív si ji v tom případě mohl vyplnit sám
+  // a uložila se mu do profilu, takže si fakticky určoval, kolik dostane.
   const rateEl = document.getElementById('inv-rate')
   if (rateEl) {
-    const locked = isRateFromProvize(p)
-    if (locked) rateEl.value = p.hourly_rate_worker
-    rateEl.readOnly = locked
-    rateEl.style.background = locked ? '#f1efe9' : ''
-    rateEl.style.color = locked ? '#555' : ''
-    rateEl.title = locked ? 'Sazbu nastavuje SubBau' : ''
+    const mameSazbu = isRateFromProvize(p)
+    rateEl.value = mameSazbu ? p.hourly_rate_worker : ''
+    rateEl.readOnly = true
+    rateEl.style.background = '#f1efe9'
+    rateEl.style.color = '#555'
+    rateEl.placeholder = mameSazbu ? '' : 'Nenastaveno'
+    rateEl.title = mameSazbu ? 'Sazbu nastavuje SubBau' : 'Sazbu vám zatím SubBau nenastavil — ozvěte se nám'
+  }
+  const rateNote = document.getElementById('inv-rate-note')
+  if (rateNote) {
+    rateNote.textContent = isRateFromProvize(p)
+      ? 'Sazbu nastavuje SubBau — měnit ji nejde.'
+      : '⚠️ Sazbu vám zatím SubBau nenastavil. Než ji doplníme, fakturu vystavit nepůjde — ozvěte se nám.'
+    rateNote.style.color = isRateFromProvize(p) ? 'var(--text3)' : 'var(--red)'
+    rateNote.style.fontWeight = isRateFromProvize(p) ? '400' : '700'
   }
   // Splatnost taky ze SubBau (sekce Provize → profiles.invoice_due_days)
   await applyInvoiceDueFromProfile('inv-due', p, true, currentUser?.id)
@@ -15583,12 +15661,9 @@ async function saveInvoiceProfileFields(silent) {
     invoice_iban: val('inv-iban'),
     invoice_swift: val('inv-swift')
   }
-  // Sazbu ukládáme jen tehdy, když ji SubBau ještě nenastavil — jinak platí ta z Provizí.
-  if (!isRateFromProvize(currentProfile)) {
-    const raw = document.getElementById('inv-rate')?.value
-    const rate = raw === '' || raw == null ? null : Number(raw)
-    if (rate != null && !isNaN(rate)) upd.hourly_rate_worker = rate
-  }
+  // Sazbu z tohohle formuláře NEUKLÁDÁME. Nastavuje ji výhradně SubBau
+  // v Provizích — pracovník ji jen vidí. Dřív si ji tady mohl vyplnit sám,
+  // pokud mu ji SubBau ještě nezadal, a tím si určil vlastní hodinovku.
   let { error } = await sb.from('profiles').update(upd).eq('id', currentUser.id)
   // Starší databáze nemusí mít sloupec invoice_address — ulož zbytek a adresu
   // schovej do locality, ať se údaje neztratí a faktura měla co tisknout.
@@ -20370,11 +20445,16 @@ async function uploadInvoicePdf(blob, workerId, invoiceNum) {
 
 // Zapíše fakturu do složky u admina. Jeden týden = jedna faktura; opravené
 // znovuodeslání tu původní přepíše, aby adminovi nechodily duplicity.
+// Faktura se přepíše JEN tehdy, když má stejné číslo u stejného člověka —
+// to je oprava téhož dokladu. Všechno ostatní zůstane uložené vedle sebe,
+// dokud s tím admin něco neudělá. Dřív se klíčovalo přes týden, takže druhá
+// faktura za týž týden tu první tiše přemazala.
 async function storeInvoiceRow(row) {
   let { error } = await sb.from('worker_invoices')
-    .upsert(row, { onConflict: 'worker_id,kw,kw_year' })
-  // Bez týdne (teoreticky) unikátní index nezabere — pak prostě vlož nový řádek
-  if (error && /on conflict|constraint/i.test(error.message || '')) {
+    .upsert(row, { onConflict: 'worker_id,invoice_number' })
+  // Když unikátní index na číslo v databázi ještě není (nespuštěná migrace),
+  // fakturu radši vlož jako novou, než aby se ztratila.
+  if (error && /on conflict|constraint|unique|index/i.test(error.message || '')) {
     ;({ error } = await sb.from('worker_invoices').insert(row))
   }
   return error
@@ -24485,7 +24565,7 @@ document.addEventListener('visibilitychange', () => {
       <!-- Hlavní krok je jediný: odeslat. Proto stojí sám nahoře přes celou šířku
            a je zeleně zvýrazněný; uložení PDF, tisk i zavření jsou vedlejší
            a drží se pod ním v jednom nenápadném řádku. -->
-      <button id="inv-send-btn" onclick="sendInvoiceToSubbau()" style="width:100%;padding:17px 14px;background:#1d9e75;color:#fff;border:none;border-radius:13px;font-weight:800;cursor:pointer;font-family:inherit;font-size:16px;display:flex;align-items:center;justify-content:center;gap:9px;box-shadow:0 6px 18px rgba(29,158,117,.38)"><span id="inv-send-icon" style="display:flex;flex-shrink:0"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:19px;height:19px"><path d="M22 2 11 13"/><path d="M22 2 15 22l-4-9-9-4z"/></svg></span><span id="inv-send-label" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">Odeslat společnosti SubBau</span></button>
+      <button id="inv-send-btn" onclick="sendInvoiceToSubbau()" style="position:relative;z-index:4;touch-action:manipulation;width:100%;padding:17px 14px;background:#1d9e75;color:#fff;border:none;border-radius:13px;font-weight:800;cursor:pointer;font-family:inherit;font-size:16px;display:flex;align-items:center;justify-content:center;gap:9px;box-shadow:0 6px 18px rgba(29,158,117,.38)"><span id="inv-send-icon" style="display:flex;flex-shrink:0;pointer-events:none"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:19px;height:19px"><path d="M22 2 11 13"/><path d="M22 2 15 22l-4-9-9-4z"/></svg></span><span id="inv-send-label" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;pointer-events:none">Odeslat společnosti SubBau</span></button>
       <div id="inv-send-note" style="color:#9a9082;font-size:11.5px;text-align:center;margin-top:7px;line-height:1.5">Odesláním se faktura uloží SubBau do složky Faktury.</div>
 
       <div style="display:flex;gap:8px;align-items:stretch;margin-top:11px">
