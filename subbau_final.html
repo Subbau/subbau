@@ -2779,7 +2779,7 @@ button:not(.x-close) > svg:first-child{margin-right:6px}
             </div>
             <div style="flex:1;min-width:0">
               <label style="font-size:11px;color:var(--text3);display:block;margin-bottom:3px">Připadá na položku (€)</label>
-              <input type="number" id="wd-inv-price" readonly style="width:100%;font-size:12px;padding:8px;border:1.5px solid var(--brd);border-radius:8px;font-family:inherit;box-sizing:border-box;background:var(--bg);font-weight:700">
+              <input type="number" step="0.01" min="0" id="wd-inv-price" oninput="adminZmenilCastku()" style="width:100%;font-size:12px;padding:8px;border:1.5px solid var(--brd);border-radius:8px;font-family:inherit;box-sizing:border-box;font-weight:700">
             </div>
           </div>
           <div id="wd-inv-items-extra"></div>
@@ -7830,6 +7830,16 @@ async function zajistiBarvuFaktury(workerId, prof) {
     prof.invoice_color = idx
     return idx
   } catch (e) { return null }
+}
+
+// Admin může s částkou hýbat i tam, kde ji jinak drží hodiny × sazba. Co si
+// přepíše u první položky, se stane novou celkovou částkou faktury — vedlejší
+// položky se k ní přičtou a dál se od první odečítají jako předtím.
+function adminZmenilCastku() {
+  const prvni = _cislo(document.getElementById('wd-inv-price')?.value)
+  const dalsi = _polozky('wd-inv').reduce((sum, pol) => sum + (Number(pol.cena) || 0), 0)
+  window._invTydenniCastka = Math.round((prvni + dalsi) * 100) / 100
+  prepocitatPolozky('wd-inv')
 }
 
 async function prideliBarvyFaktur(rows) {
@@ -20403,12 +20413,21 @@ function updateInvoiceSendUi() {
   // Oddělovač „NEBO" a e-mailové tlačítko patří k sobě — schovávají se společně,
   // jinak by adminovi zůstalo viset samotné slovo NEBO nad ničím.
   const emailBox = document.getElementById('inv-email-box')
+  // Ikona musí sedět s tím, co tlačítko dělá. Adminovi fakturu ukládá, ne
+  // odesílá — papírová vlaštovka u nápisu „Uložit" vypadá, že se něco posílá,
+  // a člověk pak hledá ukládání jinde.
+  const sendIcon = document.getElementById('inv-send-icon')
+  const IKONA_ODESLAT = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:19px;height:19px"><path d="M22 2 11 13"/><path d="M22 2 15 22l-4-9-9-4z"/></svg>'
+  const IKONA_ULOZIT = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:19px;height:19px"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><path d="M17 21v-8H7v8M7 3v5h8"/></svg>'
+
   if (d?.byAdmin) {
     // Admin fakturu nikam neodesílá — rovnou si ji zakládá do složky
-    if (sendLabel) sendLabel.textContent = 'Uložit do složky Faktury'
+    if (sendLabel) sendLabel.textContent = 'Uložit fakturu do složky'
+    if (sendIcon) sendIcon.innerHTML = IKONA_ULOZIT
     if (emailBox) emailBox.style.display = 'none'
   } else {
     if (sendLabel) sendLabel.textContent = 'Odeslat společnosti SubBau'
+    if (sendIcon) sendIcon.innerHTML = IKONA_ODESLAT
     if (emailBox) emailBox.style.display = ''
   }
   if (note) {
@@ -24466,7 +24485,7 @@ document.addEventListener('visibilitychange', () => {
       <!-- Hlavní krok je jediný: odeslat. Proto stojí sám nahoře přes celou šířku
            a je zeleně zvýrazněný; uložení PDF, tisk i zavření jsou vedlejší
            a drží se pod ním v jednom nenápadném řádku. -->
-      <button id="inv-send-btn" onclick="sendInvoiceToSubbau()" style="width:100%;padding:17px 14px;background:#1d9e75;color:#fff;border:none;border-radius:13px;font-weight:800;cursor:pointer;font-family:inherit;font-size:16px;display:flex;align-items:center;justify-content:center;gap:9px;box-shadow:0 6px 18px rgba(29,158,117,.38)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:19px;height:19px;flex-shrink:0"><path d="M22 2 11 13"/><path d="M22 2 15 22l-4-9-9-4z"/></svg><span id="inv-send-label" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">Odeslat společnosti SubBau</span></button>
+      <button id="inv-send-btn" onclick="sendInvoiceToSubbau()" style="width:100%;padding:17px 14px;background:#1d9e75;color:#fff;border:none;border-radius:13px;font-weight:800;cursor:pointer;font-family:inherit;font-size:16px;display:flex;align-items:center;justify-content:center;gap:9px;box-shadow:0 6px 18px rgba(29,158,117,.38)"><span id="inv-send-icon" style="display:flex;flex-shrink:0"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:19px;height:19px"><path d="M22 2 11 13"/><path d="M22 2 15 22l-4-9-9-4z"/></svg></span><span id="inv-send-label" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">Odeslat společnosti SubBau</span></button>
       <div id="inv-send-note" style="color:#9a9082;font-size:11.5px;text-align:center;margin-top:7px;line-height:1.5">Odesláním se faktura uloží SubBau do složky Faktury.</div>
 
       <div style="display:flex;gap:8px;align-items:stretch;margin-top:11px">
