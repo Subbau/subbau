@@ -2349,6 +2349,7 @@ button:not(.x-close) > svg:first-child{margin-right:6px}
 
         <!-- Další položky. Prázdné, dokud si někdo nepřidá řádek. -->
         <div id="inv-items-extra"></div>
+        <div id="inv-items-warn" style="display:none;font-size:12.5px;color:var(--red);font-weight:700;margin-bottom:8px"></div>
         <button type="button" onclick="pridatPolozkuFaktury()" style="width:100%;padding:10px;margin-bottom:8px;background:none;border:1.5px dashed var(--brd);border-radius:10px;font-size:13.5px;font-weight:700;color:var(--text2);cursor:pointer;font-family:inherit">+ Přidat další položku</button>
         <div id="inv-items-total" style="text-align:right;font-size:15px;font-weight:800;margin-bottom:14px">Celkem: 0.00 €</div>
 
@@ -7772,6 +7773,32 @@ async function uvolniBarvuFaktury(workerId) {
 // Doplní barvu těm, kdo ve složce Faktury vystupují, ještě ji nemají a mají
 // docházku povolenou. Bere vždycky nejnižší volné číslo, ať se paleta využívá
 // odspodu a barvy po uvolnění zase padnou k někomu jinému.
+// Barvu přidělí hned, jak pracovník poprvé fakturuje — jinak by první faktura
+// vyšla bez rámečku a barva by naskočila až po otevření složky Faktury.
+// Vrací index barvy, nebo null (neproběhlá migrace, vyčerpaná paleta,
+// zablokovaná docházka).
+async function zajistiBarvuFaktury(workerId, prof) {
+  if (!workerId || !prof) return null
+  if (prof.invoice_color != null) return prof.invoice_color
+  if (prof.can_track_hours === false || prof.is_active === false) return null
+
+  try {
+    const { data: zabrane, error } = await sb.from('profiles')
+      .select('invoice_color').not('invoice_color', 'is', null)
+    if (error) return null
+
+    const obsazene = new Set((zabrane || []).map(x => x.invoice_color))
+    let idx = 0
+    while (idx < INVOICE_COLORS.length && obsazene.has(idx)) idx++
+    if (idx >= INVOICE_COLORS.length) return null   // paleta došla
+
+    const { error: upErr } = await sb.from('profiles').update({ invoice_color: idx }).eq('id', workerId)
+    if (upErr) return null
+    prof.invoice_color = idx
+    return idx
+  } catch (e) { return null }
+}
+
 async function prideliBarvyFaktur(rows) {
   const bezBarvy = new Map()
   ;(rows || []).forEach(r => {
@@ -15615,9 +15642,10 @@ function vykreslitDalsiPolozky(pre = 'inv') {
       </div>
       <textarea rows="2" placeholder="Popis položky" oninput="zmenitPolozku('${pre}',${i},'popis',this.value)" style="width:100%;padding:9px;border:1px solid var(--brd);border-radius:8px;font-size:14px;font-family:inherit;box-sizing:border-box;resize:vertical;background:#fff;line-height:1.45">${escAttr(pol.popis || '')}</textarea>
       ${zamcenaCastka(pre)
-        ? `<div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-top:7px;font-size:13px;color:var(--text2)">
-             <span>Připadá na tuhle položku</span>
-             <b id="${pre}-cena-${i}" style="font-size:15px;color:var(--text)">—</b>
+        ? `<div style="margin-top:7px">
+             <label style="font-size:11px;color:var(--text3);display:block;margin-bottom:3px">Částka za tuhle položku (€)</label>
+             <input type="number" step="0.01" min="0" value="${pol.cena ?? ''}" oninput="zmenitPolozku('${pre}',${i},'cena',this.value)" style="width:100%;padding:9px;border:1px solid var(--brd);border-radius:8px;font-size:15px;font-family:inherit;box-sizing:border-box">
+             <div style="font-size:11px;color:var(--text3);margin-top:3px">O tuhle částku se sníží první položka.</div>
            </div>`
         : `<div style="display:flex;gap:7px;margin-top:7px">
         <div style="flex:1;min-width:0">
@@ -15655,6 +15683,8 @@ function zmenitPolozku(pre, i, klic, hodnota) {
   if (!pol) return
   pol[klic] = hodnota
   if (klic === 'mnozstvi' || klic === 'cena') {
+    // U pracovníka se o zadanou částku sníží první položka, ať součet drží.
+    if (zamcenaCastka(pre)) { rozpocitatCastku(pre); return }
     prepocitatPolozky(pre)
     // V dialogu úprav visí na částce ještě strop zálohy a „zbývá poslat" —
     // bez tohohle by po změně položky ukazovaly starou sumu.
@@ -15698,24 +15728,30 @@ function castkaPolozky(pol) {
 window._invTydenniCastka = 0
 function zamcenaCastka(pre) { return pre === 'inv' }
 
-// Rozdělí částku mezi položky. Zbytek po zaokrouhlení padá na poslední řádek,
-// aby součet vyšel na cent přesně — faktura na 1000 € nesmí dát 999,99 €.
+// První položka je zbytek. Pracovník si u dalších položek napíše, kolik na ně
+// připadá, a o tolik se první sníží — součet tak vždycky sedí na hodiny × sazbu.
+// Když si vedlejší položky ukousnou víc, než je celá faktura, řekne se to nahlas
+// a fakturu to nepustí dál (kontrola je i při vystavení).
 function rozpocitatCastku(pre) {
   if (!zamcenaCastka(pre)) return
   const celkem = Math.round((Number(window._invTydenniCastka) || 0) * 100) / 100
-  const pocet = 1 + _polozky(pre).length
-  const podil = Math.floor((celkem / pocet) * 100) / 100
-  const zbytek = Math.round((celkem - podil * pocet) * 100) / 100
+  const dalsi = _polozky(pre)
+  const sumaDalsich = Math.round(dalsi.reduce((sum, pol) => sum + (Number(pol.cena) || 0), 0) * 100) / 100
+  const prvni = Math.round((celkem - sumaDalsich) * 100) / 100
+
+  dalsi.forEach(pol => { pol.mnozstvi = 1 })
 
   const prvniEl = _pole(pre, 'price')
-  if (prvniEl) prvniEl.value = celkem > 0 ? (pocet === 1 ? celkem : podil).toFixed(2) : ''
-  _polozky(pre).forEach((pol, i) => {
-    const posledni = i === _polozky(pre).length - 1
-    pol.mnozstvi = 1
-    pol.cena = celkem > 0 ? Math.round((podil + (posledni ? zbytek : 0)) * 100) / 100 : ''
-    const el = document.getElementById(pre + '-cena-' + i)
-    if (el) el.textContent = celkem > 0 ? Number(pol.cena).toFixed(2) + ' €' : '—'
-  })
+  if (prvniEl) prvniEl.value = celkem > 0 ? prvni.toFixed(2) : ''
+
+  const varovani = document.getElementById(pre + '-items-warn')
+  if (varovani) {
+    const preteklo = prvni < -0.001
+    varovani.style.display = preteklo ? 'block' : 'none'
+    varovani.textContent = preteklo
+      ? '⚠️ Další položky přesahují částku faktury o ' + Math.abs(prvni).toFixed(2) + ' € — snižte je.'
+      : ''
+  }
   prepocitatPolozky(pre)
 }
 
@@ -15727,6 +15763,22 @@ function prepocitatPolozky(pre = 'inv') {
   const el = _pole(pre, 'items-total')
   if (!el) return
   el.textContent = 'Celkem: ' + soucetPolozek(sebratPolozkyFaktury(pre)).toFixed(2) + ' €'
+}
+
+// Co ten člověk fakturoval naposledy. Příště se mu to předvyplní, ať to nemusí
+// psát pořád dokola — přepsat si to samozřejmě může.
+async function posledniPolozkaFaktury(workerId) {
+  if (!workerId) return ''
+  try {
+    const { data, error } = await sb.from('worker_invoices')
+      .select('items, item_description, created_at')
+      .eq('worker_id', workerId).order('created_at', { ascending: false }).limit(1)
+    if (error) return ''
+    const r = (data || [])[0]
+    if (!r) return ''
+    if (Array.isArray(r.items) && r.items.length) return String(r.items[0]?.popis || '').trim()
+    return String(r.item_description || '').trim()
+  } catch (e) { return '' }
 }
 
 // ===== ČÍSLO FAKTURY =====
@@ -15748,11 +15800,25 @@ async function dalsiCisloFaktury(workerId, rok) {
 }
 
 // Doplní rok a další volné pořadí do formuláře. Co si člověk přepíše, neměníme.
-async function predvyplnitCisloFaktury(workerId, rok, pre = 'inv') {
+async function predvyplnitCisloFaktury(workerId, rok, pre = 'inv', tyden = null) {
   const rokEl = _pole(pre, 'num-year')
   const seqEl = _pole(pre, 'num-seq')
   if (rokEl) rokEl.textContent = String(rok)
-  if (!seqEl || seqEl.value.trim() !== '') return
+  if (!seqEl) return
+
+  // Za týden, který už fakturovaný byl, drží faktura svoje původní číslo —
+  // jde o opravu, ne o nový doklad. Jinak pokračuje řada dál: 01, 02, 03…
+  if (tyden != null) {
+    try {
+      const { data } = await sb.from('worker_invoices')
+        .select('invoice_number').eq('worker_id', workerId)
+        .eq('kw', parseInt(tyden)).eq('kw_year', parseInt(rok)).limit(1)
+      const stare = String((data || [])[0]?.invoice_number || '').trim()
+      const m = /^(\d{4})(\d{2})$/.exec(stare)
+      if (m && m[1] === String(rok)) { seqEl.value = m[2]; return }
+    } catch (e) { /* neva, spadne se na další volné číslo */ }
+  }
+
   seqEl.value = await dalsiCisloFaktury(workerId, rok)
 }
 
@@ -15782,7 +15848,7 @@ async function onInvoiceWeekChange() {
       : parseFloat(document.getElementById('inv-rate')?.value)
     window._invTydenniCastka = Math.round(hodiny * (Number.isFinite(sazba) ? sazba : 0) * 100) / 100
     rozpocitatCastku('inv')
-    await predvyplnitCisloFaktury(currentUser?.id, parseInt(year))
+    await predvyplnitCisloFaktury(currentUser?.id, parseInt(year), 'inv', week)
   } catch (e) { console.warn('[faktura] předvyplnění položky:', e?.message) }
 
   const own = lsGet(_invItemKey(week, year))
@@ -15790,6 +15856,17 @@ async function onInvoiceWeekChange() {
     itemEl.value = own
     autoGrowInvoiceItem()
     if (noteEl) noteEl.textContent = 'Tenhle text jste si upravil ručně. Fakturu čte německý odběratel, proto je anglicky.'
+    return
+  }
+
+  // Co fakturoval naposledy. Většina lidí dělá pořád to samé, takže je to
+  // trefa častěji než čerstvý překlad z docházky — a přepsat to může.
+  const posledni = await posledniPolozkaFaktury(currentUser?.id)
+  if (posledni) {
+    itemEl.value = posledni
+    autoGrowInvoiceItem()
+    itemEl.placeholder = defaultInvoiceItem(currentProfile?.profession)
+    if (noteEl) noteEl.textContent = 'Tohle jste fakturoval naposledy. Když jste tenhle týden dělal něco jiného, text přepište.'
     return
   }
 
@@ -19606,6 +19683,12 @@ async function generateInvoiceMob(lang = 'en', override = null) {
   // Za položkovou fakturu se to považuje, až když má aspoň jeden řádek nenulové
   // množství nebo cenu. Samotný popis bez čísel by jinak vystavil fakturu na 0 €
   // — a to je poslední věc, kterou chce kdokoli poslat odběrateli.
+  // Kdyby si vedlejší položky ukously víc, než je celá faktura, vyšla by první
+  // do mínusu. Fakturu s minusovým řádkem nikam neposíláme.
+  if (polozkyFaktury.some(pol => castkaPolozky(pol) < -0.001)) {
+    showToast('⚠️ Položky přesahují částku faktury — opravte je')
+    return
+  }
   const maPolozky = polozkyFaktury.some(pol => pol.mnozstvi > 0 || pol.cena > 0)
   const totalAmount = maPolozky
     ? soucetPolozek(polozkyFaktury)
@@ -19727,6 +19810,10 @@ async function generateInvoiceMob(lang = 'en', override = null) {
   // Datumy si vezmi i strojově (YYYY-MM-DD) — z nich se skládá záznam faktury
   const iso = d => d.getFullYear() + '-' + String(d.getMonth()+1).padStart(2,'0') + '-' + String(d.getDate()).padStart(2,'0')
 
+  // Barva pracovníka. Když ji ještě nemá, přidělí se teď — ať má rámeček
+  // hned první faktura, ne až ta druhá.
+  const barvaFaktury = await zajistiBarvuFaktury(workerId, prof)
+
   renderInvoice({
     invoiceNum, today: fmt(today), dueDate: fmt(dueDate),
     workerName, workerAddr, workerIC, workerVat, isVatPayer,
@@ -19742,7 +19829,7 @@ async function generateInvoiceMob(lang = 'en', override = null) {
     customer: cust0,
     // Kód karty z CRM (X12) a barva pracovníka — kód se tiskne pod číslo faktury,
     // barva dělá slabý rámeček. Obojí je z profilu; kód se pak uloží i k faktuře.
-    crmCode: prof.crm_code || '', invoiceColorIdx: prof.invoice_color ?? null,
+    crmCode: prof.crm_code || '', invoiceColorIdx: barvaFaktury,
     // pro uložení do složky Faktury (nezobrazuje se na faktuře)
     workerId, byAdmin: !!override, supplierType: prof.supplier_type || 'osoba',
     issueISO: iso(today), dueISO: iso(dueDate),
@@ -23916,7 +24003,7 @@ async function updateWdInvoiceHours() {
   // Množství je jednička, takže do částky patří celý týden — ne hodinová sazba.
   if (priceEl && priceEl.value.trim() === '' && amount > 0) priceEl.value = amount
   prepocitatPolozky('wd-inv')
-  await predvyplnitCisloFaktury(currentWorkerId, year, 'wd-inv')
+  await predvyplnitCisloFaktury(currentWorkerId, year, 'wd-inv', week)
 }
 
 // Vytvoří fakturu za pracovníka z admin formuláře
