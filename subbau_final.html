@@ -2307,6 +2307,18 @@ button:not(.x-close) > svg:first-child{margin-right:6px}
           <select id="inv-week-sel" onchange="onInvoiceWeekChange()" style="width:100%;padding:10px;border:1.5px solid var(--brd);border-radius:8px;font-size:14px;font-family:inherit;box-sizing:border-box"></select>
         </div>
 
+        <!-- Číslo faktury si určuje pracovník sám: rok je daný, dopisuje jen pořadí
+             svých faktur (01, 02, 03…). Appka mu předvyplní další volné číslo. -->
+        <div class="fg" style="margin-bottom:12px">
+          <label style="font-size:12px">Číslo faktury</label>
+          <div style="display:flex;align-items:center;gap:8px">
+            <span id="inv-num-year" style="font-size:18px;font-weight:800;letter-spacing:.02em;color:var(--text2)">————</span>
+            <input id="inv-num-seq" type="text" inputmode="numeric" maxlength="2" placeholder="01"
+              style="width:74px;padding:10px;border:1.5px solid var(--brd);border-radius:8px;font-size:18px;font-weight:800;text-align:center;font-family:inherit;box-sizing:border-box">
+            <span style="font-size:12px;color:var(--text3);line-height:1.35">Pořadí vaší faktury<br>v tomto roce</span>
+          </div>
+        </div>
+
         <!-- Fakturovaná položka: anglický popis toho, co pracovník ten týden opravdu dělal.
              Text se poskládá z jeho zápisů v docházce a přeloží do angličtiny — proto ta
              výzva ke kontrole. Odběratel je Němec, takže položka musí být anglicky. -->
@@ -2318,7 +2330,30 @@ button:not(.x-close) > svg:first-child{margin-right:6px}
           </div>
           <textarea id="inv-item" rows="2" spellcheck="false" oninput="rememberInvoiceItem()" placeholder="Construction work" style="width:100%;padding:9px;border:1px solid var(--brd);border-radius:8px;font-size:15px;font-family:inherit;box-sizing:border-box;resize:vertical;background:#fff;line-height:1.45;min-height:52px;max-height:190px;overflow-y:auto"></textarea>
           <div id="inv-item-note" style="font-size:12.5px;color:var(--text2);margin-top:6px;line-height:1.5">Text je anglicky, protože fakturu čte německý odběratel. Můžete ho přepsat.</div>
+
+          <!-- Množství a cena k první položce. Množství se předvyplní odpracovanými
+               hodinami za vybraný týden, cena sazbou — na faktuře se ale slovo
+               „hodiny" neobjeví, je to prostě množství krát cena za jednotku. -->
+          <div style="display:flex;gap:7px;margin-top:9px">
+            <div style="flex:1;min-width:0">
+              <label style="font-size:11px;color:var(--text3);display:block;margin-bottom:3px">Množství</label>
+              <input id="inv-qty" type="number" step="0.01" min="0" oninput="prepocitatPolozky()" style="width:100%;padding:9px;border:1px solid var(--brd);border-radius:8px;font-size:15px;font-family:inherit;box-sizing:border-box;background:#fff">
+            </div>
+            <div style="width:78px;flex-shrink:0">
+              <label style="font-size:11px;color:var(--text3);display:block;margin-bottom:3px">Jednotka</label>
+              <input id="inv-unit" type="text" maxlength="8" placeholder="hod" style="width:100%;padding:9px;border:1px solid var(--brd);border-radius:8px;font-size:15px;font-family:inherit;box-sizing:border-box;background:#fff">
+            </div>
+            <div style="flex:1;min-width:0">
+              <label style="font-size:11px;color:var(--text3);display:block;margin-bottom:3px">Cena za jedn. (€)</label>
+              <input id="inv-price" type="number" step="0.01" min="0" oninput="prepocitatPolozky()" style="width:100%;padding:9px;border:1px solid var(--brd);border-radius:8px;font-size:15px;font-family:inherit;box-sizing:border-box;background:#fff">
+            </div>
+          </div>
         </div>
+
+        <!-- Další položky. Prázdné, dokud si někdo nepřidá řádek. -->
+        <div id="inv-items-extra"></div>
+        <button type="button" onclick="pridatPolozkuFaktury()" style="width:100%;padding:10px;margin-bottom:8px;background:none;border:1.5px dashed var(--brd);border-radius:10px;font-size:13.5px;font-weight:700;color:var(--text2);cursor:pointer;font-family:inherit">+ Přidat další položku</button>
+        <div id="inv-items-total" style="text-align:right;font-size:15px;font-weight:800;margin-bottom:14px">Celkem: 0.00 €</div>
 
         <div id="inv-customer-info" style="background:var(--bg);border-radius:10px;padding:10px 12px;margin-bottom:14px;font-size:12px;color:var(--text2)">
           <div style="display:flex;align-items:center;gap:6px;font-weight:700;font-size:12px;margin-bottom:3px;color:var(--text)">
@@ -10928,6 +10963,7 @@ function invoiceDataFromRow(r, extra) {
   const e = extra || {}
   return {
     invoiceNum: r.invoice_number || '',
+    items: Array.isArray(r.items) ? r.items : null,
     // Kód zůstává tak, jak byl v době vystavení — faktura je daňový doklad.
     // Barva je naopak vlastnost pracovníka, tu předává volající v `extra`.
     crmCode: r.crm_code || '',
@@ -15500,6 +15536,117 @@ async function translateToEn(text) {
 }
 
 // Přepnutí týdne → nový popis práce. Ručně upravený text pro daný týden má přednost.
+// ===== POLOŽKY FAKTURY =====
+// První položka má svoje pole přímo ve formuláři (popis se překládá z docházky),
+// další si pracovník i admin přidávají tlačítkem. Držíme je v poli, ať se dají
+// přidávat a mazat, aniž by se sahalo do DOM víc, než je nutné.
+window._invExtraPolozky = []
+
+function _cislo(v) { const n = parseFloat(String(v ?? '').replace(',', '.')); return Number.isFinite(n) ? n : 0 }
+
+function vykreslitDalsiPolozky() {
+  const box = document.getElementById('inv-items-extra')
+  if (!box) return
+  box.innerHTML = window._invExtraPolozky.map((pol, i) => `
+    <div style="border:1.5px solid var(--brd);border-radius:12px;padding:10px 11px;margin-bottom:8px;background:#fff">
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:6px">
+        <span style="font-size:12px;font-weight:800;color:var(--text2)">Položka ${i + 2}</span>
+        <button type="button" onclick="smazatPolozkuFaktury(${i})" style="background:none;border:1px solid var(--brd);border-radius:7px;padding:3px 9px;font-size:12px;color:var(--red);cursor:pointer;font-family:inherit">Odebrat</button>
+      </div>
+      <textarea rows="2" placeholder="Popis položky" oninput="zmenitPolozku(${i},'popis',this.value)" style="width:100%;padding:9px;border:1px solid var(--brd);border-radius:8px;font-size:15px;font-family:inherit;box-sizing:border-box;resize:vertical;background:#fff;line-height:1.45">${escAttr(pol.popis || '')}</textarea>
+      <div style="display:flex;gap:7px;margin-top:7px">
+        <div style="flex:1;min-width:0">
+          <label style="font-size:11px;color:var(--text3);display:block;margin-bottom:3px">Množství</label>
+          <input type="number" step="0.01" min="0" value="${pol.mnozstvi ?? ''}" oninput="zmenitPolozku(${i},'mnozstvi',this.value)" style="width:100%;padding:9px;border:1px solid var(--brd);border-radius:8px;font-size:15px;font-family:inherit;box-sizing:border-box">
+        </div>
+        <div style="width:78px;flex-shrink:0">
+          <label style="font-size:11px;color:var(--text3);display:block;margin-bottom:3px">Jednotka</label>
+          <input type="text" maxlength="8" placeholder="ks" value="${escAttr(pol.jednotka || '')}" oninput="zmenitPolozku(${i},'jednotka',this.value)" style="width:100%;padding:9px;border:1px solid var(--brd);border-radius:8px;font-size:15px;font-family:inherit;box-sizing:border-box">
+        </div>
+        <div style="flex:1;min-width:0">
+          <label style="font-size:11px;color:var(--text3);display:block;margin-bottom:3px">Cena za jedn. (€)</label>
+          <input type="number" step="0.01" min="0" value="${pol.cena ?? ''}" oninput="zmenitPolozku(${i},'cena',this.value)" style="width:100%;padding:9px;border:1px solid var(--brd);border-radius:8px;font-size:15px;font-family:inherit;box-sizing:border-box">
+        </div>
+      </div>
+    </div>`).join('')
+  prepocitatPolozky()
+}
+
+function pridatPolozkuFaktury() {
+  // Deset řádků je strop — faktura se tiskne na jednu A4 a víc už by se na ni
+  // muselo vejít tak, že by se zmenšila celá stránka včetně hlaviček.
+  if (window._invExtraPolozky.length >= 9) { showToast('⚠️ Na jednu fakturu se vejde deset položek'); return }
+  window._invExtraPolozky.push({ popis: '', mnozstvi: '', jednotka: '', cena: '' })
+  vykreslitDalsiPolozky()
+}
+
+function smazatPolozkuFaktury(i) {
+  window._invExtraPolozky.splice(i, 1)
+  vykreslitDalsiPolozky()
+}
+
+// Zapisujeme do pole, ne překreslujeme — jinak by psaní v textovém poli poskakovalo.
+function zmenitPolozku(i, klic, hodnota) {
+  if (!window._invExtraPolozky[i]) return
+  window._invExtraPolozky[i][klic] = hodnota
+  if (klic === 'mnozstvi' || klic === 'cena') prepocitatPolozky()
+}
+
+// Všechny položky faktury dohromady — první z pevných polí, zbytek z pole.
+// Prázdné řádky se zahodí, ať se na faktuře neobjeví nic bez popisu i ceny.
+function sebratPolozkyFaktury(prvniPopis) {
+  const prvni = {
+    popis: String(prvniPopis ?? document.getElementById('inv-item')?.value ?? '').trim(),
+    mnozstvi: _cislo(document.getElementById('inv-qty')?.value),
+    jednotka: String(document.getElementById('inv-unit')?.value || '').trim(),
+    cena: _cislo(document.getElementById('inv-price')?.value),
+  }
+  const dalsi = window._invExtraPolozky.map(pol => ({
+    popis: String(pol.popis || '').trim(),
+    mnozstvi: _cislo(pol.mnozstvi),
+    jednotka: String(pol.jednotka || '').trim(),
+    cena: _cislo(pol.cena),
+  }))
+  return [prvni, ...dalsi].filter(pol => pol.popis !== '' || pol.mnozstvi || pol.cena)
+}
+
+function soucetPolozek(polozky) {
+  return Math.round(polozky.reduce((s, pol) => s + pol.mnozstvi * pol.cena, 0) * 100) / 100
+}
+
+function prepocitatPolozky() {
+  const el = document.getElementById('inv-items-total')
+  if (!el) return
+  el.textContent = 'Celkem: ' + soucetPolozek(sebratPolozkyFaktury()).toFixed(2) + ' €'
+}
+
+// ===== ČÍSLO FAKTURY =====
+// Formát je rok + dvouciferné pořadí, které si pracovník vede sám (202601, 202602…).
+// Předvyplní se další volné číslo podle jeho už vystavených faktur v tomhle roce.
+async function dalsiCisloFaktury(workerId, rok) {
+  try {
+    const { data } = await sb.from('worker_invoices')
+      .select('invoice_number').eq('worker_id', workerId).like('invoice_number', String(rok) + '%')
+    let nejvyssi = 0
+    ;(data || []).forEach(r => {
+      const m = /^(\d{4})(\d{2})$/.exec(String(r.invoice_number || '').trim())
+      if (m && m[1] === String(rok)) nejvyssi = Math.max(nejvyssi, parseInt(m[2], 10) || 0)
+    })
+    return String(Math.min(99, nejvyssi + 1)).padStart(2, '0')
+  } catch (e) {
+    return '01'
+  }
+}
+
+// Doplní rok a další volné pořadí do formuláře. Co si člověk přepíše, neměníme.
+async function predvyplnitCisloFaktury(workerId, rok) {
+  const rokEl = document.getElementById('inv-num-year')
+  const seqEl = document.getElementById('inv-num-seq')
+  if (rokEl) rokEl.textContent = String(rok)
+  if (!seqEl || seqEl.value.trim() !== '') return
+  seqEl.value = await dalsiCisloFaktury(workerId, rok)
+}
+
 async function onInvoiceWeekChange() {
   const sel = document.getElementById('inv-week-sel')
   const itemEl = document.getElementById('inv-item')
@@ -15508,6 +15655,30 @@ async function onInvoiceWeekChange() {
   const v = sel.value || ''
   if (!v) return
   const [week, year] = v.split('/')
+
+  // Množství se předvyplní odpracovanými hodinami za ten týden a cena sazbou —
+  // na faktuře se ale slovo „hodiny" neobjeví, je to prostě množství × cena.
+  // Co si člověk přepíše, se už nepřepisuje zpátky.
+  try {
+    const qtyEl = document.getElementById('inv-qty')
+    const priceEl = document.getElementById('inv-price')
+    if (qtyEl && qtyEl.value.trim() === '') {
+      const { data: att } = await sb.from('attendance').select('total_hours')
+        .eq('worker_id', currentUser?.id).eq('kw', parseInt(week)).eq('kw_year', parseInt(year))
+      const hodiny = (att || []).reduce((sum, r) => sum + (r.total_hours || 0), 0)
+      if (hodiny > 0) qtyEl.value = hodiny.toFixed(2)
+      const unitEl = document.getElementById('inv-unit')
+      if (unitEl && unitEl.value.trim() === '') unitEl.value = 'hod'
+    }
+    if (priceEl && priceEl.value.trim() === '') {
+      const sazba = isRateFromProvize(currentProfile)
+        ? parseFloat(currentProfile?.hourly_rate_worker)
+        : parseFloat(document.getElementById('inv-rate')?.value)
+      if (Number.isFinite(sazba) && sazba > 0) priceEl.value = sazba
+    }
+    prepocitatPolozky()
+    await predvyplnitCisloFaktury(currentUser?.id, parseInt(year))
+  } catch (e) { console.warn('[faktura] předvyplnění položky:', e?.message) }
 
   const own = lsGet(_invItemKey(week, year))
   if (own && own.trim()) {
@@ -19322,10 +19493,21 @@ async function generateInvoiceMob(lang = 'en', override = null) {
   if (attErr) { showToast('⚠️ Docházku se nepodařilo načíst — zkuste to prosím znovu'); return }
 
   const totalHours = (att || []).reduce((s,r) => s + (r.total_hours||0), 0)
-  const totalAmount = Math.round(totalHours * rate * 100) / 100
+  // Položky faktury. Jsou zdrojem částky — když existují, hodiny × sazba se
+  // už nepočítá. Hodiny se ale dál ukládají, drží přehled faktur v adminu.
+  const polozkyFaktury = (override && Array.isArray(override.items) && override.items.length)
+    ? override.items
+    : (typeof sebratPolozkyFaktury === 'function' ? sebratPolozkyFaktury() : [])
+  const maPolozky = polozkyFaktury.length > 0
+  const totalAmount = maPolozky
+    ? soucetPolozek(polozkyFaktury)
+    : Math.round(totalHours * rate * 100) / 100
 
   // Faktura na 0 h je skoro vždycky zapomenutý odchod, ne skutečnost.
-  if (totalHours <= 0) {
+  // Faktura s položkami stojí na tom, co je v nich — na paušál nebo za kusy se
+  // fakturovat dá i v týdnu bez zapsané docházky. Varování proto jen u faktury,
+  // která se pořád počítá z hodin.
+  if (totalHours <= 0 && !maPolozky) {
     const stejne = confirm('Za týden ' + week + '/' + year + ' není zapsaná žádná odpracovaná doba.\n\n'
       + 'Faktura by byla na 0 hodin a 0 €. Nejspíš chybí zapsaný odchod — ozvěte se SubBau.\n\n'
       + 'Opravdu chcete fakturu vystavit?')
@@ -19345,7 +19527,14 @@ async function generateInvoiceMob(lang = 'en', override = null) {
   const dueDate = new Date(today.getTime())
   dueDate.setDate(dueDate.getDate() + dueDays)
   const fmt = d => d.toLocaleDateString('en-GB').replace(/\//g, '.')
-  const invoiceNum = `${year}${week.toString().padStart(2,'0')}`
+  // Číslo faktury si určuje pracovník (nebo admin) sám: rok + dvouciferné pořadí
+  // jeho faktur v tomhle roce. Když políčko chybí nebo je prázdné, spadne se
+  // zpátky na starý tvar rok+týden, ať se faktura vystaví za každou cenu.
+  const zadaneCislo = String(override?.invoiceNum ?? document.getElementById('inv-num-seq')?.value ?? '').trim()
+  const cisloSeq = /^\d{1,2}$/.test(zadaneCislo) ? zadaneCislo.padStart(2, '0') : ''
+  const invoiceNum = cisloSeq
+    ? `${year}${cisloSeq}`
+    : (String(override?.invoiceNum || '').trim() || `${year}${week.toString().padStart(2,'0')}`)
 
   // Popis plnění pro finanční úřad: CO se dělalo, KDY (přesné období) a KOLIK hodin.
   // Hlavní řádek anglicky (čte ho německý odběratel), pod ním překlad DE · CZ.
@@ -19424,6 +19613,9 @@ async function generateInvoiceMob(lang = 'en', override = null) {
     swift, dueDays,
     serviceDesc, serviceDescTrans, serviceDescSub, periodFrom, periodTo,
     totalHours, rate, totalAmount, week, year,
+    // Položky faktury. Hodiny a sazba se dál ukládají do databáze (drží přehled,
+    // třídění a statistiky v adminu), ale na fakturu se už netisknou.
+    items: polozkyFaktury,
     customer: cust0,
     // Kód karty z CRM (X12) a barva pracovníka — kód se tiskne pod číslo faktury,
     // barva dělá slabý rámeček. Obojí je z profilu; kód se pak uloží i k faktuře.
@@ -19472,6 +19664,33 @@ function renderInvoice(d, lang = 'en') {
   const itemFont = rawItem.length > 260 ? '8pt' : rawItem.length > 150 ? '9pt' : '10pt'
   const itemDescTrans = d.serviceDescTrans ? escHtml(d.serviceDescTrans) : ''
   const itemDescSub = d.serviceDescSub ? escHtml(d.serviceDescSub) : ''
+
+  // Položky faktury. Nová faktura je nese v d.items (popis, množství, jednotka,
+  // cena za jednotku) a hodiny se na ní neuvádějí. Stará faktura items nemá a
+  // tiskne se po starém — jeden řádek „hodiny × sazba". Faktura je daňový doklad,
+  // takže se už vystavená tímhle nesmí změnit; proto ta dvě těla tabulky.
+  const polozky = (Array.isArray(d.items) ? d.items : []).filter(pol => pol && (
+    String(pol.popis || '').trim() !== '' || Number(pol.mnozstvi) || Number(pol.cena)
+  ))
+  const jePolozkova = polozky.length > 0
+
+  // Jeden řádek tabulky položek. Období plnění a překlad patří jen k prvnímu —
+  // pod každým řádkem by se to opakovalo zbytečně.
+  const radekPolozky = (pol, prvni) => {
+    const mnozstvi = Number(pol.mnozstvi) || 0
+    const cena = Number(pol.cena) || 0
+    const jednotka = String(pol.jednotka || '').trim()
+    const popisRaw = String(pol.popis || '')
+    const popis = escHtml(popisRaw).replace(/\r?\n/g, '<br>')
+    const font = popisRaw.length > 200 ? '8pt' : popisRaw.length > 110 ? '9pt' : '9.5pt'
+    const castka = Math.round(mnozstvi * cena * 100) / 100
+    return `<tr style="border-bottom:1px solid #ececec">
+            <td style="padding:9px 8px 9px 0;font-size:${font};font-weight:600">${popis}${prvni && itemDescSub ? `<div style="font-size:8pt;font-weight:400;color:#9a9a9a;margin-top:2px">${itemDescSub}</div>` : ''}</td>
+            <td style="padding:9px 8px;text-align:center;font-size:9.5pt;white-space:nowrap">${mnozstvi.toFixed(2)}${jednotka ? ' ' + escHtml(jednotka) : ''}</td>
+            <td style="padding:9px 8px;text-align:right;font-size:9.5pt;white-space:nowrap">${cena.toFixed(2)} €</td>
+            <td style="padding:9px 0 9px 8px;text-align:right;font-size:10pt;font-weight:700;white-space:nowrap">${castka.toFixed(2)} €</td>
+          </tr>`
+  }
 
   // Trojjazyčné popisky (CZ · DE · EN) — výstup je vždy 3jazyčný
   const L = {
@@ -19609,12 +19828,14 @@ function renderInvoice(d, lang = 'en') {
           </tr>
         </thead>
         <tbody>
-          <tr style="border-bottom:1px solid #ececec">
+          ${jePolozkova
+            ? polozky.map((pol, i) => radekPolozky(pol, i === 0)).join('')
+            : `<tr style="border-bottom:1px solid #ececec">
             <td style="padding:11px 8px 11px 0;font-size:${itemFont};font-weight:600">${itemDesc}${itemDescTrans ? `<div style="font-size:8.5pt;font-weight:500;color:#5a5a5a;margin-top:2px">${itemDescTrans}</div>` : ''}${itemDescSub ? `<div style="font-size:8pt;font-weight:400;color:#9a9a9a;margin-top:2px">${itemDescSub}</div>` : ''}</td>
-            <td style="padding:11px 8px;text-align:center;font-size:9.5pt;white-space:nowrap">${d.totalHours.toFixed(2)}</td>
-            <td style="padding:11px 8px;text-align:right;font-size:9.5pt;white-space:nowrap">${d.rate.toFixed(2)} €</td>
-            <td style="padding:11px 0 11px 8px;text-align:right;font-size:10pt;font-weight:700;white-space:nowrap">${d.totalAmount.toFixed(2)} €</td>
-          </tr>
+            <td style="padding:11px 8px;text-align:center;font-size:9.5pt;white-space:nowrap">${(Number(d.totalHours) || 0).toFixed(2)}</td>
+            <td style="padding:11px 8px;text-align:right;font-size:9.5pt;white-space:nowrap">${(Number(d.rate) || 0).toFixed(2)} €</td>
+            <td style="padding:11px 0 11px 8px;text-align:right;font-size:10pt;font-weight:700;white-space:nowrap">${(Number(d.totalAmount) || 0).toFixed(2)} €</td>
+          </tr>`}
         </tbody>
       </table>
     </div>
@@ -19829,6 +20050,9 @@ function invoiceRowFromLast(sentVia) {
     worker_id: d.workerId,
     invoice_number: String(d.invoiceNum || ''),
     crm_code: d.crmCode || null,
+    // Položky faktury. NULL u faktury vystavené ještě na hodiny × sazbu —
+    // podle toho se pozná, že se má tisknout po starém.
+    items: (Array.isArray(d.items) && d.items.length) ? d.items : null,
     kw: parseInt(d.week) || null,
     kw_year: parseInt(d.year) || null,
     period_from: d.periodFromISO || null,
