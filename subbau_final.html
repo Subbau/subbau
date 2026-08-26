@@ -2752,14 +2752,15 @@ button:not(.x-close) > svg:first-child{margin-right:6px}
           <div style="display:flex;gap:7px;margin-bottom:8px">
             <div style="flex:1;min-width:0">
               <label style="font-size:11px;color:var(--text3);display:block;margin-bottom:3px">Množství</label>
-              <input type="number" step="0.01" min="0" id="wd-inv-qty" oninput="prepocitatPolozky('wd-inv')" style="width:100%;font-size:12px;padding:8px;border:1.5px solid var(--brd);border-radius:8px;font-family:inherit;box-sizing:border-box">
+              <input type="number" id="wd-inv-qty" value="1" readonly style="width:100%;font-size:12px;padding:8px;border:1.5px solid var(--brd);border-radius:8px;font-family:inherit;box-sizing:border-box;background:var(--bg);color:var(--text2)">
             </div>
             <div style="flex:1;min-width:0">
-              <label style="font-size:11px;color:var(--text3);display:block;margin-bottom:3px">Cena za jedn. (€)</label>
-              <input type="number" step="0.01" min="0" id="wd-inv-price" oninput="prepocitatPolozky('wd-inv')" style="width:100%;font-size:12px;padding:8px;border:1.5px solid var(--brd);border-radius:8px;font-family:inherit;box-sizing:border-box">
+              <label style="font-size:11px;color:var(--text3);display:block;margin-bottom:3px">Připadá na položku (€)</label>
+              <input type="number" id="wd-inv-price" readonly style="width:100%;font-size:12px;padding:8px;border:1.5px solid var(--brd);border-radius:8px;font-family:inherit;box-sizing:border-box;background:var(--bg);font-weight:700">
             </div>
           </div>
           <div id="wd-inv-items-extra"></div>
+          <div id="wd-inv-items-warn" style="display:none;font-size:12px;color:var(--red);font-weight:700;margin-bottom:8px"></div>
           <button type="button" onclick="pridatPolozkuFaktury('wd-inv')" style="width:100%;padding:9px;margin-bottom:8px;background:none;border:1.5px dashed var(--brd);border-radius:9px;font-size:12.5px;font-weight:700;color:var(--text2);cursor:pointer;font-family:inherit">+ Přidat další položku</button>
           <div id="wd-inv-items-total" style="text-align:right;font-size:14px;font-weight:800;margin-bottom:10px">Celkem: 0.00 €</div>
           <div id="wd-inv-hours" style="background:var(--bg);border-radius:8px;padding:8px 10px;font-size:12px;color:var(--text2);margin-bottom:10px">Vyberte týden…</div>
@@ -7756,6 +7757,15 @@ const INVOICE_COLORS = [
 function invoiceColor(idx) {
   if (idx == null || idx < 0) return null
   return INVOICE_COLORS[idx % INVOICE_COLORS.length]
+}
+
+// Průsvitný odstín té samé barvy — na podklady a linky. Skládá se z rgba(),
+// ne z osmimístného hexu: ten html2canvas při převodu do PDF neumí spolehlivě.
+function invoiceColorRgba(idx, pruhlednost) {
+  const hex = invoiceColor(idx)
+  if (!hex) return null
+  const n = parseInt(hex.slice(1), 16)
+  return 'rgba(' + ((n >> 16) & 255) + ',' + ((n >> 8) & 255) + ',' + (n & 255) + ',' + pruhlednost + ')'
 }
 
 // Uvolní barvu pracovníka, aby ji mohl dostat někdo jiný. Volá se při
@@ -15726,7 +15736,11 @@ function castkaPolozky(pol) {
 // Nesmí ji změnit, jen si zvolit, na kolik položek si ji rozepíše — peníze se
 // mezi ně rozdělí rovným dílem. Admin může s částkami hýbat, jak potřebuje.
 window._invTydenniCastka = 0
-function zamcenaCastka(pre) { return pre === 'inv' }
+
+// Kde platí, že celková částka je daná hodinami × sazbou a položky si ji jen
+// dělí: ve formuláři pracovníka i v tom tvém při vystavování. Neplatí to
+// v dialogu úprav už vystavené faktury — tam se opravuje a musí jít všechno.
+function zamcenaCastka(pre) { return pre === 'inv' || pre === 'wd-inv' }
 
 // První položka je zbytek. Pracovník si u dalších položek napíše, kolik na ně
 // připadá, a o tolik se první sníží — součet tak vždycky sedí na hodiny × sazbu.
@@ -19879,6 +19893,13 @@ function renderInvoice(d, lang = 'en') {
   // jednotku) a hodiny se na ní neuvádějí. Stará faktura items nemá a
   // tiskne se po starém — jeden řádek „hodiny × sazba". Faktura je daňový doklad,
   // takže se už vystavená tímhle nesmí změnit; proto ta dvě těla tabulky.
+  // Barva pracovníka na faktuře: plná na číslo a nadpisy, průsvitná na podklady
+  // a linky. Když barvu nemá (nespuštěná migrace, vyčerpaná paleta), zůstanou
+  // původní firemní odstíny — faktura vypadá jako dřív.
+  const barvaF = invoiceColor(d.invoiceColorIdx)
+  const barvaPodklad = invoiceColorRgba(d.invoiceColorIdx, 0.07)
+  const barvaLinka = invoiceColorRgba(d.invoiceColorIdx, 0.35)
+
   const polozky = (Array.isArray(d.items) ? d.items : []).filter(pol => pol && (
     String(pol.popis || '').trim() !== '' || Number(pol.mnozstvi) || Number(pol.cena)
   ))
@@ -19963,8 +19984,8 @@ function renderInvoice(d, lang = 'en') {
         </div>
       </div>
       <div style="text-align:right">
-        <div style="display:inline-block;background:#faf6ee;border:1.5px solid #E8A13A;padding:5px 14px;border-radius:8px">
-          <span style="font-size:7pt;color:#8B5930;letter-spacing:.5px">Č. · Nr. · No.&nbsp;&nbsp;</span><span style="font-size:13pt;font-weight:800;color:#211D1A;vertical-align:middle">${d.invoiceNum}</span>
+        <div style="display:inline-block;background:${barvaPodklad || '#faf6ee'};border:1.5px solid ${barvaF || '#E8A13A'};padding:5px 14px;border-radius:8px">
+          <span style="font-size:7pt;color:${barvaF || '#8B5930'};letter-spacing:.5px">Č. · Nr. · No.&nbsp;&nbsp;</span><span style="font-size:13pt;font-weight:800;color:#211D1A;vertical-align:middle">${d.invoiceNum}</span>
         </div>
         ${d.crmCode ? `<div style="font-size:8pt;font-weight:800;letter-spacing:.06em;color:${invoiceColor(d.invoiceColorIdx) || '#8B5930'};margin-top:3px">${d.crmCode}</div>` : ''}
       </div>
@@ -19981,7 +20002,9 @@ function renderInvoice(d, lang = 'en') {
           ${d.workerAddr ? `<div style="font-size:9pt;color:#5a5a5a;margin-bottom:2px">${escHtml(d.workerAddr)}</div>` : ''}
           ${d.workerIC ? `<div style="font-size:9pt;color:#5a5a5a">${L.id}: <b style="color:#211D1A">${escHtml(d.workerIC)}</b></div>` : ''}
           ${d.workerVat ? `<div style="font-size:9pt;color:#5a5a5a">${L.vatId}: <b style="color:#211D1A">${escHtml(d.workerVat)}</b></div>` : ''}
-          <div style="display:inline-block;font-size:8pt;font-weight:700;margin-top:6px;padding:3px 10px;border-radius:20px;${d.isVatPayer ? 'color:#1a56a0;background:#e8f0fb;border:1px solid #b8cdec' : 'color:#7a6a55;background:#f6f4ef;border:1px solid #e0d8c9'}">${L.vatNote}</div>
+          <div style="display:inline-block;font-size:8pt;font-weight:700;margin-top:6px;padding:3px 10px;border-radius:20px;${barvaF
+            ? `color:${barvaF};background:${barvaPodklad};border:1px solid ${barvaLinka}`
+            : (d.isVatPayer ? 'color:#1a56a0;background:#e8f0fb;border:1px solid #b8cdec' : 'color:#7a6a55;background:#f6f4ef;border:1px solid #e0d8c9')}">${L.vatNote}</div>
         </td>
         <td style="width:50%;vertical-align:top;padding:15px 30px 15px 16px;border-left:1px solid #ececec">
           <div style="font-size:7pt;font-weight:700;text-transform:uppercase;color:#9a9a9a;letter-spacing:1px;margin-bottom:6px">${L.customer}</div>
@@ -20011,8 +20034,8 @@ function renderInvoice(d, lang = 'en') {
         </td>
       </tr>
       <tr>
-        <td colspan="3" style="padding:0 30px 9px;border-top:1px dotted #ddd">
-          <div style="font-size:6.5pt;font-weight:700;text-transform:uppercase;color:#C4573A;letter-spacing:.8px;padding-top:7px;margin-bottom:3px">${L.paymentInfo}</div>
+        <td colspan="3" style="padding:0 30px 9px;border-top:1px solid ${barvaLinka || '#ddd'};background:${barvaPodklad || 'transparent'}">
+          <div style="font-size:6.5pt;font-weight:700;text-transform:uppercase;color:${barvaF || '#C4573A'};letter-spacing:.8px;padding-top:7px;margin-bottom:3px">${L.paymentInfo}</div>
           <table style="border-collapse:collapse">
             <tr>
               <td style="padding:0 20px 0 0;white-space:nowrap"><span style="font-size:7pt;color:#9a9a9a">${L.iban}</span> <b style="font-size:9pt">${escHtml(d.iban || '')}</b></td>
@@ -24005,8 +24028,10 @@ async function updateWdInvoiceHours() {
   const qtyEl = document.getElementById('wd-inv-qty')
   const priceEl = document.getElementById('wd-inv-price')
   if (qtyEl) qtyEl.value = '1'
-  if (priceEl) priceEl.value = amount > 0 ? amount : ''
-  prepocitatPolozky('wd-inv')
+  // Celková částka za týden — položky si ji pak mezi sebe rozdělí stejně
+  // jako u pracovníka: co se napíše k dalším, o to se sníží první.
+  window._invTydenniCastka = amount > 0 ? amount : 0
+  rozpocitatCastku('wd-inv')
   await predvyplnitCisloFaktury(currentWorkerId, year, 'wd-inv', week)
 }
 
