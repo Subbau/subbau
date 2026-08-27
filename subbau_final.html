@@ -21706,8 +21706,17 @@ const pdfFillState = {
   contractId: null, fileUrl: null, pdfBytes: null,
   pdfDoc: null, page: 1, total: 1, scale: 1.5,
   viewport: null, fontSize: 16,
-  fields: [], hadSaved: false
+  fields: [], hadSaved: false,
+  // 'uprava' = text jde přepisovat a posouvat (vyrábí se načisto z podkladu)
+  // 'dopis'  = někdo podepsal až po vzniku podkladu, jde jen dopsat text navrch
+  rezim: 'uprava',
+  zakladOd: null      // kdy vznikl podklad smlouvy (null = ještě není)
 }
+
+// Podklad = snímek smlouvy pořízený při prvním vyplnění, i s podpisem, který v ní
+// tehdy už byl. Text se do něj pokaždé vypaluje načisto, takže jde slova opravovat
+// a posouvat, a podpis přitom zůstává na místě.
+function fillBasePath(contractId) { return 'signed/' + contractId + '_fillbase.pdf' }
 window.pdfFillState = pdfFillState
 
 // Po nahrání smlouvy: zeptej se, jestli chce admin do PDF nejdřív dopsat text
@@ -21739,6 +21748,9 @@ function fillChoiceConfirm(wantsFill) {
 }
 
 async function openPdfFillModal(contractId, title, fileUrl) {
+  // Do smlouvy píše jen SubBau. OSVČ ji smí přečíst a podepsat, nic víc — tlačítko
+  // má jen admin, ale funkce je dostupná i z konzole prohlížeče, tak ať je jistota.
+  if (currentProfile?.role !== 'admin') { showToast('🔒 Smlouvu smí upravovat jen SubBau'); return }
   if (!fileUrl) { showToast('❌ Smlouva nemá PDF'); return }
   pdfFillState.contractId = contractId
   pdfFillState.fileUrl = fileUrl
@@ -21759,66 +21771,62 @@ async function openPdfFillModal(contractId, title, fileUrl) {
     // Když sloupec fill_fields chybí (neproběhla migrace), zeptáme se bez něj,
     // ať se okno otevře jako dřív a jen se nedá upravovat.
     let saved = null
-    const SEL = 'signature_url,admin_signature_url,company_signature_url'
+    const SEL = 'signature_url,admin_signature_url,company_signature_url,signed_at,admin_signed_at,company_signed_at'
     try {
-      let r = await sb.from('contracts').select(SEL + ',fill_fields').eq('id', contractId).maybeSingle()
-      if (r.error && /fill_fields/.test(r.error.message || '')) {
+      let r = await sb.from('contracts').select(SEL + ',fill_fields,fill_base_at').eq('id', contractId).maybeSingle()
+      if (r.error && /fill_fields|fill_base_at/.test(r.error.message || '')) {
         r = await sb.from('contracts').select(SEL).eq('id', contractId).maybeSingle()
       }
       saved = r.data || null
     } catch(e) { console.warn('[smlouva] stav smlouvy se nenačetl:', e?.message) }
 
-    // Podepsanou smlouvu přepisovat nelze — podpis je vypálený ve stejném PDF
-    // a přepsáním textu bychom ho smazali.
-    if (saved && (saved.signature_url || saved.admin_signature_url || saved.company_signature_url)) {
-      if (loading) loading.style.display = 'none'
-      closePdfFillModal()
-      showToast('🔒 Smlouva je už podepsaná — text v ní měnit nejde')
-      return
-    }
-
     const ulozenaPole = Array.isArray(saved && saved.fill_fields) ? saved.fill_fields : []
+    const zakladOd = saved && saved.fill_base_at ? new Date(saved.fill_base_at).getTime() : null
+    pdfFillState.zakladOd = zakladOd
+
+    // Nezáleží na tom, JESTLI je smlouva podepsaná, ale KDY se podepsala. Podpis,
+    // který v PDF byl už při vzniku podkladu — typicky u smlouvy nahrané rovnou
+    // podepsané námi — je součástí podkladu a při přepsání textu zůstane.
+    // Podpis přidaný AŽ POTOM (podepsání uvnitř aplikace) je jen v aktuálním PDF;
+    // vyrobit stránku znovu z podkladu by ho smazalo, proto se přepne na dopisování.
+    const podpisPoZakladu = zakladOd != null &&
+      [saved.signed_at, saved.admin_signed_at, saved.company_signed_at]
+        .some(t => t && new Date(t).getTime() > zakladOd)
+    pdfFillState.rezim = podpisPoZakladu ? 'dopis' : 'uprava'
 
     await ensureLib('pdfjs')
     if (typeof pdfjsLib === 'undefined') throw new Error('PDF viewer se nenačetl')
     pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js'
 
-    // Píše se VŽDY do původní verze, ne do té s už vypáleným textem — jinak by
-    // se opravená slova otiskla přes ta stará. Zálohu si vyžádáme rovnou tady,
-    // aby existovala i u smluv, které se dosud nikdy neměnily.
-    if (loading) loading.textContent = 'Připravuji původní verzi…'
+    // Do čeho se bude psát.
     let bytes = null
-    const origUrl = await ensureContractOriginal(contractId)
-    if (origUrl) {
+    if (pdfFillState.rezim === 'uprava' && zakladOd != null) {
+      if (loading) loading.textContent = 'Načítám podklad smlouvy…'
       try {
-        const r = await fetch(origUrl, { cache:'no-store', mode:'cors', credentials:'omit' })
+        const r = await fetch(contractPublicUrl(fillBasePath(contractId)), { cache:'no-store', mode:'cors', credentials:'omit' })
         if (r.ok) bytes = await r.arrayBuffer()
-      } catch(e) { console.warn('[smlouva] původní verze nešla stáhnout:', e?.message) }
-    }
-    if (!bytes && ulozenaPole.length) {
-      // Původní verze se nestáhla, ale text už jednou uložený je. Kdybychom pustili
-      // úpravu dál, psalo by se do PDF s vypáleným textem a při dalším otevření by
-      // se vycházelo z původní verze — dřívější slova by z PDF zmizela. Radši stop.
-      if (loading) loading.style.display = 'none'
-      closePdfFillModal()
-      showToast('❌ Původní verzi smlouvy se nepodařilo načíst — zkuste to prosím za chvíli znovu')
-      return
+      } catch(e) { console.warn('[smlouva] podklad se nenačetl:', e?.message) }
+      if (!bytes) {
+        // Bez podkladu bychom text vypálili podruhé přes ten, co v PDF už je.
+        pdfFillState.rezim = 'dopis'
+        showToast('⚠️ Podklad smlouvy se nenačetl — dřívější text upravit nejde, můžete jen dopsat další')
+      } else {
+        pdfFillState.hadSaved = ulozenaPole.length > 0
+        pdfFillState.fields = ulozenaPole.map(f => ({
+          page: Number(f.page) || 1,
+          x: Number(f.x) || 0,
+          y: Number(f.y) || 0,
+          size: Number(f.size) || 12,
+          text: String(f.text == null ? '' : f.text)
+        }))
+      }
     }
     if (!bytes) {
-      // U smlouvy, do které se ještě nic nepsalo, se nic ztratit nemůže — píše se
-      // rovnou do aktuálního PDF, přesně jako dřív.
+      // První vyplnění (podklad teprve vznikne při uložení) nebo dopisování —
+      // v obou případech se vychází z aktuálního PDF i s podpisy, které v něm jsou.
       const resp = await fetch(fileUrl, { mode:'cors', credentials:'omit' })
       if (!resp.ok) throw new Error('PDF nelze stáhnout (HTTP '+resp.status+')')
       bytes = await resp.arrayBuffer()
-    } else {
-      pdfFillState.hadSaved = ulozenaPole.length > 0
-      pdfFillState.fields = ulozenaPole.map(f => ({
-        page: Number(f.page) || 1,
-        x: Number(f.x) || 0,
-        y: Number(f.y) || 0,
-        size: Number(f.size) || 12,
-        text: String(f.text == null ? '' : f.text)
-      }))
     }
     pdfFillState.pdfBytes = bytes
     if (loading) loading.textContent = 'Načítám PDF…'
@@ -21829,6 +21837,7 @@ async function openPdfFillModal(contractId, title, fileUrl) {
     await pdfFillRenderPage(1)
     if (loading) loading.style.display = 'none'
     if (pdfFillState.fields.length) showToast('✏️ Dřív napsaný text načten — přepište ho nebo posuňte')
+    else if (pdfFillState.rezim === 'dopis') showToast('🔒 Smlouva je podepsaná — text v ní jde jen dopsat, ne přepsat')
   } catch(e) {
     // Závoj je position:absolute přes celý dialog — kdyby zůstal viset,
     // pohltí kliknutí na křížek Zavřít a z okna se nedá dostat ven.
@@ -22006,6 +22015,7 @@ function pdfFillMakeDraggable(handle, wrap, f) {
 }
 
 async function pdfFillSave() {
+  if (currentProfile?.role !== 'admin') { showToast('🔒 Smlouvu smí upravovat jen SubBau'); return }
   const filled = pdfFillState.fields.filter(f => (f.text||'').trim())
   // Prázdno se smí uložit jen tehdy, když se dřívější text maže — smlouva se tím
   // vrátí do původní podoby. U nevyplněné smlouvy je to skoro jistě omyl.
@@ -22070,15 +22080,42 @@ async function pdfFillSave() {
       // Vedle hotového PDF se uloží i samotná pole — jen díky nim jde text
       // příště upravit místo psaní odznova. Když sloupec chybí (neproběhla
       // migrace), uloží se aspoň PDF a admin se to dozví.
+      // Pole se ukládají jen z režimu úpravy. V režimu dopisování sedí navrch PDF,
+      // které už text i podpis obsahuje — uložit je jako „všechen text ve smlouvě"
+      // by znamenalo, že by se při příští úpravě otiskla podruhé.
+      const jeUprava = pdfFillState.rezim === 'uprava'
+
+      // První vyplnění: odložíme si smlouvu tak, jak vypadá teď — bez dopsaného textu,
+      // ale i s podpisem, který v ní už je. Z tohohle podkladu se text příště vypálí
+      // načisto, takže půjde opravovat, a podpis se přitom neztratí.
+      let novyZaklad = null
+      if (jeUprava && pdfFillState.zakladOd == null) {
+        if (loading) loading.textContent = 'Ukládám podklad pro pozdější úpravy…'
+        const zb = new Blob([pdfFillState.pdfBytes.slice(0)], { type:'application/pdf' })
+        const { error: zErr } = await sb.storage.from('contracts')
+          .upload(fillBasePath(pdfFillState.contractId), zb, { contentType:'application/pdf', upsert:true })
+        if (zErr) console.warn('[smlouva] podklad se neuložil:', zErr.message)
+        else novyZaklad = new Date().toISOString()
+      }
+      // Bez podkladu nemá smysl pole ukládat — nebylo by je z čeho vyrobit načisto.
+      const ukladatPole = jeUprava && (pdfFillState.zakladOd != null || !!novyZaklad)
+
+      const upd = { file_url: publicUrl }
+      if (ukladatPole) {
+        upd.fill_fields = filled
+        if (novyZaklad) upd.fill_base_at = novyZaklad
+      }
+
       let bezMigrace = false
-      let { error: dbErr } = await updateContractFile(pdfFillState.contractId, { file_url: publicUrl, fill_fields: filled })
-      if (dbErr && /fill_fields/.test(dbErr.message || '')) {
+      let { error: dbErr } = await updateContractFile(pdfFillState.contractId, upd)
+      if (ukladatPole && dbErr && /fill_fields|fill_base_at/.test(dbErr.message || '')) {
         bezMigrace = true
         ;({ error: dbErr } = await updateContractFile(pdfFillState.contractId, { file_url: publicUrl }))
       }
       if (dbErr) showToast('⚠️ PDF uloženo, ale záznam smlouvy se nepodařilo aktualizovat')
       else if (bezMigrace) showToast('⚠️ PDF uloženo. Text ale příště upravit nepůjde — spusťte migraci supabase-migrace-upravitelny-text-smlouvy.sql')
-      else showToast(pdfFillState.hadSaved ? '✅ Text ve smlouvě upraven' : '✅ Vyplněné PDF uloženo')
+      else if (!ukladatPole) showToast('✅ Text dopsán do PDF (upravit ho příště nepůjde)')
+      else showToast(pdfFillState.hadSaved ? '✅ Text ve smlouvě upraven' : '✅ Vyplněné PDF uloženo — příště půjde upravit')
       loadAdminContracts()
       // Pokud pokračujeme na výběr místa podpisu, ať se otevře už s vyplněnou verzí
       if (_pdfFillThenSignPlace && _pdfFillThenSignPlace.contractId === pdfFillState.contractId) {
@@ -22099,8 +22136,8 @@ async function loadAdminContracts() {
   // fill_fields = dřív dopsaný text. Bez migrace sloupec neexistuje a dotaz by
   // spadl — pak se zeptáme znovu bez něj, ať se seznam smluv vůbec zobrazí.
   const CSEL = 'id,title,status,file_url,signature_url,admin_signature_url,signed_at,admin_signed_at,created_at,company_signed_at,company_signature_url,company_signer_name,worker_sign_page, worker:profiles!worker_id(full_name)'
-  let { data, error: cErr } = await sb.from('contracts').select(CSEL + ',fill_fields').order('created_at',{ascending:false})
-  if (cErr && /fill_fields/.test(cErr.message || '')) {
+  let { data, error: cErr } = await sb.from('contracts').select(CSEL + ',fill_fields,fill_base_at').order('created_at',{ascending:false})
+  if (cErr && /fill_fields|fill_base_at/.test(cErr.message || '')) {
     ;({ data, error: cErr } = await sb.from('contracts').select(CSEL).order('created_at',{ascending:false}))
   }
   const div = document.getElementById('contracts-list')
@@ -22126,7 +22163,7 @@ async function loadAdminContracts() {
           ${!c.signature_url?`<button onclick="openSignForWorker('${c.id}','${(c.title||'').replace(/'/g,"\'")}','${c.file_url||''}')" style="margin-top:4px;width:100%;padding:5px 8px;background:var(--green);color:#fff;border:none;border-radius:6px;cursor:pointer;font-size:11px;font-weight:700;font-family:inherit"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:1em;height:1em;flex-shrink:0;vertical-align:-2px"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/></svg> Podepsat za OSVČ</button>`:''}
           ${!c.signature_url && c.file_url?`<button onclick="openWorkerSignPlaceModal('${c.id}','${(c.title||'').replace(/'/g,"\'")}','${c.file_url||''}')" style="margin-top:4px;width:100%;padding:5px 8px;background:${c.worker_sign_page?'#e8f5e9':'none'};border:1px solid ${c.worker_sign_page?'#2e7d32':'#9c3b22'};color:${c.worker_sign_page?'#2e7d32':'#9c3b22'};border-radius:6px;cursor:pointer;font-size:11px;font-weight:700;font-family:inherit">📍 ${c.worker_sign_page?'Místo podpisu nastaveno (změnit)':'Určit místo podpisu OSVČ'}</button>`:''}
           ${c.company_signed_at?`<div style="font-size:10px;color:var(--green);margin-top:3px">🏢 Firma podepsala: ${c.company_signed_at.slice(0,10)}${c.company_signer_name?' ('+c.company_signer_name+')':''}</div>`:''}
-          ${c.file_url && !c.signature_url && !c.admin_signature_url && !c.company_signature_url?`<button onclick="openPdfFillModal('${c.id}','${(c.title||'').replace(/'/g,String.fromCharCode(39))}','${c.file_url}')" style="margin-top:4px;width:100%;padding:5px 8px;background:none;border:1px solid var(--amber,#E8A13A);color:#9a6b15;border-radius:6px;cursor:pointer;font-size:11px;font-weight:700;font-family:inherit"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:1em;height:1em;flex-shrink:0;vertical-align:-2px"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/></svg> ${(c.fill_fields && c.fill_fields.length) ? 'Upravit text v PDF' : 'Vyplnit / dopsat do PDF'}</button>`:''}
+          ${c.file_url?`<button onclick="openPdfFillModal('${c.id}','${(c.title||'').replace(/'/g,String.fromCharCode(39))}','${c.file_url}')" style="margin-top:4px;width:100%;padding:5px 8px;background:none;border:1px solid var(--amber,#E8A13A);color:#9a6b15;border-radius:6px;cursor:pointer;font-size:11px;font-weight:700;font-family:inherit"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:1em;height:1em;flex-shrink:0;vertical-align:-2px"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/></svg> ${(c.fill_fields && c.fill_fields.length) ? 'Upravit text v PDF' : 'Vyplnit / dopsat do PDF'}</button>`:''}
           <button onclick="openCompanyLinkModal('${c.id}','${(c.title||'').replace(/'/g,"\'")}')" style="margin-top:4px;width:100%;padding:5px 8px;background:none;border:1px solid var(--blue);color:var(--blue);border-radius:6px;cursor:pointer;font-size:11px;font-weight:700;font-family:inherit"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:1em;height:1em;flex-shrink:0;vertical-align:-2px"><path d="M10 13a5 5 0 0 0 7 0l3-3a5 5 0 0 0-7-7l-1 1"/><path d="M14 11a5 5 0 0 0-7 0l-3 3a5 5 0 0 0 7 7l1-1"/></svg> Odkaz pro firmu</button>
           <button onclick="deleteContract('${c.id}','${(c.title||'').replace(/'/g,"\'")}','${c.file_url||''}','${c.admin_signature_url||''}','${c.signature_url||''}')" style="margin-top:4px;width:100%;padding:4px 8px;background:none;border:1px solid var(--red);color:var(--red);border-radius:6px;cursor:pointer;font-size:10px;font-family:inherit"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:1em;height:1em;flex-shrink:0;vertical-align:-2px"><path d="M3 6h18M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6M14 11v6"/></svg> Smazat smlouvu</button>
         </div>
@@ -25434,3 +25471,4 @@ document.addEventListener('visibilitychange', () => {
   </div>
 </div>
 </body>
+</html>
