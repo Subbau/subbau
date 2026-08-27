@@ -22,6 +22,17 @@
 
 const SUPABASE_URL = 'https://ceefzlkjnrclfpmhgdmr.supabase.co';
 
+const crypto = require('crypto');
+
+// Porovnání hesla, které trvá vždycky stejně dlouho. U běžného === se dá podle
+// doby odpovědi heslo uhodnout znak po znaku.
+function hesloSedi(zadane, spravne) {
+  const a = Buffer.from(String(zadane));
+  const b = Buffer.from(String(spravne));
+  if (a.length !== b.length) return false;
+  try { return crypto.timingSafeEqual(a, b); } catch (e) { return false; }
+}
+
 // Kolik dní předem upozorňujeme (stejná hodnota je i v appce)
 const WARN_DAYS = 30;
 // Aby stejný doklad nespamoval každý den — další připomínka nejdřív za tolik dní
@@ -142,16 +153,24 @@ function workerEmailHtml({ name, docLabel, validUntil, daysLeft }) {
 }
 
 module.exports = async function handler(req, res) {
-  // Endpoint chráníme heslem, ať ho nemůže spouštět kdokoliv.
-  // Vercel Cron se hlásí vlastní hlavičkou, tu bereme také.
+  // Endpoint smí spustit jen ten, kdo zná CRON_SECRET.
+  //
+  // Dřív stačilo poslat hlavičku User-Agent s textem „vercel-cron" — jenže tu si
+  // nastaví kdokoli jedním příkazem, takže to žádná ochrana nebyla. Kdo znal
+  // adresu, mohl robota spouštět opakovaně: rozesílat pracovníkům e-maily,
+  // umlčet skutečnou ranní připomínku na 14 dní a číst si jména a doklady.
+  //
+  // Vercel Cron posílá heslo sám v hlavičce Authorization: Bearer <CRON_SECRET>,
+  // jakmile je proměnná nastavená — na hádání podle User-Agent tedy není důvod.
   const secret = process.env.CRON_SECRET;
-  const provided = String(req.query?.secret ?? req.headers['x-cron-secret'] ?? '');
-  const fromVercelCron = String(req.headers['user-agent'] ?? '').includes('vercel-cron');
-  // Zamčeno i tehdy, když CRON_SECRET nikdo nenastavil. Dřív se v tom případě
-  // kontrola přeskočila a robota mohl spustit kdokoli z internetu — a pracovníkům
-  // by chodily připomínky pořád dokola. Bez hesla projde už jen Vercel Cron.
-  const allowed = fromVercelCron || (!!secret && provided === secret);
-  if (!allowed) {
+  if (!secret) {
+    // Bez nastaveného hesla radši neběžet vůbec, než běžet komukoli na požádání.
+    res.status(503).json({ ok: false, error: 'cron_secret_not_configured' });
+    return;
+  }
+  const bearer = String(req.headers['authorization'] ?? '').replace(/^Bearer\s+/i, '');
+  const provided = String(req.query?.secret ?? req.headers['x-cron-secret'] ?? bearer);
+  if (!hesloSedi(provided, secret)) {
     res.status(401).json({ ok: false, error: 'unauthorized' });
     return;
   }
@@ -294,7 +313,11 @@ module.exports = async function handler(req, res) {
       });
     }
 
-    res.status(200).json({ ok: true, checked: docs.length, notified: results.length, results });
+    // V odpovědi schválně nejsou jména pracovníků ani jejich doklady — kdyby se
+    // heslo někdy dostalo ven, ať s ním neunikne rovnou seznam lidí ve firmě.
+    // Podrobnosti zůstávají v logu nasazení ve Vercelu.
+    const problemy = results.filter((r) => r.error).map((r) => r.error);
+    res.status(200).json({ ok: true, checked: docs.length, notified: results.length, problemy });
   } catch (e) {
     res.status(500).json({ ok: false, error: String(e?.message || e) });
   }

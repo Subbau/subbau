@@ -3856,7 +3856,24 @@ async function saveWorkerSignPlacement() {
     const upd = {}
     if (hasTexts) upd.file_url = fileUrl
     if (hasSig) { upd.worker_sign_page = wspState.page; upd.worker_sign_x = wspState.x; upd.worker_sign_y = wspState.y }
-    const { error } = await sb.from('contracts').update(upd).eq('id', wspState.contractId)
+
+    // Tohle je DRUHÁ cesta, kterou se do smlouvy píše text (vedle okna „Vyplnit /
+    // dopsat do PDF"). Text se tu vypálí rovnou do PDF a nikde se nepamatuje, kde
+    // je. Kdyby zůstal ležet odložený podklad, příští úprava textu by smlouvu
+    // vyrobila načisto z něj — a všechno dopsané tady by z ní beze stopy zmizelo.
+    // Podklad proto zneplatníme; při příštím vyplňování se vyrobí nový z aktuální
+    // podoby smlouvy a text dopsaný tady v ní zůstane.
+    let error
+    if (hasTexts) {
+      try { await sb.storage.from('contracts').remove([fillBasePath(wspState.contractId)]) } catch (e) {}
+      ;({ error } = await updateContractFile(wspState.contractId,
+        { ...upd, fill_fields: null, fill_base_at: null, fill_base_sigs: null }))
+      if (error && /fill_fields|fill_base_at|fill_base_sigs/.test(error.message || '')) {
+        ;({ error } = await updateContractFile(wspState.contractId, upd))
+      }
+    } else {
+      ;({ error } = await sb.from('contracts').update(upd).eq('id', wspState.contractId))
+    }
     if (error) throw new Error(error.message)
     showToast(hasTexts ? '✅ Uloženo (text vepsán do smlouvy)' : '✅ Místo podpisu uloženo')
     closeWorkerSignPlaceModal()
@@ -4298,7 +4315,7 @@ async function submitAdminSignatureWithPlacement() {
 // Po nahrání nové verze se snadno pozná, jestli se opravdu nasadila: otevřete
 // appku, zmáčkněte F12 (na Macu ⌥⌘I) a v konzoli je vypsané tohle datum. Když
 // tam svítí starší, prohlížeč nebo GitHub drží starou verzi.
-const SUBBAU_VERZE = '2026-08-27 21:50 — dopsaný text ve smlouvě jde dohledat a upravit'
+const SUBBAU_VERZE = '2026-08-27 22:10 — opravy z auditu'
 console.log('SubBau docházka — verze ' + SUBBAU_VERZE)
 
 // ============ SUPABASE CONFIG ============
@@ -6074,19 +6091,49 @@ const HISTORIE_PRACOVNIKA = [
   ['provize_payments',   'záznamů o provizích']
 ]
 
-// Zjistí, co po pracovníkovi v databázi zůstalo. Tabulka, která ještě neexistuje
-// (neproběhla migrace), se přeskočí — nesmí to shodit celou kontrolu.
+// Zjistí, co po pracovníkovi v databázi zůstalo.
+//
+// Vrací { nalezeno, selhalo } a ten druhý údaj je důležitější než sám seznam:
+// když se na některou tabulku nepodaří zeptat (výpadek sítě, chyba serveru,
+// změněná oprávnění), NESMÍ to vypadat jako „žádná historie“. Na tuhle odpověď
+// totiž navazuje nevratné smazání účtu, které přes kaskády v databázi zničí
+// i faktury a provize.
+//
+// Chybějící tabulka je jediná výjimka — v tabulce, která neexistuje, nic být
+// nemůže, takže se to za nezjištěný stav nepočítá.
 async function zjistiHistoriiPracovnika(workerId) {
   const nalezeno = []
+  let selhalo = false
   for (const [tabulka, popis] of HISTORIE_PRACOVNIKA) {
     try {
       const { count, error } = await sb.from(tabulka)
         .select('*', { count: 'exact', head: true })
         .eq('worker_id', workerId)
-      if (!error && count) nalezeno.push(count + ' ' + popis)
-    } catch (e) { /* tabulka nemusí být k dispozici */ }
+      if (error) {
+        if (!/does not exist|schema cache|not find the table|relation .* does not exist/i.test(error.message || '')) {
+          console.warn('[historie] tabulka ' + tabulka + ':', error.message)
+          selhalo = true
+        }
+        continue
+      }
+      // Databáze počet nevrátila — nevíme, jestli je prázdná, nebo se dotaz nepovedl.
+      if (count == null) { selhalo = true; continue }
+      if (count) nalezeno.push(count + ' ' + popis)
+    } catch (e) {
+      console.warn('[historie] tabulka ' + tabulka + ':', e?.message)
+      selhalo = true
+    }
   }
-  return nalezeno
+  return { nalezeno, selhalo }
+}
+
+// Odebere pracovníkovi přístup, ale všechno po něm nechá být.
+async function archivujPracovnika(workerId, workerName) {
+  const { error } = await sb.from('profiles')
+    .update({ is_active: false, registration_status: 'removed' }).eq('id', workerId)
+  if (error) { showToast('❌ Chyba: ' + error.message); return false }
+  showToast(`📦 Archivováno: ${workerName} — historie zůstala zachovaná`)
+  return true
 }
 
 // „Smazat účet" dřív bez varování zlikvidovalo docházku, doklady, smlouvy — a přes
@@ -6096,7 +6143,22 @@ async function zjistiHistoriiPracovnika(workerId) {
 // Doopravdy smazat jde jen prázdný účet — typicky po zkušební registraci.
 async function deleteAccountFully(workerId, workerName, email) {
   showToast('⏳ Zjišťuji, co po pracovníkovi zůstalo…')
-  const historie = await zjistiHistoriiPracovnika(workerId)
+  const { nalezeno: historie, selhalo } = await zjistiHistoriiPracovnika(workerId)
+
+  // Nezjištěno není totéž co „nic tam není“. Kdyby se na tohle nehledělo, stačil
+  // by výpadek sítě k tomu, aby appka nabídla smazání pracovníka s odpracovanými
+  // měsíci a fakturami — a ty by přes kaskády v databázi zmizely s ním.
+  if (selhalo) {
+    if (confirm(`U pracovníka „${workerName}“ se nepodařilo ověřit, co po něm zůstalo `
+      + '(odpracovaná doba, faktury, provize…).\n\n'
+      + 'Smazat účet by v takové chvíli mohlo nenávratně zničit historii, takže to appka nedovolí.\n\n'
+      + 'Chcete ho aspoň ARCHIVOVAT? Přístup ztratí, data zůstanou.')) {
+      if (await archivujPracovnika(workerId, workerName)) { loadAccess(); loadWorkers() }
+    } else {
+      showToast('ℹ️ Nic se nezměnilo — zkuste to prosím znovu')
+    }
+    return
+  }
 
   if (historie.length) {
     const souhrn = historie.map(x => '  • ' + x).join('\n')
@@ -6104,12 +6166,7 @@ async function deleteAccountFully(workerId, workerName, email) {
       + 'Smazáním účtu by se tohle všechno nenávratně ztratilo — včetně faktur a provizí.\n\n'
       + 'Místo toho ho ARCHIVUJEME: do aplikace se nepřihlásí a ze seznamů zmizí, '
       + 'ale odpracované hodiny, provize, doklady i smlouvy zůstanou.\n\nArchivovat?')) return
-    const { error } = await sb.from('profiles')
-      .update({ is_active: false, registration_status: 'removed' }).eq('id', workerId)
-    if (error) { showToast('❌ Chyba: ' + error.message); return }
-    showToast(`📦 Archivováno: ${workerName} — historie zůstala zachovaná`)
-    loadAccess()
-    loadWorkers()
+    if (await archivujPracovnika(workerId, workerName)) { loadAccess(); loadWorkers() }
     return
   }
 
@@ -7253,17 +7310,16 @@ async function rejectWorkerRegistration(workerId, workerName) {
   // I čekající registrace může mít za sebou odpracované dny — někdo ji schválí,
   // pracovník začne chodit a teprve pak se registrace řeší znovu. Smazat profil
   // by v takovém případě sebralo i jeho historii, tak se radši nejdřív podíváme.
-  const historie = await zjistiHistoriiPracovnika(workerId)
-  if (historie.length) {
-    const souhrn = historie.map(x => '  • ' + x).join('\n')
-    if (!confirm(`U „${workerName}" už je zapsaná historie:\n\n${souhrn}\n\n`
+  const { nalezeno: historie, selhalo } = await zjistiHistoriiPracovnika(workerId)
+  if (selhalo || historie.length) {
+    const uvod = selhalo
+      ? `U „${workerName}“ se nepodařilo ověřit, jestli už má zapsanou nějakou historii.`
+      : `U „${workerName}" už je zapsaná historie:\n\n${historie.map(x => '  • ' + x).join('\n')}`
+    if (!confirm(`${uvod}\n\n`
       + 'Smazáním profilu by zmizela. Místo toho ho ARCHIVUJEME — přístup mít nebude, historie zůstane.\n\nArchivovat?')) return
-    const { error: aErr } = await sb.from('profiles')
-      .update({ is_active: false, registration_status: 'removed' }).eq('id', workerId)
-    if (aErr) { showToast('Chyba: ' + aErr.message); return }
+    if (!await archivujPracovnika(workerId, workerName)) return
     await clearPendingRegDismissal(workerId)
     forgetPendingRegSeen(workerId)
-    showToast('📦 Archivováno: ' + workerName + ' — historie zůstala')
     loadDashboard()
     if (document.getElementById('v-cekajici-registrace')?.classList.contains('on')) loadPendingRegistrationsPage()
     return
@@ -21353,8 +21409,8 @@ async function resetContractToOriginal(contractId, title) {
     status: 'admin_pending'
   }
   let { error } = await sb.from('contracts')
-    .update({ ...zaklad, fill_fields: null, fill_base_at: null }).eq('id', contractId)
-  if (error && /fill_fields|fill_base_at/.test(error.message || '')) {
+    .update({ ...zaklad, fill_fields: null, fill_base_at: null, fill_base_sigs: null }).eq('id', contractId)
+  if (error && /fill_fields|fill_base_at|fill_base_sigs/.test(error.message || '')) {
     ;({ error } = await sb.from('contracts').update(zaklad).eq('id', contractId))
   }
   if (error) { showToast('❌ Chyba: ' + error.message); return }
@@ -21765,7 +21821,8 @@ const pdfFillState = {
   // 'uprava' = text jde přepisovat a posouvat (vyrábí se načisto z podkladu)
   // 'dopis'  = někdo podepsal až po vzniku podkladu, jde jen dopsat text navrch
   rezim: 'uprava',
-  zakladOd: null      // kdy vznikl podklad smlouvy (null = ještě není)
+  maZaklad: false,    // existuje už odložený podklad smlouvy?
+  podpisyTed: []      // podpisy, které smlouva má ve chvíli otevření
 }
 
 // Podklad = snímek smlouvy pořízený při prvním vyplnění, i s podpisem, který v ní
@@ -21818,18 +21875,16 @@ async function najdiDopsanyText(contractId, aktualniBytes, saved, loading) {
     }))
     if (!fields.length) return null
 
-    // Podpis vzniklý až po odložení původní verze v ní chybí — vyrobit smlouvu
-    // znovu z původní verze by ho smazalo a musel by se udělat nanovo.
-    let podpisPoOriginalu = false
-    try {
-      const { data: list } = await sb.storage.from('contracts').list('signed', { limit: 100, search: contractId })
-      const f = (list || []).find(x => x && x.name === contractId + '_original.pdf')
-      const vznik = f ? new Date(f.created_at || f.updated_at || 0).getTime() : null
-      if (vznik) podpisPoOriginalu = [saved && saved.signed_at, saved && saved.admin_signed_at, saved && saved.company_signed_at]
-        .some(t => t && new Date(t).getTime() > vznik)
-    } catch (e) { /* stáří původní verze se nepodařilo zjistit */ }
+    // Jestli je podpis součástí původní verze, se z PDF poznat nedá. Podle časů to
+    // taky nejde: původní verze se odkládá TĚSNĚ PŘED zápisem podpisu, takže její
+    // razítko je o zlomek vteřiny NOVĚJŠÍ než podpis — porovnání by pokaždé řeklo
+    // „podpis tam byl", i když v ní prokazatelně není.
+    // Bereme to tedy tak, že podpis v původní verzi není: admin se dozví předem
+    // a po uložení se stav podepsání zruší. Lepší nechat podepsat znovu než mít
+    // v databázi „podepsáno" u smlouvy, ve které podpis nikdo neuvidí.
+    const maPodpis = !!(saved && (saved.signature_url || saved.admin_signature_url || saved.company_signature_url))
 
-    return { fields, origBytes, podpisPoOriginalu }
+    return { fields, origBytes, maPodpis }
   } catch (e) {
     console.warn('[smlouva] dopsaný text se nepodařilo najít:', e?.message)
     return null
@@ -21892,26 +21947,32 @@ async function openPdfFillModal(contractId, title, fileUrl) {
     let saved = null
     const SEL = 'signature_url,admin_signature_url,company_signature_url,signed_at,admin_signed_at,company_signed_at'
     try {
-      let r = await sb.from('contracts').select(SEL + ',fill_fields,fill_base_at').eq('id', contractId).maybeSingle()
-      if (r.error && /fill_fields|fill_base_at/.test(r.error.message || '')) {
+      let r = await sb.from('contracts').select(SEL + ',fill_fields,fill_base_at,fill_base_sigs').eq('id', contractId).maybeSingle()
+      if (r.error && /fill_fields|fill_base_at|fill_base_sigs/.test(r.error.message || '')) {
         r = await sb.from('contracts').select(SEL).eq('id', contractId).maybeSingle()
       }
       saved = r.data || null
     } catch(e) { console.warn('[smlouva] stav smlouvy se nenačetl:', e?.message) }
 
     const ulozenaPole = Array.isArray(saved && saved.fill_fields) ? saved.fill_fields : []
-    const zakladOd = saved && saved.fill_base_at ? new Date(saved.fill_base_at).getTime() : null
-    pdfFillState.zakladOd = zakladOd
+    const maZaklad = !!(saved && saved.fill_base_at)
+    pdfFillState.maZaklad = maZaklad
 
-    // Nezáleží na tom, JESTLI je smlouva podepsaná, ale KDY se podepsala. Podpis,
-    // který v PDF byl už při vzniku podkladu — typicky u smlouvy nahrané rovnou
-    // podepsané námi — je součástí podkladu a při přepsání textu zůstane.
-    // Podpis přidaný AŽ POTOM (podepsání uvnitř aplikace) je jen v aktuálním PDF;
-    // vyrobit stránku znovu z podkladu by ho smazalo, proto se přepne na dopisování.
-    const podpisPoZakladu = zakladOd != null &&
-      [saved.signed_at, saved.admin_signed_at, saved.company_signed_at]
-        .some(t => t && new Date(t).getTime() > zakladOd)
-    pdfFillState.rezim = podpisPoZakladu ? 'dopis' : 'uprava'
+    // Které podpisy smlouva má teď a které měla, když vznikl podklad.
+    //
+    // Rozhoduje se podle SEZNAMU PODPISŮ, ne podle časů. Čas podkladu totiž píše
+    // počítač admina, ale signed_at telefon pracovníka a company_signed_at úplně
+    // cizí počítač firmy. Kdyby některé z těch hodin šly pozadu, vyšlo by, že
+    // podpis v podkladu je — appka by smlouvu vyrobila bez něj a v databázi by
+    // dál svítilo „podepsáno“ u PDF, ve kterém žádný podpis není.
+    const podpisyTed = [
+      saved && saved.signature_url, saved && saved.admin_signature_url, saved && saved.company_signature_url
+    ].filter(Boolean)
+    pdfFillState.podpisyTed = podpisyTed
+    const podpisyVZakladu = Array.isArray(saved && saved.fill_base_sigs) ? saved.fill_base_sigs : []
+    // Podpis, který v podkladu zaznamenaný není, by se přepsáním textu ztratil.
+    const podpisMimoZaklad = podpisyTed.some(u => !podpisyVZakladu.includes(u))
+    pdfFillState.rezim = (maZaklad && podpisMimoZaklad) ? 'dopis' : 'uprava'
 
     await ensureLib('pdfjs')
     if (typeof pdfjsLib === 'undefined') throw new Error('PDF viewer se nenačetl')
@@ -21919,7 +21980,7 @@ async function openPdfFillModal(contractId, title, fileUrl) {
 
     // Do čeho se bude psát.
     let bytes = null
-    if (pdfFillState.rezim === 'uprava' && zakladOd != null) {
+    if (pdfFillState.rezim === 'uprava' && maZaklad) {
       if (loading) loading.textContent = 'Načítám podklad smlouvy…'
       try {
         const r = await fetch(contractPublicUrl(fillBasePath(contractId)), { cache:'no-store', mode:'cors', credentials:'omit' })
@@ -21953,8 +22014,8 @@ async function openPdfFillModal(contractId, title, fileUrl) {
       if (pdfFillState.rezim === 'uprava') {
         const nalez = await najdiDopsanyText(contractId, bytes, saved, loading)
         if (nalez) {
-          const varovani = nalez.podpisPoOriginalu
-            ? '\n\nPozor: podpisy vznikly až potom, takže je bude potřeba udělat znovu.'
+          const varovani = nalez.maPodpis
+            ? '\n\nPozor: podpisy se tím z PDF ztratí a bude potřeba podepsat znovu.'
             : ''
           if (confirm(`Ve smlouvě je ${nalez.fields.length} dopsaných kousků textu.\n\n`
             + `Načíst je k úpravě? Opravíte pak třeba jen jméno a zbytek zůstane, jak je.${varovani}\n\n`
@@ -21964,7 +22025,7 @@ async function openPdfFillModal(contractId, title, fileUrl) {
             pdfFillState.hadSaved = true
             // Podpis, který v původní verzi není, po uložení v PDF nebude — ať tedy
             // ani u smlouvy nesvítí, že je podepsaná, když v ní podpis nikdo neuvidí.
-            pdfFillState.zrusitPodpisy = nalez.podpisPoOriginalu
+            pdfFillState.zrusitPodpisy = nalez.maPodpis
           } else {
             pdfFillState.rezim = 'dopis'
           }
@@ -22007,9 +22068,17 @@ function closePdfFillModal() {
 }
 
 async function pdfFillRenderPage(pageNum) {
+  // Dvě vykreslení nad jedním plátnem se perou: pdf.js to druhé odmítne a na
+  // obrazovce zůstane stará stránka, přestože appka si už myslí, že je vidět nová.
+  // Text napsaný v tu chvíli by se pak vypálil na jinou stránku, než na kterou
+  // admin psal. Rozpracované vykreslení proto zrušíme a pořadovým číslem hlídáme,
+  // že dokreslí jen to poslední.
+  const beh = (pdfFillState.renderSeq = (pdfFillState.renderSeq || 0) + 1)
+  if (pdfFillState.renderTask) { try { pdfFillState.renderTask.cancel() } catch (e) {} }
   pdfFillState.page = pageNum
   document.getElementById('pdf-fill-pageinfo').textContent = pageNum + ' / ' + pdfFillState.total
   const page = await pdfFillState.pdfDoc.getPage(pageNum)
+  if (beh !== pdfFillState.renderSeq) return
   // Zvol scale tak, aby se vešlo na šířku (max 1.8)
   const container = document.getElementById('pdf-fill-scroll')
   const avail = Math.max(320, (container?.clientWidth || 800) - 40)
@@ -22026,15 +22095,33 @@ async function pdfFillRenderPage(pageNum) {
   const stage = document.getElementById('pdf-fill-stage')
   stage.style.width = viewport.width + 'px'
   stage.style.height = viewport.height + 'px'
-  await page.render({ canvasContext: ctx, viewport }).promise
+  const task = page.render({ canvasContext: ctx, viewport })
+  pdfFillState.renderTask = task
+  try {
+    await task.promise
+  } catch (e) {
+    // Zrušené vykreslení není chyba — mezitím se prostě listovalo dál.
+    if (beh !== pdfFillState.renderSeq) return
+    throw e
+  }
+  if (beh !== pdfFillState.renderSeq) return
+  pdfFillState.renderTask = null
 
   // Překresli textová pole patřící této stránce
   document.querySelectorAll('.pdf-fill-field').forEach(el => el.remove())
   pdfFillState.fields.filter(f => f.page === pageNum).forEach(f => pdfFillCreateFieldEl(f))
 }
 
-function pdfFillPrevPage() { if (pdfFillState.page > 1) pdfFillRenderPage(pdfFillState.page - 1) }
-function pdfFillNextPage() { if (pdfFillState.page < pdfFillState.total) pdfFillRenderPage(pdfFillState.page + 1) }
+async function pdfFillPrevPage() {
+  if (pdfFillState.page <= 1) return
+  try { await pdfFillRenderPage(pdfFillState.page - 1) }
+  catch (e) { console.warn('[smlouva] vykreslení stránky:', e?.message) }
+}
+async function pdfFillNextPage() {
+  if (pdfFillState.page >= pdfFillState.total) return
+  try { await pdfFillRenderPage(pdfFillState.page + 1) }
+  catch (e) { console.warn('[smlouva] vykreslení stránky:', e?.message) }
+}
 function pdfFillFontDelta(d) {
   pdfFillState.fontSize = Math.min(48, Math.max(8, pdfFillState.fontSize + d))
   document.getElementById('pdf-fill-fontsize').textContent = pdfFillState.fontSize
@@ -22232,7 +22319,7 @@ async function pdfFillSave() {
       // ale i s podpisem, který v ní už je. Z tohohle podkladu se text příště vypálí
       // načisto, takže půjde opravovat, a podpis se přitom neztratí.
       let novyZaklad = null
-      if (jeUprava && pdfFillState.zakladOd == null) {
+      if (jeUprava && !pdfFillState.maZaklad) {
         if (loading) loading.textContent = 'Ukládám podklad pro pozdější úpravy…'
         const zb = new Blob([pdfFillState.pdfBytes.slice(0)], { type:'application/pdf' })
         const { error: zErr } = await sb.storage.from('contracts')
@@ -22241,12 +22328,17 @@ async function pdfFillSave() {
         else novyZaklad = new Date().toISOString()
       }
       // Bez podkladu nemá smysl pole ukládat — nebylo by je z čeho vyrobit načisto.
-      const ukladatPole = jeUprava && (pdfFillState.zakladOd != null || !!novyZaklad)
+      const ukladatPole = jeUprava && (pdfFillState.maZaklad || !!novyZaklad)
 
       const upd = { file_url: publicUrl }
       if (ukladatPole) {
         upd.fill_fields = filled
-        if (novyZaklad) upd.fill_base_at = novyZaklad
+        if (novyZaklad) {
+          upd.fill_base_at = novyZaklad
+          // K podkladu si uložíme i podpisy, které v něm jsou — podle nich se
+          // příště pozná, jestli mezitím někdo podepsal a text už jde jen dopisovat.
+          upd.fill_base_sigs = pdfFillState.zrusitPodpisy ? [] : (pdfFillState.podpisyTed || [])
+        }
       }
       // Smlouva se vyrobila z verze, ve které podpis ještě nebyl — v novém PDF tedy
       // není. Ať tedy ani u smlouvy nesvítí, že je podepsaná, a dá se podepsat znovu.
@@ -22261,7 +22353,7 @@ async function pdfFillSave() {
 
       let bezMigrace = false
       let { error: dbErr } = await updateContractFile(pdfFillState.contractId, upd)
-      if (ukladatPole && dbErr && /fill_fields|fill_base_at/.test(dbErr.message || '')) {
+      if (ukladatPole && dbErr && /fill_fields|fill_base_at|fill_base_sigs/.test(dbErr.message || '')) {
         bezMigrace = true
         ;({ error: dbErr } = await updateContractFile(pdfFillState.contractId, { file_url: publicUrl }))
       }
@@ -22289,8 +22381,8 @@ async function loadAdminContracts() {
   // fill_fields = dřív dopsaný text. Bez migrace sloupec neexistuje a dotaz by
   // spadl — pak se zeptáme znovu bez něj, ať se seznam smluv vůbec zobrazí.
   const CSEL = 'id,title,status,file_url,signature_url,admin_signature_url,signed_at,admin_signed_at,created_at,company_signed_at,company_signature_url,company_signer_name,worker_sign_page, worker:profiles!worker_id(full_name)'
-  let { data, error: cErr } = await sb.from('contracts').select(CSEL + ',fill_fields,fill_base_at').order('created_at',{ascending:false})
-  if (cErr && /fill_fields|fill_base_at/.test(cErr.message || '')) {
+  let { data, error: cErr } = await sb.from('contracts').select(CSEL + ',fill_fields,fill_base_at,fill_base_sigs').order('created_at',{ascending:false})
+  if (cErr && /fill_fields|fill_base_at|fill_base_sigs/.test(cErr.message || '')) {
     ;({ data, error: cErr } = await sb.from('contracts').select(CSEL).order('created_at',{ascending:false}))
   }
   const div = document.getElementById('contracts-list')
