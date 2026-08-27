@@ -4298,7 +4298,7 @@ async function submitAdminSignatureWithPlacement() {
 // Po nahrání nové verze se snadno pozná, jestli se opravdu nasadila: otevřete
 // appku, zmáčkněte F12 (na Macu ⌥⌘I) a v konzoli je vypsané tohle datum. Když
 // tam svítí starší, prohlížeč nebo GitHub drží starou verzi.
-const SUBBAU_VERZE = '2026-08-27 21:40 — vrácení smlouvy do původní podoby'
+const SUBBAU_VERZE = '2026-08-27 21:50 — dopsaný text ve smlouvě jde dohledat a upravit'
 console.log('SubBau docházka — verze ' + SUBBAU_VERZE)
 
 // ============ SUPABASE CONFIG ============
@@ -21772,6 +21772,69 @@ const pdfFillState = {
 // tehdy už byl. Text se do něj pokaždé vypaluje načisto, takže jde slova opravovat
 // a posouvat, a podpis přitom zůstává na místě.
 function fillBasePath(contractId) { return 'signed/' + contractId + '_fillbase.pdf' }
+
+// Vytáhne z PDF všechna slova i s tím, kde na stránce leží. Souřadnice jsou
+// v bodech PDF, `baseline` je účaří měřené odspodu (tak to PDF počítá).
+async function pdfTextItems(bytes) {
+  const doc = await pdfjsLib.getDocument({ data: bytes.slice(0) }).promise
+  const out = []
+  for (let p = 1; p <= doc.numPages; p++) {
+    const page = await doc.getPage(p)
+    const ph = page.getViewport({ scale: 1 }).height
+    const tc = await page.getTextContent()
+    ;(tc.items || []).forEach(it => {
+      const t = it.transform
+      const text = it.str || ''
+      if (!t || !text.trim()) return
+      // Velikost písma = svislé měřítko textové matice
+      const size = Math.hypot(t[2], t[3]) || Math.hypot(t[0], t[1]) || 12
+      out.push({ page: p, x: t[4], baseline: t[5], size, text, ph })
+    })
+  }
+  try { doc.destroy() } catch (e) {}
+  return out
+}
+
+// Najde text, který někdo do smlouvy dopsal — porovná ji s původní verzí a vezme,
+// co je ve smlouvě navíc. Slouží u smluv vyplněných starší verzí appky, která si
+// pole nepamatovala: díky tomu jde opravit jen jedno jméno a zbytek nechat být,
+// místo aby se muselo všechno smazat a psát znovu.
+async function najdiDopsanyText(contractId, aktualniBytes, saved, loading) {
+  try {
+    if (loading) loading.textContent = 'Hledám dopsaný text…'
+    const r = await fetch(contractPublicUrl('signed/' + contractId + '_original.pdf'),
+      { cache: 'no-store', mode: 'cors', credentials: 'omit' })
+    if (!r.ok) return null
+    const origBytes = await r.arrayBuffer()
+    const [puvodniPolozky, aktualniPolozky] = await Promise.all([
+      pdfTextItems(origBytes), pdfTextItems(aktualniBytes)
+    ])
+    // Text smlouvy zůstal beze změny, takže položky sedí na bod přesně. Co v původní
+    // verzi na stejném místě není, tam někdo dopsal.
+    const klic = i => i.page + '|' + Math.round(i.x) + '|' + Math.round(i.baseline) + '|' + i.text
+    const puvodni = new Set(puvodniPolozky.map(klic))
+    const fields = aktualniPolozky.filter(i => !puvodni.has(klic(i))).map(i => ({
+      page: i.page, x: i.x, y: i.ph - i.baseline - i.size, size: i.size, text: i.text
+    }))
+    if (!fields.length) return null
+
+    // Podpis vzniklý až po odložení původní verze v ní chybí — vyrobit smlouvu
+    // znovu z původní verze by ho smazalo a musel by se udělat nanovo.
+    let podpisPoOriginalu = false
+    try {
+      const { data: list } = await sb.storage.from('contracts').list('signed', { limit: 100, search: contractId })
+      const f = (list || []).find(x => x && x.name === contractId + '_original.pdf')
+      const vznik = f ? new Date(f.created_at || f.updated_at || 0).getTime() : null
+      if (vznik) podpisPoOriginalu = [saved && saved.signed_at, saved && saved.admin_signed_at, saved && saved.company_signed_at]
+        .some(t => t && new Date(t).getTime() > vznik)
+    } catch (e) { /* stáří původní verze se nepodařilo zjistit */ }
+
+    return { fields, origBytes, podpisPoOriginalu }
+  } catch (e) {
+    console.warn('[smlouva] dopsaný text se nepodařilo najít:', e?.message)
+    return null
+  }
+}
 window.pdfFillState = pdfFillState
 
 // Po nahrání smlouvy: zeptej se, jestli chce admin do PDF nejdřív dopsat text
@@ -21811,6 +21874,7 @@ async function openPdfFillModal(contractId, title, fileUrl) {
   pdfFillState.fileUrl = fileUrl
   pdfFillState.fields = []
   pdfFillState.hadSaved = false
+  pdfFillState.zrusitPodpisy = false
   pdfFillState.page = 1
   pdfFillState.fontSize = 16
   document.getElementById('pdf-fill-title').textContent = title || 'Vyplnit smlouvu'
@@ -21882,6 +21946,30 @@ async function openPdfFillModal(contractId, title, fileUrl) {
       const resp = await fetch(fileUrl, { mode:'cors', credentials:'omit' })
       if (!resp.ok) throw new Error('PDF nelze stáhnout (HTTP '+resp.status+')')
       bytes = await resp.arrayBuffer()
+
+      // Smlouva vyplněná starší verzí appky má text vypálený v PDF a žádná pole
+      // uložená nemá. Zkusíme ho dohledat porovnáním s původní verzí — ať se dá
+      // opravit jedno jméno a zbytek nechat, místo psaní všeho odznova.
+      if (pdfFillState.rezim === 'uprava') {
+        const nalez = await najdiDopsanyText(contractId, bytes, saved, loading)
+        if (nalez) {
+          const varovani = nalez.podpisPoOriginalu
+            ? '\n\nPozor: podpisy vznikly až potom, takže je bude potřeba udělat znovu.'
+            : ''
+          if (confirm(`Ve smlouvě je ${nalez.fields.length} dopsaných kousků textu.\n\n`
+            + `Načíst je k úpravě? Opravíte pak třeba jen jméno a zbytek zůstane, jak je.${varovani}\n\n`
+            + 'Když odmítnete, půjde text jen dopisovat.')) {
+            bytes = nalez.origBytes
+            pdfFillState.fields = nalez.fields
+            pdfFillState.hadSaved = true
+            // Podpis, který v původní verzi není, po uložení v PDF nebude — ať tedy
+            // ani u smlouvy nesvítí, že je podepsaná, když v ní podpis nikdo neuvidí.
+            pdfFillState.zrusitPodpisy = nalez.podpisPoOriginalu
+          } else {
+            pdfFillState.rezim = 'dopis'
+          }
+        }
+      }
     }
     pdfFillState.pdfBytes = bytes
     if (loading) loading.textContent = 'Načítám PDF…'
@@ -22159,6 +22247,16 @@ async function pdfFillSave() {
       if (ukladatPole) {
         upd.fill_fields = filled
         if (novyZaklad) upd.fill_base_at = novyZaklad
+      }
+      // Smlouva se vyrobila z verze, ve které podpis ještě nebyl — v novém PDF tedy
+      // není. Ať tedy ani u smlouvy nesvítí, že je podepsaná, a dá se podepsat znovu.
+      if (pdfFillState.zrusitPodpisy) {
+        Object.assign(upd, {
+          signature_url: null, signed_at: null,
+          admin_signature_url: null, admin_signed_at: null,
+          company_signature_url: null, company_signed_at: null, company_signer_name: null,
+          status: 'admin_pending'
+        })
       }
 
       let bezMigrace = false
