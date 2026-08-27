@@ -4298,7 +4298,7 @@ async function submitAdminSignatureWithPlacement() {
 // Po nahrání nové verze se snadno pozná, jestli se opravdu nasadila: otevřete
 // appku, zmáčkněte F12 (na Macu ⌥⌘I) a v konzoli je vypsané tohle datum. Když
 // tam svítí starší, prohlížeč nebo GitHub drží starou verzi.
-const SUBBAU_VERZE = '2026-08-27 21:15 — upravitelný text ve smlouvách'
+const SUBBAU_VERZE = '2026-08-27 21:40 — vrácení smlouvy do původní podoby'
 console.log('SubBau docházka — verze ' + SUBBAU_VERZE)
 
 // ============ SUPABASE CONFIG ============
@@ -21318,6 +21318,54 @@ async function loadContractStorageIndex() {
   return idx
 }
 
+// Vrátí smlouvu do podoby, v jaké se nahrála — z PDF zmizí dopsaný text i podpisy.
+// Je to pojistka pro případ, že se smlouva vyplní špatně. Text jednou vypálený do
+// PDF už z něj nejde rozebrat zpátky na jednotlivá slova (to umí jen smlouvy
+// vyplněné novou appkou, tam stačí „Upravit text v PDF“), ale z odložené původní
+// verze se dá začít načisto.
+async function resetContractToOriginal(contractId, title) {
+  if (currentProfile?.role !== 'admin') { showToast('🔒 Smlouvu smí měnit jen SubBau'); return }
+  const origUrl = contractPublicUrl('signed/' + contractId + '_original.pdf')
+  if (!confirm(`Vrátit smlouvu „${title}“ do původní podoby?\n\n`
+    + 'Z PDF zmizí VŠECHEN dopsaný text i všechny podpisy — smlouva bude zase taková, jaká se nahrála.\n'
+    + 'Text i podpisy pak bude potřeba udělat znovu.\n\nPokračovat?')) return
+  if (!confirm('Opravdu? Dopsaný text se tím nenávratně smaže.')) return
+
+  showToast('⏳ Vracím smlouvu do původní podoby…')
+
+  // Nejdřív ověřit, že se původní verze opravdu stáhne — ať smlouvu neshodíme
+  // na odkaz, který nikam nevede.
+  try {
+    const r = await fetch(origUrl, { cache: 'no-store', mode: 'cors', credentials: 'omit' })
+    if (!r.ok) throw new Error('HTTP ' + r.status)
+  } catch (e) {
+    console.warn('[smlouva] původní verze nedostupná:', e?.message)
+    showToast('❌ Původní verzi se nepodařilo načíst — smlouva zůstala beze změny')
+    return
+  }
+
+  // Podpisy patřily ke staré podobě PDF, takže se ruší i stav podepsání.
+  const zaklad = {
+    file_url: origUrl,
+    signature_url: null, signed_at: null,
+    admin_signature_url: null, admin_signed_at: null,
+    company_signature_url: null, company_signed_at: null, company_signer_name: null,
+    status: 'admin_pending'
+  }
+  let { error } = await sb.from('contracts')
+    .update({ ...zaklad, fill_fields: null, fill_base_at: null }).eq('id', contractId)
+  if (error && /fill_fields|fill_base_at/.test(error.message || '')) {
+    ;({ error } = await sb.from('contracts').update(zaklad).eq('id', contractId))
+  }
+  if (error) { showToast('❌ Chyba: ' + error.message); return }
+
+  // Podklad pro vyplňování patřil ke staré podobě — ať se příště vyrobí nový.
+  try { await sb.storage.from('contracts').remove([fillBasePath(contractId)]) } catch (e) {}
+
+  showToast('↺ Smlouva je zpátky v původní podobě — můžete ji vyplnit znovu')
+  loadAdminContracts()
+}
+
 // Seznam verzí jedné smlouvy, od nepodepsané po nejnovější.
 function contractVersions(c, idx) {
   const out = []
@@ -22172,6 +22220,7 @@ async function loadAdminContracts() {
           ${c.company_signed_at?`<div style="font-size:10px;color:var(--green);margin-top:3px">🏢 Firma podepsala: ${c.company_signed_at.slice(0,10)}${c.company_signer_name?' ('+c.company_signer_name+')':''}</div>`:''}
           ${c.file_url?`<button onclick="openPdfFillModal('${c.id}','${(c.title||'').replace(/'/g,String.fromCharCode(39))}','${c.file_url}')" style="margin-top:4px;width:100%;padding:5px 8px;background:none;border:1px solid var(--amber,#E8A13A);color:#9a6b15;border-radius:6px;cursor:pointer;font-size:11px;font-weight:700;font-family:inherit"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:1em;height:1em;flex-shrink:0;vertical-align:-2px"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/></svg> ${(c.fill_fields && c.fill_fields.length) ? 'Upravit text v PDF' : 'Vyplnit / dopsat do PDF'}</button>`:''}
           <button onclick="openCompanyLinkModal('${c.id}','${(c.title||'').replace(/'/g,"\'")}')" style="margin-top:4px;width:100%;padding:5px 8px;background:none;border:1px solid var(--blue);color:var(--blue);border-radius:6px;cursor:pointer;font-size:11px;font-weight:700;font-family:inherit"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:1em;height:1em;flex-shrink:0;vertical-align:-2px"><path d="M10 13a5 5 0 0 0 7 0l3-3a5 5 0 0 0-7-7l-1 1"/><path d="M14 11a5 5 0 0 0-7 0l-3 3a5 5 0 0 0 7 7l1-1"/></svg> Odkaz pro firmu</button>
+          ${stIdx.originals.has(c.id)?`<button onclick="resetContractToOriginal('${c.id}','${(c.title||'').replace(/'/g,String.fromCharCode(39))}')" title="Smaže z PDF dopsaný text i podpisy a vrátí smlouvu do podoby, v jaké se nahrála" style="margin-top:4px;width:100%;padding:5px 8px;background:none;border:1px solid var(--text3);color:var(--text2);border-radius:6px;cursor:pointer;font-size:11px;font-weight:700;font-family:inherit">↺ Vrátit do původní podoby</button>`:''}
           <button onclick="deleteContract('${c.id}','${(c.title||'').replace(/'/g,"\'")}','${c.file_url||''}','${c.admin_signature_url||''}','${c.signature_url||''}')" style="margin-top:4px;width:100%;padding:4px 8px;background:none;border:1px solid var(--red);color:var(--red);border-radius:6px;cursor:pointer;font-size:10px;font-family:inherit"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:1em;height:1em;flex-shrink:0;vertical-align:-2px"><path d="M3 6h18M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6M14 11v6"/></svg> Smazat smlouvu</button>
         </div>
       </div>
