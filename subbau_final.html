@@ -6054,25 +6054,69 @@ async function toggleWorkerActiveFromAccess(workerId, workerName, isActive) {
 }
 
 
+// Tabulky s historií pracovníka. Smazání profilu neznamená jen ztrátu těchto
+// řádků — faktury a provize na profil v databázi visí přes „on delete cascade",
+// takže zmizí samy od sebe, bez ptaní a bez možnosti to vrátit.
+const HISTORIE_PRACOVNIKA = [
+  ['attendance',         'odpracovaných dnů'],
+  ['vacations',          'záznamů o dovolené nebo nemoci'],
+  ['documents',          'nahraných dokladů'],
+  ['contracts',          'smluv'],
+  ['weekly_hour_sheets', 'týdenních výkazů'],
+  ['worker_invoices',    'faktur'],
+  ['provize_payments',   'záznamů o provizích']
+]
+
+// Zjistí, co po pracovníkovi v databázi zůstalo. Tabulka, která ještě neexistuje
+// (neproběhla migrace), se přeskočí — nesmí to shodit celou kontrolu.
+async function zjistiHistoriiPracovnika(workerId) {
+  const nalezeno = []
+  for (const [tabulka, popis] of HISTORIE_PRACOVNIKA) {
+    try {
+      const { count, error } = await sb.from(tabulka)
+        .select('*', { count: 'exact', head: true })
+        .eq('worker_id', workerId)
+      if (!error && count) nalezeno.push(count + ' ' + popis)
+    } catch (e) { /* tabulka nemusí být k dispozici */ }
+  }
+  return nalezeno
+}
+
+// „Smazat účet" dřív bez varování zlikvidovalo docházku, doklady, smlouvy — a přes
+// kaskádu v databázi i faktury a provize. Teď se nejdřív podívá, co po pracovníkovi
+// zůstalo: když má za sebou odvedenou práci, nabídne místo smazání ARCHIVACI, po
+// které se do aplikace nedostane a ze seznamů zmizí, ale historie zůstane celá.
+// Doopravdy smazat jde jen prázdný účet — typicky po zkušební registraci.
 async function deleteAccountFully(workerId, workerName, email) {
-  if (!confirm(`⚠️ SMAZAT ÚČET pracovníka "${workerName}"?\n\nSmaže se profil i jeho data (docházka, dokumenty, smlouvy).\nTato akce je NEVRATNÁ.\n\nPoužijte jen pro testování registrace.`)) return
-  if (!confirm(`Opravdu definitivně smazat "${workerName}"? Potvrďte ještě jednou.`)) return
+  showToast('⏳ Zjišťuji, co po pracovníkovi zůstalo…')
+  const historie = await zjistiHistoriiPracovnika(workerId)
+
+  if (historie.length) {
+    const souhrn = historie.map(x => '  • ' + x).join('\n')
+    if (!confirm(`Po pracovníkovi „${workerName}" zůstala historie:\n\n${souhrn}\n\n`
+      + 'Smazáním účtu by se tohle všechno nenávratně ztratilo — včetně faktur a provizí.\n\n'
+      + 'Místo toho ho ARCHIVUJEME: do aplikace se nepřihlásí a ze seznamů zmizí, '
+      + 'ale odpracované hodiny, provize, doklady i smlouvy zůstanou.\n\nArchivovat?')) return
+    const { error } = await sb.from('profiles')
+      .update({ is_active: false, registration_status: 'removed' }).eq('id', workerId)
+    if (error) { showToast('❌ Chyba: ' + error.message); return }
+    showToast(`📦 Archivováno: ${workerName} — historie zůstala zachovaná`)
+    loadAccess()
+    loadWorkers()
+    return
+  }
+
+  if (!confirm(`Smazat účet „${workerName}"?\n\nŽádná odpracovaná doba, doklady, smlouvy ani faktury u něj nejsou — nic se neztratí.\n\nTato akce je nevratná.`)) return
 
   showToast('⏳ Mažu účet…')
   try {
-    // Smaž navázaná data (ať se email dá znovu použít a nezůstanou sirotci)
-    await sb.from('attendance').delete().eq('worker_id', workerId)
-    await sb.from('vacations').delete().eq('worker_id', workerId)
-    await sb.from('documents').delete().eq('worker_id', workerId)
-    await sb.from('contracts').delete().eq('worker_id', workerId)
+    // Zbývají jen provozní záznamy, které nemá cenu držet u prázdného účtu.
     await sb.from('login_history').delete().eq('worker_id', workerId)
-    await sb.from('weekly_hour_sheets').delete().eq('worker_id', workerId)
     await sb.from('team_assignments').delete().eq('worker_id', workerId)
-    // Nakonec smaž profil
     const { error } = await sb.from('profiles').delete().eq('id', workerId)
     if (error) { showToast('❌ Chyba: ' + error.message); return }
     showToast(`✅ Účet smazán: ${workerName}`)
-    alert(`Profil "${workerName}" byl smazán.\n\nPokud se nepůjde znovu zaregistrovat se stejným e-mailem (${email}), je to tím, že přihlašovací záznam zůstává v Supabase Authentication. V tom případě ho smažte ručně v Supabase → Authentication → Users, nebo použijte při testu jiný e-mail.`)
+    alert(`Profil „${workerName}" byl smazán.\n\nPokud se nepůjde znovu zaregistrovat se stejným e-mailem (${email}), je to tím, že přihlašovací záznam zůstává v Supabase Authentication. V tom případě ho smažte ručně v Supabase → Authentication → Users, nebo použijte při testu jiný e-mail.`)
     loadAccess()
   } catch (e) {
     showToast('❌ Chyba: ' + (e?.message || e))
@@ -6257,7 +6301,7 @@ async function loadAccess() {
           ✏️ Změnit e-mail / heslo
         </button>
         <button onclick="deleteAccountFully('${w.id}','${w.full_name.replace(/'/g, String.fromCharCode(39))}','${w.email}')"
-          style="padding:5px 10px;font-size:11px;background:#211D1A;color:#ff6b6b;border:1px solid #ff6b6b;border-radius:6px;cursor:pointer;font-family:inherit;font-weight:700;display:block;width:100%"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:1em;height:1em;flex-shrink:0;vertical-align:-2px"><path d="M3 6h18M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6M14 11v6"/></svg> Smazat účet
+          style="padding:5px 10px;font-size:11px;background:#211D1A;color:#ff6b6b;border:1px solid #ff6b6b;border-radius:6px;cursor:pointer;font-family:inherit;font-weight:700;display:block;width:100%"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:1em;height:1em;flex-shrink:0;vertical-align:-2px"><path d="M3 6h18M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6M14 11v6"/></svg> Archivovat / smazat účet
         </button>
       </td>
     </tr>`
@@ -6568,7 +6612,7 @@ async function generateProvizeFirmReport(firmName, mode) {
   try {
     const anchor = new Date(provizeAnchor)
     const [{ data: workers }, { data: provRows }, { data: teams }, { data: companies }] = await Promise.all([
-      sb.from('profiles').select('id, full_name, hourly_rate_worker, team_id').in('role', ['osvec', 'partak']).eq('is_active', true).order('full_name'),
+      sb.from('profiles').select('id, full_name, hourly_rate_worker, team_id, is_active').in('role', ['osvec', 'partak']).order('full_name'),
       sb.from('worker_commissions').select('worker_id, provize'),
       sb.from('teams').select('id, name, company_id'),
       sb.from('companies').select('id, name')
@@ -6602,15 +6646,21 @@ async function generateProvizeFirmReport(firmName, mode) {
     const hoursByWorker = {}
     ;(att || []).forEach(a => { hoursByWorker[a.worker_id] = (hoursByWorker[a.worker_id] || 0) + hoursOf(a) })
 
+    // Bývalý pracovník patří do vyúčtování jen za období, kdy opravdu pracoval.
+    // Kdyby se brali jen aktivní, chyběly by ve vyúčtování hodiny odpracované
+    // těsně před odebráním přístupu — a firmě bychom je nevyfakturovali.
+    const uctovani = members.filter(w => w.is_active !== false || (hoursByWorker[w.id] || 0) > 0)
+    if (!uctovani.length) { showToast('❌ Za toto období nemá firma odpracované hodiny'); return }
+
     const eur = n => n.toLocaleString('cs-CZ', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + ' €'
     let total = 0
-    const rowsHtml = members.map(w => {
+    const rowsHtml = uctovani.map(w => {
       const hrs = hoursByWorker[w.id] || 0
       const prov = provMap[w.id] || 0
       const comm = prov * hrs
       total += comm
       return `<tr>
-        <td style="padding:8px 10px;border:1px solid #ccc">${w.full_name}</td>
+        <td style="padding:8px 10px;border:1px solid #ccc">${w.full_name}${w.is_active === false ? ' (bývalý)' : ''}</td>
         <td style="padding:8px 10px;border:1px solid #ccc;text-align:right">${hrs.toFixed(2)} h</td>
         <td style="padding:8px 10px;border:1px solid #ccc;text-align:right">${prov ? prov.toFixed(2) + ' €/h' : '—'}</td>
         <td style="padding:8px 10px;border:1px solid #ccc;text-align:right;font-weight:700">${eur(comm)}</td>
@@ -6741,8 +6791,23 @@ async function renderProvizeContent() {
   const mStartStr = localDateStr(mStart), mEndStr = localDateStr(mEnd)
   const yStartStr = localDateStr(yStart), yEndStr = localDateStr(yEnd)
 
+  // Bývalí pracovníci, kterým jsme mezitím odebrali přístup. Seznam výše je jen
+  // z aktivních, takže jejich odpracované hodiny se níže zahodily na `if (!bucket)`
+  // — a s hodinami zmizely i provize, které za ně někomu náleží. Doplníme proto
+  // každého, kdo má v zobrazeném období docházku, a označíme ho jako bývalého.
+  let workersAll = workers || []
+  const _znameIds = new Set(workersAll.map(w => w.id))
+  const _chybejici = [...new Set((att || []).map(a => a.worker_id).filter(id => id && !_znameIds.has(id)))]
+  if (_chybejici.length) {
+    const { data: _byvali } = await sb.from('profiles')
+      .select('id, full_name, hourly_rate_worker, team_id')
+      .in('id', _chybejici)
+    workersAll = workersAll.concat((_byvali || []).map(w => ({ ...w, _byvaly: true })))
+    workersAll.sort((a, b) => (a.full_name || '').localeCompare(b.full_name || '', 'cs'))
+  }
+
   const byWorker = {}
-  ;(workers || []).forEach(w => { byWorker[w.id] = { day: 0, week: 0, month: 0, year: 0 } })
+  workersAll.forEach(w => { byWorker[w.id] = { day: 0, week: 0, month: 0, year: 0 } })
   ;(att || []).forEach(a => {
     const bucket = byWorker[a.worker_id]
     if (!bucket) return
@@ -6776,7 +6841,7 @@ async function renderProvizeContent() {
     return { due, overdue: due < todayD }
   }
 
-  const rows = (workers || []).map(w => {
+  const rows = workersAll.map(w => {
     const hrs = byWorker[w.id] || { day: 0, week: 0, month: 0, year: 0 }
     const rate = w.hourly_rate_worker || 0
     const prov = provMap[w.id] || 0
@@ -6785,7 +6850,7 @@ async function renderProvizeContent() {
     const terms = termsMap[w.id] || '7/14'
     const dueInfo = provizeDueInfo(terms)
     return {
-      id: w.id, name: w.full_name, firm: firmOf(w), rate, prov,
+      id: w.id, name: w.full_name + (w._byvaly ? ' (bývalý)' : ''), firm: firmOf(w), rate, prov,
       terms,
       hoursDay: hrs.day, hoursWeek: hrs.week, hoursMonth: hrs.month, hoursYear: hrs.year,
       commDay: prov * hrs.day, commWeek: prov * hrs.week, commMonth: prov * hrs.month, commYear: prov * hrs.year,
@@ -7178,6 +7243,24 @@ async function approveWorkerRegistration(workerId, workerName) {
 }
 
 async function rejectWorkerRegistration(workerId, workerName) {
+  // I čekající registrace může mít za sebou odpracované dny — někdo ji schválí,
+  // pracovník začne chodit a teprve pak se registrace řeší znovu. Smazat profil
+  // by v takovém případě sebralo i jeho historii, tak se radši nejdřív podíváme.
+  const historie = await zjistiHistoriiPracovnika(workerId)
+  if (historie.length) {
+    const souhrn = historie.map(x => '  • ' + x).join('\n')
+    if (!confirm(`U „${workerName}" už je zapsaná historie:\n\n${souhrn}\n\n`
+      + 'Smazáním profilu by zmizela. Místo toho ho ARCHIVUJEME — přístup mít nebude, historie zůstane.\n\nArchivovat?')) return
+    const { error: aErr } = await sb.from('profiles')
+      .update({ is_active: false, registration_status: 'removed' }).eq('id', workerId)
+    if (aErr) { showToast('Chyba: ' + aErr.message); return }
+    await clearPendingRegDismissal(workerId)
+    forgetPendingRegSeen(workerId)
+    showToast('📦 Archivováno: ' + workerName + ' — historie zůstala')
+    loadDashboard()
+    if (document.getElementById('v-cekajici-registrace')?.classList.contains('on')) loadPendingRegistrationsPage()
+    return
+  }
   if (!confirm('Zamítnout registraci pro ' + workerName + '? Profil bude smazán.')) return
   const { error } = await sb.from('profiles').delete().eq('id', workerId)
   if (error) { showToast('Chyba: ' + error.message); return }
@@ -8309,7 +8392,9 @@ async function loadKWData() {
   const kwSubteamById = {}
   ;(kwSubteams||[]).forEach(s => { kwSubteamById[s.id] = s })
 
-  const { data } = await sb.from('attendance').select('*, worker:profiles(full_name,profession)').eq('kw',week).eq('kw_year',year)
+  // is_active z profilu tu potřebujeme kvůli řádkům lidí, kterým jsme mezitím odebrali
+  // přístup — v seznamu výše nejsou, ale jejich odpracované hodiny se dál musí ukázat.
+  const { data } = await sb.from('attendance').select('*, worker:profiles(full_name,profession,is_active)').eq('kw',week).eq('kw_year',year)
 
   // Dovolené v tomto týdnu — ať se u dnů bez docházky ukáže "Dovolená" místo 0h
   const _wkStart = getWeekStartDate(week, year)
@@ -8345,7 +8430,10 @@ async function loadKWData() {
 
   ;(data||[]).forEach(r => {
     const wid = r.worker_id
-    if (!workers[wid]) workers[wid] = { id: wid, name: r.worker?.full_name, prof: r.worker?.profession, days:{}, total:0 }
+    // Kdo není v seznamu výše, ale docházku v tomhle týdnu má — typicky bývalý
+    // pracovník. Řádek mu vytvoříme, ať hodiny z přehledu nezmizí.
+    if (!workers[wid]) workers[wid] = { id: wid, name: r.worker?.full_name, prof: r.worker?.profession,
+      byvaly: r.worker?.is_active === false, days:{}, total:0 }
     const rawDay = new Date(r.work_date).getDay()
     const day = rawDay === 0 ? 7 : rawDay   // neděle 0 → 7 (poslední den týdne)
     let h = r.total_hours || 0
@@ -8464,7 +8552,7 @@ async function loadKWData() {
 
   const kwHtml = list.map(w=>`
     <tr style="cursor:pointer;height:56px" class="kw-row" data-id="${w.id||''}" data-name="${(w.name||'').replace(/"/g,'&quot;')}">
-      <td class="kw-name" title="Klikněte pro otevření profilu pracovníka" style="vertical-align:middle;overflow:hidden"><b>${w.name}</b>${w.blocked?' <span style="font-size:10px;font-weight:700;background:var(--red-l);color:var(--red);border:1px solid #e8c4ba;padding:1px 6px;border-radius:8px;white-space:nowrap" title="Pracovník má dočasně zablokované zapisování docházky">🚫 docházka zablokovaná</span>':''}${(w.firm||w.sub)?`<div style="margin-top:3px">${groupCellHtml(w.firm, w.sub)}</div>`:''}</td><td style="font-size:12px;vertical-align:middle">${profLabel(w.prof)||''}</td>
+      <td class="kw-name" title="Klikněte pro otevření profilu pracovníka" style="vertical-align:middle;overflow:hidden"><b>${w.name}</b>${w.byvaly?' <span style="font-size:10px;font-weight:700;background:var(--bg);color:var(--text3);border:1px solid var(--brd);padding:1px 6px;border-radius:8px;white-space:nowrap" title="Pracovník už do aplikace nemá přístup. Hodiny, které stihl odpracovat, zůstávají v přehledu.">📦 bývalý</span>':''}${w.blocked?' <span style="font-size:10px;font-weight:700;background:var(--red-l);color:var(--red);border:1px solid #e8c4ba;padding:1px 6px;border-radius:8px;white-space:nowrap" title="Pracovník má dočasně zablokované zapisování docházky">🚫 docházka zablokovaná</span>':''}${(w.firm||w.sub)?`<div style="margin-top:3px">${groupCellHtml(w.firm, w.sub)}</div>`:''}</td><td style="font-size:12px;vertical-align:middle">${profLabel(w.prof)||''}</td>
       ${dayCell(w,1)}${dayCell(w,2)}${dayCell(w,3)}${dayCell(w,4)}${dayCell(w,5)}${dayCell(w,6)}${dayCell(w,7)}
       <td style="vertical-align:middle"><b style="color:var(--blue)">${w.total.toFixed(1)}h</b></td>
     </tr>`).join('')
@@ -17373,15 +17461,26 @@ async function initExportForm() {
   if (dEl && !dEl.value) dEl.value = localDateStr()
   const list = document.getElementById('export-worker-list')
   if (!list) return
+  // Bývalí pracovníci se nabídnou taky — jejich odpracovaná doba nikam nezmizela
+  // a občas je potřeba vyexportovat i zpětně. Zaškrtnutí ale nedostanou, aby se
+  // do běžného exportu nepletli; kdo je potřebuje, klikne na ně.
   const { data: workers } = await sb.from('profiles')
-    .select('id, full_name, profession').in('role',['osvec','partak']).eq('is_active',true).order('full_name')
+    .select('id, full_name, profession, is_active').in('role',['osvec','partak']).order('full_name')
   if (!workers?.length) { list.innerHTML = '<div style="text-align:center;color:var(--text3);font-size:13px;padding:10px">Žádní pracovníci</div>'; return }
-  list.innerHTML = workers.map(w => `
-    <label class="export-wrow on" data-name="${(w.full_name||'').toLowerCase().replace(/"/g,'&quot;')}">
-      <input type="checkbox" class="export-wcheck" value="${w.id}" checked onchange="updateExportRowStyle(this)">
-      <span class="ew-name"><b>${w.full_name}</b><small>${profLabel(w.profession)||'—'}</small></span>
+  const serazeni = workers.slice().sort((a, b) => {
+    const ab = a.is_active === false ? 1 : 0, bb = b.is_active === false ? 1 : 0
+    if (ab !== bb) return ab - bb                       // bývalí až na konec seznamu
+    return (a.full_name || '').localeCompare(b.full_name || '', 'cs')
+  })
+  list.innerHTML = serazeni.map(w => {
+    const byvaly = w.is_active === false
+    return `
+    <label class="export-wrow${byvaly ? '' : ' on'}" data-name="${(w.full_name||'').toLowerCase().replace(/"/g,'&quot;')}">
+      <input type="checkbox" class="export-wcheck" value="${w.id}"${byvaly ? '' : ' checked'} onchange="updateExportRowStyle(this)">
+      <span class="ew-name"><b>${w.full_name}${byvaly ? ' (bývalý)' : ''}</b><small>${profLabel(w.profession)||'—'}</small></span>
       <span class="ew-toggle"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg></span>
-    </label>`).join('')
+    </label>`
+  }).join('')
   const srch = document.getElementById('export-worker-search'); if (srch) srch.value = ''
   updateExportCount()
 }
@@ -25335,4 +25434,3 @@ document.addEventListener('visibilitychange', () => {
   </div>
 </div>
 </body>
-</html>
