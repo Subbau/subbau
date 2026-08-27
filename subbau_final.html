@@ -8918,18 +8918,20 @@ async function deleteDocument(docId) {
 //   required   = bez něj pracovníka nepustíme na stavbu
 //   card       = fotí se jako kartička (ořez, srovnání jasu)
 //   twoSides   = má přední a zadní stranu
-//   hasExpiry  = doklad propadá → hlídáme datum platnosti
+//   validityRequired = u toho dokladu chceme datum platnosti povinně (bez něj
+//                nemáme co hlídat). U ostatních je datum nepovinné — admin ho
+//                vyplnit může, appka ho ale nevyžaduje a nepřipomíná.
 // ---------------------------------------------------------------------------
 const DOC_TYPES = [
-  { id:'op',          icon:'🪪', label:'Občanský průkaz',        required:true,  card:true,  twoSides:true,  hasExpiry:true  },
-  { id:'pas',         icon:'📘', label:'Cestovní pas',           required:true,  card:true,  twoSides:false, hasExpiry:true  },
-  { id:'zivnost',     icon:'🏢', label:'Živnostenské oprávnění', required:true,  card:false, twoSides:true,  hasExpiry:false },
-  { id:'a1',          icon:'🇪🇺', label:'Formulář A1',            required:true,  card:false, twoSides:true,  hasExpiry:true  },
-  { id:'a1_zadost',   icon:'📝', label:'Žádost o A1',            required:false, card:false, twoSides:true,  hasExpiry:false },
-  { id:'pobyt',       icon:'🏠', label:'Povolení k pobytu',      required:false, card:true,  twoSides:true,  hasExpiry:true  },
-  { id:'vizum',       icon:'🛂', label:'Vízum',                  required:false, card:true,  twoSides:false, hasExpiry:true  },
-  { id:'freistellung',icon:'📄', label:'Freistellung',           required:false, card:false, twoSides:true,  hasExpiry:true  },
-  { id:'other',       icon:'📎', label:'Jiný dokument',          required:false, card:false, twoSides:false, hasExpiry:false }
+  { id:'op',          icon:'🪪', label:'Občanský průkaz',        required:true,  card:true,  twoSides:true,  validityRequired:true  },
+  { id:'pas',         icon:'📘', label:'Cestovní pas',           required:true,  card:true,  twoSides:false, validityRequired:true  },
+  { id:'zivnost',     icon:'🏢', label:'Živnostenské oprávnění', required:true,  card:false, twoSides:true,  validityRequired:true  },
+  { id:'a1',          icon:'🇪🇺', label:'Formulář A1',            required:true,  card:false, twoSides:true,  validityRequired:true  },
+  { id:'a1_zadost',   icon:'📝', label:'Žádost o A1',            required:false, card:false, twoSides:true,  validityRequired:false },
+  { id:'pobyt',       icon:'🏠', label:'Povolení k pobytu',      required:false, card:true,  twoSides:true,  validityRequired:false },
+  { id:'vizum',       icon:'🛂', label:'Vízum',                  required:false, card:true,  twoSides:false, validityRequired:false },
+  { id:'freistellung',icon:'📄', label:'Freistellung',           required:false, card:false, twoSides:true,  validityRequired:true  },
+  { id:'other',       icon:'📎', label:'Jiný dokument',          required:false, card:false, twoSides:false, validityRequired:false }
 ]
 // Rychlý přístup k jednomu typu
 const DOC_TYPE_BY_ID = {}
@@ -9266,7 +9268,7 @@ async function applyDocTypeChange(id, workerId, newType) {
   }
   const nt = DOC_TYPE_BY_ID[newType]
   showToast('✅ Přeřazeno na: ' + docLabel(newType)
-    + (nt && nt.hasExpiry ? ' — doplňte platnost' : ''))
+    + (nt && nt.validityRequired ? ' — doplňte platnost' : ''))
   if (typeof loadDocumentAlertsStat === 'function') loadDocumentAlertsStat()
   return true
 }
@@ -14082,11 +14084,15 @@ function docTypeHasSecondSide() {
 
 // ---------------------------------------------------------------------------
 // PLATNOST DOKLADŮ
-// U dokladů, které propadají (občanka, pas, A1, Freistellung), musí být datum
-// vyplněné — jinak nemáme co hlídat a nikdo se včas nedozví, že platnost končí.
-// U živnosťáku a "jiného dokumentu" je datum nepovinné, ty obvykle nevyprší.
+// Datum konce platnosti vyžadujeme jen u dokladů, u kterých ho SubBau opravdu
+// hlídá: občanka (i pas místo ní), živnostenské oprávnění, A1 a Freistellung.
+// Bez data u nich nemáme co hlídat a nikdo se včas nedozví, že platnost končí.
+//
+// U všech ostatních (povolení k pobytu, vízum, žádost o A1, jiný dokument…) je
+// datum NEPOVINNÉ — admin ho vyplnit může a pak se hlídá stejně jako u ostatních,
+// appka ho ale nevyžaduje a nepřipomíná, že chybí.
 // ---------------------------------------------------------------------------
-const DOC_VALIDITY_REQUIRED = DOC_TYPES.filter(t => t.hasExpiry).map(t => t.id).concat('ridicak')
+const DOC_VALIDITY_REQUIRED = DOC_TYPES.filter(t => t.validityRequired).map(t => t.id)
 // Kolik dní předem upozorňujeme na blížící se konec platnosti
 const DOC_EXPIRY_WARN_DAYS = 30
 
@@ -14139,8 +14145,12 @@ function updateValidityRequiredMark(typeSelId, starId, hintId) {
   const req = docNeedsValidity(type)
   const star = document.getElementById(starId)
   if (star) star.style.display = req ? 'inline' : 'none'
+  // Text se musí přepsat OBĚMA směry — po přepnutí zpátky na povinný doklad
+  // tu dřív zůstalo viset „Nepovinné" a admin datum vyplnit nemusel.
   const hint = document.getElementById(hintId)
-  if (hint && !req) hint.textContent = 'Nepovinné — vyplňte, pokud doklad má konec platnosti.'
+  if (hint) hint.textContent = req
+    ? 'Opište datum z dokladu. Měsíc před vypršením se to objeví na dashboardu a pracovníkovi přijde upozornění.'
+    : 'Nepovinné — u tohoto dokladu platnost hlídat nemusíte. Když ji vyplníte, appka na její konec upozorní stejně jako u ostatních.'
 }
 
 // Kontrola zadaného data platnosti. Vrací chybovou hlášku, nebo '' když je vše OK.
@@ -15095,9 +15105,12 @@ async function checkDocumentReadability(file, docType) {
   try { base64 = await fileToBase64(file) } catch(e) { return { readable:false, reason:'Soubor se nepodařilo načíst' } }
 
   const expectedName = DOC_TYPE_NAMES[docType] || 'doklad'
-  // Typy, u kterých MUSÍ být datum platnosti (jinak doklad neprojde)
-  const VALIDITY_REQUIRED = ['op', 'pas', 'ridicak']
-  const needsValidity = VALIDITY_REQUIRED.includes(docType)
+  // Pozor, tohle NENÍ DOC_VALIDITY_REQUIRED. Tady jde o to, jestli je datum
+  // platnosti ČITELNÉ NA FOTCE — u kartiček (občanka, pas) je vytištěné, takže
+  // když ho AI nevidí, je fotka useknutá nebo něco zakrývá a vracíme ji zpátky.
+  // Živnosťák, A1 ani Freistellung se nefotí (jdou jako PDF), proto tu nejsou.
+  const VALIDITY_ON_PHOTO = ['op', 'pas', 'ridicak']
+  const needsValidity = VALIDITY_ON_PHOTO.includes(docType)
   const today = localDateStr()
   const prompt = `Jsi přísný kontrolor dokumentů pro stavební firmu. Na obrázku má být: ${expectedName}.
 Dnešní datum je ${today}.
