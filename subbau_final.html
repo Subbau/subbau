@@ -7888,6 +7888,28 @@ async function prideliBarvyFaktur(rows) {
   return zmena
 }
 
+// Jak dlouhá byla pauza v minutách. Neuzavřená (chybí konec) vrátí null —
+// u ní se ještě neví, jak dlouhá bude, a nemá smysl ji značit.
+// Přes půlnoc pauza nejde, takže záporný rozdíl bereme jako chybu zápisu.
+const PAUZA_LIMIT_MIN = 30
+function pauzaMinuty(bs, be) {
+  if (!bs || !be) return null
+  const naMinuty = t => {
+    const m = /^(\d{1,2}):(\d{2})/.exec(String(t))
+    return m ? parseInt(m[1], 10) * 60 + parseInt(m[2], 10) : null
+  }
+  const od = naMinuty(bs), doo = naMinuty(be)
+  if (od == null || doo == null) return null
+  const rozdil = doo - od
+  return rozdil >= 0 ? rozdil : null
+}
+
+// Delší pauza než půl hodiny se adminovi ukáže červeně, kratší zůstává okrová.
+function pauzaDlouha(bs, be) {
+  const min = pauzaMinuty(bs, be)
+  return min != null && min > PAUZA_LIMIT_MIN
+}
+
 function groupCellHtml(teamName, subName) {
   if (!teamName && !subName) return '<span style="color:var(--text3)">—</span>'
   let html = '<div style="display:flex;flex-direction:column;gap:4px;align-items:flex-start">'
@@ -8180,7 +8202,13 @@ async function loadTodayTimeline() {
           const breaksHtml = g.breaks.length
             ? g.breaks.map((b) => {
                 const beTxt = b.be || '<span style="color:var(--amber)">…</span>'
-                return '<span style="display:inline-block;background:var(--amber-l,#faf0dc);color:#9a6b15;border-radius:6px;padding:2px 7px;margin:1px 3px 1px 0;font-size:12px;white-space:nowrap">' + b.bs + '–' + beTxt + '</span>'
+                const dlouha = pauzaDlouha(b.bs, b.be)
+                const min = pauzaMinuty(b.bs, b.be)
+                const styl = dlouha
+                  ? 'background:var(--red-l,#f6e9e4);color:var(--red,#9c3b22);font-weight:800'
+                  : 'background:var(--amber-l,#faf0dc);color:#9a6b15'
+                const popis = min != null ? ' title="Pauza ' + min + ' min' + (dlouha ? ' — víc než ' + PAUZA_LIMIT_MIN + ' min' : '') + '"' : ''
+                return '<span' + popis + ' style="display:inline-block;' + styl + ';border-radius:6px;padding:2px 7px;margin:1px 3px 1px 0;font-size:12px;white-space:nowrap">' + b.bs + '–' + beTxt + '</span>'
               }).join('')
             : '<span style="color:var(--text3)">—</span>'
           // Adresa: GPS i ruční, oba pokud jsou
@@ -8373,8 +8401,18 @@ async function loadKWData() {
     const dateStr = dateOfDay(dayIdx)
     const isPastOrToday = dateStr <= todayStrAdmin
     if (h !== undefined && h > 0 && info) {
-      const b1 = info.breaks && info.breaks[0] ? `${info.breaks[0].bs}–${info.breaks[0].be || '…'}` : ''
-      const b2 = info.breaks && info.breaks[1] ? `${info.breaks[1].bs}–${info.breaks[1].be || '…'}` : ''
+      // Pauza nad půl hodiny svítí červeně i v týdenním přehledu, ať se na ni
+      // přijde i bez otevírání dne.
+      const pauzaText = i => {
+        const b = info.breaks && info.breaks[i]
+        if (!b) return ''
+        const text = `${b.bs}–${b.be || '…'}`
+        return pauzaDlouha(b.bs, b.be)
+          ? `<b style="color:var(--red)">${text}</b>`
+          : text
+      }
+      const b1 = pauzaText(0)
+      const b2 = pauzaText(1)
       const hLabel = info.running
         ? `<span style="color:var(--amber)">${h.toFixed(1)}h▶</span>`
         : `${h.toFixed(1)}h`
