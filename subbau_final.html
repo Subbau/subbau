@@ -4315,7 +4315,7 @@ async function submitAdminSignatureWithPlacement() {
 // Po nahrání nové verze se snadno pozná, jestli se opravdu nasadila: otevřete
 // appku, zmáčkněte F12 (na Macu ⌥⌘I) a v konzoli je vypsané tohle datum. Když
 // tam svítí starší, prohlížeč nebo GitHub drží starou verzi.
-const SUBBAU_VERZE = '2026-08-27 23:05 — ošetření textů od uživatelů'
+const SUBBAU_VERZE = '2026-08-27 23:20 — dnešní provize nahoře'
 console.log('SubBau docházka — verze ' + SUBBAU_VERZE)
 
 // ============ SUPABASE CONFIG ============
@@ -6871,15 +6871,29 @@ async function renderProvizeContent() {
   }
 
   const byWorker = {}
-  workersAll.forEach(w => { byWorker[w.id] = { day: 0, week: 0, month: 0, year: 0 } })
+  workersAll.forEach(w => { byWorker[w.id] = { dnes: 0, day: 0, week: 0, month: 0, year: 0 } })
   ;(att || []).forEach(a => {
     const bucket = byWorker[a.worker_id]
     if (!bucket) return
     const h = hoursOf(a)
+    // `dnes` je opravdu dnešek, ne vybraný den — dlaždice nahoře se nesmí měnit,
+    // když se šipkami listuje po minulých dnech.
+    if (a.work_date === dnesStrStat) bucket.dnes += h
     if (a.work_date >= dStartStr && a.work_date <= dEndStr) bucket.day += h
     if (a.work_date >= wStartStr && a.work_date <= wEndStr) bucket.week += h
     if (a.work_date >= mStartStr && a.work_date <= mEndStr) bucket.month += h
     if (a.work_date >= yStartStr && a.work_date <= yEndStr) bucket.year += h
+  })
+
+  // DNEŠNÍ PROVIZE — kolik SubBau vydělá za dnešek. Počítá se jen z lidí, kteří
+  // dnes opravdu byli v práci; kdo nemá odpracovanou hodinu, do součtu nevstupuje.
+  // Na rozdíl od dlaždice „Denní provize" se tohle nemění listováním po dnech.
+  let dnesProvize = 0, dnesLidi = 0
+  workersAll.forEach(w => {
+    const h = (byWorker[w.id] && byWorker[w.id].dnes) || 0
+    if (h <= 0) return
+    dnesLidi++
+    dnesProvize += (provMap[w.id] || 0) * h
   })
 
   // Uhrazeno je vždy vázané na týden (kolem vybraného data), bez ohledu na zvolený režim navigace — best-effort, tabulka nemusí ještě existovat
@@ -7026,6 +7040,7 @@ async function renderProvizeContent() {
       <div style="padding:4px 16px 16px">
         <div style="font-size:14px;color:var(--text2);margin-bottom:10px;font-weight:600">Zobrazené období: ${periodLabel}</div>
         <div class="stats" style="grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;margin-bottom:0">
+          <div class="sc a" style="grid-column:1/-1;background:#211D1A"><div class="sc-lbl" style="font-size:13px;color:#E8A13A">DNEŠNÍ PROVIZE<div style="font-weight:400;font-size:11px;color:#b5ada3">${dnesLidi ? dnesLidi + (dnesLidi === 1 ? ' pracovník dnes v práci' : (dnesLidi < 5 ? ' pracovníci dnes v práci' : ' pracovníků dnes v práci')) : 'dnes zatím nikdo nepracoval'}</div></div><div class="sc-val" style="color:#E8A13A;font-size:34px">${eur(dnesProvize)}</div></div>
           <div class="sc a"><div class="sc-lbl" style="font-size:12px">Denní provize<div style="font-weight:400;font-size:10.5px;color:var(--text3)">${dayLabel} — všechny firmy</div></div><div class="sc-val" id="pv-gd" style="color:var(--amber);font-size:24px">${eur(dayGrandTotal)}</div></div>
           <div class="sc b"><div class="sc-lbl" style="font-size:12px">Týdenní provize</div><div class="sc-val" id="pv-gw" style="color:var(--blue);font-size:24px">${eur(weekGrandTotal)}</div></div>
           <div class="sc b"><div class="sc-lbl" style="font-size:12px">Měsíční provize</div><div class="sc-val" id="pv-gm" style="color:var(--blue);font-size:24px">${eur(monthGrandTotal)}</div></div>
@@ -7033,7 +7048,6 @@ async function renderProvizeContent() {
           <div class="sc a"><div class="sc-lbl" style="font-size:12px">DPH 21 % z roční provize</div><div class="sc-val" id="pv-gv" style="color:var(--amber);font-size:24px">${eur(yearGrandTotal * 0.21)}</div></div>
           <div class="sc g"><div class="sc-lbl" style="font-size:12px">Výdělek pracovníků (den)<div style="font-weight:400;font-size:10.5px;color:var(--text3)">${dayLabel}</div></div><div class="sc-val" id="pv-ged" style="color:var(--green);font-size:24px">${eur(earnDayGrandTotal)}</div></div>
           <div class="sc g"><div class="sc-lbl" style="font-size:12px">Výdělek pracovníků (týden)</div><div class="sc-val" id="pv-ge" style="color:var(--green);font-size:24px">${eur(earnGrandTotal)}</div></div>
-          <div class="sc g"><div class="sc-lbl" style="font-size:12px">Firem</div><div class="sc-val" style="color:var(--green);font-size:24px">${firmNames.length}</div></div>
           <div class="sc g"><div class="sc-lbl" style="font-size:12px">Pracovníků</div><div class="sc-val" style="color:var(--green);font-size:24px">${rows.length}</div></div>
         </div>
         ${(paymentsTableMissing || paymentTermsColumnMissing) ? `<div style="margin-top:10px;font-size:13px;color:var(--amber);line-height:1.6">${[
