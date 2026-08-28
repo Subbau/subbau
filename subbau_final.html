@@ -4315,7 +4315,7 @@ async function submitAdminSignatureWithPlacement() {
 // Po nahrání nové verze se snadno pozná, jestli se opravdu nasadila: otevřete
 // appku, zmáčkněte F12 (na Macu ⌥⌘I) a v konzoli je vypsané tohle datum. Když
 // tam svítí starší, prohlížeč nebo GitHub drží starou verzi.
-const SUBBAU_VERZE = '2026-08-27 23:20 — dnešní provize nahoře'
+const SUBBAU_VERZE = '2026-08-27 23:35 — dnešní provize na hodinu'
 console.log('SubBau docházka — verze ' + SUBBAU_VERZE)
 
 // ============ SUPABASE CONFIG ============
@@ -6885,15 +6885,25 @@ async function renderProvizeContent() {
     if (a.work_date >= yStartStr && a.work_date <= yEndStr) bucket.year += h
   })
 
-  // DNEŠNÍ PROVIZE — kolik SubBau vydělá za dnešek. Počítá se jen z lidí, kteří
-  // dnes opravdu byli v práci; kdo nemá odpracovanou hodinu, do součtu nevstupuje.
+  // DNEŠNÍ PROVIZE — kolik SubBau vydělává právě teď, přepočteno na hodinu.
+  // Bere se ze všech, kdo si dnes dali příchod a ještě neodešli (check_out chybí).
+  // Kdo směnu ukončil, už peníze v tuhle chvíli nevydělává, takže do sazby nepatří.
   // Na rozdíl od dlaždice „Denní provize" se tohle nemění listováním po dnech.
-  let dnesProvize = 0, dnesLidi = 0
+  const dnesVPraci = new Set()
+  ;(att || []).forEach(a => {
+    if (a.work_date !== dnesStrStat) return
+    if (!a.check_in || a.check_out) return
+    dnesVPraci.add(a.worker_id)
+  })
+  let dnesNaHodinu = 0
+  dnesVPraci.forEach(id => { dnesNaHodinu += (provMap[id] || 0) })
+  const dnesTedLidi = dnesVPraci.size
+
+  // Kolik za dnešek přibylo zatím — u načatých směn se počítá čas do teď.
+  let dnesProvize = 0
   workersAll.forEach(w => {
     const h = (byWorker[w.id] && byWorker[w.id].dnes) || 0
-    if (h <= 0) return
-    dnesLidi++
-    dnesProvize += (provMap[w.id] || 0) * h
+    if (h > 0) dnesProvize += (provMap[w.id] || 0) * h
   })
 
   // Uhrazeno je vždy vázané na týden (kolem vybraného data), bez ohledu na zvolený režim navigace — best-effort, tabulka nemusí ještě existovat
@@ -7040,7 +7050,7 @@ async function renderProvizeContent() {
       <div style="padding:4px 16px 16px">
         <div style="font-size:14px;color:var(--text2);margin-bottom:10px;font-weight:600">Zobrazené období: ${periodLabel}</div>
         <div class="stats" style="grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;margin-bottom:0">
-          <div class="sc a" style="grid-column:1/-1;background:#211D1A"><div class="sc-lbl" style="font-size:13px;color:#E8A13A">DNEŠNÍ PROVIZE<div style="font-weight:400;font-size:11px;color:#b5ada3">${dnesLidi ? dnesLidi + (dnesLidi === 1 ? ' pracovník dnes v práci' : (dnesLidi < 5 ? ' pracovníci dnes v práci' : ' pracovníků dnes v práci')) : 'dnes zatím nikdo nepracoval'}</div></div><div class="sc-val" style="color:#E8A13A;font-size:34px">${eur(dnesProvize)}</div></div>
+          <div class="sc b"><div class="sc-lbl" style="font-size:12px">Dnešní provize<div style="font-weight:400;font-size:10.5px;color:var(--text3)">${dnesTedLidi ? dnesTedLidi + (dnesTedLidi === 1 ? ' pracovník' : (dnesTedLidi < 5 ? ' pracovníci' : ' pracovníků')) + ' teď v práci · dnes zatím ' + eur(dnesProvize) : 'teď nikdo v práci'}</div></div><div class="sc-val" style="color:var(--blue);font-size:24px">${eur(dnesNaHodinu)}/h</div></div>
           <div class="sc a"><div class="sc-lbl" style="font-size:12px">Denní provize<div style="font-weight:400;font-size:10.5px;color:var(--text3)">${dayLabel} — všechny firmy</div></div><div class="sc-val" id="pv-gd" style="color:var(--amber);font-size:24px">${eur(dayGrandTotal)}</div></div>
           <div class="sc b"><div class="sc-lbl" style="font-size:12px">Týdenní provize</div><div class="sc-val" id="pv-gw" style="color:var(--blue);font-size:24px">${eur(weekGrandTotal)}</div></div>
           <div class="sc b"><div class="sc-lbl" style="font-size:12px">Měsíční provize</div><div class="sc-val" id="pv-gm" style="color:var(--blue);font-size:24px">${eur(monthGrandTotal)}</div></div>
