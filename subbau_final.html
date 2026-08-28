@@ -4315,7 +4315,7 @@ async function submitAdminSignatureWithPlacement() {
 // Po nahrání nové verze se snadno pozná, jestli se opravdu nasadila: otevřete
 // appku, zmáčkněte F12 (na Macu ⌥⌘I) a v konzoli je vypsané tohle datum. Když
 // tam svítí starší, prohlížeč nebo GitHub drží starou verzi.
-const SUBBAU_VERZE = '2026-08-27 23:45 — dnešní provize ze všech, kdo dnes pracovali'
+const SUBBAU_VERZE = '2026-08-28 00:05 — bez provize u pracovníka'
 console.log('SubBau docházka — verze ' + SUBBAU_VERZE)
 
 // ============ SUPABASE CONFIG ============
@@ -6648,6 +6648,28 @@ async function toggleProvizePaid(checkbox, workerId, mode, periodKey) {
     else if (res.count) showToast(paid ? '✅ Uhrazeno — propsáno i do Faktur' : '↩️ Uhrazení zrušeno — propsáno i do Faktur')
   }
 }
+// „Bez provize" — pracovník odešel dřív, než za něj SubBau dostane zaplaceno,
+// takže se mu provize nemá počítat nikam. Sazba u něj zůstane uložená, aby se
+// dalo kliknutí vzít zpět.
+async function toggleBezProvize(checkbox, workerId) {
+  const bez = checkbox.checked
+  const tr = checkbox.closest('tr')
+  if (tr) tr.style.opacity = bez ? '0.55' : ''
+  const { error } = await sb.from('worker_commissions')
+    .upsert({ worker_id: workerId, bez_provize: bez, updated_at: new Date().toISOString() },
+            { onConflict: 'worker_id' })
+  if (error) {
+    checkbox.checked = !bez
+    if (tr) tr.style.opacity = !bez ? '0.55' : ''
+    showToast(/bez_provize/i.test(error.message)
+      ? '❌ Chybí sloupec bez_provize — spusťte migraci supabase-migrace-bez-provize.sql'
+      : '❌ Chyba: ' + error.message)
+    return
+  }
+  showToast(bez ? '🚫 Provize se za tohoto pracovníka nepočítá' : '✅ Provize se zase počítá')
+  renderProvizeContent()
+}
+
 async function saveProvizeTerms(select, workerId) {
   const terms = select.value
   const { error } = await sb.from('worker_commissions')
@@ -6677,12 +6699,16 @@ async function generateProvizeFirmReport(firmName, mode) {
     const anchor = new Date(provizeAnchor)
     const [{ data: workers }, { data: provRows }, { data: teams }, { data: companies }] = await Promise.all([
       sb.from('profiles').select('id, full_name, hourly_rate_worker, team_id, is_active').in('role', ['osvec', 'partak']).order('full_name'),
-      sb.from('worker_commissions').select('worker_id, provize'),
+      sb.from('worker_commissions').select('worker_id, provize, bez_provize'),
       sb.from('teams').select('id, name, company_id'),
       sb.from('companies').select('id, name')
     ])
+    // Kdo je označený „bez provize", do vyúčtování nepatří — odešel dřív, než za
+    // něj přijdou peníze, takže si za jeho hodiny nemá kdo nárokovat provizi.
     const provMap = {}
-    ;(provRows || []).forEach(p => { if (p.provize != null) provMap[p.worker_id] = Number(p.provize) })
+    ;(provRows || []).forEach(p => {
+      if (p.provize != null && !p.bez_provize) provMap[p.worker_id] = Number(p.provize)
+    })
     const teamById = {}
     ;(teams || []).forEach(t => { teamById[t.id] = t })
     const companyNameById = {}
@@ -6792,7 +6818,7 @@ async function renderProvizeContent() {
 
   const [{ data: workers }, provResult, { data: teams }, { data: companies }] = await Promise.all([
     sb.from('profiles').select('id, full_name, hourly_rate_worker, team_id').in('role', ['osvec', 'partak']).eq('is_active', true).order('full_name'),
-    sb.from('worker_commissions').select('worker_id, provize, payment_terms'),
+    sb.from('worker_commissions').select('worker_id, provize, payment_terms, bez_provize'),
     sb.from('teams').select('id, name, company_id'),
     sb.from('companies').select('id, name')
   ])
@@ -6802,15 +6828,28 @@ async function renderProvizeContent() {
   // (celý dotaz vrátí prázdno), takže by se po každém přepnutí týdne/dne ukázaly samé nuly.
   let provRows = provResult.data
   let paymentTermsColumnMissing = false
+  let bezProvizeColumnMissing = false
   if (provResult.error) {
-    paymentTermsColumnMissing = true
-    const retry = await sb.from('worker_commissions').select('worker_id, provize')
-    provRows = retry.data
+    // Ustupujeme po jednom sloupci — ať chybějící novinka neshodí i to, co funguje.
+    const r2 = await sb.from('worker_commissions').select('worker_id, provize, payment_terms')
+    if (!r2.error) {
+      bezProvizeColumnMissing = true
+      provRows = r2.data
+    } else {
+      paymentTermsColumnMissing = true
+      bezProvizeColumnMissing = true
+      const r3 = await sb.from('worker_commissions').select('worker_id, provize')
+      provRows = r3.data
+    }
   }
 
-  const provMap = {}, termsMap = {}
+  // „Bez provize" = pracovník odešel dřív, než za něj SubBau dostane zaplaceno.
+  // Sazba u něj zůstane uložená (ať jde příznak vrátit zpět), ale do peněz se
+  // nikde nepočítá — proto se pracuje se dvěma hodnotami: uloženou a účinnou.
+  const provMap = {}, termsMap = {}, bezProvize = new Set()
   ;(provRows || []).forEach(p => {
     if (p.provize != null) provMap[p.worker_id] = Number(p.provize)
+    if (!bezProvizeColumnMissing && p.bez_provize) bezProvize.add(p.worker_id)
     if (!paymentTermsColumnMissing) termsMap[p.worker_id] = p.payment_terms || '7/14'
   })
   const teamById = {}
@@ -6819,6 +6858,8 @@ async function renderProvizeContent() {
   ;(companies || []).forEach(c => { companyNameById[c.id] = c.name })
 
   function firmOf(w) { return provizeFirmOf(w, teamById, companyNameById) }
+  // Sazba, se kterou se doopravdy počítá. U „bez provize" je nula.
+  const provUcinna = id => bezProvize.has(id) ? 0 : (provMap[id] || 0)
 
   const now = new Date()
   // Rozsah dotazu: pokrýt den, týden, měsíc i celý rok kolem vybraného data (týden může přesahovat do jiného měsíce/roku) i dnešek
@@ -6896,14 +6937,14 @@ async function renderProvizeContent() {
     dnesVPraci.add(a.worker_id)
   })
   let dnesNaHodinu = 0
-  dnesVPraci.forEach(id => { dnesNaHodinu += (provMap[id] || 0) })
+  dnesVPraci.forEach(id => { dnesNaHodinu += provUcinna(id) })
   const dnesTedLidi = dnesVPraci.size
 
   // Kolik za dnešek přibylo zatím — u načatých směn se počítá čas do teď.
   let dnesProvize = 0
   workersAll.forEach(w => {
     const h = (byWorker[w.id] && byWorker[w.id].dnes) || 0
-    if (h > 0) dnesProvize += (provMap[w.id] || 0) * h
+    if (h > 0) dnesProvize += provUcinna(w.id) * h
   })
 
   // Uhrazeno je vždy vázané na týden (kolem vybraného data), bez ohledu na zvolený režim navigace — best-effort, tabulka nemusí ještě existovat
@@ -6932,13 +6973,15 @@ async function renderProvizeContent() {
   const rows = workersAll.map(w => {
     const hrs = byWorker[w.id] || { day: 0, week: 0, month: 0, year: 0 }
     const rate = w.hourly_rate_worker || 0
-    const prov = provMap[w.id] || 0
+    const prov = provUcinna(w.id)           // do peněz; nula u „bez provize"
+    const provUlozena = provMap[w.id] || 0  // do políčka, ať jde příznak vrátit
     const pay = payMap[w.id] || null
     const paid = !!(pay && pay.paid)
     const terms = termsMap[w.id] || '7/14'
     const dueInfo = provizeDueInfo(terms)
     return {
-      id: w.id, name: w.full_name + (w._byvaly ? ' (bývalý)' : ''), firm: firmOf(w), rate, prov,
+      id: w.id, name: w.full_name + (w._byvaly ? ' (bývalý)' : ''), firm: firmOf(w), rate,
+      prov, provUlozena, bezProvize: bezProvize.has(w.id),
       terms,
       hoursDay: hrs.day, hoursWeek: hrs.week, hoursMonth: hrs.month, hoursYear: hrs.year,
       commDay: prov * hrs.day, commWeek: prov * hrs.week, commMonth: prov * hrs.month, commYear: prov * hrs.year,
@@ -6978,14 +7021,16 @@ async function renderProvizeContent() {
       fDay += r.commDay; fWeek += r.commWeek; fMonth += r.commMonth; fYear += r.commYear; fEarn += r.earnWeek; fEarnDay += r.earnDay; if (r.paid) fPaidCount++
       window._provizeIndex[r.id] = { hoursDay: r.hoursDay, hoursWeek: r.hoursWeek, hoursMonth: r.hoursMonth, hoursYear: r.hoursYear, prov: r.prov, rate: r.rate, firmIdx }
       const termsOpts = TERMS_OPTIONS.map(t => `<option value="${t}" ${r.terms === t ? 'selected' : ''}>${t}</option>`).join('')
-      const rowBg = r.paid ? 'background:var(--green-l)' : (r.overdue ? 'background:var(--red-l)' : '')
+      const rowBg = (r.bezProvize ? 'opacity:0.55;' : '')
+      + (r.paid ? 'background:var(--green-l)' : (r.overdue ? 'background:var(--red-l)' : ''))
       const dueLabel = paymentTermsColumnMissing
         ? '<div style="font-size:10px;margin-top:3px;color:var(--amber)">⚠️ neukládá se (chybí migrace)</div>'
         : `<div style="font-size:10px;margin-top:3px;font-weight:${r.overdue ? '700' : '400'};color:${r.overdue ? 'var(--red)' : 'var(--text3)'}">${r.overdue ? '⚠️ po splatnosti ' : 'splatnost '}${r.dueDate.toLocaleDateString('cs-CZ')}</div>`
       return `<tr style="${rowBg}">
         <td style="font-size:${isNoFirm ? '16px' : '14.5px'};font-weight:600">${r.name}${r.overdue ? ' <span style="font-size:11px;color:var(--red);font-weight:700">⚠️ nezaplaceno</span>' : ''}</td>
         <td style="text-align:right"><input type="number" step="0.01" value="${r.rate || ''}" placeholder="0" onchange="saveProvizeRate(this,'${r.id}')" style="width:80px;padding:6px 8px;border:1.5px solid var(--brd);border-radius:7px;font-size:14px;text-align:right;font-family:inherit"> €/h</td>
-        <td style="text-align:right"><input type="number" step="0.01" value="${r.prov || ''}" placeholder="0" onchange="saveProvizeCommission(this,'${r.id}')" style="width:80px;padding:6px 8px;border:1.5px solid var(--amber);border-radius:7px;font-size:14px;text-align:right;font-family:inherit;background:#faf6ee"> €/h</td>
+        <td style="text-align:right"><input type="number" step="0.01" value="${r.provUlozena || ''}" placeholder="0" onchange="saveProvizeCommission(this,'${r.id}')" title="${r.bezProvize ? 'Sazba zůstává uložená, ale nepočítá se — pracovník je označený „bez provize“' : ''}" style="width:80px;padding:6px 8px;border:1.5px solid var(--amber);border-radius:7px;font-size:14px;text-align:right;font-family:inherit;background:#faf6ee"> €/h</td>
+        <td style="text-align:center;padding:0"><label title="Pracovník odešel dřív, než za něj přijdou peníze — nepočítat mu provizi" style="display:flex;align-items:center;justify-content:center;width:100%;height:100%;min-height:44px;padding:8px;cursor:pointer"><input type="checkbox" ${r.bezProvize ? 'checked' : ''} onchange="toggleBezProvize(this,'${r.id}')" style="width:20px;height:20px;cursor:pointer;accent-color:var(--red)"></label></td>
         <td style="text-align:right;background:#f2f8f4"><b id="pv-e-${r.id}" style="font-size:14px;color:var(--green)">${eur(r.earnWeek)}</b><div style="font-size:11px;color:var(--text3)">${r.hoursWeek.toFixed(2)} h</div></td>
         <td style="text-align:right"><b id="pv-d-${r.id}" style="font-size:14px">${eur(r.commDay)}</b><div style="font-size:11px;color:var(--text3)">${r.hoursDay.toFixed(2)} h</div></td>
         <td style="text-align:right"><b id="pv-w-${r.id}" style="font-size:14px">${eur(r.commWeek)}</b><div style="font-size:11px;color:var(--text3)">${r.hoursWeek.toFixed(2)} h</div></td>
@@ -7009,14 +7054,14 @@ async function renderProvizeContent() {
       <div style="overflow-x:auto">
       <table>
         <thead><tr>
-          <th style="font-size:14px">Jméno</th><th style="text-align:right;font-size:14px">Sazba</th><th style="text-align:right;font-size:14px">Provize</th>
+          <th style="font-size:14px">Jméno</th><th style="text-align:right;font-size:14px">Sazba</th><th style="text-align:right;font-size:14px">Provize</th><th style="text-align:center;font-size:13px">Bez provize<div style="font-weight:400;font-size:10.5px;color:var(--text3)">nepočítat</div></th>
           <th style="text-align:right;font-size:13px;color:var(--green);background:#f2f8f4">Výdělek pracovníka<div style="font-weight:400;font-size:11px">za týden</div></th>
           <th style="text-align:right;font-size:13px">Odměna den</th><th style="text-align:right;font-size:13px">Odměna týden</th><th style="text-align:right;font-size:13px">Odměna měsíc</th>
           <th style="text-align:center;font-size:14px">Uhrazeno</th><th style="font-size:14px">Splatnost</th>
         </tr></thead>
         <tbody>${memberRows}</tbody>
         <tfoot><tr style="font-weight:800;background:var(--bg)">
-          <td colspan="3" style="font-size:15px">Součet — ${firm}</td>
+          <td colspan="4" style="font-size:15px">Součet — ${firm}</td>
           <td style="text-align:right;font-size:14px;color:var(--green);background:#f2f8f4" id="pv-fe-${firmIdx}">${eur(fEarn)}</td>
           <td style="text-align:right;font-size:14px" id="pv-fd-${firmIdx}">${eur(fDay)}</td>
           <td style="text-align:right;font-size:14px" id="pv-fw-${firmIdx}">${eur(fWeek)}</td>
