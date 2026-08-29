@@ -4358,7 +4358,7 @@ async function submitAdminSignatureWithPlacement() {
 // Po nahrání nové verze se snadno pozná, jestli se opravdu nasadila: otevřete
 // appku, zmáčkněte F12 (na Macu ⌥⌘I) a v konzoli je vypsané tohle datum. Když
 // tam svítí starší, prohlížeč nebo GitHub drží starou verzi.
-const SUBBAU_VERZE = '2026-08-29 h — provize jen za odpracované období'
+const SUBBAU_VERZE = '2026-08-29 i — až 5 listů dokladu'
 console.log('SubBau docházka — verze ' + SUBBAU_VERZE)
 
 // ============ SUPABASE CONFIG ============
@@ -24373,14 +24373,15 @@ function openUploadForWorker() {
         <div id="admin-upload-preview1" style="margin-top:6px;display:none"><img style="max-width:100%;max-height:150px;border-radius:8px;object-fit:contain"></div>
       </div>
       <div id="admin-upload-side2" class="fg" style="margin-bottom:10px">
-        <label style="font-size:12px;color:var(--text3)">Zadni strana (nepovinne)</label>
+        <label style="font-size:12px;color:var(--text3)">Další listy (nepovinné, až 4)</label>
         <label id="admin-cam2-btn" for="admin-upload-cam2" style="display:none;align-items:center;justify-content:center;gap:9px;width:100%;padding:13px;background:#211D1A;color:#E8A13A;border-radius:10px;font-size:14px;font-weight:800;cursor:pointer;font-family:inherit;margin-bottom:7px">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" style="width:19px;height:19px"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg>
           Vyfotit druhou stranu
         </label>
         <input type="file" id="admin-upload-cam2" accept="image/*" capture="environment" style="display:none" onchange="adminFileSelect(this,2)">
-        <input type="file" id="admin-upload-file2" accept="image/*,application/pdf" style="width:100%;padding:8px;border:1.5px solid var(--brd);border-radius:8px;font-size:13px" onchange="adminFileSelect(this,2)">
+        <input type="file" id="admin-upload-file2" accept="image/*,application/pdf" multiple style="width:100%;padding:8px;border:1.5px solid var(--brd);border-radius:8px;font-size:13px" onchange="adminFileSelect(this,2)">
         <div id="admin-upload-preview2" style="margin-top:6px;display:none"><img style="max-width:100%;max-height:150px;border-radius:8px;object-fit:contain"></div>
+        <div id="admin-upload-list2" style="margin-top:6px;font-size:12px;color:var(--text2);line-height:1.6"></div>
       </div>
       <div id="admin-upload-status" style="display:none;padding:10px;border-radius:8px;text-align:center;font-size:13px;font-weight:600;margin-bottom:10px"></div>
       <div style="display:flex;gap:8px">
@@ -24468,13 +24469,42 @@ function adminDocTypeChange() {
   adminUploadFile1 = null; adminUploadFile2 = null
   const p1 = document.getElementById('admin-upload-preview1'); if(p1) p1.style.display='none'
   const p2 = document.getElementById('admin-upload-preview2'); if(p2) p2.style.display='none'
+  adminUploadFiles2 = []
+  const l2 = document.getElementById('admin-upload-list2'); if(l2) l2.innerHTML=''
 }
 
+// Druhé pole bere víc souborů najednou — doklad jako A1 má klidně pět listů
+// a nahrávat je po jednom je otrava. První list zůstává povinný, dalších je
+// nejvýš čtyři, ať se dokument nerozpadne na nepřehlednou hromadu.
+const ADMIN_MAX_LISTU = 5
+
 function adminFileSelect(input, side) {
+  if (side === 2) {
+    let vybrane = Array.from(input.files || [])
+    // Focení druhé strany přidává jeden snímek k tomu, co už je vybrané.
+    if (input.id === 'admin-upload-cam2' && vybrane.length) vybrane = adminUploadFiles2.concat(vybrane)
+    const max = ADMIN_MAX_LISTU - 1
+    if (vybrane.length > max) {
+      showToast('⚠️ Nejvýš ' + ADMIN_MAX_LISTU + ' listů celkem — beru prvních ' + max + ' dalších')
+      vybrane = vybrane.slice(0, max)
+    }
+    adminUploadFiles2 = vybrane
+    adminUploadFile2 = vybrane[0] || null
+    const seznam = document.getElementById('admin-upload-list2')
+    if (seznam) seznam.innerHTML = vybrane.length
+      ? vybrane.map((f, i) => '📄 ' + (i + 2) + '. list — ' + escAttr(f.name)).join('<br>')
+      : ''
+    const prev2 = document.getElementById('admin-upload-preview2')
+    if (prev2 && vybrane[0] && vybrane[0].type.startsWith('image/')) {
+      const img = prev2.querySelector('img')
+      img.src = URL.createObjectURL(vybrane[0])
+      prev2.style.display = 'block'
+    }
+    return
+  }
   const file = input.files[0]; if (!file) return
-  if (side === 1) adminUploadFile1 = file
-  else adminUploadFile2 = file
-  const prev = document.getElementById('admin-upload-preview' + side)
+  adminUploadFile1 = file
+  const prev = document.getElementById('admin-upload-preview1')
   if (prev && file.type.startsWith('image/')) {
     const img = prev.querySelector('img')
     img.src = URL.createObjectURL(file)
@@ -24538,24 +24568,33 @@ async function uploadDocumentForWorker() {
   }
   if (chybaDb1) { if(st){st.style.background='#ffebee';st.style.color='#c62828';st.textContent=docSaveErrorText(chybaDb1)}; return }
 
-  // Zadna strana
-  if (adminUploadFile2 && MULTI.includes(docType)) {
-    const safeName2 = adminUploadFile2.name.normalize('NFD').replace(/[̀-ͯ]/g,'').replace(/[^a-zA-Z0-9._-]/g,'_').toLowerCase()
-    const fp2 = uploadingForWorkerId + '/' + (Date.now()+1) + '_' + safeName2
-    const { error: e2 } = await sb.storage.from('documents').upload(fp2, adminUploadFile2, {upsert:true})
-    if (!e2) {
+  // Další listy dokladu (2. až 5.). Doklad jako A1 má víc stránek a dřív se
+  // dala přidat jen jedna — zbytek se musel nahrávat jako samostatné dokumenty.
+  if (adminUploadFiles2.length && MULTI.includes(docType)) {
+    for (let i = 0; i < adminUploadFiles2.length; i++) {
+      const soubor = adminUploadFiles2[i]
+      const cisloListu = i + 2
+      const safeName2 = soubor.name.normalize('NFD').replace(/[̀-ͯ]/g,'').replace(/[^a-zA-Z0-9._-]/g,'_').toLowerCase()
+      const fp2 = uploadingForWorkerId + '/' + (Date.now() + cisloListu) + '_' + safeName2
+      const { error: e2 } = await sb.storage.from('documents').upload(fp2, soubor, {upsert:true})
+      if (e2) { showToast('⚠️ ' + cisloListu + '. list se nenahrál: ' + e2.message); continue }
       const { data: url2 } = sb.storage.from('documents').getPublicUrl(fp2)
-      await sb.from('documents').insert({
+      const { error: dbN } = await sb.from('documents').insert({
         worker_id: uploadingForWorkerId, doc_type: docType,
-        file_name: adminUploadFile2.name + ' (strana 2)',
+        file_name: soubor.name + ' (strana ' + cisloListu + ')',
         file_path: fp2, file_url: url2?.publicUrl,
         valid_until: validUntilA,
         ...(bezPlatnosti ? { no_expiry: true } : {}),
         status: 'ok', uploaded_by: currentUser?.id, uploaded_at: new Date().toISOString()
       })
+      if (dbN) showToast('⚠️ ' + cisloListu + '. list se neuložil: ' + dbN.message)
     }
   }
 
+  adminUploadFiles2 = []
+  adminUploadFile2 = null
+  const l2h = document.getElementById('admin-upload-list2'); if (l2h) l2h.innerHTML = ''
+  const f2h = document.getElementById('admin-upload-file2'); if (f2h) f2h.value = ''
   if(st){st.textContent='Dokument nahran!'}
   setTimeout(() => { closeUploadForWorker(); loadWdDocs(uploadingForWorkerId || currentWorkerId) }, 1200)
 }
