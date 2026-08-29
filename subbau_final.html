@@ -4358,7 +4358,7 @@ async function submitAdminSignatureWithPlacement() {
 // Po nahrání nové verze se snadno pozná, jestli se opravdu nasadila: otevřete
 // appku, zmáčkněte F12 (na Macu ⌥⌘I) a v konzoli je vypsané tohle datum. Když
 // tam svítí starší, prohlížeč nebo GitHub drží starou verzi.
-const SUBBAU_VERZE = '2026-08-29 g — historie provizí zůstává u firmy, kde se odpracovala'
+const SUBBAU_VERZE = '2026-08-29 h — provize jen za odpracované období'
 console.log('SubBau docházka — verze ' + SUBBAU_VERZE)
 
 // ============ SUPABASE CONFIG ============
@@ -7068,17 +7068,30 @@ async function renderProvizeContent() {
       // Kdo v daném týdnu nemá jedinou odpracovanou hodinu, nemá co fakturovat — nesmí svítit „nezaplaceno"
       paid, dueDate: dueInfo.due, overdue: !paid && dueInfo.overdue && hrs.week > 0
     }
-  }).filter(r =>
-    // Bývalý pracovník patří do přehledu jen za období, kdy opravdu pracoval.
-    // Dřív se dobíral podle docházky za celý rok, takže se objevoval i v týdnech
-    // dávno po svém odchodu — s nulami, ale pořád v seznamu. Kdo v zobrazeném
-    // dni, týdnu ani měsíci neodpracoval nic, se neukáže. Aktivních se to netýká,
-    // ti v seznamu zůstávají i s nulou.
-    !r.byvaly || (r.hoursDay + r.hoursWeek + r.hoursMonth) > 0
-  )
+  })
+
+  // Souhrny v dlaždicích nahoře se počítají ze VŠECH lidí, i z těch, kdo se
+  // v seznamu neukážou. Jinak by roční provize spadla pokaždé, když se zrovna
+  // díváte na klidný týden.
+  const souhrn = { day: 0, week: 0, month: 0, year: 0, earnWeek: 0, earnDay: 0 }
+  rows.forEach(r => {
+    souhrn.day += r.commDay; souhrn.week += r.commWeek
+    souhrn.month += r.commMonth; souhrn.year += r.commYear
+    souhrn.earnWeek += r.earnWeek; souhrn.earnDay += r.earnDay
+  })
+
+  // V seznamu ukazujeme jen ty, kdo v zobrazeném období opravdu pracovali.
+  // Kdo neodpracoval ani hodinu, nemá v přehledu co dělat — jen zabírá místo
+  // a nulami znepřehledňuje, kdo se má vyplatit. Období se řídí přepínačem
+  // Den / Týden / Měsíc nad tabulkou.
+  const odpracoval = r => provizeMode === 'day' ? r.hoursDay > 0
+    : provizeMode === 'month' ? r.hoursMonth > 0
+    : r.hoursWeek > 0
+  const rowsZobrazit = rows.filter(odpracoval)
+  const skrytoLidi = rows.length - rowsZobrazit.length
 
   const byFirm = new Map()
-  rows.forEach(r => {
+  rowsZobrazit.forEach(r => {
     if (!byFirm.has(r.firm)) byFirm.set(r.firm, [])
     byFirm.get(r.firm).push(r)
   })
@@ -7090,7 +7103,10 @@ async function renderProvizeContent() {
 
   const eur = n => n.toLocaleString('cs-CZ', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + ' €'
   const TERMS_OPTIONS = ['7/7', '7/10', '7/14', '14/14']
-  let dayGrandTotal = 0, weekGrandTotal = 0, monthGrandTotal = 0, yearGrandTotal = 0, earnGrandTotal = 0, earnDayGrandTotal = 0
+  // Souhrny nahoře — ze všech lidí, ne jen z těch v seznamu (viz `souhrn` výše).
+  const dayGrandTotal = souhrn.day, weekGrandTotal = souhrn.week,
+        monthGrandTotal = souhrn.month, yearGrandTotal = souhrn.year,
+        earnGrandTotal = souhrn.earnWeek, earnDayGrandTotal = souhrn.earnDay
 
   // Index pro rychlý přepočet Odměny po uložení provize bez znovuvykreslení celé tabulky (viz updateProvizeCommissionDisplay)
   window._provizeIndex = {}
@@ -7124,7 +7140,8 @@ async function renderProvizeContent() {
         <td><select onchange="saveProvizeTerms(this,'${r.id}')" style="padding:6px 8px;border:1.5px solid var(--brd);border-radius:7px;font-size:13px;font-family:inherit">${termsOpts}</select>${dueLabel}</td>
       </tr>`
     }).join('')
-    dayGrandTotal += fDay; weekGrandTotal += fWeek; monthGrandTotal += fMonth; yearGrandTotal += fYear; earnGrandTotal += fEarn; earnDayGrandTotal += fEarnDay
+    // Do firemního součtu jde jen to, co je v tabulce vidět. Celkové souhrny
+    // nahoře se berou ze `souhrn`, tedy ze všech lidí.
     window._provizeFirmTotals[firmIdx] = { day: fDay, week: fWeek, month: fMonth, year: fYear, earn: fEarn }
     return `
     <div class="card" style="border-left:6px solid ${gc.border};margin-bottom:16px">
@@ -7188,7 +7205,7 @@ async function renderProvizeContent() {
           <div class="sc a"><div class="sc-lbl" style="font-size:12px">DPH 21 % z roční provize</div><div class="sc-val" id="pv-gv" style="color:var(--amber);font-size:24px">${eur(yearGrandTotal * 0.21)}</div></div>
           <div class="sc g"><div class="sc-lbl" style="font-size:12px">Výdělek pracovníků (den)<div style="font-weight:400;font-size:10.5px;color:var(--text3)">${dayLabel}</div></div><div class="sc-val" id="pv-ged" style="color:var(--green);font-size:24px">${eur(earnDayGrandTotal)}</div></div>
           <div class="sc g"><div class="sc-lbl" style="font-size:12px">Výdělek pracovníků (týden)</div><div class="sc-val" id="pv-ge" style="color:var(--green);font-size:24px">${eur(earnGrandTotal)}</div></div>
-          <div class="sc g"><div class="sc-lbl" style="font-size:12px">Pracovníků</div><div class="sc-val" style="color:var(--green);font-size:24px">${rows.length}</div></div>
+          <div class="sc g"><div class="sc-lbl" style="font-size:12px">Pracovníků<div style="font-weight:400;font-size:10.5px;color:var(--text3)">${skrytoLidi ? skrytoLidi + ' bez odpracovaných hodin skryto' : 'všichni odpracovali'}</div></div><div class="sc-val" style="color:var(--green);font-size:24px">${rowsZobrazit.length}</div></div>
         </div>
         ${(paymentsTableMissing || paymentTermsColumnMissing) ? `<div style="margin-top:10px;font-size:13px;color:var(--amber);line-height:1.6">${[
           paymentsTableMissing ? '⚠️ Sledování plateb (uhrazeno) zatím není zapnuté — spusťte migraci <code>supabase-migrace-provize-platby.sql</code>' : '',
