@@ -4358,7 +4358,7 @@ async function submitAdminSignatureWithPlacement() {
 // Po nahrání nové verze se snadno pozná, jestli se opravdu nasadila: otevřete
 // appku, zmáčkněte F12 (na Macu ⌥⌘I) a v konzoli je vypsané tohle datum. Když
 // tam svítí starší, prohlížeč nebo GitHub drží starou verzi.
-const SUBBAU_VERZE = '2026-08-29 e — oprava kalendáře (calTeams)'
+const SUBBAU_VERZE = '2026-08-29 f — týmy zrychlené, doklad bez platnosti, provize bez odešlých'
 console.log('SubBau docházka — verze ' + SUBBAU_VERZE)
 
 // ============ SUPABASE CONFIG ============
@@ -7029,7 +7029,7 @@ async function renderProvizeContent() {
     const dueInfo = provizeDueInfo(terms)
     return {
       id: w.id, name: w.full_name + (w._byvaly ? ' (bývalý)' : ''), firm: firmOf(w), rate,
-      prov, provUlozena, bezProvize: bezProvize.has(w.id),
+      prov, provUlozena, bezProvize: bezProvize.has(w.id), byvaly: !!w._byvaly,
       terms,
       hoursDay: hrs.day, hoursWeek: hrs.week, hoursMonth: hrs.month, hoursYear: hrs.year,
       commDay: prov * hrs.day, commWeek: prov * hrs.week, commMonth: prov * hrs.month, commYear: prov * hrs.year,
@@ -7038,7 +7038,14 @@ async function renderProvizeContent() {
       // Kdo v daném týdnu nemá jedinou odpracovanou hodinu, nemá co fakturovat — nesmí svítit „nezaplaceno"
       paid, dueDate: dueInfo.due, overdue: !paid && dueInfo.overdue && hrs.week > 0
     }
-  })
+  }).filter(r =>
+    // Bývalý pracovník patří do přehledu jen za období, kdy opravdu pracoval.
+    // Dřív se dobíral podle docházky za celý rok, takže se objevoval i v týdnech
+    // dávno po svém odchodu — s nulami, ale pořád v seznamu. Kdo v zobrazeném
+    // dni, týdnu ani měsíci neodpracoval nic, se neukáže. Aktivních se to netýká,
+    // ti v seznamu zůstávají i s nulou.
+    !r.byvaly || (r.hoursDay + r.hoursWeek + r.hoursMonth) > 0
+  )
 
   const byFirm = new Map()
   rows.forEach(r => {
@@ -11896,37 +11903,46 @@ async function loadTeams() {
   if (!div) return
   div.innerHTML = '<div style="text-align:center;color:var(--text3);padding:20px">Načítám...</div>'
 
-  // Načti aktivní týmy + jejich členy
-  const { data: teams, error: teamsErr } = await sb.from('teams').select('*').eq('is_active', true).order('name')
-  if (teamsErr) { div.innerHTML = '<div style="color:var(--red);padding:12px">Chyba: '+teamsErr.message+'</div>'; return }
-  // Načti všechny pracovníky s jejich team_id (+ subteam_id, pokud sloupec existuje)
-  let workers = null
+  // Týmy, lidi, podskupiny a firmy na sobě nezávisí — ptáme se na všechno naráz.
+  // Dřív se čekalo na každý dotaz zvlášť; na pomalejším připojení, kde jedna cesta
+  // na server trvá i vteřinu, se z toho nasčítalo přes deset vteřin čekání.
+  const SLOUPCE_LIDI = 'id, full_name, profession, role, team_id, subteam_id, is_active, can_track_hours'
+  const [rTeams, rWorkers, rSubteams, rComps] = await Promise.all([
+    sb.from('teams').select('*').eq('is_active', true).order('name'),
+    sb.from('profiles').select(SLOUPCE_LIDI).in('role', ['osvec', 'partak']).order('full_name'),
+    sb.from('subteams').select('*').eq('is_active', true).order('name'),
+    sb.from('companies').select('id, name').order('name')
+  ])
+
+  const teams = rTeams.data
+  if (rTeams.error) { div.innerHTML = '<div style="color:var(--red);padding:12px">Chyba: '+rTeams.error.message+'</div>'; return }
+
   // Postupně ubíráme sloupce, které nemusí být v databázi (subteam_id, can_track_hours) —
   // ať se seznam členů načte i před spuštěním migrací, jen bez té které informace.
-  for (const cols of [
-    'id, full_name, profession, role, team_id, subteam_id, is_active, can_track_hours',
-    'id, full_name, profession, role, team_id, subteam_id, is_active',
-    'id, full_name, profession, role, team_id, is_active',
-    'id, full_name, profession, role, team_id'
-  ]) {
-    ;({ data: workers } = await sb.from('profiles')
-      .select(cols).in('role', ['osvec', 'partak']).order('full_name'))
-    if (workers) break
+  // Zkouší se to, jen když ten bohatší dotaz výše neprošel.
+  let workers = rWorkers.data
+  if (!workers) {
+    for (const cols of [
+      'id, full_name, profession, role, team_id, subteam_id, is_active',
+      'id, full_name, profession, role, team_id, is_active',
+      'id, full_name, profession, role, team_id'
+    ]) {
+      ;({ data: workers } = await sb.from('profiles')
+        .select(cols).in('role', ['osvec', 'partak']).order('full_name'))
+      if (workers) break
+    }
   }
 
-  // Načti podskupiny (subteams). Když filtr is_active selže (sloupec v tabulce chybí), zkus to
-  // bez něj — jinak by zůstalo prázdno a všichni lidé zařazení do podskupin by ze seznamu zmizeli.
-  let subteams = [], subteamsError = null
-  try {
-    let { data: st, error: stErr } = await sb.from('subteams').select('*').eq('is_active', true).order('name')
-    if (stErr) {
+  // Podskupiny: když filtr is_active selže (sloupec v tabulce chybí), zkus to bez něj —
+  // jinak by zůstalo prázdno a všichni lidé zařazení do podskupin by ze seznamu zmizeli.
+  let subteams = rSubteams.data || [], subteamsError = rSubteams.error || null
+  if (subteamsError) {
+    try {
       const retry = await sb.from('subteams').select('*').order('name')
-      st = retry.data; stErr = retry.error
-      if (st) st = st.filter(x => x.is_active !== false)
-    }
-    subteams = st || []
-    subteamsError = stErr || null
-  } catch(e) { subteams = []; subteamsError = e }
+      if (retry.data) { subteams = retry.data.filter(x => x.is_active !== false); subteamsError = null }
+      else subteamsError = retry.error
+    } catch(e) { subteams = []; subteamsError = e }
+  }
 
   // Úklid zbytků: kdo nemá skupinu, nebo mu podskupina ukazuje do jiné (či smazané) skupiny,
   // nesmí mít subteam_id — jinak se mu odznak podskupiny ukazuje i po odpojení od firmy.
@@ -11949,9 +11965,8 @@ async function loadTeams() {
   _subteamsCache = subteams
   window._subteamsCache = subteams
   window._subteamsError = subteamsError
-  // Načti firmy pro dropdown navázání firmy k týmu
-  const { data: comps } = await sb.from('companies').select('id, name').order('name')
-  _teamCompaniesCache = comps || []
+  // Firmy pro nabídku navázání firmy k týmu (načteno už výše, naráz s ostatními)
+  _teamCompaniesCache = rComps.data || []
   renderTeams()
 }
 
@@ -24241,6 +24256,10 @@ function openUploadForWorker() {
       <div class="fg" style="margin-bottom:12px">
         <label style="font-size:12px;color:var(--text3)">Platnost do <span id="admin-valid-req" style="color:var(--red);font-weight:700">*</span></label>
         <input type="date" id="admin-upload-valid-until" style="width:100%;padding:10px;border:1.5px solid var(--brd);border-radius:8px;font-size:14px;font-family:inherit">
+        <label style="display:flex;align-items:center;gap:8px;margin-top:8px;cursor:pointer;font-size:12.5px;color:var(--text2)">
+          <input type="checkbox" id="admin-upload-no-expiry" onchange="adminNoExpiryChange()" style="width:18px;height:18px;cursor:pointer">
+          <span>Platnost neřeším — doklad žádný konec platnosti nemá</span>
+        </label>
         <div id="admin-valid-hint" style="font-size:11px;color:var(--text3);margin-top:4px;line-height:1.4">Opište datum z dokladu. Měsíc před vypršením se to objeví na dashboardu a pracovníkovi přijde upozornění.</div>
       </div>
       <!-- Přední strana: na osobní schůzce se doklad fotí rovnou telefonem,
@@ -24319,8 +24338,26 @@ function docSaveErrorText(err) {
   return 'Chyba uložení: ' + msg
 }
 
+// „Platnost neřeším" — doklad, který žádný konec platnosti nemá (živnostenský
+// list, výpis, příloha). Bez tohohle se u povinných typů nedal doklad vůbec
+// nahrát, dokud admin nevymyslel nějaké datum.
+function adminNoExpiryChange() {
+  const bez = document.getElementById('admin-upload-no-expiry')?.checked
+  const inp = document.getElementById('admin-upload-valid-until')
+  const star = document.getElementById('admin-valid-req')
+  const hint = document.getElementById('admin-valid-hint')
+  if (inp) { inp.disabled = !!bez; inp.style.opacity = bez ? '0.45' : ''; if (bez) { inp.value = ''; inp.style.borderColor = '' } }
+  if (star) star.style.display = bez ? 'none' : (star.dataset.puvodni || 'none')
+  if (hint && bez) hint.textContent = 'Platnost se u tohoto dokladu nebude hlídat ani připomínat.'
+  else if (!bez) updateValidityRequiredMark('admin-upload-doc-type', 'admin-valid-req', 'admin-valid-hint')
+}
+
 function adminDocTypeChange() {
   updateValidityRequiredMark('admin-upload-doc-type', 'admin-valid-req', 'admin-valid-hint')
+  // Zapamatuj si, jestli u tohohle typu hvězdička patří — po odškrtnutí „neřeším" se vrátí.
+  const starA = document.getElementById('admin-valid-req')
+  if (starA) starA.dataset.puvodni = starA.style.display || 'inline'
+  adminNoExpiryChange()
   const t = document.getElementById('admin-upload-doc-type')?.value
   const multiside = MULTISIDE_TYPES
   document.getElementById('admin-upload-side2').style.display = multiside.includes(t) ? 'block' : 'none'
@@ -24353,10 +24390,13 @@ async function uploadDocumentForWorker() {
   const st = document.getElementById('admin-upload-status')
 
   const docType = document.getElementById('admin-upload-doc-type')?.value || 'other'
-  // Platnost dokladu — bez ní nemáme co hlídat a upozornění nikdy nepřijde
+  // Platnost dokladu — bez ní nemáme co hlídat a upozornění nikdy nepřijde.
+  // Výjimka: doklad, u kterého admin řekl „platnost neřeším" (živnostenský list,
+  // výpis, příloha). Ten se uloží bez data a přestane se hlídat.
+  const bezPlatnosti = !!document.getElementById('admin-upload-no-expiry')?.checked
   const validInputA = document.getElementById('admin-upload-valid-until')
-  const validUntilA = (validInputA?.value || '').trim() || null
-  const validErrA = validateValidUntil(docType, validUntilA)
+  const validUntilA = bezPlatnosti ? null : ((validInputA?.value || '').trim() || null)
+  const validErrA = bezPlatnosti ? '' : validateValidUntil(docType, validUntilA)
   if (validErrA) {
     if (st) { st.style.display='block'; st.style.background='#ffebee'; st.style.color='#c62828'; st.textContent = validErrA }
     if (validInputA) { validInputA.style.borderColor = '#c0392b'; validInputA.focus() }
@@ -24380,11 +24420,25 @@ async function uploadDocumentForWorker() {
     file_path: fp1,
     file_url: url1?.publicUrl,
     valid_until: validUntilA,
+    ...(bezPlatnosti ? { no_expiry: true } : {}),
     status: 'ok',  // Admin nahrava = hned OK
     uploaded_by: currentUser?.id,
     uploaded_at: new Date().toISOString()
   })
-  if (db1) { if(st){st.style.background='#ffebee';st.style.color='#c62828';st.textContent=docSaveErrorText(db1)}; return }
+  let chybaDb1 = db1
+  // Sloupec no_expiry nemusí v databázi být (neproběhla migrace) — pak doklad
+  // uložíme aspoň bez něj, ať se nahrávání nezastaví, a řekneme to.
+  if (chybaDb1 && /no_expiry/i.test(chybaDb1.message || '')) {
+    const { error: db1b } = await sb.from('documents').insert({
+      worker_id: uploadingForWorkerId, doc_type: docType,
+      file_name: adminUploadFile1.name + ' (strana 1)',
+      file_path: fp1, file_url: url1?.publicUrl, valid_until: null,
+      status: 'ok', uploaded_by: currentUser?.id, uploaded_at: new Date().toISOString()
+    })
+    chybaDb1 = db1b
+    if (!db1b) showToast('⚠️ Doklad uložen, ale „platnost neřeším" se nezapamatovalo — spusťte migraci supabase-migrace-doklad-bez-expirace.sql')
+  }
+  if (chybaDb1) { if(st){st.style.background='#ffebee';st.style.color='#c62828';st.textContent=docSaveErrorText(chybaDb1)}; return }
 
   // Zadna strana
   if (adminUploadFile2 && MULTI.includes(docType)) {
@@ -24398,6 +24452,7 @@ async function uploadDocumentForWorker() {
         file_name: adminUploadFile2.name + ' (strana 2)',
         file_path: fp2, file_url: url2?.publicUrl,
         valid_until: validUntilA,
+        ...(bezPlatnosti ? { no_expiry: true } : {}),
         status: 'ok', uploaded_by: currentUser?.id, uploaded_at: new Date().toISOString()
       })
     }
