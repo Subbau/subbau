@@ -4358,7 +4358,7 @@ async function submitAdminSignatureWithPlacement() {
 // Po nahrání nové verze se snadno pozná, jestli se opravdu nasadila: otevřete
 // appku, zmáčkněte F12 (na Macu ⌥⌘I) a v konzoli je vypsané tohle datum. Když
 // tam svítí starší, prohlížeč nebo GitHub drží starou verzi.
-const SUBBAU_VERZE = '2026-08-29 — úvodní obrazovka místo blikajícího přihlášení'
+const SUBBAU_VERZE = '2026-08-29 b — rychlejší plocha a kalendář'
 console.log('SubBau docházka — verze ' + SUBBAU_VERZE)
 
 // ============ SUPABASE CONFIG ============
@@ -7650,36 +7650,43 @@ function togglePendingReg() {
 }
 
 async function loadDashboard() {
-  const { data: workers } = await sb.from('profiles').select('id').in('role',['osvec','partak']).eq('is_active',true)
+  // Nic z toho na sobě nezávisí, tak se to pouští naráz. Dřív se čekalo na každý
+  // dotaz zvlášť — osm cest na server za sebou, každá čtvrt vteřiny, takže se
+  // plocha skládala přes dvě vteřiny, i když je databáze rychlá.
+  // Chybu v dílčím načítání odchytáváme, ať kvůli ní nezmizí zbytek plochy.
+  const pDismissals = loadPendingRegDismissals().catch(e => console.warn('[plocha] odložené registrace:', e))
+  const pChat = loadChatAlerts().catch(e => console.warn('[plocha] zprávy:', e))
+  const pVac = loadVacationAlerts().catch(e => console.warn('[plocha] dovolené:', e))
+  const pLong = loadLongDayAlert().catch(e => console.warn('[plocha] dlouhé směny:', e))
+
+  const kw = getKW()
+  const [rWorkers, rPending, rTeams, rAtt] = await Promise.all([
+    sb.from('profiles').select('id').in('role',['osvec','partak']).eq('is_active',true),
+    // Pending registrace = nově registrovaní čekající na schválení (registration_status='pending').
+    // Odebraní pracovníci (is_active=false, ale registration_status≠'pending') sem NEPATŘÍ.
+    sb.from('profiles')
+      .select('id, full_name, email, created_at')
+      .in('role', ['osvec', 'partak'])
+      .eq('is_active', false)
+      .eq('registration_status', 'pending')
+      .order('created_at', { ascending: false }),
+    sb.from('teams').select('id').eq('is_active',true),
+    sb.from('attendance').select('*').eq('kw',kw.week).eq('kw_year',kw.year)
+  ])
+  const workers = rWorkers.data
+  const pendingWorkersRaw = rPending.data
+  const teams = rTeams.data
+  const att = rAtt.data
+
   document.getElementById('stat-workers').textContent = workers?.length || 0
+  document.getElementById('stat-teams').textContent = teams?.length || 0
 
-  // Pending registrace = nově registrovaní čekající na schválení (registration_status='pending').
-  // Odebraní pracovníci (is_active=false, ale registration_status≠'pending') sem NEPATŘÍ.
-  const { data: pendingWorkersRaw } = await sb.from('profiles')
-    .select('id, full_name, email, created_at')
-    .in('role', ['osvec', 'partak'])
-    .eq('is_active', false)
-    .eq('registration_status', 'pending')
-    .order('created_at', { ascending: false })
-
-  await loadPendingRegDismissals()   // co odložili ostatní admini
+  await pDismissals   // co odložili ostatní admini — bez toho by blok blikl a přerovnal se
   updatePendingRegBadge(unseenPendingCount(pendingWorkersRaw))
   renderPendingRegDashboardBlock((pendingWorkersRaw || []).filter(w => !isPendingRegDismissed(w.id)))
 
-  // 💬 Nepřečtené zprávy od pracovníků
-  await loadChatAlerts()
-
-  // ☀️ Dovolená nebo nemoc, kterou si pracovník nahlásil sám
-  await loadVacationAlerts()
-
-  const { data: teams } = await sb.from('teams').select('id').eq('is_active',true)
-  document.getElementById('stat-teams').textContent = teams?.length || 0
-
-  // ⚠️ Dlouhá pracovní doba (práce po 19:00) a zapomenuté odchody
-  await loadLongDayAlert()
-
-  const kw = getKW()
-  const { data: att } = await sb.from('attendance').select('*').eq('kw',kw.week).eq('kw_year',kw.year)
+  // 💬 zprávy, ☀️ dovolené a ⚠️ dlouhé směny už běží — počkáme, až dokreslí
+  await Promise.all([pChat, pVac, pLong])
   const nowStrDash = new Date().toTimeString().slice(0,8)
   const dnesStrDash = localDateStr()
   const totalH = att?.reduce((s,a) => {
@@ -8834,35 +8841,39 @@ async function renderCalendar() {
   if (!content) return
   content.innerHTML = '<div style="text-align:center;color:var(--text3);padding:20px">Načítám…</div>'
 
-  // Pracovníci + jejich turnus + skupina (firma) + podskupina
-  let allWorkers = null
-  ;({ data: allWorkers } = await sb.from('profiles')
-    .select('id, full_name, profession, turnus_work_weeks, turnus_off_weeks, turnus_start, turnus_weekends, team_id, subteam_id')
-    .in('role', ['osvec','partak']).eq('is_active', true).order('full_name'))
+  // Pracovníci, skupiny, firmy a podskupiny se navzájem nepotřebují, takže se
+  // ptáme na všechno naráz. Dřív se čekalo na každý dotaz zvlášť — čtyři cesty
+  // na server za sebou, každá čtvrt vteřiny, a kalendář se rozjížděl přes vteřinu
+  // ještě předtím, než se vůbec sáhlo na docházku.
+  const [rWorkers, rTeams, rCompanies, rSubteams] = await Promise.all([
+    sb.from('profiles')
+      .select('id, full_name, profession, turnus_work_weeks, turnus_off_weeks, turnus_start, turnus_weekends, team_id, subteam_id')
+      .in('role', ['osvec','partak']).eq('is_active', true).order('full_name'),
+    sb.from('teams').select('id, name, company_id'),
+    sb.from('companies').select('id, name'),
+    sb.from('subteams').select('id, name, team_id').eq('is_active', true)
+  ])
+
+  let allWorkers = rWorkers.data
   if (!allWorkers) {
+    // Starší databáze nemusí mít sloupec subteam_id — zkusíme to bez něj.
     ;({ data: allWorkers } = await sb.from('profiles')
       .select('id, full_name, profession, turnus_work_weeks, turnus_off_weeks, turnus_start, turnus_weekends, team_id')
       .in('role', ['osvec','partak']).eq('is_active', true).order('full_name'))
   }
 
-  // Načti názvy skupin (firem) pro zobrazení u jména
-  const { data: calTeams } = await sb.from('teams').select('id, name, company_id')
   const teamNameById = {}
   const teamCompanyById = {}
-  ;(calTeams||[]).forEach(t => { teamNameById[t.id] = t.name; teamCompanyById[t.id] = t.company_id })
+  ;(rTeams.data||[]).forEach(t => { teamNameById[t.id] = t.name; teamCompanyById[t.id] = t.company_id })
   window._calTeamNames = teamNameById
 
-  // Firmy (companies) — pro nadpis skupiny v kalendáři
-  let calCompanies = []
-  try { const { data: cc } = await sb.from('companies').select('id, name'); calCompanies = cc || [] } catch(e) {}
+  const calCompanies = rCompanies.data || []
   const companyNameById = {}
-  ;(calCompanies||[]).forEach(c => { companyNameById[c.id] = c.name })
+  calCompanies.forEach(c => { companyNameById[c.id] = c.name })
 
-  // Podskupiny
-  let calSubteams = []
-  try { const { data: st } = await sb.from('subteams').select('id, name, team_id').eq('is_active', true); calSubteams = st || [] } catch(e) {}
+  const calSubteams = rSubteams.data || []
   const subteamById = {}
-  ;(calSubteams||[]).forEach(s => { subteamById[s.id] = s })
+  calSubteams.forEach(s => { subteamById[s.id] = s })
 
   // Naplň rozbalovací nabídku firem (jen jednou)
   const firmEl = document.getElementById('cal-firm')
