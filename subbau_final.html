@@ -4358,7 +4358,7 @@ async function submitAdminSignatureWithPlacement() {
 // Po nahrání nové verze se snadno pozná, jestli se opravdu nasadila: otevřete
 // appku, zmáčkněte F12 (na Macu ⌥⌘I) a v konzoli je vypsané tohle datum. Když
 // tam svítí starší, prohlížeč nebo GitHub drží starou verzi.
-const SUBBAU_VERZE = '2026-08-29 f — týmy zrychlené, doklad bez platnosti, provize bez odešlých'
+const SUBBAU_VERZE = '2026-08-29 g — historie provizí zůstává u firmy, kde se odpracovala'
 console.log('SubBau docházka — verze ' + SUBBAU_VERZE)
 
 // ============ SUPABASE CONFIG ============
@@ -6745,11 +6745,19 @@ async function generateProvizeFirmReport(firmName, mode) {
   showToast('⏳ Připravuji report…')
   try {
     const anchor = new Date(provizeAnchor)
-    const [{ data: workers }, { data: provRows }, { data: teams }, { data: companies }] = await Promise.all([
+    const [rStart, rEnd] = provizePeriodRange(mode, anchor)
+    const startStr = localDateStr(rStart), endStr = localDateStr(rEnd)
+    // Docházku bereme za VŠECHNY, ne jen za dnešní členy firmy. Kdo u firmy dělal
+    // a mezitím přešel jinam, se jinak do vyúčtování vůbec nedostal a firmě by
+    // jeho odpracované hodiny propadly.
+    const [{ data: workers }, { data: provRows }, { data: teams }, { data: companies }, { data: att }] = await Promise.all([
       sb.from('profiles').select('id, full_name, hourly_rate_worker, team_id, is_active').in('role', ['osvec', 'partak']).order('full_name'),
       sb.from('worker_commissions').select('worker_id, provize, bez_provize'),
       sb.from('teams').select('id, name, company_id'),
-      sb.from('companies').select('id, name')
+      sb.from('companies').select('id, name'),
+      sb.from('attendance')
+        .select('worker_id, work_date, check_in, check_out, break_start, break_end, total_hours, team_id')
+        .gte('work_date', startStr).lte('work_date', endStr)
     ])
     // Kdo je označený „bez provize", do vyúčtování nepatří — odešel dřív, než za
     // něj přijdou peníze, takže si za jeho hodiny nemá kdo nárokovat provizi.
@@ -6762,15 +6770,22 @@ async function generateProvizeFirmReport(firmName, mode) {
     const companyNameById = {}
     ;(companies || []).forEach(c => { companyNameById[c.id] = c.name })
 
-    const members = (workers || []).filter(w => provizeFirmOf(w, teamById, companyNameById) === firmName)
-    if (!members.length) { showToast('❌ Firma nemá žádné pracovníky'); return }
+    // Ke které firmě pracovník v tomhle období patřil — podle skupiny zapsané
+    // u docházky, ne podle toho, kam je zařazený dnes. U starých záznamů skupina
+    // chybí, tam se použije dnešní zařazení.
+    const teamZDochazky = {}
+    ;(att || []).forEach(a => {
+      if (!a.team_id) return
+      const d = teamZDochazky[a.worker_id]
+      if (!d || a.work_date >= d.den) teamZDochazky[a.worker_id] = { den: a.work_date, team: a.team_id }
+    })
+    const firmaObdobi = (w) => {
+      const z = teamZDochazky[w.id]
+      return provizeFirmOf(z ? { ...w, team_id: z.team } : w, teamById, companyNameById)
+    }
 
-    const [rStart, rEnd] = provizePeriodRange(mode, anchor)
-    const startStr = localDateStr(rStart), endStr = localDateStr(rEnd)
-    const ids = members.map(w => w.id)
-    const { data: att } = await sb.from('attendance')
-      .select('worker_id, work_date, check_in, check_out, break_start, break_end, total_hours')
-      .in('worker_id', ids).gte('work_date', startStr).lte('work_date', endStr)
+    const members = (workers || []).filter(w => firmaObdobi(w) === firmName)
+    if (!members.length) { showToast('❌ Firma nemá v tomto období žádné pracovníky'); return }
 
     const nowStr2 = new Date().toTimeString().slice(0, 8)
     const dnesStr2 = localDateStr()
@@ -6905,7 +6920,15 @@ async function renderProvizeContent() {
   const companyNameById = {}
   ;(companies || []).forEach(c => { companyNameById[c.id] = c.name })
 
-  function firmOf(w) { return provizeFirmOf(w, teamById, companyNameById) }
+  // Firma se určuje podle toho, kde pracovník v zobrazeném období opravdu dělal —
+  // ne podle toho, kam patří dnes. Bere se skupina zapsaná u docházky. U starých
+  // záznamů (pořízených dřív, než se skupina začala ukládat) se spadne na dnešní
+  // zařazení, jinak by historie zmizela úplně.
+  const teamZDochazky = {}
+  function firmOf(w) {
+    const z = teamZDochazky[w.id]
+    return provizeFirmOf(z ? { ...w, team_id: z.team } : w, teamById, companyNameById)
+  }
   // Sazba, se kterou se doopravdy počítá. U „bez provize" je nula.
   const provUcinna = id => bezProvize.has(id) ? 0 : (provMap[id] || 0)
 
@@ -6922,7 +6945,7 @@ async function renderProvizeContent() {
   const ATT_PAGE = 1000
   for (let fromRow = 0; fromRow < 200000; fromRow += ATT_PAGE) {
     const { data: page, error: pageErr } = await sb.from('attendance')
-      .select('worker_id, work_date, check_in, check_out, break_start, break_end, total_hours')
+      .select('worker_id, work_date, check_in, check_out, break_start, break_end, total_hours, team_id')
       .gte('work_date', fetchStart).lte('work_date', fetchEnd)
       .order('id').range(fromRow, fromRow + ATT_PAGE - 1)
     if (pageErr || !page || !page.length) break
@@ -6958,6 +6981,13 @@ async function renderProvizeContent() {
     workersAll = workersAll.concat((_byvali || []).map(w => ({ ...w, _byvaly: true })))
     workersAll.sort((a, b) => (a.full_name || '').localeCompare(b.full_name || '', 'cs'))
   }
+
+  // Poslední skupina, ve které pracovník v zobrazeném měsíci opravdu odpracoval den.
+  ;(att || []).forEach(a => {
+    if (!a.team_id || a.work_date < mStartStr || a.work_date > mEndStr) return
+    const d = teamZDochazky[a.worker_id]
+    if (!d || a.work_date >= d.den) teamZDochazky[a.worker_id] = { den: a.work_date, team: a.team_id }
+  })
 
   const byWorker = {}
   workersAll.forEach(w => { byWorker[w.id] = { dnes: 0, day: 0, week: 0, month: 0, year: 0 } })
@@ -13141,7 +13171,8 @@ async function saveSecondSite() {
   window.zapisProbiha = true
   let error
   try {
-    ;({ error } = await sb.from('attendance').insert(row))
+    row.team_id = await skupinaPracovnika(currentUser.id)
+    ;({ error } = await dochazkaInsert(row))
   } finally {
     _ssSaving = false
     window.zapisProbiha = false
@@ -13622,6 +13653,43 @@ function attMainAction() {
 
 let checkinInProgress = false
 
+// SKUPINA U ZÁZNAMU DOCHÁZKY
+//
+// Docházka si dosud pamatovala jen kdo a kdy. Firma se dopočítávala z toho, kam
+// pracovník patří DNES — takže jakmile se přesunul jinam, přepsala se mu tím
+// i celá minulost a původní firma přišla v provizích o odpracované hodiny.
+// Proto se ke každému zápisu ukládá skupina, do které pracovník v tu chvíli patřil.
+async function skupinaPracovnika(workerId) {
+  if (!workerId) return null
+  if (currentProfile && currentProfile.id === workerId) return currentProfile.team_id || null
+  const zCache = (_workersCache || []).find(w => w && w.id === workerId)
+  if (zCache && 'team_id' in zCache) return zCache.team_id || null
+  try {
+    const { data } = await sb.from('profiles').select('team_id').eq('id', workerId).maybeSingle()
+    return (data && data.team_id) || null
+  } catch (e) { return null }
+}
+
+// Zápis docházky, který se NESMÍ nepovést. Když databáze o sloupci team_id ještě
+// neví (neproběhla migrace), zapíše se záznam bez něj. Zapsaný příchod je
+// důležitější než evidence firmy.
+async function dochazkaInsert(radek, opts) {
+  const dotaz = (data) => (opts && opts.vratit)
+    ? sb.from('attendance').insert(data).select().single()
+    : (opts && opts.vratitSeznam)
+      ? sb.from('attendance').insert(data).select()
+      : sb.from('attendance').insert(data)
+  const spustit = (data) => (opts && opts.timeout) ? withTimeout(dotaz(data), opts.timeout) : dotaz(data)
+  let r = await spustit(radek)
+  if (r && r.error && /team_id/i.test(r.error.message || '')) {
+    const bezSkupiny = { ...radek }
+    delete bezSkupiny.team_id
+    r = await spustit(bezSkupiny)
+    console.warn('[docházka] sloupec team_id v databázi není — zapsáno bez něj')
+  }
+  return r
+}
+
 async function mobCheckin(type) {
   console.log('[mobCheckin] called with type:', type, '| checkinInProgress:', checkinInProgress, '| currentUser:', !!currentUser)
   // Docházka zablokovaná adminem — pracovník se přihlásí, ale nemůže zapisovat hodiny
@@ -13726,7 +13794,7 @@ async function mobCheckin(type) {
       // změří askAddressIfNeeded(). Dřív se sem kopírovaly globální gpsAddr/gpsLat/
       // gpsLng z předchozí směny, takže druhý příchod téhož dne zdědil adresu
       // i souřadnice ranní stavby a tvářil se jako ověřený GPS záznam.
-      const { data, error } = await withTimeout(sb.from('attendance').insert({
+      const { data, error } = await dochazkaInsert({
         worker_id: currentUser.id,
         work_date: today,
         check_in: timeStr,
@@ -13735,8 +13803,9 @@ async function mobCheckin(type) {
         location_lng: null,
         kw: kw.week,
         kw_year: kw.year,
-        is_saturday: now.getDay() === 6
-      }).select().single(), 12000)
+        is_saturday: now.getDay() === 6,
+        team_id: await skupinaPracovnika(currentUser.id)
+      }, { vratit: true, timeout: 12000 })
 
       if (error) { showToast(chybaText(error, 'Příchod se nezapsal')); checkinInProgress = false; return }
       todayAttId = data.id
@@ -19629,9 +19698,10 @@ async function saveEditAttRecord() {
       if (!workerId || !dateStr) { showToast('❌ Chybí pracovník nebo datum'); return }
       const kw = parseInt(document.getElementById('edit-att-kw').value) || getKW(new Date(dateStr)).week
       const kwYear = parseInt(document.getElementById('edit-att-kwyear').value) || getKW(new Date(dateStr)).year
-      ;({ data: updData, error } = await sb.from('attendance').insert({
-        ...payload, worker_id: workerId, work_date: dateStr, kw, kw_year: kwYear
-      }).select())
+      ;({ data: updData, error } = await dochazkaInsert({
+        ...payload, worker_id: workerId, work_date: dateStr, kw, kw_year: kwYear,
+        team_id: await skupinaPracovnika(workerId)
+      }, { vratitSeznam: true }))
     }
   } finally {
     window.zapisProbiha = false
@@ -19868,8 +19938,9 @@ async function saveManualAttendance() {
     window.zapisProbiha = true
     let error
     try {
-      ;({ error } = await sb.from('attendance').insert({
+      ;({ error } = await dochazkaInsert({
         worker_id: workerId,
+        team_id: await skupinaPracovnika(workerId),
         work_date: date,
         check_in: ci+':00',
         check_out: co+':00',
@@ -21652,6 +21723,15 @@ function contractVersionsHtml(c, idx, workerName) {
     + '</details>'
 }
 
+// Datum a čas podpisu. U smluv je čas důležitý — při sporu se řeší, kdy přesně
+// kdo podepsal, a samotné datum na to nestačí.
+function datumCas(ts) {
+  if (!ts) return ''
+  const d = new Date(ts)
+  if (isNaN(d)) return String(ts).slice(0, 10)
+  return d.toLocaleDateString('cs-CZ') + ' ' + d.toLocaleTimeString('cs-CZ', { hour: '2-digit', minute: '2-digit' })
+}
+
 // Otevřít PDF - spolehlivé i v Safari anonymous okně
 function openPdfUrl(url) {
   if (!url) { showToast('⚠️ PDF URL není dostupná'); return }
@@ -22549,12 +22629,13 @@ async function loadAdminContracts() {
         </div>
         <div style="text-align:right">
           <span class="pill ${c.status==='pending'?'pa':c.status==='signed_electronic'?'pg':'pr'}">${statusLabels[c.status]||c.status}</span>
-          ${c.signed_at?`<div style="font-size:10px;color:var(--text3);margin-top:3px">Podepsáno: ${c.signed_at.slice(0,10)}</div>`:''}
+          ${c.signed_at?`<div style="font-size:10px;color:var(--text3);margin-top:3px">Podepsáno OSVČ: ${datumCas(c.signed_at)}</div>`:''}
+          ${c.admin_signed_at?`<div style="font-size:10px;color:var(--text3);margin-top:2px">Podepsáno SubBau: ${datumCas(c.admin_signed_at)}</div>`:''}
           ${c.file_url?`<button onclick="openPdfUrl('${c.file_url}')" style="font-size:11px;color:var(--blue);display:block;margin-top:3px;background:none;border:none;cursor:pointer;padding:0;font-family:inherit;text-decoration:underline"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:1em;height:1em;flex-shrink:0;vertical-align:-2px"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/></svg> Smlouva PDF</button>`:''}
           ${c.status==='admin_pending'?`<button onclick="openAdminSignModal('${c.id}','${escAttr((c.title||'').replace(/'/g,"\'"))}','${c.file_url||''}')" style="margin-top:6px;width:100%;padding:5px 8px;background:#211D1A;color:#E8A13A;border:none;border-radius:6px;cursor:pointer;font-size:11px;font-weight:700"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:1em;height:1em;flex-shrink:0;vertical-align:-2px"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/></svg> Podepsat jako admin</button>`:''}
           ${!c.signature_url?`<button onclick="openSignForWorker('${c.id}','${escAttr((c.title||'').replace(/'/g,"\'"))}','${c.file_url||''}')" style="margin-top:4px;width:100%;padding:5px 8px;background:var(--green);color:#fff;border:none;border-radius:6px;cursor:pointer;font-size:11px;font-weight:700;font-family:inherit"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:1em;height:1em;flex-shrink:0;vertical-align:-2px"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/></svg> Podepsat za OSVČ</button>`:''}
           ${!c.signature_url && c.file_url?`<button onclick="openWorkerSignPlaceModal('${c.id}','${escAttr((c.title||'').replace(/'/g,"\'"))}','${c.file_url||''}')" style="margin-top:4px;width:100%;padding:5px 8px;background:${c.worker_sign_page?'#e8f5e9':'none'};border:1px solid ${c.worker_sign_page?'#2e7d32':'#9c3b22'};color:${c.worker_sign_page?'#2e7d32':'#9c3b22'};border-radius:6px;cursor:pointer;font-size:11px;font-weight:700;font-family:inherit">📍 ${c.worker_sign_page?'Místo podpisu nastaveno (změnit)':'Určit místo podpisu OSVČ'}</button>`:''}
-          ${c.company_signed_at?`<div style="font-size:10px;color:var(--green);margin-top:3px">🏢 Firma podepsala: ${c.company_signed_at.slice(0,10)}${escAttr(c.company_signer_name?' ('+c.company_signer_name+')':'')}</div>`:''}
+          ${c.company_signed_at?`<div style="font-size:10px;color:var(--green);margin-top:3px">🏢 Firma podepsala: ${datumCas(c.company_signed_at)}${escAttr(c.company_signer_name?' ('+c.company_signer_name+')':'')}</div>`:''}
           ${c.file_url?`<button onclick="openPdfFillModal('${c.id}','${escAttr((c.title||'').replace(/'/g,String.fromCharCode(39)))}','${c.file_url}')" style="margin-top:4px;width:100%;padding:5px 8px;background:none;border:1px solid var(--amber,#E8A13A);color:#9a6b15;border-radius:6px;cursor:pointer;font-size:11px;font-weight:700;font-family:inherit"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:1em;height:1em;flex-shrink:0;vertical-align:-2px"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/></svg> ${(c.fill_fields && c.fill_fields.length) ? 'Upravit text v PDF' : 'Vyplnit / dopsat do PDF'}</button>`:''}
           <button onclick="openCompanyLinkModal('${c.id}','${escAttr((c.title||'').replace(/'/g,"\'"))}')" style="margin-top:4px;width:100%;padding:5px 8px;background:none;border:1px solid var(--blue);color:var(--blue);border-radius:6px;cursor:pointer;font-size:11px;font-weight:700;font-family:inherit"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:1em;height:1em;flex-shrink:0;vertical-align:-2px"><path d="M10 13a5 5 0 0 0 7 0l3-3a5 5 0 0 0-7-7l-1 1"/><path d="M14 11a5 5 0 0 0-7 0l-3 3a5 5 0 0 0 7 7l1-1"/></svg> Odkaz pro firmu</button>
           ${stIdx.originals.has(c.id)?`<button onclick="resetContractToOriginal('${c.id}','${escAttr((c.title||'').replace(/'/g,String.fromCharCode(39)))}')" title="Smaže z PDF dopsaný text i podpisy a vrátí smlouvu do podoby, v jaké se nahrála" style="margin-top:4px;width:100%;padding:5px 8px;background:none;border:1px solid var(--text3);color:var(--text2);border-radius:6px;cursor:pointer;font-size:11px;font-weight:700;font-family:inherit">↺ Vrátit do původní podoby</button>`:''}
@@ -24631,7 +24712,7 @@ async function loadWdContracts(id) {
         <div style="font-size:11px;color:var(--text3)">${c.created_at?.slice(0,10)||'—'}</div>
       </div>
       <span class="pill ${sP[c.status]||'pa'}" style="font-size:11px;white-space:nowrap">${sL[c.status]||c.status}</span>
-      ${c.company_signed_at ? `<span style="font-size:10px;color:var(--green);font-weight:600;white-space:nowrap">🏢 Firma podepsala ${c.company_signed_at.slice(0,10)}</span>` : ''}
+      ${c.company_signed_at ? `<span style="font-size:10px;color:var(--green);font-weight:600;white-space:nowrap">🏢 Firma podepsala ${datumCas(c.company_signed_at)}</span>` : ''}
       <div style="display:flex;gap:4px;flex-wrap:wrap;flex-shrink:0">
         ${c.file_url ? `<button onclick="openPdfUrl('${c.file_url}')" style="font-size:11px;padding:2px 8px;border:1px solid var(--blue);border-radius:5px;cursor:pointer;background:none;color:var(--blue);font-family:inherit">PDF</button>` : ''}
         ${c.status==='admin_pending' ? `<button onclick="openAdminSignModal('${c.id}','${escAttr((c.title||'').replace(/'/g,String.fromCharCode(39)))}','${c.file_url||''}')" style="font-size:11px;padding:2px 8px;border:none;border-radius:5px;cursor:pointer;background:var(--blue);color:#fff;font-family:inherit;font-weight:700">Podepsat</button>` : ''}
