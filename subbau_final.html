@@ -4382,7 +4382,7 @@ async function submitAdminSignatureWithPlacement() {
 // Po nahrání nové verze se snadno pozná, jestli se opravdu nasadila: otevřete
 // appku, zmáčkněte F12 (na Macu ⌥⌘I) a v konzoli je vypsané tohle datum. Když
 // tam svítí starší, prohlížeč nebo GitHub drží starou verzi.
-const SUBBAU_VERZE = '2026-08-30 b — výpadek sítě už nikoho neodhlásí'
+const SUBBAU_VERZE = '2026-08-30 c — pojistka proti zacyklenému přenačítání'
 console.log('SubBau docházka — verze ' + SUBBAU_VERZE)
 
 // ============ SUPABASE CONFIG ============
@@ -4496,11 +4496,20 @@ if ('serviceWorker' in navigator) {
     setInterval(() => { try { reg.update() } catch(e) {} }, 60 * 60 * 1000)
     // Nainstalovaná appka se často jen "probouzí" z pozadí (žádné nové načtení
     // stránky), takže hodinový časovač na pozadí nemusí na Androidu vůbec běžet.
-    // Při každém návratu appky do popředí si tak aktualizaci vyžádáme i zvlášť.
+    // Při návratu do popředí si proto aktualizaci vyžádáme i zvlášť — ale nejvýš
+    // jednou za deset minut. Dřív se ptalo při KAŽDÉM přepnutí na okno; kdo mezi
+    // appkou a poštou přepíná pořád, posílal na server desítky dotazů za hodinu
+    // a každý z nich mohl spustit převzetí nové verze a přenačtení stránky.
+    let _poslKontrola = Date.now()
+    const zkusAktualizaci = () => {
+      if (Date.now() - _poslKontrola < 10 * 60 * 1000) return
+      _poslKontrola = Date.now()
+      try { reg.update() } catch(e) {}
+    }
     document.addEventListener('visibilitychange', () => {
-      if (document.visibilityState === 'visible') { try { reg.update() } catch(e) {} }
+      if (document.visibilityState === 'visible') zkusAktualizaci()
     })
-    window.addEventListener('focus', () => { try { reg.update() } catch(e) {} })
+    window.addEventListener('focus', zkusAktualizaci)
     // Když je připravená nová verze, aktivuj ji a jednou přenačti stránku
     reg.addEventListener('updatefound', () => {
       const nw = reg.installing
@@ -4513,11 +4522,25 @@ if ('serviceWorker' in navigator) {
       })
     })
   }).catch(err => console.warn('SW registrace selhala:', err))
-  // Po převzetí nové verze přenačti (jen jednou, ať se nezacyklí)
+  // Po převzetí nové verze přenačti — ale opravdu jen jednou.
+  //
+  // Proměnná v paměti stránky tohle neuhlídá: přenačtením se stránka postaví
+  // znovu a proměnná je zase false. Kdyby se převzetí z jakéhokoli důvodu
+  // opakovalo, appka by se přenačítala pořád dokola a uživatel by koukal na
+  // věčné načítání — a nepomohlo by ani zavření okna, protože ten stav si drží
+  // prohlížeč, ne stránka. Značka v sessionStorage přenačtení přežije, takže
+  // v jedné kartě přenačteme nejvýš jednou.
   let _swReloaded = false
   navigator.serviceWorker.addEventListener('controllerchange', () => {
     if (_swReloaded) return
     _swReloaded = true
+    try {
+      if (sessionStorage.getItem('sw-prenacteno') === '1') {
+        console.warn('[sw] nová verze převzala řízení podruhé — přenačtení přeskočeno, ať se to nezacyklí')
+        return
+      }
+      sessionStorage.setItem('sw-prenacteno', '1')
+    } catch (e) { /* Safari v soukromém režimu ukládání zakazuje */ }
     location.reload()
   })
 }
