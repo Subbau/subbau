@@ -4382,7 +4382,7 @@ async function submitAdminSignatureWithPlacement() {
 // Po nahrání nové verze se snadno pozná, jestli se opravdu nasadila: otevřete
 // appku, zmáčkněte F12 (na Macu ⌥⌘I) a v konzoli je vypsané tohle datum. Když
 // tam svítí starší, prohlížeč nebo GitHub drží starou verzi.
-const SUBBAU_VERZE = '2026-08-30 a — oprava prázdné obrazovky po 12 s'
+const SUBBAU_VERZE = '2026-08-30 b — výpadek sítě už nikoho neodhlásí'
 console.log('SubBau docházka — verze ' + SUBBAU_VERZE)
 
 // ============ SUPABASE CONFIG ============
@@ -4861,22 +4861,40 @@ window.addEventListener('load', async () => {
   // ať aplikace pracovníky nežádá o polohu pokaždé, když ji jen otevřou.
 
   // Ověř uloženou session — na Androidu/Chrome může být poškozená a blokovat přihlášení.
-  // Pokud je session přítomná, ale neplatná, vyčisti ji a ukaž čistý login.
+  //
+  // POZOR NA ROZDÍL, kvůli kterému tohle lidi odhlašovalo: „přihlášení neplatí"
+  // NENÍ totéž co „na server se teď nedá dosáhnout". Dřív se odhlašovalo při
+  // JAKÉKOLI chybě, takže probuzení uspaného počítače, přepnutí wifi nebo krátký
+  // výpadek serveru vyhodily člověka s naprosto platnou relací. Sama knihovna
+  // Supabase v takovém případě relaci schválně nemaže — příliš by to bolelo.
+  //
+  // Odhlašujeme proto jen tehdy, když server vysloveně řekne, že přihlášení
+  // neplatí (401 nebo 403). Všechno ostatní jen zapíšeme do konzole a necháme
+  // start běžet dál; když je relace opravdu mrtvá, načtení profilu stejně
+  // skončí hláškou a uživatel se přihlásí znovu.
   try {
     const { data: { session } } = await sb.auth.getSession()
     if (session) {
       const { error: userErr } = await sb.auth.getUser()
       if (userErr) {
-        console.warn('[startup] poškozená session — čistím:', userErr.message)
-        try { await sb.auth.signOut() } catch(e) {}
-        appInitialized = false
-        authHandling = false
-        showLogin()
+        const stav = userErr.status || 0
+        const opravduNeplatna = stav === 401 || stav === 403
+        if (opravduNeplatna) {
+          console.warn('[startup] přihlášení už neplatí — čistím:', userErr.message)
+          // Jen tady, ne na ostatních zařízeních toho člověka.
+          try { await sb.auth.signOut({ scope: 'local' }) } catch(e) {}
+          appInitialized = false
+          authHandling = false
+          showLogin()
+        } else {
+          console.warn('[startup] server teď neodpověděl (' + stav + '), přihlášení nechávám být:', userErr.message)
+        }
       }
     }
   } catch(e) {
+    // Sem se dostaneme jen při nečekané výjimce. Ukázat přihlášení ano —
+    // ale relaci nemazat, o tom tahle větev nemá jak rozhodnout.
     console.warn('[startup] kontrola session selhala:', e)
-    try { await sb.auth.signOut() } catch(err) {}
     showLogin()
   }
 })
@@ -4893,8 +4911,9 @@ function startAuthTimeout() {
       appInitialized = false
       authHandling = false
       loginInProgress = false
-      // Pravděpodobně poškozená/viselá session z normálního prohlížeče → odhlas a ukaž čistý login
-      try { await sb.auth.signOut() } catch(e) {}
+      // Ukázat přihlášení ano, ale relaci nemazat. Že se start nestihl do 50 s
+      // znamená pomalou linku nebo zaseknutý dotaz — ne že by přihlášení neplatilo.
+      // Dřív se tu odhlašovalo, a to na všech zařízeních toho člověka naráz.
       showLogin()
     }
   }, 50000)  // dost času na opakované pokusy o načtení profilu (pomalý/uspaný Supabase)
