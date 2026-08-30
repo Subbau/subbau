@@ -2,7 +2,11 @@
 // Strategie: NETWORK-FIRST — vždy zkusí stáhnout aktuální verzi z internetu,
 // a jen když není síť, sáhne do cache. Tím appka nikdy nedrží "starou verzi".
 // Verzi zvyš při každém větším nasazení (nebo klidně datum).
-const CACHE = 'subbau-v38';
+// Číslo verze úložiště. Když se zvedne, prohlížeč při aktivaci SMAŽE všechno
+// staré (viz 'activate' níže). Zvedněte ho pokaždé, když je podezření, že si
+// někdo drží poškozenou kopii appky — je to jediný způsob, jak mu ji zahodit
+// na dálku, aniž by sám mazal data v prohlížeči.
+const CACHE = 'subbau-v39';
 
 self.addEventListener('install', (event) => {
   // Nová verze se má aktivovat hned, nečekat na zavření všech karet
@@ -36,7 +40,14 @@ self.addEventListener('fetch', (event) => {
     try {
       // NETWORK-FIRST: zkus síť
       const fresh = await fetch(req);
-      // Ulož kopii do cache pro offline
+      // Ukládáme JEN odpověď, o které víme, že je celá a v pořádku. Dřív se
+      // ukládalo cokoli — i chybová stránka nebo odpověď přerušená cestou.
+      // Taková kopie zůstala v prohlížeči a při každém dalším spuštění se z ní
+      // servírovala rozdrolená appka: holý nadpis, žádné styly, žádná pole.
+      // Nepomohlo ani zavření okna, protože to nedrží stránka, ale prohlížeč.
+      if (!(fresh && fresh.ok && fresh.status === 200 && fresh.type === 'basic')) {
+        return fresh;
+      }
       try {
         const cache = await caches.open(CACHE);
         cache.put(req, fresh.clone());
