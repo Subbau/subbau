@@ -4381,7 +4381,7 @@ async function submitAdminSignatureWithPlacement() {
 // Po nahrání nové verze se snadno pozná, jestli se opravdu nasadila: otevřete
 // appku, zmáčkněte F12 (na Macu ⌥⌘I) a v konzoli je vypsané tohle datum. Když
 // tam svítí starší, prohlížeč nebo GitHub drží starou verzi.
-const SUBBAU_VERZE = '2026-08-31 b — oprava nahrávání dokladů'
+const SUBBAU_VERZE = '2026-08-31 c — v provizích i lidé zařazení do skupiny'
 console.log('SubBau docházka — verze ' + SUBBAU_VERZE)
 
 // ============ SUPABASE CONFIG ============
@@ -7125,6 +7125,7 @@ async function renderProvizeContent() {
     return {
       id: w.id, name: w.full_name + (w._byvaly ? ' (bývalý)' : ''), firm: firmOf(w), rate,
       prov, provUlozena, bezProvize: bezProvize.has(w.id), byvaly: !!w._byvaly,
+      maTym: !!w.team_id,
       terms,
       hoursDay: hrs.day, hoursWeek: hrs.week, hoursMonth: hrs.month, hoursYear: hrs.year,
       commDay: prov * hrs.day, commWeek: prov * hrs.week, commMonth: prov * hrs.month, commYear: prov * hrs.year,
@@ -7145,14 +7146,19 @@ async function renderProvizeContent() {
     souhrn.earnWeek += r.earnWeek; souhrn.earnDay += r.earnDay
   })
 
-  // V seznamu ukazujeme jen ty, kdo v zobrazeném období opravdu pracovali.
-  // Kdo neodpracoval ani hodinu, nemá v přehledu co dělat — jen zabírá místo
-  // a nulami znepřehledňuje, kdo se má vyplatit. Období se řídí přepínačem
-  // Den / Týden / Měsíc nad tabulkou.
+  // Kdo se v seznamu ukáže:
+  //   a) kdo je zařazený do skupiny — i když ještě neodpracoval ani hodinu.
+  //      Bez toho by nešlo nastavit sazbu nově přidanému člověku, protože by
+  //      v přehledu vůbec nebyl.
+  //   b) kdo v zobrazeném období pracoval — sem patří i lidé bez skupiny
+  //      a bývalí pracovníci, aby jim za odvedenou práci provize nepropadla.
+  // Ostatní se skryjí, ať přehled nezaplní řádky se samými nulami.
+  // Období se řídí přepínačem Den / Týden / Měsíc nad tabulkou.
   const odpracoval = r => provizeMode === 'day' ? r.hoursDay > 0
     : provizeMode === 'month' ? r.hoursMonth > 0
     : r.hoursWeek > 0
-  const rowsZobrazit = rows.filter(odpracoval)
+  const patriDoPrehledu = r => (r.maTym && !r.byvaly) || odpracoval(r)
+  const rowsZobrazit = rows.filter(patriDoPrehledu)
   const skrytoLidi = rows.length - rowsZobrazit.length
 
   const byFirm = new Map()
@@ -7270,7 +7276,7 @@ async function renderProvizeContent() {
           <div class="sc a"><div class="sc-lbl" style="font-size:12px">DPH 21 % z roční provize</div><div class="sc-val" id="pv-gv" style="color:var(--amber);font-size:24px">${eur(yearGrandTotal * 0.21)}</div></div>
           <div class="sc g"><div class="sc-lbl" style="font-size:12px">Výdělek pracovníků (den)<div style="font-weight:400;font-size:10.5px;color:var(--text3)">${dayLabel}</div></div><div class="sc-val" id="pv-ged" style="color:var(--green);font-size:24px">${eur(earnDayGrandTotal)}</div></div>
           <div class="sc g"><div class="sc-lbl" style="font-size:12px">Výdělek pracovníků (týden)</div><div class="sc-val" id="pv-ge" style="color:var(--green);font-size:24px">${eur(earnGrandTotal)}</div></div>
-          <div class="sc g"><div class="sc-lbl" style="font-size:12px">Pracovníků<div style="font-weight:400;font-size:10.5px;color:var(--text3)">${skrytoLidi ? skrytoLidi + ' bez odpracovaných hodin skryto' : 'všichni odpracovali'}</div></div><div class="sc-val" style="color:var(--green);font-size:24px">${rowsZobrazit.length}</div></div>
+          <div class="sc g"><div class="sc-lbl" style="font-size:12px">Pracovníků<div style="font-weight:400;font-size:10.5px;color:var(--text3)">${skrytoLidi ? skrytoLidi + ' bez skupiny a bez hodin skryto' : 'nikdo neskrytý'}</div></div><div class="sc-val" style="color:var(--green);font-size:24px">${rowsZobrazit.length}</div></div>
         </div>
         ${(paymentsTableMissing || paymentTermsColumnMissing) ? `<div style="margin-top:10px;font-size:13px;color:var(--amber);line-height:1.6">${[
           paymentsTableMissing ? '⚠️ Sledování plateb (uhrazeno) zatím není zapnuté — spusťte migraci <code>supabase-migrace-provize-platby.sql</code>' : '',
