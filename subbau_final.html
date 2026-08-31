@@ -1310,7 +1310,7 @@ setTimeout(function () {
                 </select>
                 <select id="inv-filter-status" onchange="renderWorkerInvoices()" style="padding:7px 10px;border:1px solid var(--brd);border-radius:8px;font-size:12px;font-family:inherit;background:#fff">
                   <option value="">Všechny stavy</option>
-                  <option value="new">Nové</option>
+                  <option value="new">Nevyřízené</option>
                   <option value="seen">Vyřízené</option>
                   <option value="paid">Zaplacené</option>
                 </select>
@@ -4381,7 +4381,7 @@ async function submitAdminSignatureWithPlacement() {
 // Po nahrání nové verze se snadno pozná, jestli se opravdu nasadila: otevřete
 // appku, zmáčkněte F12 (na Macu ⌥⌘I) a v konzoli je vypsané tohle datum. Když
 // tam svítí starší, prohlížeč nebo GitHub drží starou verzi.
-const SUBBAU_VERZE = '2026-08-31 d — v provizích jen lidé s firmou nebo s hodinami'
+const SUBBAU_VERZE = '2026-08-31 e — barvy stavů faktur a dělení po týdnech'
 console.log('SubBau docházka — verze ' + SUBBAU_VERZE)
 
 // ============ SUPABASE CONFIG ============
@@ -11352,18 +11352,36 @@ function renderWorkerInvoices() {
     const d = new Date(iso)
     return isNaN(d) ? '—' : d.toLocaleDateString('cs-CZ') + ' ' + d.toTimeString().slice(0, 5)
   }
+  // Zaplacená a Vyřízená měly obě zelenou a nešly od sebe rozeznat.
+  //   pg = zelená, pa = oranžová, pr = světle červená
   const statusPill = st => {
-    const map = { new: ['pa', 'Nová'], seen: ['pg', 'Vyřízená'], paid: ['pg', 'Zaplacená'] }
-    const [cls, label] = map[st || 'new'] || ['pa', st]
+    const map = {
+      new:  ['pr', 'Nevyřízená'],
+      seen: ['pa', 'Vyřízená'],
+      paid: ['pg', 'Zaplacená']
+    }
+    const [cls, label] = map[st || 'new'] || ['pr', st]
     return `<span class="pill ${cls}">${label}</span>`
   }
+
+  // Oddělovač mezi týdny. Má smysl jen u řazení, kde týdny tvoří souvislé bloky —
+  // podle týdne nebo podle data odeslání. Při řazení podle jména nebo částky by
+  // čáry vznikaly mezi skoro každými dvěma řádky a jen by překážely.
+  const delitTydny = _invSortKey === 'week' || _invSortKey === 'sent'
+  let _poslKw = null
 
   tbody.innerHTML = rows.map(r => {
     // Barva je vlastnost pracovníka, ne dokladu — proto se bere živě z profilu.
     // Kód naopak z řádku faktury, ten je zmrazený k okamžiku vystavení.
     const barva = invoiceColor(r.worker?.invoice_color)
     const kod = r.crm_code || r.worker?.crm_code || ''
-    return `
+    const kwTeto = r.kw ? (r.kw + '/' + r.kw_year) : 'bez týdne'
+    let oddelovac = ''
+    if (delitTydny && kwTeto !== _poslKw) {
+      oddelovac = `<tr><td colspan="9" style="padding:10px 12px 6px;border-top:2px solid var(--blue,#211D1A);background:var(--bg,#f4efe7);font-size:12.5px;font-weight:800;color:var(--text2)">${r.kw ? 'KW ' + r.kw + ' / ' + r.kw_year : 'Bez týdne'}</td></tr>`
+      _poslKw = kwTeto
+    }
+    return oddelovac + `
     <tr>
       <td style="border-left:5px solid ${barva || 'transparent'}"><b>${escAttr(r.worker?.full_name || r.supplier_name || '—')}</b>${r.supplier_name && r.worker?.full_name && r.supplier_name !== r.worker.full_name ? `<div style="font-size:11px;color:var(--text3)">${escAttr(r.supplier_name)}</div>` : ''}</td>
       <td style="font-weight:700;white-space:nowrap">${escAttr(r.invoice_number || '—')}${kod ? `<div style="font-size:11.5px;font-weight:800;letter-spacing:.03em;color:${barva || 'var(--text3)'}">${escAttr(kod)}</div>` : ''}</td>
