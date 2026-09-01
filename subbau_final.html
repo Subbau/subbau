@@ -4391,7 +4391,7 @@ async function submitAdminSignatureWithPlacement() {
 // Po nahrání nové verze se snadno pozná, jestli se opravdu nasadila: otevřete
 // appku, zmáčkněte F12 (na Macu ⌥⌘I) a v konzoli je vypsané tohle datum. Když
 // tam svítí starší, prohlížeč nebo GitHub drží starou verzi.
-const SUBBAU_VERZE = '2026-09-01 b — dlouhá směna: jasný rozdíl mezi skrytím a mazáním'
+const SUBBAU_VERZE = '2026-09-01 c — vyřízení dlouhé směny platí na člověka a den'
 console.log('SubBau docházka — verze ' + SUBBAU_VERZE)
 
 // ============ SUPABASE CONFIG ============
@@ -7906,6 +7906,15 @@ const LONG_DAY_HOUR = 19
 // Skrytá upozornění na dlouhý den se ukládají do sdílené tabulky doc_alert_dismissals
 // (stejně jako odložené registrace), takže co jeden admin vyřídí, zmizí i ostatním.
 const LONG_KEY_PREFIX = 'long|'
+
+// Skrytí upozornění se pamatuje k PRACOVNÍKOVI A DNI, ne ke konkrétnímu záznamu
+// docházky. Dřív se vázalo na id záznamu — když měl někdo ten den záznamů víc,
+// admin skryl jeden a hned vyskočil další, takže to vypadalo, že se skrytí
+// neuložilo. Klíč podle člověka a dne navíc přežije i to, když se záznam dne
+// smaže a založí znovu (dostane nové id).
+function longDayKlic(r) {
+  return String(r.worker_id || '') + '|' + String(r.work_date || '').slice(0, 10)
+}
 window._longDayDismissed = window._longDayDismissed || new Set()
 
 async function loadLongDayDismissals() {
@@ -7923,13 +7932,14 @@ async function loadLongDayDismissals() {
 
 // „Skrýt" u jednoho dne — admin ho vyřídil (opravil hodiny, doptal se pracovníka)
 // a nechce, aby mu svítil dál. Platí pro všechny adminy a všechna zařízení.
-async function dismissLongDayAlert(id) {
-  if (!id) return
-  window._longDayDismissed.add(id)
+async function dismissLongDayAlert(workerId, workDate) {
+  const klic = String(workerId || '') + '|' + String(workDate || '').slice(0, 10)
+  if (!klic.trim() || klic === '|') return
+  window._longDayDismissed.add(klic)
   let chyba = ''
   try {
     const { error } = await sb.from('doc_alert_dismissals')
-      .insert({ dismiss_key: LONG_KEY_PREFIX + id, dismissed_by: currentUser?.id || null })
+      .insert({ dismiss_key: LONG_KEY_PREFIX + klic, dismissed_by: currentUser?.id || null })
     if (error && error.code !== '23505') throw error   // 23505 = někdo jiný to už skryl
   } catch (e) { chyba = e?.message || '' }
   if (chyba) {
@@ -7939,7 +7949,7 @@ async function dismissLongDayAlert(id) {
           ? 'Spusťte migraci supabase-migrace-odlozene-registrace.sql'
           : 'Databáze: ' + chyba))
   } else {
-    showToast('✅ Skryto — zmizí i ostatním adminům')
+    showToast('✅ Vyřízeno — tenhle den už se u něj neukáže')
   }
   loadLongDayAlert()
 }
@@ -7962,7 +7972,7 @@ async function cleanStaleLongDayDismissals(aktualni) {
   // úklid by pak zbytečně vrátil skrytá upozornění zpátky.
   if (!window._longDayLoadOk) return
   if (!window._longDayDismissed || !window._longDayDismissed.size) return
-  const zive = new Set((aktualni || []).map(r => String(r.id)))
+  const zive = new Set((aktualni || []).map(longDayKlic))
   const kUklidu = [...window._longDayDismissed].filter(id => !zive.has(id))
   if (!kUklidu.length) return
   kUklidu.forEach(id => window._longDayDismissed.delete(id))
@@ -7989,10 +7999,10 @@ async function deleteLongDayRecord(id, workerId, jmeno, popis) {
       : '❌ Chyba mazání: ' + error.message)
     return
   }
-  // Smazaný den už nemá co hlídat — ať po něm nezůstane viset značka „skryto".
-  if (window._longDayDismissed) window._longDayDismissed.delete(String(id))
-  try { await sb.from('doc_alert_dismissals').delete().eq('dismiss_key', LONG_KEY_PREFIX + id) }
-  catch (e) { console.warn('[dlouhý den] úklid po smazání:', e?.message) }
+  // Značku „vyřízeno" po sobě neuklízíme ručně: platí pro pracovníka a den, a ten
+  // den může mít víc záznamů. Kdyby po smazání jednoho zůstal další dlouhý den,
+  // musí skrytí platit dál. Postará se o to cleanStaleLongDayDismissals při
+  // nejbližším načtení — smaže jen ta skrytí, ke kterým už žádný dlouhý den není.
   showToast('🗑 Záznam docházky smazán')
   await refreshAttendanceEverywhere(workerId || undefined)
 }
@@ -8073,7 +8083,7 @@ async function loadLongDayAlert() {
   await loadLongDayDismissals()      // co už jiný admin vyřídil, se znovu neukazuje
   const vse = await computeLongDayAlerts()
   await cleanStaleLongDayDismissals(vse)   // opravené i smazané dny přestanou být „skryté"
-  const items = vse.filter(r => !window._longDayDismissed.has(String(r.id)))
+  const items = vse.filter(r => !window._longDayDismissed.has(longDayKlic(r)))
   const skrytych = vse.length - items.length
 
   if (!items.length) {
@@ -8132,7 +8142,7 @@ async function loadLongDayAlert() {
             </div>
             <div style="display:flex;align-items:center;gap:7px;flex-shrink:0">
               ${odznak}
-              <button onclick="event.stopPropagation();dismissLongDayAlert('${r.id}')" title="Schová jen tohle upozornění. Docházka i hodiny zůstanou beze změny." style="font-size:11px;padding:3px 9px;border:1px solid var(--brd);border-radius:7px;background:#fff;color:var(--text3);cursor:pointer;font-family:inherit;font-weight:600;display:inline-flex;align-items:center;gap:4px;white-space:nowrap"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" style="width:12px;height:12px"><path d="M18 6L6 18M6 6l12 12"/></svg>Vyřízeno</button>
+              <button onclick="event.stopPropagation();dismissLongDayAlert('${r.worker_id||''}','${String(r.work_date||'').slice(0,10)}')" title="Schová upozornění pro tohoto pracovníka a tento den — natrvalo. Docházka i hodiny zůstanou beze změny." style="font-size:11px;padding:3px 9px;border:1px solid var(--brd);border-radius:7px;background:#fff;color:var(--text3);cursor:pointer;font-family:inherit;font-weight:600;display:inline-flex;align-items:center;gap:4px;white-space:nowrap"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" style="width:12px;height:12px"><path d="M18 6L6 18M6 6l12 12"/></svg>Vyřízeno</button>
               <button onclick="event.stopPropagation();deleteLongDayRecord('${r.id}','${r.worker_id||''}','${arg(jmeno)}','${arg(popisText)}')" title="POZOR: smaže celý záznam docházky toho dne včetně odpracovaných hodin. Chcete-li jen schovat upozornění, dejte Vyřízeno." style="font-size:11px;padding:3px 9px;border:1px solid var(--red);border-radius:7px;background:#fff;color:var(--red);cursor:pointer;font-family:inherit;font-weight:600;display:inline-flex;align-items:center;gap:4px;white-space:nowrap"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" style="width:12px;height:12px"><path d="M3 6h18M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6M14 11v6"/></svg>Smazat docházku</button>
             </div>
           </div>`
