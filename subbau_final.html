@@ -4391,7 +4391,7 @@ async function submitAdminSignatureWithPlacement() {
 // Po nahrání nové verze se snadno pozná, jestli se opravdu nasadila: otevřete
 // appku, zmáčkněte F12 (na Macu ⌥⌘I) a v konzoli je vypsané tohle datum. Když
 // tam svítí starší, prohlížeč nebo GitHub drží starou verzi.
-const SUBBAU_VERZE = '2026-09-02 a — historie sazeb: změna sazby nepřepíše už odpracované dny'
+const SUBBAU_VERZE = '2026-09-02 b — u sazby si vyberu datum, od kterého platí'
 console.log('SubBau docházka — verze ' + SUBBAU_VERZE)
 
 // ============ SUPABASE CONFIG ============
@@ -6681,19 +6681,71 @@ function zitraStr() {
   return localDateStr(d)
 }
 
-// Zeptá se, od kdy nová hodnota platí. Vrací 'zpetne', datum (YYYY-MM-DD), nebo null.
-function zeptejSeOdKdy(popis, puvodni, nova) {
-  const zitra = zitraStr()
-  const zitraCz = new Date(zitra + 'T00:00:00').toLocaleDateString('cs-CZ')
-  const stara = (puvodni == null || puvodni === '') ? '—' : puvodni
-  if (confirm(`${popis}: ${stara} → ${nova}\n\n`
-    + `OK = platí od ${zitraCz}\n`
-    + `   Dosud odpracované hodiny zůstanou spočítané po staru.\n\n`
-    + `Zrušit = nabídnu přepočet celé historie`)) return zitra
-  if (confirm(`Přepočítat ZPĚTNĚ všechny odpracované hodiny sazbou ${nova}?\n\n`
-    + 'Změní se i týdny, které už jsou hotové a vyfakturované.\n\n'
-    + 'Zrušit = nechat všechno, jak je')) return 'zpetne'
-  return null
+// Okno „od kdy platí nová sazba". Datum si admin vybere sám — někdy se na zvýšení
+// domluví zpětně od pondělí, jindy má platit až od příštího měsíce. Zavřít se dá
+// křížkem, Escapem i kliknutím vedle okna; ve všech případech se nezmění nic.
+// Vrací (Promise): datum 'YYYY-MM-DD', 'zpetne', nebo null když admin zavřel.
+let _sazbaOdKdy = null
+function datumCz(den) {
+  const d = new Date(String(den) + 'T00:00:00')
+  return isNaN(d) ? String(den) : d.toLocaleDateString('cs-CZ')
+}
+function sazbaOdKdyHint() {
+  const el = document.getElementById('sazba-odkdy-hint')
+  const inp = document.getElementById('sazba-odkdy-datum')
+  if (!el || !inp || !_sazbaOdKdy) return
+  const den = inp.value
+  if (!den) { el.textContent = 'Vyberte datum, od kterého se má počítat nová sazba.'; el.style.color = '#c0392b'; return }
+  const dnes = localDateStr()
+  const stara = _sazbaOdKdy.staraText, nova = _sazbaOdKdy.novaText
+  let t = 'Dny před ' + datumCz(den) + ' zůstanou spočítané za ' + stara
+    + '. Od ' + datumCz(den) + ' (včetně) se počítá ' + nova + '.'
+  if (den < dnes) t += ' Pozor: tenhle den už byl — přepočítají se i dny, které jsou hotové.'
+  el.textContent = t
+  el.style.color = den < dnes ? '#9a6b15' : '#6b6157'
+}
+function sazbaOdKdyKonec(vysledek) {
+  const modal = document.getElementById('sazba-odkdy-modal')
+  if (modal) modal.style.display = 'none'
+  document.removeEventListener('keydown', sazbaOdKdyKlavesa)
+  const stav = _sazbaOdKdy
+  _sazbaOdKdy = null
+  if (stav) stav.hotovo(vysledek)
+}
+function sazbaOdKdyKlavesa(e) {
+  if (e.key === 'Escape') { e.preventDefault(); sazbaOdKdyKonec(null) }
+}
+function sazbaOdKdyUlozit() {
+  const inp = document.getElementById('sazba-odkdy-datum')
+  const den = inp && inp.value
+  // Bez data by se nedalo poznat, odkdy nová sazba platí — okno proto zůstane otevřené.
+  if (!den) { sazbaOdKdyHint(); if (inp) inp.focus(); return }
+  sazbaOdKdyKonec(den)
+}
+function sazbaOdKdyZpetne() {
+  if (!_sazbaOdKdy) return
+  if (!confirm('Přepočítat ZPĚTNĚ úplně všechny odpracované hodiny sazbou '
+    + _sazbaOdKdy.novaText + '?\n\nZmění se i týdny, které už jsou hotové a vyfakturované.')) return
+  sazbaOdKdyKonec('zpetne')
+}
+function zeptejSeOdKdy(popis, puvodni, nova, jmeno) {
+  return new Promise(hotovo => {
+    const modal = document.getElementById('sazba-odkdy-modal')
+    const inp = document.getElementById('sazba-odkdy-datum')
+    // Kdyby okno v HTML chybělo (stará verze v mezipaměti), ať se ukládání nezasekne.
+    if (!modal || !inp) { hotovo(zitraStr()); return }
+    const cislo = v => (v == null || v === '') ? '—' : (Number(v).toLocaleString('cs-CZ') + ' €')
+    _sazbaOdKdy = { hotovo, staraText: cislo(puvodni), novaText: cislo(nova) }
+    const p = document.getElementById('sazba-odkdy-popis')
+    if (p) p.textContent = jmeno ? (popis + ' — ' + jmeno) : popis
+    const z = document.getElementById('sazba-odkdy-zmena')
+    if (z) z.textContent = cislo(puvodni) + '  →  ' + cislo(nova)
+    inp.value = zitraStr()
+    sazbaOdKdyHint()
+    modal.style.display = 'flex'
+    document.addEventListener('keydown', sazbaOdKdyKlavesa)
+    setTimeout(() => { try { inp.focus() } catch (e) { /* nevadí */ } }, 60)
+  })
 }
 
 // Uloží novou hodnotu a podle odpovědi k ní doplní historii.
@@ -6801,11 +6853,11 @@ async function saveProvizeRate(input, workerId) {
   const rate = isNaN(val) ? null : val
   // Původní hodnotu čteme z databáze, ne z obrazovky — jen tak víme jistě,
   // co se má u starších dnů zachovat.
-  const { data: p } = await sb.from('profiles').select('hourly_rate_worker').eq('id', workerId).maybeSingle()
+  const { data: p } = await sb.from('profiles').select('hourly_rate_worker, full_name').eq('id', workerId).maybeSingle()
   const puvodni = p ? p.hourly_rate_worker : null
   if (String(puvodni ?? '') === String(rate ?? '')) return   // nic se nezměnilo
 
-  const odKdy = zeptejSeOdKdy('Hodinová sazba pracovníka', puvodni, rate)
+  const odKdy = await zeptejSeOdKdy('Hodinová sazba pracovníka', puvodni, rate, p && p.full_name)
   if (!odKdy) { input.value = puvodni == null ? '' : puvodni; return }
   if (!await ulozSazbuSHistorii(workerId, 'sazba', puvodni, rate, odKdy)) {
     input.value = puvodni == null ? '' : puvodni
@@ -6821,11 +6873,14 @@ async function saveProvizeRate(input, workerId) {
 async function saveProvizeCommission(input, workerId) {
   const val = parseFloat(input.value)
   const provize = isNaN(val) ? null : val
-  const { data: wc } = await sb.from('worker_commissions').select('provize').eq('worker_id', workerId).maybeSingle()
+  const [{ data: wc }, { data: pr }] = await Promise.all([
+    sb.from('worker_commissions').select('provize').eq('worker_id', workerId).maybeSingle(),
+    sb.from('profiles').select('full_name').eq('id', workerId).maybeSingle()
+  ])
   const puvodni = wc ? wc.provize : null
   if (String(puvodni ?? '') === String(provize ?? '')) return   // nic se nezměnilo
 
-  const odKdy = zeptejSeOdKdy('Provize SubBau na hodinu', puvodni, provize)
+  const odKdy = await zeptejSeOdKdy('Provize SubBau na hodinu', puvodni, provize, pr && pr.full_name)
   if (!odKdy) { input.value = puvodni == null ? '' : puvodni; return }
   if (!await ulozSazbuSHistorii(workerId, 'provize', puvodni, provize, odKdy)) {
     input.value = puvodni == null ? '' : puvodni
@@ -25672,6 +25727,28 @@ document.addEventListener('visibilitychange', () => {
 }
 </style>
 
+
+<!-- OD KDY PLATÍ NOVÁ SAZBA — admin si vybere datum, od kterého se počítá nově.
+     Zavřít křížkem, Escapem nebo kliknutím vedle = nic se nezmění. -->
+<div id="sazba-odkdy-modal" style="display:none;position:fixed;inset:0;z-index:10020;background:rgba(33,29,26,.55);align-items:center;justify-content:center;padding:20px" onclick="if(event.target===this)sazbaOdKdyKonec(null)">
+  <div style="background:#fff;border-radius:18px;padding:26px;width:100%;max-width:440px;box-shadow:0 16px 48px rgba(0,0,0,.35);position:relative">
+    <button onclick="sazbaOdKdyKonec(null)" title="Zavřít a nic neměnit" aria-label="Zavřít a nic neměnit" style="position:absolute;top:14px;right:14px;width:34px;height:34px;border:none;border-radius:10px;background:#f4efe7;color:#6b6157;font-size:17px;line-height:1;cursor:pointer;font-family:inherit">✕</button>
+    <div style="width:46px;height:46px;border-radius:13px;background:var(--amber-l,#faf0dc);color:#9a6b15;display:flex;align-items:center;justify-content:center;margin-bottom:14px">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:24px;height:24px"><rect x="3" y="4" width="18" height="18" rx="2"/><path d="M16 2v4M8 2v4M3 10h18"/></svg>
+    </div>
+    <div style="font-size:17px;font-weight:800;color:#211D1A;margin-bottom:5px;padding-right:40px">Od kdy má platit nová sazba?</div>
+    <div id="sazba-odkdy-popis" style="font-size:12px;color:#9a9082;margin-bottom:14px;font-weight:600"></div>
+    <div id="sazba-odkdy-zmena" style="font-size:20px;font-weight:800;color:#211D1A;margin-bottom:16px"></div>
+    <label for="sazba-odkdy-datum" style="display:block;font-size:12px;font-weight:700;color:#6b6157;margin-bottom:6px">Nová sazba platí od</label>
+    <input type="date" id="sazba-odkdy-datum" oninput="sazbaOdKdyHint()" onchange="sazbaOdKdyHint()" style="width:100%;padding:11px;border:1.5px solid var(--brd,#e0d9cf);border-radius:9px;font-size:16px;font-family:inherit;box-sizing:border-box">
+    <p id="sazba-odkdy-hint" style="font-size:13px;color:#6b6157;line-height:1.55;margin:12px 0 20px"></p>
+    <div style="display:flex;flex-direction:column;gap:9px">
+      <button onclick="sazbaOdKdyUlozit()" style="padding:14px;background:#211D1A;color:#E8A13A;border:none;border-radius:12px;font-size:14px;font-weight:800;cursor:pointer;font-family:inherit">Uložit</button>
+      <button onclick="sazbaOdKdyZpetne()" style="padding:13px;background:#f4efe7;color:#211D1A;border:none;border-radius:12px;font-size:13.5px;font-weight:700;cursor:pointer;font-family:inherit">Přepočítat zpětně úplně všechno</button>
+      <button onclick="sazbaOdKdyKonec(null)" style="padding:12px;background:none;color:#9a9082;border:none;border-radius:12px;font-size:13px;font-weight:700;cursor:pointer;font-family:inherit">Zavřít a nic neměnit</button>
+    </div>
+  </div>
+</div>
 
 <!-- VOLBA: dopsat text do smlouvy, nebo rovnou vybrat místo podpisu -->
 <div id="fill-choice-modal" style="display:none;position:fixed;inset:0;z-index:10010;background:rgba(33,29,26,.55);align-items:center;justify-content:center;padding:20px">
