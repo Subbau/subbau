@@ -4391,7 +4391,7 @@ async function submitAdminSignatureWithPlacement() {
 // Po nahrání nové verze se snadno pozná, jestli se opravdu nasadila: otevřete
 // appku, zmáčkněte F12 (na Macu ⌥⌘I) a v konzoli je vypsané tohle datum. Když
 // tam svítí starší, prohlížeč nebo GitHub drží starou verzi.
-const SUBBAU_VERZE = '2026-09-02 b — u sazby si vyberu datum, od kterého platí'
+const SUBBAU_VERZE = '2026-09-02 c — opravy z kontroly historie sazeb (nula, karta pracovníka, faktury)'
 console.log('SubBau docházka — verze ' + SUBBAU_VERZE)
 
 // ============ SUPABASE CONFIG ============
@@ -6734,6 +6734,9 @@ function zeptejSeOdKdy(popis, puvodni, nova, jmeno) {
     const inp = document.getElementById('sazba-odkdy-datum')
     // Kdyby okno v HTML chybělo (stará verze v mezipaměti), ať se ukládání nezasekne.
     if (!modal || !inp) { hotovo(zitraStr()); return }
+    // Kdyby okno běželo z předchozího dotazu, jeho slib nikdo nedokončí a to
+    // ukládání by viselo napořád. Radši ho ukončíme jako „nic neměnit".
+    if (_sazbaOdKdy) { const stary = _sazbaOdKdy; _sazbaOdKdy = null; stary.hotovo(null) }
     const cislo = v => (v == null || v === '') ? '—' : (Number(v).toLocaleString('cs-CZ') + ' €')
     _sazbaOdKdy = { hotovo, staraText: cislo(puvodni), novaText: cislo(nova) }
     const p = document.getElementById('sazba-odkdy-popis')
@@ -6760,20 +6763,35 @@ async function ulozSazbuSHistorii(workerId, druh, puvodni, nova, odKdy) {
   // Aby se dřívější dny počítaly po staru, musí být původní sazba v historii
   // zapsaná jako platná „odjakživa". Bez toho by se na starší dny nenašel žádný
   // záznam a spadlo by se na aktuální (novou) hodnotu — tedy zpětný přepočet.
+  //
+  // Pozor: když pracovník žádnou sazbu JEŠTĚ NEMĚL, není co chránit a základ se
+  // psát nesmí. Zapsala by se nula platná od roku 1900 a všechny dny, které do
+  // té doby odpracoval, by se spočítaly za 0 € — faktura by vyšla na nulu.
+  const maPuvodni = puvodni != null && puvodni !== '' && Number(puvodni) > 0
   try {
     const { data: mame } = await sb.from('worker_rate_history')
       .select('id').eq('worker_id', workerId).eq('druh', druh).limit(1)
-    if (!mame || !mame.length) {
-      await sb.from('worker_rate_history').insert({
-        worker_id: workerId, druh, hodnota: (puvodni == null ? 0 : puvodni),
+    if (maPuvodni && (!mame || !mame.length)) {
+      // Když se základ nepodaří zapsat, NESMÍ se pokračovat: nová sazba by pak
+      // platila i zpětně, což je pravý opak toho, co si admin zvolil.
+      const { error: chybaZaklad } = await sb.from('worker_rate_history').insert({
+        worker_id: workerId, druh, hodnota: Number(puvodni),
         valid_from: DAVNO, created_by: currentUser?.id || null
       })
+      if (chybaZaklad) throw chybaZaklad
     }
     const { error } = await sb.from('worker_rate_history').upsert({
       worker_id: workerId, druh, hodnota: (nova == null ? 0 : nova),
       valid_from: odKdy, created_by: currentUser?.id || null
     }, { onConflict: 'worker_id,druh,valid_from' })
     if (error) throw error
+    // Hranice ležící PO zvoleném datu už neplatí — od téhle chvíle je novou
+    // hodnotou to, co admin právě zadal (a co je i v profilu). Bez smazání by
+    // se od data té pozdější hranice vrátila zase stará sazba a nová by platila
+    // jen v úzkém okénku mezi oběma daty.
+    const { error: chybaUklid } = await sb.from('worker_rate_history')
+      .delete().eq('worker_id', workerId).eq('druh', druh).gt('valid_from', odKdy)
+    if (chybaUklid) throw chybaUklid
   } catch (e) {
     const m = e?.message || ''
     showToast(/worker_rate_history|does not exist|schema cache/i.test(m)
@@ -6802,6 +6820,23 @@ async function sazbyPracovnika(workerId, druh, vychozi) {
   }
   fn.maHistorii = h.length > 0
   return fn
+}
+
+// Spočítá týden pro fakturu: kolik hodin, za kolik peněz a na kolik řádků.
+// `sazbaVPoli` je to, co je na obrazovce — když se rovná sazbě z profilu,
+// nikdo ji ručně nepřepsal a platí historie. Jinak platí zadané číslo na celý
+// týden. Používá to faktura pracovníka i ta, kterou vystavuje admin z karty,
+// aby obě vyšly na stejnou částku.
+async function rozpisTydne(workerId, radky, sazbaVPoli) {
+  let sazbaKDni = () => sazbaVPoli
+  try {
+    const { data: p } = await sb.from('profiles').select('hourly_rate_worker').eq('id', workerId).maybeSingle()
+    const zProfilu = parseFloat(p && p.hourly_rate_worker) || 0
+    if (zProfilu > 0 && Math.abs(sazbaVPoli - zProfilu) < 0.005) {
+      sazbaKDni = await sazbyPracovnika(workerId, 'sazba', sazbaVPoli)
+    }
+  } catch (e) { console.warn('[faktura] sazba z profilu:', e?.message) }
+  return hodinyPodleSazeb(radky, sazbaKDni)
 }
 
 // Rozdělí odpracované hodiny podle sazby, která ten den platila.
@@ -6983,8 +7018,10 @@ async function generateProvizeFirmReport(firmName, mode) {
     // Kdo je označený „bez provize", do vyúčtování nepatří — odešel dřív, než za
     // něj přijdou peníze, takže si za jeho hodiny nemá kdo nárokovat provizi.
     const provMap = {}
+    const bezProvizeFirma = new Set()
     ;(provRows || []).forEach(p => {
-      if (p.provize != null && !p.bez_provize) provMap[p.worker_id] = Number(p.provize)
+      if (p.bez_provize) { bezProvizeFirma.add(p.worker_id); return }
+      if (p.provize != null) provMap[p.worker_id] = Number(p.provize)
     })
     const teamById = {}
     ;(teams || []).forEach(t => { teamById[t.id] = t })
@@ -7031,6 +7068,10 @@ async function generateProvizeFirmReport(firmName, mode) {
       })
     } catch (e) { console.warn('[report firmy] historie sazeb:', e?.message) }
     const provKDni = (workerId, den) => {
+      // „Bez provize" musí přebít i historii — jinak by se u člověka, kterému
+      // se sazba někdy měnila, provize účtovala dál, protože se do vychozí
+      // (nulové) hodnoty vůbec nedostaneme.
+      if (bezProvizeFirma.has(workerId)) return 0
       const h = histFirma[workerId]
       const vychozi = provMap[workerId] || 0
       if (!h || !h.length) return vychozi
@@ -16659,8 +16700,11 @@ async function onInvoiceWeekChange() {
     const zaklad = Number.isFinite(sazba) ? sazba : 0
     // Když SubBau změnil sazbu uprostřed týdne, počítá se každý den svou sazbou —
     // jinak by faktura zvedla i dny odpracované za starou sazbu.
-    const sazbaKDni = await sazbyPracovnika(currentUser?.id, 'sazba', zaklad)
-    window._invTydenniCastka = hodinyPodleSazeb(att, sazbaKDni).castka
+    const castka = (await rozpisTydne(currentUser?.id, att, zaklad)).castka
+    // Než se docházka a historie načetly, mohl pracovník přepnout na jiný týden.
+    // Bez téhle kontroly by se mu do faktury dosadila částka za týden předchozí.
+    if (sel.value !== v) return
+    window._invTydenniCastka = castka
     rozpocitatCastku('inv')
     await predvyplnitCisloFaktury(currentUser?.id, parseInt(year), 'inv', week)
   } catch (e) { console.warn('[faktura] předvyplnění položky:', e?.message) }
@@ -25260,14 +25304,25 @@ async function updateWdInvoiceHours() {
   const sel = document.getElementById('wd-inv-week')
   if (!box || !sel?.value || !currentWorkerId) return
   const [week, year] = sel.value.split('/').map(Number)
+  const workerIdPriStartu = currentWorkerId
   const { data } = await sb.from('attendance')
-    .select('total_hours')
+    .select('total_hours, work_date')
     .eq('worker_id', currentWorkerId).eq('kw', week).eq('kw_year', year)
-  const hours = (data || []).reduce((s, r) => s + (r.total_hours || 0), 0)
   const rate = parseFloat(document.getElementById('wd-inv-rate')?.value) || 0
-  const amount = Math.round(hours * rate * 100) / 100
+  // Stejně jako u faktury pracovníka: pokud sazba v poli odpovídá té z profilu,
+  // platí historie a každý den se počítá svou sazbou. Když sis sazbu přepsal
+  // ručně, platí tvoje číslo na celý týden.
+  const rozpis = await rozpisTydne(currentWorkerId, data, rate)
+  // Mezi načtením a zápisem mohl admin přepnout týden nebo otevřít jiného
+  // pracovníka — pak by tu zůstala viset částka, která k ničemu nepatří.
+  if (sel.value !== `${week}/${year}` || currentWorkerId !== workerIdPriStartu) return
+  const hours = rozpis.hodiny
+  const amount = rozpis.castka
+  const popisSazby = rozpis.skupiny.length > 1
+    ? rozpis.skupiny.map(g => `${g.hodiny} h × ${g.sazba} €`).join(' + ')
+    : (rate ? `sazba ${rate} €/h` : '')
   box.innerHTML = hours > 0
-    ? `⏱ Odpracováno <b>${hours.toFixed(2)} h</b>${rate ? ` · sazba ${rate} €/h → <b style="color:var(--blue)">${amount.toFixed(2)} €</b>` : ''}`
+    ? `⏱ Odpracováno <b>${hours.toFixed(2)} h</b>${popisSazby ? ` · ${popisSazby} → <b style="color:var(--blue)">${amount.toFixed(2)} €</b>` : ''}`
     : '<span style="color:var(--red)">⚠️ Za tento týden není zapsaná žádná docházka — faktura by byla na 0 h.</span>'
 
   // Předvyplnění první položky. Co už je vyplněné, se nepřepisuje — admin si
@@ -25361,9 +25416,29 @@ async function saveWorkerProfile() {
   const ic = document.getElementById('wd-ic')?.value.trim() || null
   // DIČ dává smysl jen u plátce — u neplátce ho z faktury vyhodíme
   const dic = isVatPayer ? (document.getElementById('wd-dic')?.value.trim() || null) : null
+  // Sazba se dá měnit na dvou místech — tady a v Provizích. Obě musí projít
+  // stejnou otázkou „od kdy platí", jinak by se historie a profil rozešly:
+  // v profilu by svítilo nové číslo, ale do peněz by se pořád počítalo staré.
+  let sazbaKUlozeni = rate
+  const { data: puvProfil } = await sb.from('profiles')
+    .select('hourly_rate_worker, full_name').eq('id', currentWorkerId).maybeSingle()
+  const puvSazba = puvProfil ? puvProfil.hourly_rate_worker : null
+  if ((Number(puvSazba) || 0) !== (Number(rate) || 0)) {
+    const odKdy = await zeptejSeOdKdy('Hodinová sazba pracovníka', puvSazba, rate,
+                                      puvProfil && puvProfil.full_name)
+    if (!odKdy || !await ulozSazbuSHistorii(currentWorkerId, 'sazba', puvSazba, rate, odKdy)) {
+      // Zavřel jsi okno, nebo se historii nepodařilo uložit — zbytek profilu se
+      // uloží normálně, ale sazba zůstane, jaká byla.
+      sazbaKUlozeni = puvSazba
+      const poleSazba = document.getElementById('wd-rate')
+      if (poleSazba) poleSazba.value = puvSazba == null ? '' : puvSazba
+      if (odKdy) showToast('⚠️ Sazba se nezměnila — zbytek profilu se ukládá')
+    }
+  }
+
   const zaklad = {
     full_name: fullName,
-    hourly_rate_worker: rate,
+    hourly_rate_worker: sazbaKUlozeni,
     cooperation_start: coopStart || null,
     cooperation_end: coopEnd || null,
     email: email,
@@ -25408,7 +25483,7 @@ async function saveWorkerProfile() {
     // Ať faktura vystavená hned po uložení pracuje s novými údaji
     Object.assign(currentWorkerProfile, {
       full_name: fullName, profession, is_vat_payer: isVatPayer, ic, dic,
-      hourly_rate_worker: rate, business_type: businessType
+      hourly_rate_worker: sazbaKUlozeni, business_type: businessType
     })
   }
   const wIdx = (_workersCache||[]).find(w => String(w.id) === String(currentWorkerId))
