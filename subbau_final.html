@@ -4391,7 +4391,7 @@ async function submitAdminSignatureWithPlacement() {
 // Po nahrání nové verze se snadno pozná, jestli se opravdu nasadila: otevřete
 // appku, zmáčkněte F12 (na Macu ⌥⌘I) a v konzoli je vypsané tohle datum. Když
 // tam svítí starší, prohlížeč nebo GitHub drží starou verzi.
-const SUBBAU_VERZE = '2026-09-01 c — vyřízení dlouhé směny platí na člověka a den'
+const SUBBAU_VERZE = '2026-09-02 a — historie sazeb: změna sazby nepřepíše už odpracované dny'
 console.log('SubBau docházka — verze ' + SUBBAU_VERZE)
 
 // ============ SUPABASE CONFIG ============
@@ -6669,84 +6669,175 @@ function provizeFirmOf(w, teamById, companyNameById) {
   return cleanTeamName(t.name) || 'Bez firmy'
 }
 
+// ===== HISTORIE SAZEB =====
+// Sazba i provize se dřív ukládaly jako jedno číslo a použily se na VŠECHNY
+// hodiny, i loňské. Zvednutí sazby z 22 na 23 € tak zpětně přepsalo i týdny,
+// které už byly odpracované a vyfakturované za 22 €. Proto se teď u každé
+// změny ptáme, od kdy má platit, a k sazbě se ukládá datum.
+const DAVNO = '1900-01-01'   // „odjakživa" — datum pro původní sazbu
+
+function zitraStr() {
+  const d = new Date(); d.setDate(d.getDate() + 1)
+  return localDateStr(d)
+}
+
+// Zeptá se, od kdy nová hodnota platí. Vrací 'zpetne', datum (YYYY-MM-DD), nebo null.
+function zeptejSeOdKdy(popis, puvodni, nova) {
+  const zitra = zitraStr()
+  const zitraCz = new Date(zitra + 'T00:00:00').toLocaleDateString('cs-CZ')
+  const stara = (puvodni == null || puvodni === '') ? '—' : puvodni
+  if (confirm(`${popis}: ${stara} → ${nova}\n\n`
+    + `OK = platí od ${zitraCz}\n`
+    + `   Dosud odpracované hodiny zůstanou spočítané po staru.\n\n`
+    + `Zrušit = nabídnu přepočet celé historie`)) return zitra
+  if (confirm(`Přepočítat ZPĚTNĚ všechny odpracované hodiny sazbou ${nova}?\n\n`
+    + 'Změní se i týdny, které už jsou hotové a vyfakturované.\n\n'
+    + 'Zrušit = nechat všechno, jak je')) return 'zpetne'
+  return null
+}
+
+// Uloží novou hodnotu a podle odpovědi k ní doplní historii.
+// Vrací true, když se uložilo.
+async function ulozSazbuSHistorii(workerId, druh, puvodni, nova, odKdy) {
+  if (odKdy === 'zpetne') {
+    // Zpětný přepočet = historie u tohohle údaje nemá smysl, ať nezůstane viset.
+    try { await sb.from('worker_rate_history').delete().eq('worker_id', workerId).eq('druh', druh) }
+    catch (e) { console.warn('[sazby] úklid historie:', e?.message) }
+    return true
+  }
+  // Aby se dřívější dny počítaly po staru, musí být původní sazba v historii
+  // zapsaná jako platná „odjakživa". Bez toho by se na starší dny nenašel žádný
+  // záznam a spadlo by se na aktuální (novou) hodnotu — tedy zpětný přepočet.
+  try {
+    const { data: mame } = await sb.from('worker_rate_history')
+      .select('id').eq('worker_id', workerId).eq('druh', druh).limit(1)
+    if (!mame || !mame.length) {
+      await sb.from('worker_rate_history').insert({
+        worker_id: workerId, druh, hodnota: (puvodni == null ? 0 : puvodni),
+        valid_from: DAVNO, created_by: currentUser?.id || null
+      })
+    }
+    const { error } = await sb.from('worker_rate_history').upsert({
+      worker_id: workerId, druh, hodnota: (nova == null ? 0 : nova),
+      valid_from: odKdy, created_by: currentUser?.id || null
+    }, { onConflict: 'worker_id,druh,valid_from' })
+    if (error) throw error
+  } catch (e) {
+    const m = e?.message || ''
+    showToast(/worker_rate_history|does not exist|schema cache/i.test(m)
+      ? '❌ Chybí tabulka historie sazeb — spusťte migraci supabase-migrace-historie-sazeb.sql'
+      : '❌ Historii sazby se nepodařilo uložit: ' + m)
+    return false
+  }
+  return true
+}
+
+// Načte historii jednoho údaje u jednoho pracovníka a vrátí funkci
+// „jaká hodnota platila v tenhle den". Když historie není nebo se nenačte,
+// vrací se všude výchozí hodnota — tedy přesně stav, jaký byl před historií.
+async function sazbyPracovnika(workerId, druh, vychozi) {
+  let h = []
+  try {
+    const { data } = await sb.from('worker_rate_history')
+      .select('hodnota, valid_from').eq('worker_id', workerId).eq('druh', druh)
+      .order('valid_from', { ascending: true })
+    h = (data || []).map(r => ({ od: String(r.valid_from).slice(0, 10), hodnota: Number(r.hodnota) || 0 }))
+  } catch (e) { console.warn('[sazby] historie:', e?.message) }
+  const fn = den => {
+    let v = null
+    for (let i = 0; i < h.length; i++) { if (h[i].od <= den) v = h[i].hodnota; else break }
+    return v == null ? vychozi : v
+  }
+  fn.maHistorii = h.length > 0
+  return fn
+}
+
+// Rozdělí odpracované hodiny podle sazby, která ten den platila.
+// Vrací { hodiny, castka, skupiny: [{ sazba, hodiny, od, do }] } seřazené podle data.
+function hodinyPodleSazeb(radky, sazbaKDni) {
+  const podleSazby = new Map()
+  let hodiny = 0, castka = 0
+  ;(radky || []).slice()
+    .sort((a, b) => String(a.work_date || '').localeCompare(String(b.work_date || '')))
+    .forEach(r => {
+      const h = Number(r.total_hours) || 0
+      if (!h) return
+      const den = String(r.work_date || '').slice(0, 10)
+      const sz = Number(sazbaKDni(den)) || 0
+      hodiny += h
+      castka += h * sz
+      const k = sz.toFixed(4)
+      const g = podleSazby.get(k) || { sazba: sz, hodiny: 0, od: den, do: den }
+      g.hodiny += h
+      if (den < g.od) g.od = den
+      if (den > g.do) g.do = den
+      podleSazby.set(k, g)
+    })
+  const skupiny = [...podleSazby.values()].sort((a, b) => a.od.localeCompare(b.od))
+  skupiny.forEach(g => { g.hodiny = Math.round(g.hodiny * 100) / 100 })
+  return { hodiny: Math.round(hodiny * 100) / 100, castka: Math.round(castka * 100) / 100, skupiny }
+}
+
+// Po změně sazby se musí přepočítat celá tabulka (peníze se počítají den po dni,
+// jedno pole už nestačí přepsat). Admin ale často vyplňuje pole za polem — kdyby
+// překreslení spolklo to, co má rozepsané ve vedlejším políčku, přišel by o to.
+// Proto si zapamatujeme, kde stál kurzor a co v poli bylo, a po překreslení to vrátíme.
+async function prekresliProvize() {
+  const akt = document.activeElement
+  const id = akt && akt.id && /^pv-(rate|prov)-/.test(akt.id) ? akt.id : null
+  const hodnota = id ? akt.value : null
+  const kurzor = id ? akt.selectionStart : null
+  await renderProvizeContent()
+  if (!id) return
+  const nove = document.getElementById(id)
+  if (!nove) return
+  if (hodnota != null && hodnota !== nove.value) nove.value = hodnota
+  nove.focus()
+  try { if (kurzor != null) nove.setSelectionRange(kurzor, kurzor) } catch (e) { /* number input to nemusí umět */ }
+}
+
 async function saveProvizeRate(input, workerId) {
   const val = parseFloat(input.value)
   const rate = isNaN(val) ? null : val
+  // Původní hodnotu čteme z databáze, ne z obrazovky — jen tak víme jistě,
+  // co se má u starších dnů zachovat.
+  const { data: p } = await sb.from('profiles').select('hourly_rate_worker').eq('id', workerId).maybeSingle()
+  const puvodni = p ? p.hourly_rate_worker : null
+  if (String(puvodni ?? '') === String(rate ?? '')) return   // nic se nezměnilo
+
+  const odKdy = zeptejSeOdKdy('Hodinová sazba pracovníka', puvodni, rate)
+  if (!odKdy) { input.value = puvodni == null ? '' : puvodni; return }
+  if (!await ulozSazbuSHistorii(workerId, 'sazba', puvodni, rate, odKdy)) {
+    input.value = puvodni == null ? '' : puvodni
+    return
+  }
   const { error } = await sb.from('profiles').update({ hourly_rate_worker: rate }).eq('id', workerId)
   if (error) { showToast('❌ Chyba: ' + error.message); return }
-  showToast('✅ Sazba uložena — projeví se i v profilu pracovníka')
-  updateProvizeEarningsDisplay(workerId, rate || 0)
-}
-// Po změně sazby přepočítá zobrazený týdenní výdělek pracovníka (jeho řádek,
-// součet firmy i celkovou dlaždici) — bez překreslení celé tabulky, aby admin
-// nepřišel o rozepsané hodnoty v ostatních polích.
-function updateProvizeEarningsDisplay(workerId, newRate) {
-  const idx = window._provizeIndex && window._provizeIndex[workerId]
-  if (!idx) return
-  const eur = n => n.toLocaleString('cs-CZ', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + ' €'
-  const newEarn = newRate * idx.hoursWeek
-  const delta = newEarn - (idx.rate || 0) * idx.hoursWeek
-  const deltaDay = newRate * idx.hoursDay - (idx.rate || 0) * idx.hoursDay
-  idx.rate = newRate
-  const eEl = document.getElementById('pv-e-' + workerId); if (eEl) eEl.textContent = eur(newEarn)
-  const ft = window._provizeFirmTotals && window._provizeFirmTotals[idx.firmIdx]
-  if (ft) {
-    ft.earn = (ft.earn || 0) + delta
-    const fe = document.getElementById('pv-fe-' + idx.firmIdx); if (fe) fe.textContent = eur(ft.earn)
-  }
-  const g = window._provizeGrand
-  if (g) {
-    g.earnWeek = (g.earnWeek || 0) + delta
-    g.earnDay = (g.earnDay || 0) + deltaDay
-    const ge = document.getElementById('pv-ge'); if (ge) ge.textContent = eur(g.earnWeek)
-    const ged = document.getElementById('pv-ged'); if (ged) ged.textContent = eur(g.earnDay)
-  }
+  showToast(odKdy === 'zpetne'
+    ? '✅ Sazba uložena a přepočítána zpětně'
+    : '✅ Sazba uložena — platí od ' + new Date(odKdy + 'T00:00:00').toLocaleDateString('cs-CZ'))
+  prekresliProvize()
 }
 async function saveProvizeCommission(input, workerId) {
   const val = parseFloat(input.value)
   const provize = isNaN(val) ? null : val
+  const { data: wc } = await sb.from('worker_commissions').select('provize').eq('worker_id', workerId).maybeSingle()
+  const puvodni = wc ? wc.provize : null
+  if (String(puvodni ?? '') === String(provize ?? '')) return   // nic se nezměnilo
+
+  const odKdy = zeptejSeOdKdy('Provize SubBau na hodinu', puvodni, provize)
+  if (!odKdy) { input.value = puvodni == null ? '' : puvodni; return }
+  if (!await ulozSazbuSHistorii(workerId, 'provize', puvodni, provize, odKdy)) {
+    input.value = puvodni == null ? '' : puvodni
+    return
+  }
   const { error } = await sb.from('worker_commissions')
     .upsert({ worker_id: workerId, provize, updated_at: new Date().toISOString() }, { onConflict: 'worker_id' })
   if (error) { showToast('❌ Chyba: ' + error.message); return }
-  showToast('✅ Provize uložena')
-  updateProvizeCommissionDisplay(workerId, provize || 0)
-}
-// Přepočítá zobrazenou Odměnu (den/týden/měsíc) pro jeden řádek + součty firmy a celkové součty,
-// bez znovuvykreslení celé tabulky — kdyby se po uložení překreslil celý #provize-content,
-// admin by při postupném vyplňování více polí za sebou přišel o rozepsaný vstup v dalším poli.
-function updateProvizeCommissionDisplay(workerId, newProv) {
-  const idx = window._provizeIndex && window._provizeIndex[workerId]
-  if (!idx) return
-  const eur = n => n.toLocaleString('cs-CZ', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + ' €'
-  const oldProv = idx.prov
-  const newDay = newProv * idx.hoursDay
-  const newWeek = newProv * idx.hoursWeek
-  const newMonth = newProv * idx.hoursMonth
-  const newYear = newProv * (idx.hoursYear || 0)
-  const deltaDay = newDay - oldProv * idx.hoursDay
-  const deltaWeek = newWeek - oldProv * idx.hoursWeek
-  const deltaMonth = newMonth - oldProv * idx.hoursMonth
-  const deltaYear = newYear - oldProv * (idx.hoursYear || 0)
-  idx.prov = newProv
-  const dEl = document.getElementById('pv-d-' + workerId); if (dEl) dEl.textContent = eur(newDay)
-  const wEl = document.getElementById('pv-w-' + workerId); if (wEl) wEl.textContent = eur(newWeek)
-  const mEl = document.getElementById('pv-m-' + workerId); if (mEl) mEl.textContent = eur(newMonth)
-  const ft = window._provizeFirmTotals && window._provizeFirmTotals[idx.firmIdx]
-  if (ft) {
-    ft.day += deltaDay; ft.week += deltaWeek; ft.month += deltaMonth; ft.year = (ft.year || 0) + deltaYear
-    const fd = document.getElementById('pv-fd-' + idx.firmIdx); if (fd) fd.textContent = eur(ft.day)
-    const fw = document.getElementById('pv-fw-' + idx.firmIdx); if (fw) fw.textContent = eur(ft.week)
-    const fm = document.getElementById('pv-fm-' + idx.firmIdx); if (fm) fm.textContent = eur(ft.month)
-  }
-  const g = window._provizeGrand
-  if (g) {
-    g.day = (g.day || 0) + deltaDay; g.week += deltaWeek; g.month += deltaMonth; g.year = (g.year || 0) + deltaYear
-    const gd = document.getElementById('pv-gd'); if (gd) gd.textContent = eur(g.day)
-    const gw = document.getElementById('pv-gw'); if (gw) gw.textContent = eur(g.week)
-    const gm = document.getElementById('pv-gm'); if (gm) gm.textContent = eur(g.month)
-    const gy = document.getElementById('pv-gy'); if (gy) gy.textContent = eur(g.year)
-    const gv = document.getElementById('pv-gv'); if (gv) gv.textContent = eur(g.year * 0.21)
-  }
+  showToast(odKdy === 'zpetne'
+    ? '✅ Provize uložena a přepočítána zpětně'
+    : '✅ Provize uložena — platí od ' + new Date(odKdy + 'T00:00:00').toLocaleDateString('cs-CZ'))
+  prekresliProvize()
 }
 async function toggleProvizePaid(checkbox, workerId, mode, periodKey) {
   const tr = checkbox.closest('tr')
@@ -6871,8 +6962,35 @@ async function generateProvizeFirmReport(firmName, mode) {
       if (a.check_in && !a.check_out && a.work_date === dnesStr2) return calcHours(a.check_in, nowStr2, a.break_start, a.break_end)
       return 0
     }
+    // Historie sazeb — provize se sčítá den po dni, každý den svou sazbou.
+    // Jinak by vyúčtování pro firmu nesedělo s Provizemi, kde se to tak počítá.
+    const histFirma = {}
+    try {
+      const { data: hh } = await sb.from('worker_rate_history')
+        .select('worker_id, hodnota, valid_from').eq('druh', 'provize')
+        .order('valid_from', { ascending: true })
+      ;(hh || []).forEach(h => {
+        ;(histFirma[h.worker_id] = histFirma[h.worker_id] || []).push({
+          od: String(h.valid_from).slice(0, 10), hodnota: Number(h.hodnota) || 0
+        })
+      })
+    } catch (e) { console.warn('[report firmy] historie sazeb:', e?.message) }
+    const provKDni = (workerId, den) => {
+      const h = histFirma[workerId]
+      const vychozi = provMap[workerId] || 0
+      if (!h || !h.length) return vychozi
+      let v = null
+      for (let i = 0; i < h.length; i++) { if (h[i].od <= den) v = h[i].hodnota; else break }
+      return v == null ? vychozi : v
+    }
+
     const hoursByWorker = {}
-    ;(att || []).forEach(a => { hoursByWorker[a.worker_id] = (hoursByWorker[a.worker_id] || 0) + hoursOf(a) })
+    const commByWorker = {}
+    ;(att || []).forEach(a => {
+      const h = hoursOf(a)
+      hoursByWorker[a.worker_id] = (hoursByWorker[a.worker_id] || 0) + h
+      commByWorker[a.worker_id] = (commByWorker[a.worker_id] || 0) + h * provKDni(a.worker_id, a.work_date)
+    })
 
     // Bývalý pracovník patří do vyúčtování jen za období, kdy opravdu pracoval.
     // Kdyby se brali jen aktivní, chyběly by ve vyúčtování hodiny odpracované
@@ -6884,8 +7002,10 @@ async function generateProvizeFirmReport(firmName, mode) {
     let total = 0
     const rowsHtml = uctovani.map(w => {
       const hrs = hoursByWorker[w.id] || 0
-      const prov = provMap[w.id] || 0
-      const comm = prov * hrs
+      const comm = commByWorker[w.id] || 0
+      // Když se sazba během období změnila, není jedno číslo — ukážeme průměr
+      // na hodinu, ať sloupec „provize" pořád dává smysl s výslednou částkou.
+      const prov = hrs > 0 ? comm / hrs : (provMap[w.id] || 0)
       total += comm
       return `<tr>
         <td style="padding:8px 10px;border:1px solid #ccc">${escAttr(w.full_name)}${w.is_active === false ? ' (bývalý)' : ''}</td>
@@ -6984,6 +7104,24 @@ async function renderProvizeContent() {
   // „Bez provize" = pracovník odešel dřív, než za něj SubBau dostane zaplaceno.
   // Sazba u něj zůstane uložená (ať jde příznak vrátit zpět), ale do peněz se
   // nikde nepočítá — proto se pracuje se dvěma hodnotami: uloženou a účinnou.
+  // Historie sazeb — od kdy která platila. Když tabulka ještě není (neproběhla
+  // migrace), zůstane prázdná a počítá se dnešními hodnotami jako dřív.
+  const historieSazeb = { sazba: {}, provize: {} }
+  try {
+    const { data: hist, error: histErr } = await sb.from('worker_rate_history')
+      .select('worker_id, druh, hodnota, valid_from').order('valid_from', { ascending: true })
+    if (histErr) throw histErr
+    ;(hist || []).forEach(h => {
+      const kos = historieSazeb[h.druh]
+      if (!kos) return
+      ;(kos[h.worker_id] = kos[h.worker_id] || []).push({
+        od: String(h.valid_from).slice(0, 10), hodnota: Number(h.hodnota) || 0
+      })
+    })
+  } catch (e) {
+    console.warn('[provize] historie sazeb se nenačetla:', e?.message)
+  }
+
   const provMap = {}, termsMap = {}, bezProvize = new Set()
   ;(provRows || []).forEach(p => {
     if (p.provize != null) provMap[p.worker_id] = Number(p.provize)
@@ -7064,19 +7202,48 @@ async function renderProvizeContent() {
     if (!d || a.work_date >= d.den) teamZDochazky[a.worker_id] = { den: a.work_date, team: a.team_id }
   })
 
+  // Sazba platná v konkrétní den. Historie je seřazená od nejstarší; hledá se
+  // poslední záznam, který začal platit nejpozději ten den. Když u pracovníka
+  // žádná historie není (sazba se nikdy neměnila), platí dnešní hodnota — pak
+  // se počítá úplně stejně jako dřív.
+  const hodnotaKDni = (druh, workerId, den, vychozi) => {
+    const h = historieSazeb[druh] && historieSazeb[druh][workerId]
+    if (!h || !h.length) return vychozi
+    let v = null
+    for (let i = 0; i < h.length; i++) {
+      if (h[i].od <= den) v = h[i].hodnota
+      else break
+    }
+    return v == null ? vychozi : v
+  }
+  const sazbaAktualni = {}
+  workersAll.forEach(w => { sazbaAktualni[w.id] = Number(w.hourly_rate_worker) || 0 })
+
+  // Peníze se počítají DEN PO DNI — sazba se mohla během období změnit. Dřív se
+  // hodiny jen sečetly a na konci vynásobily jedním číslem, takže zvednutí sazby
+  // přepsalo i týdny odpracované za starou.
   const byWorker = {}
-  workersAll.forEach(w => { byWorker[w.id] = { dnes: 0, day: 0, week: 0, month: 0, year: 0 } })
+  workersAll.forEach(w => {
+    byWorker[w.id] = { dnes: 0, day: 0, week: 0, month: 0, year: 0,
+                       pDnes: 0, pDay: 0, pWeek: 0, pMonth: 0, pYear: 0,
+                       vDay: 0, vWeek: 0 }
+  })
   ;(att || []).forEach(a => {
     const bucket = byWorker[a.worker_id]
     if (!bucket) return
     const h = hoursOf(a)
+    if (!h) return
+    const den = a.work_date
+    const provDen = bezProvize.has(a.worker_id)
+      ? 0 : Number(hodnotaKDni('provize', a.worker_id, den, provMap[a.worker_id] || 0)) || 0
+    const sazbaDen = Number(hodnotaKDni('sazba', a.worker_id, den, sazbaAktualni[a.worker_id] || 0)) || 0
     // `dnes` je opravdu dnešek, ne vybraný den — dlaždice nahoře se nesmí měnit,
     // když se šipkami listuje po minulých dnech.
-    if (a.work_date === dnesStrStat) bucket.dnes += h
-    if (a.work_date >= dStartStr && a.work_date <= dEndStr) bucket.day += h
-    if (a.work_date >= wStartStr && a.work_date <= wEndStr) bucket.week += h
-    if (a.work_date >= mStartStr && a.work_date <= mEndStr) bucket.month += h
-    if (a.work_date >= yStartStr && a.work_date <= yEndStr) bucket.year += h
+    if (den === dnesStrStat) { bucket.dnes += h; bucket.pDnes += h * provDen }
+    if (den >= dStartStr && den <= dEndStr) { bucket.day += h; bucket.pDay += h * provDen; bucket.vDay += h * sazbaDen }
+    if (den >= wStartStr && den <= wEndStr) { bucket.week += h; bucket.pWeek += h * provDen; bucket.vWeek += h * sazbaDen }
+    if (den >= mStartStr && den <= mEndStr) { bucket.month += h; bucket.pMonth += h * provDen }
+    if (den >= yStartStr && den <= yEndStr) { bucket.year += h; bucket.pYear += h * provDen }
   })
 
   // DNEŠNÍ PROVIZE — kolik SubBau vydělá za každou odpracovanou hodinu dnešního dne.
@@ -7096,8 +7263,8 @@ async function renderProvizeContent() {
   // Kolik za dnešek přibylo zatím — u načatých směn se počítá čas do teď.
   let dnesProvize = 0
   workersAll.forEach(w => {
-    const h = (byWorker[w.id] && byWorker[w.id].dnes) || 0
-    if (h > 0) dnesProvize += provUcinna(w.id) * h
+    const b = byWorker[w.id]
+    if (b && b.dnes > 0) dnesProvize += b.pDnes
   })
 
   // Uhrazeno je vždy vázané na týden (kolem vybraného data), bez ohledu na zvolený režim navigace — best-effort, tabulka nemusí ještě existovat
@@ -7124,7 +7291,8 @@ async function renderProvizeContent() {
   }
 
   const rows = workersAll.map(w => {
-    const hrs = byWorker[w.id] || { day: 0, week: 0, month: 0, year: 0 }
+    const hrs = byWorker[w.id] || { day: 0, week: 0, month: 0, year: 0,
+                                    pDay: 0, pWeek: 0, pMonth: 0, pYear: 0, vDay: 0, vWeek: 0 }
     const rate = w.hourly_rate_worker || 0
     const prov = provUcinna(w.id)           // do peněz; nula u „bez provize"
     const provUlozena = provMap[w.id] || 0  // do políčka, ať jde příznak vrátit
@@ -7141,9 +7309,10 @@ async function renderProvizeContent() {
       maFirmu: !!(w.team_id && teamById[w.team_id] && teamById[w.team_id].company_id),
       terms,
       hoursDay: hrs.day, hoursWeek: hrs.week, hoursMonth: hrs.month, hoursYear: hrs.year,
-      commDay: prov * hrs.day, commWeek: prov * hrs.week, commMonth: prov * hrs.month, commYear: prov * hrs.year,
-      // kolik si vydělá sám pracovník (sazba × odpracované hodiny)
-      earnWeek: rate * hrs.week, earnDay: rate * hrs.day,
+      // Odměny i výdělky jsou sečtené po dnech, každý den svou sazbou (viz výše).
+      commDay: hrs.pDay, commWeek: hrs.pWeek, commMonth: hrs.pMonth, commYear: hrs.pYear,
+      // kolik si vydělá sám pracovník
+      earnWeek: hrs.vWeek, earnDay: hrs.vDay,
       // Kdo v daném týdnu nemá jedinou odpracovanou hodinu, nemá co fakturovat — nesmí svítit „nezaplaceno"
       paid, dueDate: dueInfo.due, overdue: !paid && dueInfo.overdue && hrs.week > 0
     }
@@ -7192,7 +7361,7 @@ async function renderProvizeContent() {
         monthGrandTotal = souhrn.month, yearGrandTotal = souhrn.year,
         earnGrandTotal = souhrn.earnWeek, earnDayGrandTotal = souhrn.earnDay
 
-  // Index pro rychlý přepočet Odměny po uložení provize bez znovuvykreslení celé tabulky (viz updateProvizeCommissionDisplay)
+  // Index řádků pro doplňkové výpočty v tabulce (souhrny za firmu).
   window._provizeIndex = {}
   window._provizeFirmTotals = []
 
@@ -7213,8 +7382,8 @@ async function renderProvizeContent() {
         : `<div style="font-size:10px;margin-top:3px;font-weight:${r.overdue ? '700' : '400'};color:${r.overdue ? 'var(--red)' : 'var(--text3)'}">${r.overdue ? '⚠️ po splatnosti ' : 'splatnost '}${r.dueDate.toLocaleDateString('cs-CZ')}</div>`
       return `<tr style="${rowBg}">
         <td style="font-size:${isNoFirm ? '16px' : '14.5px'};font-weight:600">${r.name}${r.overdue ? ' <span style="font-size:11px;color:var(--red);font-weight:700">⚠️ nezaplaceno</span>' : ''}</td>
-        <td style="text-align:right"><input type="number" step="0.01" value="${r.rate || ''}" placeholder="0" onchange="saveProvizeRate(this,'${r.id}')" style="width:80px;padding:6px 8px;border:1.5px solid var(--brd);border-radius:7px;font-size:14px;text-align:right;font-family:inherit"> €/h</td>
-        <td style="text-align:right"><input type="number" step="0.01" value="${r.provUlozena || ''}" placeholder="0" onchange="saveProvizeCommission(this,'${r.id}')" title="${r.bezProvize ? 'Sazba zůstává uložená, ale nepočítá se — pracovník je označený „bez provize“' : ''}" style="width:80px;padding:6px 8px;border:1.5px solid var(--amber);border-radius:7px;font-size:14px;text-align:right;font-family:inherit;background:#faf6ee"> €/h</td>
+        <td style="text-align:right"><input id="pv-rate-${r.id}" type="number" step="0.01" value="${r.rate || ''}" placeholder="0" onchange="saveProvizeRate(this,'${r.id}')" style="width:80px;padding:6px 8px;border:1.5px solid var(--brd);border-radius:7px;font-size:14px;text-align:right;font-family:inherit"> €/h</td>
+        <td style="text-align:right"><input id="pv-prov-${r.id}" type="number" step="0.01" value="${r.provUlozena || ''}" placeholder="0" onchange="saveProvizeCommission(this,'${r.id}')" title="${r.bezProvize ? 'Sazba zůstává uložená, ale nepočítá se — pracovník je označený „bez provize“' : ''}" style="width:80px;padding:6px 8px;border:1.5px solid var(--amber);border-radius:7px;font-size:14px;text-align:right;font-family:inherit;background:#faf6ee"> €/h</td>
         <td style="text-align:center;padding:0"><label title="Pracovník odešel dřív, než za něj přijdou peníze — nepočítat mu provizi" style="display:flex;align-items:center;justify-content:center;width:100%;height:100%;min-height:44px;padding:8px;cursor:pointer"><input type="checkbox" ${r.bezProvize ? 'checked' : ''} onchange="toggleBezProvize(this,'${r.id}')" style="width:20px;height:20px;cursor:pointer;accent-color:var(--red)"></label></td>
         <td style="text-align:right;background:#f2f8f4"><b id="pv-e-${r.id}" style="font-size:14px;color:var(--green)">${eur(r.earnWeek)}</b><div style="font-size:11px;color:var(--text3)">${r.hoursWeek.toFixed(2)} h</div></td>
         <td style="text-align:right"><b id="pv-d-${r.id}" style="font-size:14px">${eur(r.commDay)}</b><div style="font-size:11px;color:var(--text3)">${r.hoursDay.toFixed(2)} h</div></td>
@@ -16427,13 +16596,16 @@ async function onInvoiceWeekChange() {
     if (qtyEl) qtyEl.value = '1'
     // Celková částka faktury je daná: odpracované hodiny × sazba. Pracovník ji
     // nemění, jen si volí, na kolik položek si ji rozepíše.
-    const { data: att } = await sb.from('attendance').select('total_hours')
+    const { data: att } = await sb.from('attendance').select('total_hours, work_date')
       .eq('worker_id', currentUser?.id).eq('kw', parseInt(week)).eq('kw_year', parseInt(year))
-    const hodiny = (att || []).reduce((sum, r) => sum + (r.total_hours || 0), 0)
     const sazba = isRateFromProvize(currentProfile)
       ? parseFloat(currentProfile?.hourly_rate_worker)
       : parseFloat(document.getElementById('inv-rate')?.value)
-    window._invTydenniCastka = Math.round(hodiny * (Number.isFinite(sazba) ? sazba : 0) * 100) / 100
+    const zaklad = Number.isFinite(sazba) ? sazba : 0
+    // Když SubBau změnil sazbu uprostřed týdne, počítá se každý den svou sazbou —
+    // jinak by faktura zvedla i dny odpracované za starou sazbu.
+    const sazbaKDni = await sazbyPracovnika(currentUser?.id, 'sazba', zaklad)
+    window._invTydenniCastka = hodinyPodleSazeb(att, sazbaKDni).castka
     rozpocitatCastku('inv')
     await predvyplnitCisloFaktury(currentUser?.id, parseInt(year), 'inv', week)
   } catch (e) { console.warn('[faktura] předvyplnění položky:', e?.message) }
@@ -20274,7 +20446,15 @@ async function generateInvoiceMob(lang = 'en', override = null) {
   // a vystavila by se faktura na nula hodin.
   if (attErr) { showToast('⚠️ Docházku se nepodařilo načíst — zkuste to prosím znovu'); return }
 
-  const totalHours = (att || []).reduce((s,r) => s + (r.total_hours||0), 0)
+  // Sazbu, kterou sis napsal ručně, nepřebíjíme historií — platí na celý týden.
+  // Když se ale fakturuje sazbou z profilu, můžou v tom týdnu platit dvě různé
+  // (změna od středy). Pak se každý den počítá svou a na fakturu jdou dva řádky.
+  const profilovaSazba = parseFloat(prof.hourly_rate_worker) || 0
+  const sazbaKDni = (profilovaSazba > 0 && Math.abs(rate - profilovaSazba) < 0.005)
+    ? await sazbyPracovnika(workerId, 'sazba', rate)
+    : (() => { const f = () => rate; f.maHistorii = false; return f })()
+  const rozpis = hodinyPodleSazeb(att, sazbaKDni)
+  const totalHours = rozpis.hodiny
   // Položky faktury. Jsou zdrojem částky — když existují, hodiny × sazba se
   // už nepočítá. Hodiny se ale dál ukládají, drží přehled faktur v adminu.
   const polozkyFaktury = (override && Array.isArray(override.items) && override.items.length)
@@ -20290,9 +20470,19 @@ async function generateInvoiceMob(lang = 'en', override = null) {
     return
   }
   const maPolozky = polozkyFaktury.some(pol => pol.mnozstvi > 0 || pol.cena > 0)
+  // Změnila se sazba uprostřed fakturovaného týdne? Pak se nedá vytisknout jedna
+  // jednotková cena — hodiny × sazba by nedaly výslednou částku. Rozepíšeme to
+  // na řádek za každou sazbu, ať si to odběratel i účetní přepočítá na papíře.
+  const denCz = d => { const x = new Date(d + 'T00:00:00'); return isNaN(x) ? d : x.toLocaleDateString('cs-CZ') }
+  const polozkySazeb = (!maPolozky && rozpis.skupiny.length > 1)
+    ? rozpis.skupiny.map(g => ({
+        popis: invoiceItem + '\n' + denCz(g.od) + (g.do !== g.od ? ' – ' + denCz(g.do) : ''),
+        mnozstvi: g.hodiny, cena: g.sazba
+      }))
+    : null
   const totalAmount = maPolozky
     ? soucetPolozek(polozkyFaktury)
-    : Math.round(totalHours * rate * 100) / 100
+    : (polozkySazeb ? soucetPolozek(polozkySazeb) : Math.round(totalHours * rate * 100) / 100)
 
   // Faktura na 0 h je skoro vždycky zapomenutý odchod, ne skutečnost.
   // Faktura s položkami stojí na tom, co je v nich — na paušál nebo za kusy se
@@ -20425,7 +20615,7 @@ async function generateInvoiceMob(lang = 'en', override = null) {
     totalHours, rate, totalAmount, week, year,
     // Položky faktury. Hodiny a sazba se dál ukládají do databáze (drží přehled,
     // třídění a statistiky v adminu), ale na fakturu se už netisknou.
-    items: maPolozky ? polozkyFaktury : null,
+    items: maPolozky ? polozkyFaktury : polozkySazeb,
     customer: cust0,
     // Kód karty z CRM (X12) a barva pracovníka — kód se tiskne pod číslo faktury,
     // barva dělá slabý rámeček. Obojí je z profilu; kód se pak uloží i k faktuře.
