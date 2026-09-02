@@ -4391,7 +4391,7 @@ async function submitAdminSignatureWithPlacement() {
 // Po nahrání nové verze se snadno pozná, jestli se opravdu nasadila: otevřete
 // appku, zmáčkněte F12 (na Macu ⌥⌘I) a v konzoli je vypsané tohle datum. Když
 // tam svítí starší, prohlížeč nebo GitHub drží starou verzi.
-const SUBBAU_VERZE = '2026-09-02 f — odmítnutí dokladu funguje i na starší databázi'
+const SUBBAU_VERZE = '2026-09-02 g — příchod: dolů jen do 10 min po celé hodině, jinak nahoru na půlhodinu'
 console.log('SubBau docházka — verze ' + SUBBAU_VERZE)
 
 // ============ SUPABASE CONFIG ============
@@ -10889,10 +10889,10 @@ const tutorialSteps = [
       <div style="background:#211D1A;border-radius:12px;padding:14px;margin-bottom:9px;border-left:3px solid #1d9e75">
         <div style="color:#fff;font-size:15px;font-weight:800;margin-bottom:5px">Příchod</div>
         <div style="color:#aaa;font-size:14px;line-height:1.7">
-          Příchod se počítá od <b style="color:#fff">nejbližší celé půlhodiny dopředu</b> — v kterýkoli čas, ráno i odpoledne.<br>
-          6:00 → <b style="color:#1d9e75">6:00</b>, 6:20 → <b style="color:#1d9e75">6:30</b>, 7:00 → <b style="color:#1d9e75">7:00</b>, 9:30 → <b style="color:#1d9e75">9:30</b>.<br>
-          Kdo přijde byť o minutu později, počítá se mu až od další půlhodiny: 7:01 → <b style="color:#ff6b6b">7:30</b>, 9:31 → <b style="color:#ff6b6b">10:00</b>.<br>
-          Vyplatí se tedy přijít včas — jedna minuta po půlhodině stojí celou půlhodinu. Práci před sedmou nám vždycky nahlaste dopředu.
+          Do <b style="color:#fff">10 minut po celé hodině</b> se počítá ta celá hodina: 7:08 → <b style="color:#1d9e75">7:00</b>, 9:01 → <b style="color:#1d9e75">9:00</b>, 9:10 → <b style="color:#1d9e75">9:00</b>.<br>
+          Jinak se počítá od <b style="color:#fff">nejbližší půlhodiny dopředu</b>: 7:11 → <b style="color:#ff6b6b">7:30</b>, 9:31 → <b style="color:#ff6b6b">10:00</b>, 9:37 → <b style="color:#ff6b6b">10:00</b>.<br>
+          Přesná půlhodina zůstane: 9:30 → <b style="color:#1d9e75">9:30</b>. Po půlhodině se ale už nic neodpouští.<br>
+          Práci před sedmou nám vždycky nahlaste dopředu.
         </div>
       </div>
 
@@ -24147,6 +24147,9 @@ function buildKWOptions() {
 // Standardní směna: příchod 7:00, přestávka 11:00-11:30, odchod 16:00.
 // abnormal = hranice dlouhé pracovní doby (19:00), stejná jako u upozornění na dashboardu.
 const SHIFT = { start: 7*60, breakStart: 11*60, breakLen: 30, end: 16*60, abnormal: 19*60 }
+// Kolik minut po CELÉ hodině se ještě odpouští dolů. 7:08 → 7:00, ale 7:11 → 7:30.
+// Po půlhodině se neodpouští nic: 9:37 → 10:00.
+const HAJENA_DOBA_MIN = 10
 
 function timeToMin(t) {
   if (!t) return null
@@ -24277,12 +24280,16 @@ function applyAttendanceRules(record) {
   }
 
   // --- 1. PŘÍCHOD ---
-  // Počítá se od nejbližší CELÉ půlhodiny dopředu, a to v kterýkoli čas — ráno
-  // i odpoledne. Žádná hájená doba není:
-  //   9:30 přesně → 9:30, ale 9:31 už → 10:00. Stejně tak 7:00 → 7:00, 7:01 → 7:30.
-  // Důvod: neplatit dobu, kdy člověk ještě nebyl na stavbě. Kdo chce celou
-  // půlhodinu, musí ji stihnout celou.
-  const adjCi = Math.ceil(ci / 30) * 30
+  // Dolů se zaokrouhluje JEN po celé hodině — kdo přijde do 10 minut po celé,
+  // má započtenou tu celou hodinu:  7:08 → 7:00,  9:01 → 9:00,  9:10 → 9:00.
+  // Jinak se jde NAHORU na nejbližší půlhodinu:  7:11 → 7:30,  9:31 → 10:00,
+  //   9:37 → 10:00.  Přesná půlhodina zůstává:  9:30 → 9:30.
+  // Platí to v kterýkoli čas, ráno i odpoledne. Po půlhodině se neodpouští nic —
+  // ať se neplatí doba, kdy člověk ještě nebyl na stavbě.
+  const minutyPoCele = ci % 60
+  const adjCi = (minutyPoCele <= HAJENA_DOBA_MIN)
+    ? ci - minutyPoCele                 // do 10 minut po celé → dolů na celou
+    : Math.ceil(ci / 30) * 30           // jinak nahoru na nejbližší půlhodinu
   if (adjCi > SHIFT.start) flags.lateIn = true
 
   // --- 2. PŘESTÁVKA ---
