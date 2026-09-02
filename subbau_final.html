@@ -4391,7 +4391,7 @@ async function submitAdminSignatureWithPlacement() {
 // Po nahrání nové verze se snadno pozná, jestli se opravdu nasadila: otevřete
 // appku, zmáčkněte F12 (na Macu ⌥⌘I) a v konzoli je vypsané tohle datum. Když
 // tam svítí starší, prohlížeč nebo GitHub drží starou verzi.
-const SUBBAU_VERZE = '2026-09-02 e — příchod se vždy počítá od celé půlhodiny dopředu'
+const SUBBAU_VERZE = '2026-09-02 f — odmítnutí dokladu funguje i na starší databázi'
 console.log('SubBau docházka — verze ' + SUBBAU_VERZE)
 
 // ============ SUPABASE CONFIG ============
@@ -9835,12 +9835,15 @@ function renderDocuments() {
 }
 
 async function approveDoc(id) {
-  await sb.from('documents').update({ status:'ok', reviewed_at: new Date().toISOString() }).eq('id',id)
+  // Bez kontroly chyby appka hlásila „schváleno" i když se nic neuložilo.
+  const { error } = await sb.from('documents').update({ status:'ok', reviewed_at: new Date().toISOString() }).eq('id',id)
+  if (error) { showToast('❌ Chyba: ' + error.message); return }
   showToast('✅ Dokument schválen'); loadDocuments()
 }
 
 async function requestReupload(id) {
-  await sb.from('documents').update({ status:'unreadable' }).eq('id',id)
+  const { error } = await sb.from('documents').update({ status:'unreadable' }).eq('id',id)
+  if (error) { showToast('❌ Chyba: ' + error.message); return }
   showToast('📧 Pracovník byl upozorněn'); loadDocuments()
 }
 
@@ -25053,21 +25056,33 @@ async function approveDocWd(id, workerId) {
 async function rejectDocWd(id, workerId) {
   const reason = prompt('Důvod odmítnutí (uvidí ho pracovník):', 'Nečitelný dokument — nahrajte prosím znovu')
   if (reason === null) return  // zrušeno
-  const upd = { status:'rejected', reviewed_at: new Date().toISOString() }
-  // reject_reason ulož jen pokud sloupec existuje (jinak se update nepovede tiše)
-  upd.reject_reason = reason.trim() || 'Nahrajte prosím znovu'
-  let { error } = await sb.from('documents').update(upd).eq('id', id)
-  if (error) {
-    // fallback bez reject_reason (kdyby sloupec chyběl)
-    const r2 = await sb.from('documents').update({ status:'rejected', reviewed_at: new Date().toISOString() }).eq('id', id)
-    if (r2.error) { showToast('❌ Chyba: ' + r2.error.message); return }
+  const duvod = reason.trim() || 'Nahrajte prosím znovu'
+  // Stav zkoušíme v tomhle pořadí: 'rejected' je ten správný, ale starší databáze
+  // ho v pravidle documents_status_check nemá a odmítne ho. 'unreadable' povoluje
+  // odjakživa a appka s ním zachází úplně stejně (viz `isRejected` níž), takže
+  // odmítnutí funguje i bez migrace — jen se to jinak jmenuje.
+  // Zároveň zkoušíme uložit důvod; když sloupec reject_reason chybí, jde to bez něj.
+  let error = null, ulozenyDuvod = duvod
+  for (const stav of ['rejected', 'unreadable']) {
+    for (const sDuvodem of [true, false]) {
+      const upd = { status: stav, reviewed_at: new Date().toISOString() }
+      if (sDuvodem) upd.reject_reason = duvod
+      const r = await sb.from('documents').update(upd).eq('id', id)
+      if (!r.error) { error = null; ulozenyDuvod = sDuvodem ? duvod : null; break }
+      error = r.error
+      // Nesouvisí to se sloupcem ani s pravidlem? Pak dál zkoušet nemá smysl.
+      if (!/reject_reason|status_check|column|schema cache|constraint/i.test(r.error.message || '')) break
+    }
+    if (!error) break
   }
+  if (error) { showToast('❌ Chyba: ' + error.message); return }
+  if (!ulozenyDuvod) showToast('⚠️ Důvod se neuložil — chybí sloupec reject_reason')
   // Pošli pracovníkovi oznámení
   try {
     await sb.from('notifications').insert({
       worker_id: workerId,
       title: '📄 Dokument odmítnut',
-      message: (upd.reject_reason || 'Nahrajte prosím znovu') + ' — nahrajte dokument znovu.',
+      message: duvod + ' — nahrajte dokument znovu.',
       type: 'document',
       is_read: false
     })
