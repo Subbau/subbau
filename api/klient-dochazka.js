@@ -247,14 +247,18 @@ module.exports = async (req, res) => {
       }
     }
 
-    // Počítadlo návštěv — jen orientační, ať víte, jestli se tam klient dívá.
+    // Počítadlo otevření. Stránka se sama obnovuje jednou za minutu, a kdyby
+    // se počítalo každé takové doptání, ukazovalo by číslo, jak dlouho měl
+    // klient okno otevřené, ne kolikrát se přišel podívat. Proto se zvyšuje
+    // jen při skutečném otevření — stránka to pozná a pošle `prvni=1`.
+    // Čas poslední návštěvy se naopak zapisuje vždycky.
+    const prvniOtevreni = String((req.query && req.query.prvni) || '') === '1';
+    const zmena = { posledni_navsteva: new Date().toISOString() };
+    if (prvniOtevreni) zmena.pocet_navstev = (odkaz.pocet_navstev || 0) + 1;
     fetch(`${SUPABASE_URL}/rest/v1/client_links?id=eq.${odkaz.id}`, {
       method: 'PATCH',
       headers: { apikey: klic, Authorization: `Bearer ${klic}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        posledni_navsteva: new Date().toISOString(),
-        pocet_navstev: (odkaz.pocet_navstev || 0) + 1,
-      }),
+      body: JSON.stringify(zmena),
     }).catch(() => {});
 
     res.status(200).json({ ok: true, nazev: odkaz.nazev, kw, rok, od, do: doDne, radky });
