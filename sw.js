@@ -38,7 +38,8 @@ self.addEventListener('fetch', (event) => {
   // Serverové funkce a stránka pro odběratele se NIKDY neukládají do paměti.
   // Kdyby se uložily, klient by po zneplatnění odkazu koukal na data dál
   // z prohlížeče a tlačítko „Deaktivovat" by nefungovalo, jak slibuje.
-  if (url.pathname.startsWith('/api/') || url.pathname.startsWith('/klient')) return;
+  if (url.pathname.startsWith('/api/') || url.pathname.startsWith('/klient')
+      || url.pathname.startsWith('/ukazka')) return;
 
   event.respondWith((async () => {
     try {
