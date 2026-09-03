@@ -27,6 +27,18 @@ const TVAR_TOKENU = /^[0-9a-f]{64}$/;
 const SMENA = { start: 7 * 60, delkaPauzy: 30 };
 const HAJENA_DOBA_MIN = 10;
 
+// ---------------------------------------------------------------------
+// CO KLIENT VIDÍ A KDY — dva přepínače na jednom místě
+// ---------------------------------------------------------------------
+// Den se klientovi ukáže až takhle dlouho po odchodu. Nemá koukat naživo,
+// kdo je zrovna na stavbě; navíc je tím čas, kdy si SubBau může zápis
+// v klidu opravit dřív, než ho odběratel uvidí.
+const PRODLEVA_PO_ODCHODU_MIN = 20;
+// Den, u kterého ještě neuplynulo zdržení, se z přehledu nevyhazuje —
+// klient u něj vidí jméno a adresu stavby, ale místo časů a hodin nápis
+// „Stundenerfassung läuft". Ví tedy, kdo mu na stavbě je, ale hodiny uvidí,
+// až budou hotové a SubBau je stihne případně opravit.
+
 function naMinuty(t) {
   if (!t) return null;
   const [h, m, s] = String(t).slice(0, 8).split(':').map(Number);
@@ -96,6 +108,24 @@ function upravDen(z, nyni) {
 
   return { prichod: naCas(adjCi), odchod: bezi ? null : naCas(adjCo % 1440),
            pauzy: kPrehledu, hodiny, bezi };
+}
+
+// Uplynulo od odchodu dost času, aby se den směl ukázat klientovi?
+// Konec směny se skládá z data a času odchodu; u směny přes půlnoc leží
+// odchod až v následujícím dni, proto se přičítá 24 hodin.
+function uzSeSmiUkazat(z, nyni) {
+  const ci = naMinuty(z.check_in);
+  const co = naMinuty(z.check_out);
+  if (co == null) return false;                   // ještě neskončil
+  if (!nyni) return true;
+  let konec = co;
+  if (ci != null && co < ci) konec += 24 * 60;
+  const dnu = Math.round(
+    (Date.parse(nyni.den + 'T00:00:00Z') - Date.parse(String(z.work_date).slice(0, 10) + 'T00:00:00Z'))
+    / 86400000);
+  if (!Number.isFinite(dnu)) return true;         // nečitelné datum radši ukážeme
+  const odKonce = dnu * 24 * 60 + nyni.minuty - konec;
+  return odKonce >= PRODLEVA_PO_ODCHODU_MIN;
 }
 
 // Adresa stavby pro klienta. Pořadí jako v appce: ručně zapsaná stavba,
@@ -231,18 +261,33 @@ module.exports = async (req, res) => {
       }
 
       for (const z of (dochazka || [])) {
-        const u = upravDen(z, nyni);
-        if (!u) continue;   // starý den bez odchodu — zapomenutý zápis, nepočítá se
-        radky.push({
+        const zaklad = {
           jmeno: jmena[z.worker_id] || '—',
-          datum: z.work_date,
+          datum: String(z.work_date).slice(0, 10),
+          stavba: adresaStavby(z),
+          prace: (z.work_description || '').trim() || null,
+        };
+
+        // Ještě neuplynulo zdržení po odchodu (nebo směna pořád běží):
+        // klient uvidí, kdo a kde je, ale žádné časy ani hodiny.
+        if (!uzSeSmiUkazat(z, nyni)) {
+          const dnesniBezOdchodu = !z.check_out && zaklad.datum === (nyni && nyni.den);
+          // Starý den bez odchodu je zapomenutý zápis, ne práce — ten se
+          // neukazuje vůbec, stejně jako ho přeskakuje appka.
+          if (!z.check_out && !dnesniBezOdchodu) continue;
+          radky.push({ ...zaklad, probiha: true, prichod: null, odchod: null, pauzy: [], hodiny: 0 });
+          continue;
+        }
+
+        const u = upravDen(z, nyni);
+        if (!u) continue;
+        radky.push({
+          ...zaklad,
+          probiha: false,
           prichod: u.prichod,
           odchod: u.odchod,
           pauzy: u.pauzy,
           hodiny: u.hodiny,
-          bezi: !!u.bezi,
-          stavba: adresaStavby(z),
-          prace: (z.work_description || '').trim() || null,
         });
       }
     }

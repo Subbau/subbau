@@ -41,6 +41,7 @@
   .cas{font-variant-numeric:tabular-nums;white-space:nowrap}
   .bezi{color:#b8860b;font-weight:800}
   .radek-bezi{background:#fffaf0}
+  .probiha{color:#b8860b;font-weight:700;font-size:13px}
   .hod{font-weight:800;text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}
   .drobne{font-size:11.5px;color:var(--seda2)}
   .de{color:var(--seda);font-size:11.5px;font-style:italic}
@@ -160,8 +161,8 @@ function vykreslit(d, preklady){
     html += '<div class="clovek"><div class="hlava">'
       + '<div class="jmeno">' + esc(jm) + '</div>'
       + '<div class="soucet">' + hod(suma) + ' Std.'
-      + '<small>' + (dny.some(function(x){ return x.bezi })
-          ? 'Schicht läuft · směna běží' : 'Stunden · hodin') + '</small></div>'
+      + '<small>' + (dny.some(function(x){ return x.probiha })
+          ? 'ohne laufende Tage · bez probíhajících' : 'Stunden · hodin') + '</small></div>'
       + '</div><div class="tab"><table><thead><tr>'
       + '<th>Datum<small>datum</small></th>'
       + '<th>Beginn<small>příchod</small></th>'
@@ -189,17 +190,26 @@ function vykreslit(d, preklady){
         }
       }
       if (!prace) prace = '<span class="drobne">—</span>';
-      html += '<tr' + (r.bezi ? ' class="radek-bezi"' : '') + '>'
-        + '<td class="cas">' + esc(datumDe(r.datum))
-          + '<div class="drobne">' + esc(datumCs(r.datum)) + '</div></td>'
-        + '<td class="cas">' + esc(r.prichod || '—') + '</td>'
-        + '<td class="cas drobne">' + pauza + '</td>'
-        + '<td class="cas">' + (r.bezi
-            ? '<span class="bezi">läuft…<div class="drobne">probíhá</div></span>'
-            : esc(r.odchod || '—')) + '</td>'
-        + '<td>' + prace + '</td>'
-        + '<td class="hod">' + hod(r.hodiny) + '</td>'
-        + '</tr>';
+      var datumBunka = '<td class="cas">' + esc(datumDe(r.datum))
+        + '<div class="drobne">' + esc(datumCs(r.datum)) + '</div></td>';
+      if (r.probiha){
+        // Hodiny se dopisují až po skončení směny — místo časů jeden nápis
+        // přes tři sloupce. Adresa a popis práce zůstávají.
+        html += '<tr class="radek-bezi">' + datumBunka
+          + '<td colspan="3" class="probiha">Stundenerfassung läuft'
+            + '<div class="drobne">Probíhá zápis hodin</div></td>'
+          + '<td>' + prace + '</td>'
+          + '<td class="hod probiha">—</td>'
+          + '</tr>';
+      } else {
+        html += '<tr>' + datumBunka
+          + '<td class="cas">' + esc(r.prichod || '—') + '</td>'
+          + '<td class="cas drobne">' + pauza + '</td>'
+          + '<td class="cas">' + esc(r.odchod || '—') + '</td>'
+          + '<td>' + prace + '</td>'
+          + '<td class="hod">' + hod(r.hodiny) + '</td>'
+          + '</tr>';
+      }
     });
     html += '</tbody></table></div></div>';
   });
@@ -208,7 +218,10 @@ function vykreslit(d, preklady){
     + jmena.length + ' Mitarbeiter · pracovníků</div></div>'
     + '<div class="c">' + hod(celkem) + ' Std.</div></div>';
 
-  html += '<div class="pata">Tätigkeitsbeschreibungen sind maschinell übersetzt.<br>'
+  html += '<div class="pata">'
+    + '<b>Nach Arbeitsende wird die vollständige Arbeitszeit angezeigt.</b><br>'
+    + 'Po ukončení docházky se zobrazí celá jeho pracovní doba.<br><br>'
+    + 'Tätigkeitsbeschreibungen sind maschinell übersetzt.<br>'
     + 'Popisy práce jsou přeložené strojově.<br><br>'
     + 'Bitte diesen Link nicht weitergeben · Odkaz prosím nikomu nepřeposílejte.</div>';
 
@@ -221,10 +234,10 @@ function stahnoutCsv(){
   var radky = DATA.radky.slice().sort(function(a,b){
     return a.jmeno.localeCompare(b.jmeno,'cs') || a.datum.localeCompare(b.datum);
   }).map(function(r){
-    return [ r.jmeno, r.datum, r.prichod || '',
+    return [ r.jmeno, r.datum, r.probiha ? 'laeuft' : (r.prichod || ''),
       (r.pauzy||[]).map(function(p){ return p.od + '-' + p.do }).join(' '),
-      r.bezi ? 'laeuft' : (r.odchod || ''), r.stavba || '', r.prace || '',
-      String(r.hodiny).replace('.', ',') ];
+      r.probiha ? 'laeuft' : (r.odchod || ''), r.stavba || '', r.prace || '',
+      r.probiha ? '' : String(r.hodiny).replace('.', ',') ];
   });
   var csv = [hl].concat(radky).map(function(r){
     return r.map(function(b){ return '"' + String(b).replace(/"/g,'""') + '"' }).join(';');
