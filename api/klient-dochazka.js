@@ -108,10 +108,20 @@ function tydenOdDo(dnes) {
 
 async function db(cesta, klic) {
   const r = await fetch(`${SUPABASE_URL}/rest/v1/${cesta}`, {
-    headers: { apikey: klic, Authorization: `Bearer ${klic}` },
+    headers: { apikey: klic, Authorization: `Bearer ${klic}`, Accept: 'application/json' },
   });
-  if (!r.ok) throw new Error(`db ${r.status}`);
-  return r.json();
+  if (!r.ok) {
+    const telo = await r.text().catch(() => '');
+    // Podrobnosti jen do logu na Vercelu. Ven půjde jen číslo a kód chyby,
+    // ať se z odpovědi nedá vyčíst, jak je databáze postavená.
+    console.error('[klient-dochazka] Supabase', r.status, telo.slice(0, 300));
+    const e = new Error('db ' + r.status);
+    e.stav = r.status;
+    try { e.kod = JSON.parse(telo).code } catch (x) { e.kod = null }
+    throw e;
+  }
+  const t = await r.text();
+  return t ? JSON.parse(t) : [];
 }
 
 module.exports = async (req, res) => {
@@ -211,6 +221,10 @@ module.exports = async (req, res) => {
     // Podrobnosti si nechá log na Vercelu. Ven jde jen obecná hláška, ať
     // z ní nejde vyčíst, jak je databáze postavená.
     console.error('[klient-dochazka]', e);
-    res.status(500).json({ ok: false, chyba: 'chyba_serveru' });
+    // Dočasná diagnostika: samotné číslo stavu a kód chyby nic o datech
+    // neprozradí, ale bez nich se hledá příčina naslepo.
+    res.status(500).json({ ok: false, chyba: 'chyba_serveru',
+                           stav: e && e.stav ? e.stav : null,
+                           kod: e && e.kod ? e.kod : (e && e.message ? String(e.message).slice(0, 60) : null) });
   }
 };
