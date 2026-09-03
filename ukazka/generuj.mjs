@@ -102,11 +102,22 @@ s = s.replace(/<link[^>]*rel="manifest"[^>]*>/g, '<!-- ukázka: bez manifestu --
 s = s.replace(/<link[^>]*href="\/favicon\.ico"[^>]*>/g, '<!-- ukázka: bez ikony ze serveru -->');
 s = s.replace(/<link[^>]*href="\/apple-touch-icon\.png"[^>]*>/g, '<!-- ukázka: bez ikony ze serveru -->');
 
+// --- 4c) SKUTEČNÉ OSOBNÍ ÚDAJE
+// V appce jsou natvrdo telefony na vedení, jména a údaje německého odběratele
+// včetně DIČ. Ukázku dostanou cizí stavební firmy — tam to nepatří.
+const { OSOBNI_UDAJE } = await import('./bez-osobnich-udaju.js');
+let vymen2 = 0;
+for (const [skutecny, misto] of OSOBNI_UDAJE) {
+  const kolik = s.split(skutecny).length - 1;
+  if (kolik) { s = s.split(skutecny).join(misto); vymen2 += kolik; }
+}
+console.log(`   osobní údaje vyměněny: ${vymen2}×`);
+
 // --- 5) service worker se v ukázce neregistruje ---
 s = s.replace(/navigator\.serviceWorker\.register\(/g, 'void (0) && navigator.serviceWorker.register(');
 
 // --- 6) vložit ukázkovou vrstvu PŘED hlavní skript appky ---
-const soubory = ['databaze-v-pameti.js', 'sb-nahrada.js', 'vymyslena-data.js', 'prihlas-hned.js'];
+const soubory = ['bez-serveru.js', 'databaze-v-pameti.js', 'sb-nahrada.js', 'vymyslena-data.js', 'prihlas-hned.js'];
 // Vlastní vrstva prochází stejnou výměnou názvu jako appka — i v komentářích
 // by jinak zůstalo skutečné jméno firmy a kontrola na konci by to (správně)
 // zastavila.
@@ -137,9 +148,11 @@ s = s.replace('<head>', '<head>\n<meta name="robots" content="noindex, nofollow"
 const puvodniLogo = (fs.readFileSync(path.join(koren, 'subbau_final.html'), 'utf8')
   .match(/data:image\/png;base64,([A-Za-z0-9+/=]{200,})/) || [])[1];
 
+const { OSOBNI_UDAJE: KONTROLA_UDAJU } = await import('./bez-osobnich-udaju.js');
 const zakazane = [
   [mKey[1], 'klíč k databázi'],
   [puvodniLogo && puvodniLogo.slice(0, 120), 'původní logo firmy'],
+  ...KONTROLA_UDAJU.map(([skutecny]) => [skutecny, 'osobní údaj: ' + skutecny]),
   [mUrl[1].replace('https://', ''), 'adresa databáze'],
   ['SubBau', 'název firmy'],
   ['subbau.vercel.app', 'adresa ostré appky'],
@@ -152,6 +165,12 @@ if (zbylyOdkaz) {
         + s.slice(Math.max(0, zbylyOdkaz.index - 70), zbylyOdkaz.index + 40).replace(/\n/g, ' ') + '…');
 }
 console.log('   ✅ žádný odkaz na knihovnu supabase');
+
+// Ukázka nesmí volat serverové funkce ostré appky — musí být vložený odchytávač.
+if (!s.includes('[ukázka] požadavek na server odchycen')) {
+  chyba('v ukázce chybí odchytávání požadavků na /api/ — klik na „odeslat fakturu" by odeslal opravdový e-mail');
+}
+console.log('   ✅ požadavky na server jsou odchycené');
 
 let spatne = 0;
 for (const [co, popis] of zakazane) {
