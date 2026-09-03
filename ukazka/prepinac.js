@@ -11,10 +11,10 @@
     const U = window.__demoUcty;
     if (!U || !window.__demoPrihlas) return;
 
-    // Přihlas rovnou — návštěvník žádné heslo nedostane a nepotřebuje.
+    // Přihlášení se stalo už při startu (prihlas-hned.js) — tady jen
+    // zjistíme, který pohled je zapnutý, ať se označí správné tlačítko.
     let role = 'sef';
     try { role = localStorage.getItem('demo-role') || 'sef' } catch (e) {}
-    window.__demoPrihlas(role === 'pracovnik' ? U.pracovnik : U.sef);
 
     const pruh = document.createElement('div');
     pruh.id = 'demo-pruh';

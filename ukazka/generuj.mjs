@@ -64,11 +64,36 @@ s = s.split('subbau.cz').join('ukazka.cz');
 s = s.split('subbau.vercel.app').join('ukazka.local');
 console.log(`   název firmy vyměněn: ${predVymenou}×`);
 
+// --- 4b) LOGO A IKONY
+// Text se vyměnil, ale logo je vložený obrázek — na přihlašovací obrazovce
+// i v ikoně na ploše by jinak dál svítilo skutečné logo firmy. Nahradíme ho
+// neutrálním nápisem. Ikona a manifest se berou ze serveru, ty odpojíme úplně.
+const logoSvg = (barva, pozadi) => 'data:image/svg+xml;base64,' + Buffer.from(
+  `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">` +
+  `<rect width="512" height="512" rx="96" fill="${pozadi}"/>` +
+  `<text x="256" y="248" text-anchor="middle" font-family="Helvetica,Arial,sans-serif" ` +
+  `font-size="86" font-weight="bold" fill="${barva}">${FIRMA}</text>` +
+  `<text x="256" y="322" text-anchor="middle" font-family="Helvetica,Arial,sans-serif" ` +
+  `font-size="40" fill="${barva}" opacity="0.75">docházka</text></svg>`
+).toString('base64');
+
+let obrazku = 0;
+s = s.replace(/data:image\/png;base64,[A-Za-z0-9+/=]{200,}/g, () => {
+  obrazku++;
+  return logoSvg('#E8A13A', '#211D1A');
+});
+console.log(`   vložená loga vyměněna: ${obrazku}×`);
+
+// Ikona na ploše a manifest ze serveru patří skutečné firmě — odpojit.
+s = s.replace(/<link[^>]*rel="manifest"[^>]*>/g, '<!-- ukázka: bez manifestu -->');
+s = s.replace(/<link[^>]*href="\/favicon\.ico"[^>]*>/g, '<!-- ukázka: bez ikony ze serveru -->');
+s = s.replace(/<link[^>]*href="\/apple-touch-icon\.png"[^>]*>/g, '<!-- ukázka: bez ikony ze serveru -->');
+
 // --- 5) service worker se v ukázce neregistruje ---
 s = s.replace(/navigator\.serviceWorker\.register\(/g, 'void (0) && navigator.serviceWorker.register(');
 
 // --- 6) vložit ukázkovou vrstvu PŘED hlavní skript appky ---
-const soubory = ['databaze-v-pameti.js', 'sb-nahrada.js', 'vymyslena-data.js'];
+const soubory = ['databaze-v-pameti.js', 'sb-nahrada.js', 'vymyslena-data.js', 'prihlas-hned.js'];
 // Vlastní vrstva prochází stejnou výměnou názvu jako appka — i v komentářích
 // by jinak zůstalo skutečné jméno firmy a kontrola na konci by to (správně)
 // zastavila.
@@ -95,8 +120,13 @@ s = s.replace(/<title>[^<]*<\/title>/, `<title>${FIRMA} — ukázka docházkové
 s = s.replace('<head>', '<head>\n<meta name="robots" content="noindex, nofollow">');
 
 // --- KONTROLA: v ukázce nesmí zůstat nic skutečného ---
+// Otisk původního loga — kdyby výměna nezabrala, poznáme to tady.
+const puvodniLogo = (fs.readFileSync(path.join(koren, 'subbau_final.html'), 'utf8')
+  .match(/data:image\/png;base64,([A-Za-z0-9+/=]{200,})/) || [])[1];
+
 const zakazane = [
   [mKey[1], 'klíč k databázi'],
+  [puvodniLogo && puvodniLogo.slice(0, 120), 'původní logo firmy'],
   [mUrl[1].replace('https://', ''), 'adresa databáze'],
   ['SubBau', 'název firmy'],
   ['subbau.vercel.app', 'adresa ostré appky'],
