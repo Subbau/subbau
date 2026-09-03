@@ -4407,7 +4407,7 @@ async function submitAdminSignatureWithPlacement() {
 // Po nahrání nové verze se snadno pozná, jestli se opravdu nasadila: otevřete
 // appku, zmáčkněte F12 (na Macu ⌥⌘I) a v konzoli je vypsané tohle datum. Když
 // tam svítí starší, prohlížeč nebo GitHub drží starou verzi.
-const SUBBAU_VERZE = '2026-09-03 b — odkaz na docházku pro odběratele'
+const SUBBAU_VERZE = '2026-09-03 c — odchod se nepotvrdí, dokud se opravdu neuloží'
 console.log('SubBau docházka — verze ' + SUBBAU_VERZE)
 
 // ============ SUPABASE CONFIG ============
@@ -13694,6 +13694,14 @@ async function confirmCheckout() {
     showToast(chybaText(error, 'Směna se neuzavřela'))
     return
   }
+  // Zápis může „projít" a přitom nezměnit ani řádek — když záznam mezitím zmizel
+  // nebo na něj pracovník nemá právo. Bez téhle kontroly by uviděl zelené
+  // potvrzení a odchod by se nikam neuložil. Přišel by o celý den.
+  if (!savedRows || !savedRows.length) {
+    console.error('[checkout] update neuložil žádný řádek, attId:', attId)
+    showToast('❌ Odchod se neuložil — zkuste to prosím znovu. Když to nepůjde, ozvěte se SubBau.')
+    return
+  }
   if (keptByAdmin) showToast('ℹ️ Stavbu a popis u tohoto dne vyplnil SubBau — jeho zápis zůstává')
 
   // Nepovinné fotky ze stavby
@@ -14514,10 +14522,18 @@ async function mobCheckin(type) {
 
         if (hasSite && hasDesc) {
           // Stavba i popis už zapsané během dne → směnu můžeme uzavřít rovnou
-          const { error: outErr } = await withTimeout(sb.from('attendance').update({
+          // `.select('id')` tu není navíc: bez něj se nepozná zápis, který
+          // projde bez chyby, ale nezmění ani řádek — a pracovník by uviděl
+          // „odchod zapsán", přestože se nic neuložilo.
+          const { data: outRows, error: outErr } = await withTimeout(sb.from('attendance').update({
             check_out: timeStr, total_hours: h
-          }).eq('id', todayAttId), 12000)
+          }).eq('id', todayAttId).select('id'), 12000)
           if (outErr) { showToast(chybaText(outErr, 'Odchod se nezapsal')); checkinInProgress = false; return }
+          if (!outRows || !outRows.length) {
+            console.error('[odchod] update neuložil žádný řádek, id:', todayAttId)
+            showToast('❌ Odchod se neuložil — zkuste to prosím znovu')
+            checkinInProgress = false; return
+          }
           updated.check_out = timeStr
           updated.total_hours = h
           todayAttId = null
@@ -14633,12 +14649,15 @@ async function saveMobAttEntry(attId) {
     loadMobWeek()
     return
   }
-  const { error } = await sb.from('attendance').update({
+  const { data: ulozeno, error } = await sb.from('attendance').update({
     construction_site: site,
     work_description: desc
-  }).eq('id', attId).eq('worker_id', currentUser.id)  // bezpečnostní check
-  if (error) {
-    // Panel necháme otevřený i s vyplněným textem, ať jde uložení rovnou zopakovat
+  }).eq('id', attId).eq('worker_id', currentUser.id).select('id')  // bezpečnostní check
+  if (error || !ulozeno || !ulozeno.length) {
+    // Panel necháme otevřený i s vyplněným textem, ať jde uložení rovnou zopakovat.
+    // Prázdný výsledek bez chyby = záznam mezitím zmizel nebo na něj nemá právo;
+    // tiše to spolknout nesmíme, pracovník by si myslel, že je uloženo.
+    if (!error) console.error('[úprava dne] update neuložil žádný řádek, id:', attId)
     showToast('❌ Neuložilo se — zkuste to prosím znovu, text zůstal vyplněný')
     return
   }
