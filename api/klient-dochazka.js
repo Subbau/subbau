@@ -221,10 +221,6 @@ module.exports = async (req, res) => {
     // Podrobnosti si nechá log na Vercelu. Ven jde jen obecná hláška, ať
     // z ní nejde vyčíst, jak je databáze postavená.
     console.error('[klient-dochazka]', e);
-    // Dočasná diagnostika: samotné číslo stavu a kód chyby nic o datech
-    // neprozradí, ale bez nich se hledá příčina naslepo.
-    res.status(500).json({ ok: false, chyba: 'chyba_serveru',
-                           stav: e && e.stav ? e.stav : null,
-                           kod: e && e.kod ? e.kod : (e && e.message ? String(e.message).slice(0, 60) : null) });
+    res.status(500).json({ ok: false, chyba: 'chyba_serveru' });
   }
 };
