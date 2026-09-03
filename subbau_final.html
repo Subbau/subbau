@@ -1464,6 +1464,22 @@ setTimeout(function () {
                 <div style="text-align:center;color:var(--text3);padding:20px">Načítám skupiny...</div>
               </div>
             </div>
+            <!-- Odkazy pro odběratele -->
+            <div class="card">
+              <div class="card-h">
+                <h4><span class="hi a">🔗</span> Odkazy pro odběratele</h4>
+                <button class="btn-pri" style="font-size:12px;padding:5px 12px" onclick="otevriNovyOdkaz()">+ Nový odkaz</button>
+              </div>
+              <div style="padding:4px 16px 0;font-size:12px;color:var(--text3);line-height:1.6">
+                Odběratel uvidí bez přihlášení docházku vybraných skupin za&nbsp;aktuální týden —
+                jméno, příchod, přestávku, odchod, hodiny, stavbu a popis práce.
+                Sazby ani provize nevidí. Odkaz můžete kdykoli vypnout.
+              </div>
+              <div id="klient-odkazy" style="display:flex;flex-direction:column;gap:10px;margin-top:10px">
+                <div style="text-align:center;color:var(--text3);padding:14px">Načítám…</div>
+              </div>
+            </div>
+
             <!-- Nepřiřazení pracovníci -->
             <div class="card">
               <div class="card-h"><h4><span class="hi r"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><line x1="17" y1="8" x2="22" y2="13"/><line x1="22" y1="8" x2="17" y2="13"/></svg></span>Nepřiřazení pracovníci</h4></div>
@@ -4391,7 +4407,7 @@ async function submitAdminSignatureWithPlacement() {
 // Po nahrání nové verze se snadno pozná, jestli se opravdu nasadila: otevřete
 // appku, zmáčkněte F12 (na Macu ⌥⌘I) a v konzoli je vypsané tohle datum. Když
 // tam svítí starší, prohlížeč nebo GitHub drží starou verzi.
-const SUBBAU_VERZE = '2026-09-03 a — „Neřešit platnost" jde i u dokladu, kde už datum je'
+const SUBBAU_VERZE = '2026-09-03 b — odkaz na docházku pro odběratele'
 console.log('SubBau docházka — verze ' + SUBBAU_VERZE)
 
 // ============ SUPABASE CONFIG ============
@@ -12341,7 +12357,198 @@ let _workersCache = []
 let _teamCompaniesCache = []
 let _subteamsCache = []
 
+// =====================================================================
+// ODKAZY PRO ODBĚRATELE
+// Německý klient dostane odkaz a bez přihlášení uvidí docházku vybraných
+// skupin za aktuální týden. Data mu NEVYDÁVÁ tahle appka — vydává je
+// serverová funkce /api/klient-dochazka, která jediná zná služební klíč.
+// Klientovi se posílá adresa /klient?t=…, což je samostatná stránka
+// klient.html BEZ klíče k databázi. Adresu appky mu poslat nesmíme.
+// =====================================================================
+
+let _klientTymy = []
+
+// Token vyrábíme kryptografickým generátorem, ne Math.random() — ten se dá
+// při troše snahy dopočítat. 32 bajtů = 64 hex znaků.
+function novyKlientToken() {
+  const b = new Uint8Array(32)
+  crypto.getRandomValues(b)
+  return Array.from(b).map(x => x.toString(16).padStart(2, '0')).join('')
+}
+
+function klientOdkazUrl(token) {
+  return location.origin + '/klient?t=' + token
+}
+
+async function loadKlientOdkazy() {
+  const box = document.getElementById('klient-odkazy')
+  if (!box) return
+  const { data, error } = await sb.from('client_links')
+    .select('id, nazev, token, aktivni, plati_do, posledni_navsteva, pocet_navstev')
+    .order('vytvoreno', { ascending: false })
+  if (error) {
+    box.innerHTML = /client_links|does not exist|schema cache/i.test(error.message || '')
+      ? '<div style="padding:12px;font-size:12.5px;color:var(--amber)">Chybí tabulka odkazů — spusťte migraci <b>supabase-migrace-odkaz-pro-odberatele.sql</b></div>'
+      : '<div style="padding:12px;color:var(--red);font-size:12.5px">Chyba: ' + escAttr(error.message) + '</div>'
+    return
+  }
+  if (!data || !data.length) {
+    box.innerHTML = '<div style="text-align:center;color:var(--text3);padding:14px;font-size:13px">Zatím žádný odkaz.</div>'
+    return
+  }
+  const dnes = localDateStr()
+  const { data: vazby } = await sb.from('client_link_teams').select('link_id, team_id')
+  const pocty = {}
+  ;(vazby || []).forEach(v => { pocty[v.link_id] = (pocty[v.link_id] || 0) + 1 })
+
+  box.innerHTML = data.map(o => {
+    const prosly = o.plati_do && o.plati_do < dnes
+    const bezi = o.aktivni && !prosly
+    const stav = !o.aktivni ? ['Vypnutý', 'var(--red)']
+      : prosly ? ['Prošlý', 'var(--amber)'] : ['Aktivní', 'var(--green)']
+    return `<div style="border:1.5px solid var(--brd);border-radius:12px;padding:12px;background:#fff">
+      <div style="display:flex;justify-content:space-between;align-items:baseline;gap:8px;flex-wrap:wrap">
+        <b style="font-size:14.5px">${escAttr(o.nazev)}</b>
+        <span style="font-size:11px;font-weight:800;color:${stav[1]}">${stav[0]}</span>
+      </div>
+      <div style="font-size:11.5px;color:var(--text3);margin-top:3px">
+        ${pocty[o.id] || 0} skupin${(pocty[o.id] || 0) === 1 ? 'a' : ''}
+        ${o.plati_do ? ' · platí do ' + datumCz(o.plati_do) : ' · bez omezení'}
+        ${o.posledni_navsteva ? ' · naposledy ' + datumCas(o.posledni_navsteva) : ' · zatím neotevřen'}
+        ${o.pocet_navstev ? ' · ' + o.pocet_navstev + '×' : ''}
+      </div>
+      <div style="display:flex;gap:6px;margin-top:9px;flex-wrap:wrap">
+        <button onclick="zkopirujKlientOdkaz('${o.token}')" style="font-size:11.5px;padding:5px 10px;border:1px solid var(--blue);border-radius:7px;background:var(--bg2);color:var(--blue);cursor:pointer;font-family:inherit">📋 Kopírovat odkaz</button>
+        <button onclick="otevriNovyOdkaz('${o.id}')" style="font-size:11.5px;padding:5px 10px;border:1px solid var(--brd);border-radius:7px;background:none;color:var(--text2);cursor:pointer;font-family:inherit">Upravit skupiny</button>
+        <button onclick="prepniKlientOdkaz('${o.id}',${bezi ? 'false' : 'true'})" style="font-size:11.5px;padding:5px 10px;border:1px solid ${bezi ? 'var(--red)' : 'var(--green)'};border-radius:7px;background:none;color:${bezi ? 'var(--red)' : 'var(--green)'};cursor:pointer;font-family:inherit">${bezi ? 'Deaktivovat' : 'Zapnout'}</button>
+        <button onclick="smazKlientOdkaz('${o.id}','${escAttr(o.nazev).replace(/'/g, String.fromCharCode(39))}')" style="font-size:11.5px;padding:5px 10px;border:1px solid var(--brd);border-radius:7px;background:none;color:var(--text3);cursor:pointer;font-family:inherit">Smazat</button>
+      </div>
+    </div>`
+  }).join('')
+}
+
+async function zkopirujKlientOdkaz(token) {
+  const url = klientOdkazUrl(token)
+  try {
+    await navigator.clipboard.writeText(url)
+    showToast('📋 Odkaz zkopírován — pošlete ho odběrateli')
+  } catch (e) {
+    // Prohlížeč schránku nepustil (Safari bez HTTPS, starší verze) — ať se
+    // dá odkaz aspoň přečíst a opsat, místo aby se nestalo nic.
+    prompt('Zkopírujte odkaz a pošlete ho odběrateli:', url)
+  }
+}
+
+async function prepniKlientOdkaz(id, zapnout) {
+  if (!zapnout && !confirm('Deaktivovat odkaz?\n\nOdběratel na něj přestane vidět okamžitě. Zapnout ho můžete kdykoli zpátky.')) return
+  const { error } = await sb.from('client_links').update({ aktivni: !!zapnout }).eq('id', id)
+  if (error) { showToast('❌ Chyba: ' + error.message); return }
+  showToast(zapnout ? '✅ Odkaz zapnutý' : '🚫 Odkaz deaktivován')
+  loadKlientOdkazy()
+}
+
+async function smazKlientOdkaz(id, nazev) {
+  if (!confirm('Smazat odkaz pro ' + nazev + '?\n\nPřestane fungovat natrvalo. Když ho chcete jen dočasně vypnout, použijte Deaktivovat.')) return
+  const { error } = await sb.from('client_links').delete().eq('id', id)
+  if (error) { showToast('❌ Chyba: ' + error.message); return }
+  showToast('🗑 Odkaz smazán')
+  loadKlientOdkazy()
+}
+
+let _klientOdkazId = null
+async function otevriNovyOdkaz(id) {
+  _klientOdkazId = id || null
+  const modal = document.getElementById('klient-odkaz-modal')
+  if (!modal) return
+  document.getElementById('klient-odkaz-nadpis').textContent = id ? 'Upravit odkaz' : 'Nový odkaz pro odběratele'
+  document.getElementById('klient-odkaz-nazev').value = ''
+  document.getElementById('klient-odkaz-do').value = ''
+
+  const box = document.getElementById('klient-odkaz-skupiny')
+  box.innerHTML = '<div style="padding:10px;color:var(--text3);font-size:13px">Načítám skupiny…</div>'
+  modal.style.display = 'flex'
+
+  const [{ data: tymy }, { data: firmy }] = await Promise.all([
+    sb.from('teams').select('id, name, company_id').eq('is_active', true).order('name'),
+    sb.from('companies').select('id, name')
+  ])
+  _klientTymy = tymy || []
+  const firmaJmeno = {}
+  ;(firmy || []).forEach(f => { firmaJmeno[f.id] = f.name })
+
+  let vybrane = new Set()
+  if (id) {
+    const [{ data: o }, { data: v }] = await Promise.all([
+      sb.from('client_links').select('nazev, plati_do').eq('id', id).maybeSingle(),
+      sb.from('client_link_teams').select('team_id').eq('link_id', id)
+    ])
+    if (o) {
+      document.getElementById('klient-odkaz-nazev').value = o.nazev || ''
+      document.getElementById('klient-odkaz-do').value = o.plati_do || ''
+    }
+    ;(v || []).forEach(x => vybrane.add(x.team_id))
+  }
+
+  box.innerHTML = _klientTymy.length
+    ? _klientTymy.map(t => `<label style="display:flex;align-items:center;gap:9px;padding:8px 9px;border-radius:8px;cursor:pointer;font-size:14px">
+        <input type="checkbox" class="klient-tym" value="${t.id}"${vybrane.has(t.id) ? ' checked' : ''} style="width:18px;height:18px;flex:none">
+        <span>${escAttr(t.name)}${t.company_id && firmaJmeno[t.company_id] ? ` <span style="color:var(--text3);font-size:12px">· ${escAttr(firmaJmeno[t.company_id])}</span>` : ''}</span>
+      </label>`).join('')
+    : '<div style="padding:10px;color:var(--text3);font-size:13px">Žádné skupiny — nejdřív si je založte.</div>'
+}
+
+function zavriNovyOdkaz() {
+  const m = document.getElementById('klient-odkaz-modal')
+  if (m) m.style.display = 'none'
+  _klientOdkazId = null
+}
+
+async function ulozNovyOdkaz() {
+  const nazev = (document.getElementById('klient-odkaz-nazev')?.value || '').trim()
+  if (!nazev) { showToast('⚠️ Napište, komu odkaz patří'); return }
+  const platiDo = document.getElementById('klient-odkaz-do')?.value || null
+  const tymy = [...document.querySelectorAll('.klient-tym:checked')].map(c => c.value)
+  if (!tymy.length) { showToast('⚠️ Zaškrtněte aspoň jednu skupinu'); return }
+
+  const btn = document.getElementById('klient-odkaz-ulozit')
+  if (btn) { btn.disabled = true; btn.textContent = 'Ukládám…' }
+  try {
+    let id = _klientOdkazId
+    if (id) {
+      const { error } = await sb.from('client_links')
+        .update({ nazev, plati_do: platiDo || null }).eq('id', id)
+      if (error) throw error
+    } else {
+      const { data, error } = await sb.from('client_links')
+        .insert({ nazev, plati_do: platiDo || null, token: novyKlientToken(),
+                  vytvoril: currentUser?.id || null })
+        .select('id, token').single()
+      if (error) throw error
+      id = data.id
+    }
+    // Skupiny nastavíme vždycky znovu — ať se dají i ubírat, nejen přidávat.
+    await sb.from('client_link_teams').delete().eq('link_id', id)
+    const { error: chybaVazeb } = await sb.from('client_link_teams')
+      .insert(tymy.map(t => ({ link_id: id, team_id: t })))
+    if (chybaVazeb) throw chybaVazeb
+
+    // Odkaz bez skupin by neukazoval nic a jen mátl — proto se vazby ukládají
+    // hned po založení a při chybě se nový odkaz zase smaže.
+    zavriNovyOdkaz()
+    showToast('✅ Odkaz uložený — zkopírujte ho tlačítkem a pošlete odběrateli')
+    loadKlientOdkazy()
+  } catch (e) {
+    const m = e?.message || ''
+    showToast(/client_link|does not exist|schema cache/i.test(m)
+      ? '❌ Chybí tabulky odkazů — spusťte migraci supabase-migrace-odkaz-pro-odberatele.sql'
+      : '❌ Nepovedlo se uložit: ' + m)
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = 'Uložit' }
+  }
+}
+
 async function loadTeams() {
+  loadKlientOdkazy()
   const div = document.getElementById('teams-list')
   const unassignedDiv = document.getElementById('unassigned-workers')
   if (!div) return
@@ -25876,6 +26083,29 @@ document.addEventListener('visibilitychange', () => {
       <button onclick="sazbaOdKdyUlozit()" style="padding:14px;background:#211D1A;color:#E8A13A;border:none;border-radius:12px;font-size:14px;font-weight:800;cursor:pointer;font-family:inherit">Uložit</button>
       <button onclick="sazbaOdKdyZpetne()" style="padding:13px;background:#f4efe7;color:#211D1A;border:none;border-radius:12px;font-size:13.5px;font-weight:700;cursor:pointer;font-family:inherit">Přepočítat zpětně úplně všechno</button>
       <button onclick="sazbaOdKdyKonec(null)" style="padding:12px;background:none;color:#9a9082;border:none;border-radius:12px;font-size:13px;font-weight:700;cursor:pointer;font-family:inherit">Zavřít a nic neměnit</button>
+    </div>
+  </div>
+</div>
+
+<!-- NOVÝ ODKAZ PRO ODBĚRATELE -->
+<div id="klient-odkaz-modal" style="display:none;position:fixed;inset:0;z-index:10020;background:rgba(33,29,26,.55);align-items:center;justify-content:center;padding:20px" onclick="if(event.target===this)zavriNovyOdkaz()">
+  <div style="background:#fff;border-radius:18px;padding:24px;width:100%;max-width:460px;max-height:88vh;overflow:auto;box-shadow:0 16px 48px rgba(0,0,0,.35);position:relative">
+    <button onclick="zavriNovyOdkaz()" title="Zavřít" style="position:absolute;top:14px;right:14px;width:34px;height:34px;border:none;border-radius:10px;background:#f4efe7;color:#6b6157;font-size:17px;line-height:1;cursor:pointer;font-family:inherit">✕</button>
+    <div style="font-size:17px;font-weight:800;color:#211D1A;margin-bottom:4px;padding-right:40px" id="klient-odkaz-nadpis">Nový odkaz pro odběratele</div>
+    <div style="font-size:12px;color:#9a9082;margin-bottom:16px">Odběratel uvidí jen skupiny, které mu zaškrtnete.</div>
+
+    <label style="display:block;font-size:12px;font-weight:700;color:#6b6157;margin-bottom:5px">Komu odkaz patří</label>
+    <input type="text" id="klient-odkaz-nazev" placeholder="např. Treskower Zimmermann und Dachdecker GmbH" style="width:100%;padding:11px;border:1.5px solid var(--brd);border-radius:9px;font-size:15px;font-family:inherit;box-sizing:border-box">
+
+    <label style="display:block;font-size:12px;font-weight:700;color:#6b6157;margin:14px 0 5px">Platí do <span style="font-weight:500;color:#9a9082">(prázdné = bez omezení)</span></label>
+    <input type="date" id="klient-odkaz-do" style="width:100%;padding:11px;border:1.5px solid var(--brd);border-radius:9px;font-size:15px;font-family:inherit;box-sizing:border-box">
+
+    <label style="display:block;font-size:12px;font-weight:700;color:#6b6157;margin:14px 0 5px">Které skupiny uvidí</label>
+    <div id="klient-odkaz-skupiny" style="border:1.5px solid var(--brd);border-radius:9px;padding:6px;max-height:230px;overflow:auto"></div>
+
+    <div style="display:flex;flex-direction:column;gap:9px;margin-top:18px">
+      <button onclick="ulozNovyOdkaz()" id="klient-odkaz-ulozit" style="padding:14px;background:#211D1A;color:#E8A13A;border:none;border-radius:12px;font-size:14px;font-weight:800;cursor:pointer;font-family:inherit">Uložit</button>
+      <button onclick="zavriNovyOdkaz()" style="padding:12px;background:none;color:#9a9082;border:none;border-radius:12px;font-size:13px;font-weight:700;cursor:pointer;font-family:inherit">Zavřít a nic neměnit</button>
     </div>
   </div>
 </div>

@@ -1,0 +1,262 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- Token je v adrese. Bez tohohle by odešel v hlavičce Referer na každou
+     cizí doménu, na kterou by stránka sáhla (třeba na překladač). -->
+<meta name="referrer" content="no-referrer">
+<meta name="robots" content="noindex, nofollow">
+<title>Anwesenheit · Docházka — SubBau</title>
+<style>
+  :root{
+    --tmava:#211D1A; --zlata:#E8A13A; --seda:#9a9082; --seda2:#6b6157;
+    --ram:#e0d9cf; --pozadi:#f7f4ef; --zelena:#3f7d54;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--pozadi);color:var(--tmava);
+       font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+       font-size:15px;line-height:1.5}
+  .obal{max-width:1000px;margin:0 auto;padding:18px 14px 60px}
+  header{background:var(--tmava);color:#fff;border-radius:16px;padding:18px 20px;margin-bottom:16px}
+  header h1{margin:0;font-size:19px;font-weight:800;letter-spacing:.2px}
+  header .pod{color:var(--zlata);font-size:13px;font-weight:700;margin-top:3px}
+  header .obdobi{color:#cfc7bd;font-size:13px;margin-top:8px}
+  .clovek{background:#fff;border:1px solid var(--ram);border-radius:14px;
+          margin-bottom:12px;overflow:hidden}
+  .hlava{display:flex;justify-content:space-between;align-items:baseline;gap:10px;
+         padding:13px 16px;border-bottom:1px solid var(--ram);flex-wrap:wrap}
+  .jmeno{font-size:16px;font-weight:800}
+  .soucet{font-size:17px;font-weight:800;color:var(--zelena);white-space:nowrap}
+  .soucet small{display:block;font-size:10px;color:var(--seda);font-weight:600;text-align:right}
+  .tab{width:100%;overflow-x:auto}
+  table{width:100%;border-collapse:collapse;font-size:14px}
+  th{text-align:left;font-size:10px;text-transform:uppercase;letter-spacing:.4px;
+     color:var(--seda);font-weight:800;padding:8px 10px;border-bottom:1px solid var(--ram);
+     white-space:nowrap}
+  th small{display:block;font-size:9px;text-transform:none;letter-spacing:0;
+           color:var(--ram);font-weight:600}
+  td{padding:10px;border-bottom:1px solid #f1ece4;vertical-align:top}
+  tr:last-child td{border-bottom:none}
+  .cas{font-variant-numeric:tabular-nums;white-space:nowrap}
+  .hod{font-weight:800;text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}
+  .drobne{font-size:11.5px;color:var(--seda2)}
+  .de{color:var(--seda);font-size:11.5px;font-style:italic}
+  .celkem{background:var(--tmava);color:#fff;border-radius:14px;padding:16px 20px;
+          display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap}
+  .celkem .c{font-size:24px;font-weight:800;color:var(--zlata)}
+  .tlacitka{display:flex;gap:9px;margin:16px 0;flex-wrap:wrap}
+  button{font-family:inherit;font-size:14px;font-weight:700;padding:11px 18px;
+         border-radius:11px;border:1.5px solid var(--tmava);background:#fff;
+         color:var(--tmava);cursor:pointer}
+  button.hlavni{background:var(--tmava);color:var(--zlata);border-color:var(--tmava)}
+  .zprava{background:#fff;border:1px solid var(--ram);border-radius:14px;
+          padding:34px 22px;text-align:center;color:var(--seda2)}
+  .zprava h2{margin:0 0 8px;font-size:17px;color:var(--tmava)}
+  .pata{margin-top:22px;font-size:11.5px;color:var(--seda);text-align:center;line-height:1.7}
+  @media print{
+    body{background:#fff}
+    .tlacitka,.pata{display:none}
+    .obal{max-width:none;padding:0}
+    header{background:#fff;color:#000;border:1px solid #000;border-radius:0}
+    header .pod{color:#000}header .obdobi{color:#333}
+    .clovek{break-inside:avoid;page-break-inside:avoid;border:1px solid #999;border-radius:0}
+    .celkem{background:#fff;color:#000;border:2px solid #000;border-radius:0}
+    .celkem .c{color:#000}
+  }
+</style>
+</head>
+<body>
+<div class="obal" id="obal">
+  <div class="zprava"><h2>Wird geladen…</h2><div class="de">Načítám…</div></div>
+</div>
+
+<script>
+// Token z adresy. Do stránky se nikde nevypisuje.
+var TOKEN = new URLSearchParams(location.search).get('t') || '';
+var obal = document.getElementById('obal');
+
+function esc(s){
+  return String(s == null ? '' : s)
+    .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+    .replace(/"/g,'&quot;').replace(/'/g,'&#39;');
+}
+function chyba(nadpis, de, cs){
+  obal.innerHTML = '<div class="zprava"><h2>' + esc(nadpis) + '</h2>'
+    + '<div>' + esc(de) + '</div><div class="de">' + esc(cs) + '</div></div>';
+}
+var DNY_DE = ['Sonntag','Montag','Dienstag','Mittwoch','Donnerstag','Freitag','Samstag'];
+var DNY_CS = ['Neděle','Pondělí','Úterý','Středa','Čtvrtek','Pátek','Sobota'];
+function datumDe(iso){
+  var d = new Date(iso + 'T00:00:00');
+  if (isNaN(d)) return iso;
+  return DNY_DE[d.getDay()].slice(0,2) + ' ' +
+    String(d.getDate()).padStart(2,'0') + '.' + String(d.getMonth()+1).padStart(2,'0') + '.';
+}
+function datumCs(iso){
+  var d = new Date(iso + 'T00:00:00');
+  return isNaN(d) ? iso : DNY_CS[d.getDay()];
+}
+function hod(n){ return (Number(n)||0).toFixed(2).replace('.', ','); }
+
+// Překlad popisu práce do němčiny. Je to ozdoba — když překladač neodpoví,
+// zůstane český text a stránka se kvůli tomu nezdrží.
+var mezipamet = {};
+function prelozit(text){
+  var t = (text||'').trim();
+  if (!t) return Promise.resolve(null);
+  if (mezipamet[t] !== undefined) return Promise.resolve(mezipamet[t]);
+  var ac = new AbortController();
+  var casovac = setTimeout(function(){ try{ac.abort()}catch(e){} }, 3500);
+  return fetch('https://translate.googleapis.com/translate_a/single?client=gtx&sl=cs&tl=de&dt=t&q='
+      + encodeURIComponent(t), { signal: ac.signal, referrerPolicy: 'no-referrer' })
+    .then(function(r){ return r.ok ? r.json() : null })
+    .then(function(d){
+      var v = d && d[0] ? d[0].map(function(s){ return s[0] }).join('') : null;
+      mezipamet[t] = v || null;
+      return mezipamet[t];
+    })
+    .catch(function(){ mezipamet[t] = null; return null })
+    .finally(function(){ clearTimeout(casovac) });
+}
+
+var DATA = null;
+
+function vykreslit(d, preklady){
+  preklady = preklady || {};
+  var podle = {};
+  d.radky.forEach(function(r){ (podle[r.jmeno] = podle[r.jmeno] || []).push(r) });
+  var jmena = Object.keys(podle).sort(function(a,b){ return a.localeCompare(b,'cs') });
+
+  var celkem = 0;
+  var html = '<header>'
+    + '<h1>' + esc(d.nazev) + '</h1>'
+    + '<div class="pod">Anwesenheitsübersicht · Přehled docházky</div>'
+    + '<div class="obdobi">KW ' + d.kw + ' / ' + d.rok + ' &nbsp;·&nbsp; '
+    + esc(d.od.split('-').reverse().join('.')) + ' – ' + esc(d.do.split('-').reverse().join('.'))
+    + '</div></header>';
+
+  html += '<div class="tlacitka">'
+    + '<button class="hlavni" onclick="window.print()">📄 Als PDF speichern · Uložit do PDF</button>'
+    + '<button onclick="stahnoutCsv()">📊 Excel (CSV)</button>'
+    + '</div>';
+
+  if (!jmena.length){
+    html += '<div class="zprava"><h2>Keine Einträge für diese Woche</h2>'
+      + '<div class="de">Za tento týden zatím není zapsaná žádná docházka.</div></div>';
+    obal.innerHTML = html;
+    return;
+  }
+
+  jmena.forEach(function(jm){
+    var dny = podle[jm].slice().sort(function(a,b){ return a.datum.localeCompare(b.datum) });
+    var suma = dny.reduce(function(s,r){ return s + (Number(r.hodiny)||0) }, 0);
+    celkem += suma;
+    html += '<div class="clovek"><div class="hlava">'
+      + '<div class="jmeno">' + esc(jm) + '</div>'
+      + '<div class="soucet">' + hod(suma) + ' Std.<small>Stunden · hodin</small></div>'
+      + '</div><div class="tab"><table><thead><tr>'
+      + '<th>Datum<small>datum</small></th>'
+      + '<th>Beginn<small>příchod</small></th>'
+      + '<th>Pause<small>přestávka</small></th>'
+      + '<th>Ende<small>odchod</small></th>'
+      + '<th>Baustelle · Tätigkeit<small>stavba · práce</small></th>'
+      + '<th style="text-align:right">Std.<small>hodin</small></th>'
+      + '</tr></thead><tbody>';
+    dny.forEach(function(r){
+      var pauza = (r.pauzy && r.pauzy.length)
+        ? r.pauzy.map(function(p){ return esc(p.od) + '–' + esc(p.do) }).join('<br>')
+        : '<span class="drobne">—</span>';
+      var prace = '';
+      if (r.stavba) prace += '<div>' + esc(r.stavba) + '</div>';
+      if (r.prace){
+        var de = preklady[r.prace];
+        prace += '<div class="drobne">' + esc(r.prace) + '</div>';
+        if (de && de !== r.prace) prace += '<div class="de">' + esc(de) + '</div>';
+      }
+      if (!prace) prace = '<span class="drobne">—</span>';
+      html += '<tr>'
+        + '<td class="cas">' + esc(datumDe(r.datum))
+          + '<div class="drobne">' + esc(datumCs(r.datum)) + '</div></td>'
+        + '<td class="cas">' + esc(r.prichod || '—') + '</td>'
+        + '<td class="cas drobne">' + pauza + '</td>'
+        + '<td class="cas">' + esc(r.odchod || '—') + '</td>'
+        + '<td>' + prace + '</td>'
+        + '<td class="hod">' + hod(r.hodiny) + '</td>'
+        + '</tr>';
+    });
+    html += '</tbody></table></div></div>';
+  });
+
+  html += '<div class="celkem"><div>Gesamt · Celkem<div style="font-size:12px;color:#cfc7bd">'
+    + jmena.length + ' Mitarbeiter · pracovníků</div></div>'
+    + '<div class="c">' + hod(celkem) + ' Std.</div></div>';
+
+  html += '<div class="pata">Die Zeiten sind nach den Regeln von SubBau gerundet.<br>'
+    + 'Časy jsou zaokrouhlené podle pravidel SubBau.<br>'
+    + 'Bitte diesen Link nicht weitergeben · Odkaz prosím nikomu nepřeposílejte.</div>';
+
+  obal.innerHTML = html;
+}
+
+function stahnoutCsv(){
+  if (!DATA) return;
+  var hl = ['Name','Datum','Beginn','Pause','Ende','Baustelle','Taetigkeit','Stunden'];
+  var radky = DATA.radky.slice().sort(function(a,b){
+    return a.jmeno.localeCompare(b.jmeno,'cs') || a.datum.localeCompare(b.datum);
+  }).map(function(r){
+    return [ r.jmeno, r.datum, r.prichod || '',
+      (r.pauzy||[]).map(function(p){ return p.od + '-' + p.do }).join(' '),
+      r.odchod || '', r.stavba || '', r.prace || '',
+      String(r.hodiny).replace('.', ',') ];
+  });
+  var csv = [hl].concat(radky).map(function(r){
+    return r.map(function(b){ return '"' + String(b).replace(/"/g,'""') + '"' }).join(';');
+  }).join('\r\n');
+  // BOM, ať Excel pozná diakritiku
+  var blob = new Blob(['﻿' + csv], { type: 'text/csv;charset=utf-8' });
+  var a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'Anwesenheit_KW' + DATA.kw + '_' + DATA.rok + '.csv';
+  document.body.appendChild(a); a.click();
+  setTimeout(function(){ URL.revokeObjectURL(a.href); a.remove() }, 1000);
+}
+
+if (!TOKEN){
+  chyba('Link ungültig', 'Dieser Link ist ungültig oder wurde deaktiviert.',
+        'Odkaz je neplatný nebo byl deaktivován.');
+} else {
+  fetch('/api/klient-dochazka?t=' + encodeURIComponent(TOKEN), { cache: 'no-store' })
+    .then(function(r){ return r.json().then(function(j){ return { stav: r.status, j: j } }) })
+    .then(function(o){
+      if (!o.j || !o.j.ok){
+        if (o.stav === 429){
+          chyba('Zu viele Anfragen', 'Bitte versuchen Sie es später erneut.',
+                'Příliš mnoho dotazů, zkuste to prosím později.');
+        } else {
+          chyba('Link ungültig', 'Dieser Link ist ungültig oder wurde deaktiviert. '
+            + 'Bitte fordern Sie bei SubBau einen neuen Link an.',
+            'Odkaz je neplatný nebo byl deaktivován.');
+        }
+        return;
+      }
+      DATA = o.j;
+      vykreslit(DATA, {});           // ukaž hned, překlad doplň potom
+      var popisy = {};
+      DATA.radky.forEach(function(r){ if (r.prace) popisy[r.prace] = 1 });
+      var klice = Object.keys(popisy);
+      if (!klice.length) return;
+      Promise.all(klice.map(prelozit)).then(function(vys){
+        var mapa = {};
+        klice.forEach(function(k,i){ if (vys[i]) mapa[k] = vys[i] });
+        if (Object.keys(mapa).length) vykreslit(DATA, mapa);
+      });
+    })
+    .catch(function(){
+      chyba('Verbindungsfehler', 'Die Daten konnten nicht geladen werden. Bitte später erneut versuchen.',
+            'Data se nepodařilo načíst, zkuste to prosím později.');
+    });
+}
+</script>
+</body>
+</html>

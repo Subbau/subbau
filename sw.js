@@ -6,7 +6,7 @@
 // staré (viz 'activate' níže). Zvedněte ho pokaždé, když je podezření, že si
 // někdo drží poškozenou kopii appky — je to jediný způsob, jak mu ji zahodit
 // na dálku, aniž by sám mazal data v prohlížeči.
-const CACHE = 'subbau-v47';
+const CACHE = 'subbau-v48';
 
 self.addEventListener('install', (event) => {
   // Nová verze se má aktivovat hned, nečekat na zavření všech karet
@@ -35,6 +35,10 @@ self.addEventListener('fetch', (event) => {
   const url = new URL(req.url);
   // Požadavky na jiné domény (Supabase API, CDN, mapy…) neřešíme — přímo na síť
   if (url.origin !== self.location.origin) return;
+  // Serverové funkce a stránka pro odběratele se NIKDY neukládají do paměti.
+  // Kdyby se uložily, klient by po zneplatnění odkazu koukal na data dál
+  // z prohlížeče a tlačítko „Deaktivovat" by nefungovalo, jak slibuje.
+  if (url.pathname.startsWith('/api/') || url.pathname.startsWith('/klient')) return;
 
   event.respondWith((async () => {
     try {
