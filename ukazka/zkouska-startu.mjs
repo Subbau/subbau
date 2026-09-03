@@ -14,11 +14,12 @@ const skripty = [...html.matchAll(/<script(?![^>]*\bsrc=)[^>]*>([\s\S]*?)<\/scri
 console.log('skriptů ve stránce:', skripty.length)
 
 // --- napodobenina stránky ---
-const prvek = () => {
+const prvky = {}
+const prvek = (id) => {
   const p = {
     style: {}, dataset: {}, classList: { add(){}, remove(){}, toggle(){}, contains: () => false },
     children: [], childNodes: [], value: '', textContent: '', innerHTML: '', innerText: '',
-    checked: false, disabled: false, options: [], files: [], id: '', className: '',
+    checked: false, disabled: false, options: [], files: [], id: id || '', className: '',
     appendChild(x){ return x }, removeChild(x){ return x }, remove(){}, insertBefore(x){ return x },
     setAttribute(){}, getAttribute: () => null, removeAttribute(){}, hasAttribute: () => false,
     addEventListener(){}, removeEventListener(){}, dispatchEvent(){ return true },
@@ -32,12 +33,16 @@ const prvek = () => {
 }
 const doc = {
   readyState: 'complete', title: '', cookie: '',
-  // Prohlížeč prvky opravdu najde — vracíme je taky, jinak by test hlásil chyby,
-  // které v prohlížeči nenastanou, a zakryl by ty skutečné.
-  getElementById: () => prvek(), querySelector: () => prvek(), querySelectorAll: () => [],
+  // Prvky si pamatujeme podle id — jinak by každé zavolání vrátilo nový objekt
+  // a nedalo by se zjistit, jestli appka nakonec zobrazila systém, nebo přihlášení.
+  getElementById: (id) => (prvky[id] = prvky[id] || prvek(id)),
+  querySelector: (s) => { const m = /^#([A-Za-z0-9_-]+)$/.exec(s || ''); return m ? (prvky[m[1]] = prvky[m[1]] || prvek(m[1])) : prvek() },
+  querySelectorAll: () => [],
   getElementsByClassName: () => [], getElementsByTagName: () => [],
   createElement: () => prvek(), createTextNode: () => prvek(), createDocumentFragment: () => prvek(),
-  addEventListener(){}, removeEventListener(){}, dispatchEvent(){ return true },
+  _posluchaci: {},
+  addEventListener(t, f){ (doc._posluchaci[t] = doc._posluchaci[t] || []).push(f) },
+  removeEventListener(){}, dispatchEvent(){ return true },
   body: prvek(), head: prvek(), documentElement: prvek(), activeElement: null,
   execCommand(){}, hasFocus: () => true, visibilityState: 'visible', write(){}, open(){}, close(){},
 }
@@ -50,7 +55,10 @@ const okno = {
                geolocation:{ getCurrentPosition(){}, watchPosition(){ return 1 }, clearWatch(){} }, clipboard:{ writeText: async()=>{} }, share: async()=>{}, vibrate(){} },
   localStorage: uloziste(), sessionStorage: uloziste(),
   addEventListener(){}, removeEventListener(){}, dispatchEvent(){ return true },
-  setTimeout: (f,ms) => setTimeout(()=>{ try{ f&&f() }catch(e){ chyby.push(['odloženě', e]) } }, Math.min(ms||0, 1)),
+  // Krátká čekání necháváme běžet doopravdy (start appky na nich stojí),
+  // dlouhá zkracujeme, ať zkouška netrvá minuty. Padesátivteřinovou pojistku,
+  // která ukazuje přihlášení, ale zahodíme — jinak by test čekal na ni.
+  setTimeout: (f, ms) => (ms >= 10000 ? 0 : setTimeout(() => { try { f && f() } catch (e) { chyby.push(['odloženě', e]) } }, Math.min(ms || 0, 5))),
   clearTimeout, setInterval: () => 0, clearInterval, requestAnimationFrame: (f)=>{ return 0 },
   fetch: async () => ({ ok:true, status:200, json: async()=>({}), text: async()=>'' }),
   alert(){}, confirm: () => true, prompt: () => null, print(){}, open: () => null, close(){},
@@ -69,6 +77,7 @@ okno.parent = okno
 
 const chyby = []
 const ctx = vm.createContext(okno)
+const prvkyStav = (id) => { const p = prvky[id]; return p ? (p.style.display || '(nenastaveno)') : '(prvek nevznikl)' }
 
 skripty.forEach((kod, i) => {
   try {
@@ -98,8 +107,20 @@ const sb = ctx.sb
 let vada = 0
 const kontrola = (jm, ok, extra='') => { if(ok) console.log('   ✅',jm,extra); else {vada++;console.log('   ❌',jm,extra)} }
 
+// Nastartuj appku tak, jak to udělá prohlížeč.
+ctx.document.readyState = 'complete'
+;(ctx.document._posluchaci['DOMContentLoaded'] || []).forEach(f => { try { f({}) } catch (e) { chyby.push(['DOMContentLoaded', e]) } })
+await new Promise(r => setTimeout(r, 1500))   // ať doběhnou dotazy do paměti
+
 const { data: { session } } = await sb.auth.getSession()
 kontrola('ukázka je přihlášená', !!(session && session.user), session ? session.user.email : 'ŽÁDNÁ RELACE')
+
+// TOHLE JE TA ROZHODUJÍCÍ KONTROLA: co appka nakonec ukázala?
+// Appka po startu VÝSLOVNĚ nastaví #app na 'block' a #login na 'none'.
+// Nenastavenou hodnotu proto nesmíme brát jako „je vidět" — to by prošlo
+// i tehdy, když se appka vůbec nerozjela a nic nenastavila.
+kontrola('systém je vidět', prvkyStav('app') === 'block', 'app.display=' + prvkyStav('app'))
+kontrola('přihlašovací okno je schované', prvkyStav('login') === 'none', 'login.display=' + prvkyStav('login'))
 
 const { data: lide } = await sb.from('profiles').select('*')
 kontrola('jsou vymyšlení lidé', (lide||[]).length > 5, (lide||[]).length + ' profilů')
