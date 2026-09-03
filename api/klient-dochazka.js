@@ -41,16 +41,27 @@ function naCas(m) {
 // Zaokrouhlení jednoho dne — stejná pravidla jako v appce:
 // do 10 minut po celé hodině dolů na celou, jinak nahoru na nejbližší půlhodinu.
 // Odchod vždycky dolů na půlhodinu. Pauza kratší než 30 minut se počítá jako 30.
-function upravDen(z) {
+function upravDen(z, nyni) {
   const ci = naMinuty(z.check_in);
-  const co = naMinuty(z.check_out);
-  if (ci == null || co == null) return null;
+  let co = naMinuty(z.check_out);
+  if (ci == null) return null;
+
+  // Směna, která ještě běží. Ukazuje se jen dnešní — u starých dnů znamená
+  // chybějící odchod zapomenutý zápis, ne práci, a appka je taky přeskakuje.
+  const bezi = co == null;
+  if (bezi) {
+    if (!nyni || z.work_date !== nyni.den) return null;
+    co = nyni.minuty;
+    if (co < ci) return null;    // ještě nezačala (nemělo by nastat)
+  }
 
   const poCele = ci % 60;
   const adjCi = poCele <= HAJENA_DOBA_MIN ? ci - poCele : Math.ceil(ci / 30) * 30;
 
-  let adjCo = Math.floor(co / 30) * 30;
-  const presPulnoc = co < ci;
+  // U běžící směny se čas NEZAOKROUHLUJE dolů na půlhodinu — jinak by první
+  // půlhodinu po příchodu svítila nula a klient by si myslel, že nikdo nedělá.
+  let adjCo = bezi ? co : Math.floor(co / 30) * 30;
+  const presPulnoc = !bezi && co < ci;
   if (presPulnoc) adjCo += 24 * 60;
   if (adjCo < adjCi) adjCo = adjCi;
 
@@ -79,11 +90,35 @@ function upravDen(z) {
   // Hodiny bereme ULOŽENÉ, ne přepočítané — je to přesně to číslo, které je
   // na výkazu i na faktuře, včetně ručních oprav od SubBau. Dopočítáme jen
   // tehdy, když v databázi chybí.
-  const hodiny = (z.total_hours != null && !isNaN(z.total_hours))
+  const hodiny = (!bezi && z.total_hours != null && !isNaN(z.total_hours))
     ? Number(z.total_hours)
     : Math.round(Math.max(0, adjCo - adjCi - pauzaMin) * 100 / 60) / 100;
 
-  return { prichod: naCas(adjCi), odchod: naCas(adjCo % 1440), pauzy: kPrehledu, hodiny };
+  return { prichod: naCas(adjCi), odchod: bezi ? null : naCas(adjCo % 1440),
+           pauzy: kPrehledu, hodiny, bezi };
+}
+
+// Adresa stavby pro klienta. Pořadí jako v appce: ručně zapsaná stavba,
+// jinak adresa zapsaná při příchodu. Značky ✍️ / 📍, kterými správce v appce
+// rozlišuje ruční zápis od GPS, se sem záměrně nedávají — a kdyby se emoji
+// dostalo přímo do textu, useknem ho, ať klient nepozná, odkud adresa je.
+function adresaStavby(z) {
+  const cs = String(z.construction_site || '').trim();
+  const adr = cs || String(z.location_address || '').trim();
+  if (!adr) return null;
+  return adr.replace(/^[\u200d\u2600-\u27bf\ufe0f\u{1f300}-\u{1faff}\s]+/u, '').trim() || null;
+}
+
+// Dnešek a čas podle ČESKÉHO času, ne podle času serveru. Server běží v UTC —
+// v neděli po 22:00 by mu už bylo pondělí a klient by uviděl prázdný nový týden,
+// zatímco na stavbě je pořád neděle.
+function ted() {
+  const f = new Intl.DateTimeFormat('sv-SE', {
+    timeZone: 'Europe/Prague', year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', hour12: false,
+  });
+  const t = f.format(new Date());              // „2026-09-03 21:45"
+  return { den: t.slice(0, 10), minuty: Number(t.slice(11, 13)) * 60 + Number(t.slice(14, 16)) };
 }
 
 // ISO týden (KW) — stejné počítání jako v appce.
@@ -149,7 +184,7 @@ module.exports = async (req, res) => {
 
     // Neexistuje, vypnutý i prošlý — navenek úplně stejná odpověď. Ať se
     // z ní nedá poznat, jestli takový odkaz vůbec kdy existoval.
-    const dnesIso = new Date().toISOString().slice(0, 10);
+    const dnesIso = ted().den;
     if (!odkaz || !odkaz.aktivni || (odkaz.plati_do && odkaz.plati_do < dnesIso)) {
       res.status(404).json({ ok: false, chyba: 'neplatny' });
       return;
@@ -157,7 +192,7 @@ module.exports = async (req, res) => {
 
     // Brzda proti pumpování dat: počítáme podle ODKAZU, ne podle IP adresy —
     // tu si útočník v hlavičce napíše jakou chce, takže by to nic nedrželo.
-    if ((odkaz.pocet_navstev || 0) > 5000) {
+    if ((odkaz.pocet_navstev || 0) > 100000) {
       res.status(429).json({ ok: false, chyba: 'prilis_mnoho' });
       return;
     }
@@ -166,18 +201,23 @@ module.exports = async (req, res) => {
       `client_link_teams?select=team_id&link_id=eq.${odkaz.id}`, klic);
     const teamIds = (vazby || []).map(v => v.team_id).filter(Boolean);
 
-    const dnes = new Date();
+    const nyni = ted();
+    const dnes = new Date(nyni.den + 'T12:00:00Z');   // poledne, ať posun pásma nikdy nepřehodí den
     const { kw, rok } = tydenKDatu(dnes);
     const { od, do: doDne } = tydenOdDo(dnes);
 
     let radky = [];
     if (teamIds.length) {
       const seznam = teamIds.map(encodeURIComponent).join(',');
-      // POZOR: location_address (GPS poloha telefonu při příchodu) se tu
-      // ZÁMĚRNĚ nečte. Klientovi patří stavba, ne to, kde kdo ráno stál.
+      // Adresa: nejdřív ručně zapsaná stavba, a když chybí, adresa z příchodu —
+      // stejné pořadí, jaké má správce v appce (attDisplaySite). Bez té druhé
+      // by u části dnů nebyla adresa žádná.
+      // Ven jde jen TEXT adresy. Souřadnice (location_lat/lng) ani údaj o tom,
+      // jestli ji člověk psal ručně nebo přišla z GPS (address_source), se
+      // nečtou — klient tak nepozná rozdíl a ani ho poznat nemá.
       const dochazka = await db(
         `attendance?select=worker_id,work_date,check_in,check_out,break_start,break_end,` +
-        `break2_start,break2_end,breaks,total_hours,construction_site,work_description` +
+        `break2_start,break2_end,breaks,total_hours,construction_site,location_address,work_description` +
         `&team_id=in.(${seznam})&work_date=gte.${od}&work_date=lte.${doDne}` +
         `&order=work_date.asc&limit=3000`, klic);
 
@@ -191,8 +231,8 @@ module.exports = async (req, res) => {
       }
 
       for (const z of (dochazka || [])) {
-        const u = upravDen(z);
-        if (!u) continue;   // nezavřená směna — do přehledu nepatří
+        const u = upravDen(z, nyni);
+        if (!u) continue;   // starý den bez odchodu — zapomenutý zápis, nepočítá se
         radky.push({
           jmeno: jmena[z.worker_id] || '—',
           datum: z.work_date,
@@ -200,7 +240,8 @@ module.exports = async (req, res) => {
           odchod: u.odchod,
           pauzy: u.pauzy,
           hodiny: u.hodiny,
-          stavba: (z.construction_site || '').trim() || null,
+          bezi: !!u.bezi,
+          stavba: adresaStavby(z),
           prace: (z.work_description || '').trim() || null,
         });
       }

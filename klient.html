@@ -39,6 +39,8 @@
   td{padding:10px;border-bottom:1px solid #f1ece4;vertical-align:top}
   tr:last-child td{border-bottom:none}
   .cas{font-variant-numeric:tabular-nums;white-space:nowrap}
+  .bezi{color:#b8860b;font-weight:800}
+  .radek-bezi{background:#fffaf0}
   .hod{font-weight:800;text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}
   .drobne{font-size:11.5px;color:var(--seda2)}
   .de{color:var(--seda);font-size:11.5px;font-style:italic}
@@ -121,6 +123,7 @@ function prelozit(text){
 }
 
 var DATA = null;
+var prekladyCache = {};
 
 function vykreslit(d, preklady){
   preklady = preklady || {};
@@ -139,6 +142,8 @@ function vykreslit(d, preklady){
   html += '<div class="tlacitka">'
     + '<button class="hlavni" onclick="window.print()">📄 Als PDF speichern · Uložit do PDF</button>'
     + '<button onclick="stahnoutCsv()">📊 Excel (CSV)</button>'
+    + '<button onclick="nacti(true)">🔄 Aktualisieren · Obnovit</button>'
+    + '<span id="stav-obnovy" class="de" style="align-self:center"></span>'
     + '</div>';
 
   if (!jmena.length){
@@ -154,7 +159,9 @@ function vykreslit(d, preklady){
     celkem += suma;
     html += '<div class="clovek"><div class="hlava">'
       + '<div class="jmeno">' + esc(jm) + '</div>'
-      + '<div class="soucet">' + hod(suma) + ' Std.<small>Stunden · hodin</small></div>'
+      + '<div class="soucet">' + hod(suma) + ' Std.'
+      + '<small>' + (dny.some(function(x){ return x.bezi })
+          ? 'Schicht läuft · směna běží' : 'Stunden · hodin') + '</small></div>'
       + '</div><div class="tab"><table><thead><tr>'
       + '<th>Datum<small>datum</small></th>'
       + '<th>Beginn<small>příchod</small></th>'
@@ -170,17 +177,26 @@ function vykreslit(d, preklady){
       var prace = '';
       if (r.stavba) prace += '<div>' + esc(r.stavba) + '</div>';
       if (r.prace){
+        // Německy nahoře (stránku čte Němec), český originál drobně pod tím.
+        // Když překlad nedorazil, zůstane jen čeština — ale to nastane u všech
+        // řádků naráz, ne u některých, takže tabulka vypadá jednotně.
         var de = preklady[r.prace];
-        prace += '<div class="drobne">' + esc(r.prace) + '</div>';
-        if (de && de !== r.prace) prace += '<div class="de">' + esc(de) + '</div>';
+        if (de && de !== r.prace){
+          prace += '<div>' + esc(de) + '</div>';
+          prace += '<div class="drobne">' + esc(r.prace) + '</div>';
+        } else {
+          prace += '<div>' + esc(r.prace) + '</div>';
+        }
       }
       if (!prace) prace = '<span class="drobne">—</span>';
-      html += '<tr>'
+      html += '<tr' + (r.bezi ? ' class="radek-bezi"' : '') + '>'
         + '<td class="cas">' + esc(datumDe(r.datum))
           + '<div class="drobne">' + esc(datumCs(r.datum)) + '</div></td>'
         + '<td class="cas">' + esc(r.prichod || '—') + '</td>'
         + '<td class="cas drobne">' + pauza + '</td>'
-        + '<td class="cas">' + esc(r.odchod || '—') + '</td>'
+        + '<td class="cas">' + (r.bezi
+            ? '<span class="bezi">läuft…<div class="drobne">probíhá</div></span>'
+            : esc(r.odchod || '—')) + '</td>'
         + '<td>' + prace + '</td>'
         + '<td class="hod">' + hod(r.hodiny) + '</td>'
         + '</tr>';
@@ -192,8 +208,8 @@ function vykreslit(d, preklady){
     + jmena.length + ' Mitarbeiter · pracovníků</div></div>'
     + '<div class="c">' + hod(celkem) + ' Std.</div></div>';
 
-  html += '<div class="pata">Die Zeiten sind nach den Regeln von SubBau gerundet.<br>'
-    + 'Časy jsou zaokrouhlené podle pravidel SubBau.<br>'
+  html += '<div class="pata">Tätigkeitsbeschreibungen sind maschinell übersetzt.<br>'
+    + 'Popisy práce jsou přeložené strojově.<br><br>'
     + 'Bitte diesen Link nicht weitergeben · Odkaz prosím nikomu nepřeposílejte.</div>';
 
   obal.innerHTML = html;
@@ -207,7 +223,7 @@ function stahnoutCsv(){
   }).map(function(r){
     return [ r.jmeno, r.datum, r.prichod || '',
       (r.pauzy||[]).map(function(p){ return p.od + '-' + p.do }).join(' '),
-      r.odchod || '', r.stavba || '', r.prace || '',
+      r.bezi ? 'laeuft' : (r.odchod || ''), r.stavba || '', r.prace || '',
       String(r.hodiny).replace('.', ',') ];
   });
   var csv = [hl].concat(radky).map(function(r){
@@ -222,14 +238,34 @@ function stahnoutCsv(){
   setTimeout(function(){ URL.revokeObjectURL(a.href); a.remove() }, 1000);
 }
 
-if (!TOKEN){
-  chyba('Link ungültig', 'Dieser Link ist ungültig oder wurde deaktiviert.',
-        'Odkaz je neplatný nebo byl deaktivován.');
-} else {
-  fetch('/api/klient-dochazka?t=' + encodeURIComponent(TOKEN), { cache: 'no-store' })
+// Stránka se sama obnovuje, aby se opravy od SubBau (změna času nebo adresy)
+// projevily bez zásahu klienta. Když je okno na pozadí, neptáme se — nemá to
+// smysl a jen by to zbytečně zatěžovalo.
+var PRODLEVA_MS = 60000;
+var casovac = null;
+function naplanuj(){
+  if (casovac) clearTimeout(casovac);
+  casovac = setTimeout(function(){
+    if (document.visibilityState === 'visible') nacti(false); else naplanuj();
+  }, PRODLEVA_MS);
+}
+document.addEventListener('visibilitychange', function(){
+  // Návrat k oknu = načti hned, ať klient nekouká na zastaralá čísla.
+  if (document.visibilityState === 'visible') nacti(false);
+});
+
+function stav(text){
+  var el = document.getElementById('stav-obnovy');
+  if (el) el.textContent = text || '';
+}
+
+function nacti(rucne){
+  if (rucne) stav('Wird aktualisiert…');
+  return fetch('/api/klient-dochazka?t=' + encodeURIComponent(TOKEN), { cache: 'no-store' })
     .then(function(r){ return r.json().then(function(j){ return { stav: r.status, j: j } }) })
     .then(function(o){
       if (!o.j || !o.j.ok){
+        if (casovac) { clearTimeout(casovac); casovac = null }
         if (o.stav === 429){
           chyba('Zu viele Anfragen', 'Bitte versuchen Sie es später erneut.',
                 'Příliš mnoho dotazů, zkuste to prosím později.');
@@ -241,21 +277,43 @@ if (!TOKEN){
         return;
       }
       DATA = o.j;
-      vykreslit(DATA, {});           // ukaž hned, překlad doplň potom
       var popisy = {};
       DATA.radky.forEach(function(r){ if (r.prace) popisy[r.prace] = 1 });
-      var klice = Object.keys(popisy);
-      if (!klice.length) return;
+      var klice = Object.keys(popisy).filter(function(k){ return prekladyCache[k] === undefined });
+
+      function hotovo(){
+        vykreslit(DATA, prekladyCache);
+        var d = new Date();
+        stav('Stand ' + String(d.getHours()).padStart(2,'0') + ':' + String(d.getMinutes()).padStart(2,'0'));
+        naplanuj();
+      }
+      if (!klice.length){ hotovo(); return; }
+
+      // Čeká se na VŠECHNY překlady naráz. Kdyby se dokreslovaly postupně,
+      // měl by klient část řádků německy a část česky — a to je přesně ta
+      // nejednotnost, kterou nechceme. Když se překladač do pěti vteřin
+      // neozve, zobrazí se všechno česky, zase jednotně.
+      var dokresleno = false;
+      var pojistka = setTimeout(function(){ if (!dokresleno){ dokresleno = true; hotovo() } }, 5000);
       Promise.all(klice.map(prelozit)).then(function(vys){
-        var mapa = {};
-        klice.forEach(function(k,i){ if (vys[i]) mapa[k] = vys[i] });
-        if (Object.keys(mapa).length) vykreslit(DATA, mapa);
+        klice.forEach(function(k,i){ prekladyCache[k] = vys[i] || null });
+        if (!dokresleno){ dokresleno = true; clearTimeout(pojistka); hotovo() }
       });
     })
     .catch(function(){
-      chyba('Verbindungsfehler', 'Die Daten konnten nicht geladen werden. Bitte später erneut versuchen.',
-            'Data se nepodařilo načíst, zkuste to prosím později.');
+      // Výpadek sítě není důvod smazat, co už klient vidí — jen to řekneme
+      // a zkusíme to za chvíli znovu.
+      if (DATA) { stav('Keine Verbindung · bez připojení'); naplanuj(); }
+      else chyba('Verbindungsfehler', 'Die Daten konnten nicht geladen werden. Bitte später erneut versuchen.',
+                 'Data se nepodařilo načíst, zkuste to prosím později.');
     });
+}
+
+if (!TOKEN){
+  chyba('Link ungültig', 'Dieser Link ist ungültig oder wurde deaktiviert.',
+        'Odkaz je neplatný nebo byl deaktivován.');
+} else {
+  nacti(false);
 }
 </script>
 </body>
