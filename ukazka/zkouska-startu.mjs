@@ -1,0 +1,116 @@
+// Spustí skripty z ukazka.html v Node s napodobeninou stránky.
+// Nehledá chyby v logice — hledá jedinou věc: shodí se skript hned při startu?
+// Přesně to se stalo s `const { createClient } = supabase` a návštěvníkovi
+// zůstala viset přihlašovací obrazovka.
+import fs from 'fs'
+import vm from 'vm'
+
+import path from 'path'
+import { fileURLToPath } from 'url'
+const kde = path.dirname(fileURLToPath(import.meta.url))
+const soubor = process.argv[2] || path.join(kde, '..', 'ukazka.html')
+const html = fs.readFileSync(soubor, 'utf8')
+const skripty = [...html.matchAll(/<script(?![^>]*\bsrc=)[^>]*>([\s\S]*?)<\/script>/g)].map(m => m[1])
+console.log('skriptů ve stránce:', skripty.length)
+
+// --- napodobenina stránky ---
+const prvek = () => {
+  const p = {
+    style: {}, dataset: {}, classList: { add(){}, remove(){}, toggle(){}, contains: () => false },
+    children: [], childNodes: [], value: '', textContent: '', innerHTML: '', innerText: '',
+    checked: false, disabled: false, options: [], files: [], id: '', className: '',
+    appendChild(x){ return x }, removeChild(x){ return x }, remove(){}, insertBefore(x){ return x },
+    setAttribute(){}, getAttribute: () => null, removeAttribute(){}, hasAttribute: () => false,
+    addEventListener(){}, removeEventListener(){}, dispatchEvent(){ return true },
+    querySelector: () => prvek(), querySelectorAll: () => [], closest: () => null,
+    focus(){}, blur(){}, click(){}, scrollIntoView(){}, getBoundingClientRect: () => ({ top:0,left:0,width:0,height:0,bottom:0,right:0 }),
+    insertAdjacentHTML(){}, cloneNode(){ return prvek() }, contains: () => false,
+    getContext: () => ({ drawImage(){}, fillRect(){}, clearRect(){}, fillText(){}, beginPath(){}, stroke(){}, moveTo(){}, lineTo(){}, save(){}, restore(){}, scale(){}, translate(){}, setTransform(){}, putImageData(){}, getImageData: () => ({ data: [] }) }),
+    toDataURL: () => 'data:,', play(){}, pause(){}, showPicker(){},
+  }
+  return p
+}
+const doc = {
+  readyState: 'complete', title: '', cookie: '',
+  // Prohlížeč prvky opravdu najde — vracíme je taky, jinak by test hlásil chyby,
+  // které v prohlížeči nenastanou, a zakryl by ty skutečné.
+  getElementById: () => prvek(), querySelector: () => prvek(), querySelectorAll: () => [],
+  getElementsByClassName: () => [], getElementsByTagName: () => [],
+  createElement: () => prvek(), createTextNode: () => prvek(), createDocumentFragment: () => prvek(),
+  addEventListener(){}, removeEventListener(){}, dispatchEvent(){ return true },
+  body: prvek(), head: prvek(), documentElement: prvek(), activeElement: null,
+  execCommand(){}, hasFocus: () => true, visibilityState: 'visible', write(){}, open(){}, close(){},
+}
+const uloziste = () => ({ _d:{}, getItem(k){ return this._d[k] ?? null }, setItem(k,v){ this._d[k]=String(v) },
+                          removeItem(k){ delete this._d[k] }, clear(){ this._d={} }, key: () => null, length: 0 })
+
+const okno = {
+  document: doc, location: { href:'https://ukazka/', search:'', hash:'', pathname:'/', origin:'https://ukazka', reload(){}, replace(){}, assign(){} },
+  navigator: { userAgent:'node', language:'cs', onLine:true, serviceWorker:{ register: async()=>({}), ready: Promise.resolve({}), addEventListener(){}, controller:null },
+               geolocation:{ getCurrentPosition(){}, watchPosition(){ return 1 }, clearWatch(){} }, clipboard:{ writeText: async()=>{} }, share: async()=>{}, vibrate(){} },
+  localStorage: uloziste(), sessionStorage: uloziste(),
+  addEventListener(){}, removeEventListener(){}, dispatchEvent(){ return true },
+  setTimeout: (f,ms) => setTimeout(()=>{ try{ f&&f() }catch(e){ chyby.push(['odloženě', e]) } }, Math.min(ms||0, 1)),
+  clearTimeout, setInterval: () => 0, clearInterval, requestAnimationFrame: (f)=>{ return 0 },
+  fetch: async () => ({ ok:true, status:200, json: async()=>({}), text: async()=>'' }),
+  alert(){}, confirm: () => true, prompt: () => null, print(){}, open: () => null, close(){},
+  matchMedia: () => ({ matches:false, addEventListener(){}, addListener(){} }),
+  innerWidth:1280, innerHeight:800, devicePixelRatio:1, scrollTo(){}, getComputedStyle: () => ({ display:'block', getPropertyValue: () => '' }),
+  crypto: { getRandomValues: (a)=>{ for(let i=0;i<a.length;i++) a[i]=(i*37)%256; return a }, randomUUID: () => 'x' },
+  URL, URLSearchParams, Blob: class { constructor(){} }, File: class {}, FileReader: class { readAsDataURL(){} },
+  Image: class { constructor(){} }, AbortController, Intl, console,
+  btoa: (s)=>Buffer.from(s,'binary').toString('base64'), atob: (s)=>Buffer.from(s,'base64').toString('binary'),
+}
+okno.window = okno
+okno.self = okno
+okno.globalThis = okno
+okno.top = okno
+okno.parent = okno
+
+const chyby = []
+const ctx = vm.createContext(okno)
+
+skripty.forEach((kod, i) => {
+  try {
+    new vm.Script(kod, { filename: `skript-${i}.js` }).runInContext(ctx, { timeout: 20000 })
+    console.log(`  skript ${i} (${kod.length} B) — ✅ proběhl`)
+  } catch (e) {
+    chyby.push([`skript ${i}`, e])
+    console.log(`  skript ${i} (${kod.length} B) — ❌ ${e.name}: ${e.message}`)
+  }
+})
+
+console.log()
+if (chyby.length) {
+  console.log('❌ UKÁZKA BY SE NEROZJELA:')
+  chyby.forEach(([kde, e]) => {
+    console.log(`   ${kde}: ${e.name}: ${e.message}`)
+    const r = String(e.stack||'').split('\n').find(x => x.includes('skript-'))
+    if (r) console.log('     ' + r.trim())
+  })
+  process.exit(1)
+}
+console.log('✅ všechny skripty proběhly bez pádu')
+
+// Rozjetý skript ještě neznamená použitelnou ukázku. Tohle jsou tři věci,
+// bez kterých by návštěvník viděl přihlašovací okno nebo prázdné obrazovky.
+const sb = ctx.sb
+let vada = 0
+const kontrola = (jm, ok, extra='') => { if(ok) console.log('   ✅',jm,extra); else {vada++;console.log('   ❌',jm,extra)} }
+
+const { data: { session } } = await sb.auth.getSession()
+kontrola('ukázka je přihlášená', !!(session && session.user), session ? session.user.email : 'ŽÁDNÁ RELACE')
+
+const { data: lide } = await sb.from('profiles').select('*')
+kontrola('jsou vymyšlení lidé', (lide||[]).length > 5, (lide||[]).length + ' profilů')
+
+const { data: doch } = await sb.from('attendance').select('*, worker:profiles!worker_id(full_name)').limit(3)
+kontrola('docházka i s vnořeným jménem',
+  (doch||[]).length > 0 && doch[0].worker && doch[0].worker.full_name,
+  (doch||[]).length ? doch[0].worker?.full_name : 'nic')
+
+const { data: adm } = await sb.from('profiles').select('*').eq('role','admin').maybeSingle()
+kontrola('je tam účet vedení', !!adm, adm ? adm.full_name : 'není')
+
+if (vada) { console.log('\n❌ ukázka by se otevřela rozbitá'); process.exit(1) }
+console.log('\n✅ UKÁZKA JE POUŽITELNÁ')

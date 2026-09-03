@@ -44,6 +44,15 @@ s = s.replace(mUrl[0], "const SUPABASE_URL = ''   // ukázka: žádná databáze
 s = s.replace(mKey[0], "const SUPABASE_ANON_KEY = ''   // ukázka: žádný klíč");
 
 // --- 2) místo skutečného klienta ten falešný ---
+// POZOR: nejdřív musí pryč `const { createClient } = supabase`. Knihovnu
+// Supabase v ukázce nenačítáme, takže `supabase` neexistuje a ten řádek by
+// spadl na ReferenceError. Spadl by s ním CELÝ skript appky — appka by se
+// vůbec nerozjela a návštěvníkovi by zůstala viset záložní přihlašovací
+// obrazovka. Přesně tohle se stalo napoprvé.
+const mDestr = s.match(/const \{ createClient \} = supabase/);
+if (!mDestr) chyba('nenašel jsem `const { createClient } = supabase`');
+s = s.replace(mDestr[0], 'const createClient = () => window.sb   // ukázka: knihovna Supabase se nenačítá');
+
 const mSb = s.match(/const sb = createClient\(SUPABASE_URL, SUPABASE_ANON_KEY, \{[\s\S]*?\n\}\)/);
 if (!mSb) chyba('nenašel jsem vytvoření klienta (const sb = createClient…)');
 s = s.replace(mSb[0], 'const sb = window.sb   // ukázka: databáze v paměti prohlížeče');
@@ -55,7 +64,11 @@ s = s.replace(/<link[^>]*rel="preconnect"[^>]*supabase\.co[^>]*>/g,
 // --- 3) knihovna supabase-js se v ukázce nenačítá ---
 s = s.replace(/<script[^>]*src="\/supabase\.js"[^>]*><\/script>/g,
   '<!-- ukázka: supabase-js se nenačítá, není kam se připojovat -->');
-s = s.replace(/document\.write\([^)]*unpkg[^)]*\)/g, 'void 0');
+// Záchranné dotažení knihovny z cizí domény, kdyby se místní soubor nenačetl.
+// V ukázce nemá co dělat: knihovnu nepotřebujeme a stránka nemá sahat nikam ven.
+const mZachrana = s.match(/if \(typeof supabase === 'undefined'\) \{[\s\S]*?\n\}/);
+if (!mZachrana) chyba("nenašel jsem záchranné načtení knihovny (if (typeof supabase === 'undefined'))");
+s = s.replace(mZachrana[0], '/* ukázka: knihovna Supabase se nenačítá odnikud */');
 
 // --- 4) neutrální název místo skutečné firmy ---
 const predVymenou = (s.match(/SubBau/g) || []).length;
@@ -131,6 +144,15 @@ const zakazane = [
   ['SubBau', 'název firmy'],
   ['subbau.vercel.app', 'adresa ostré appky'],
 ];
+// Odkaz na knihovnu, kterou v ukázce nenačítáme, by shodil celý skript.
+// Hledáme `supabase` jako samostatné slovo — ne v adrese ani v názvu souboru.
+const zbylyOdkaz = s.match(/(?<![\w.\/-])supabase(?![\w.\/-])/);
+if (zbylyOdkaz) {
+  chyba('v ukázce zůstal odkaz na knihovnu `supabase` — appka by se nerozjela:\n     …'
+        + s.slice(Math.max(0, zbylyOdkaz.index - 70), zbylyOdkaz.index + 40).replace(/\n/g, ' ') + '…');
+}
+console.log('   ✅ žádný odkaz na knihovnu supabase');
+
 let spatne = 0;
 for (const [co, popis] of zakazane) {
   if (co && s.includes(co)) { console.error(`   ❌ v ukázce zůstalo: ${popis}`); spatne++; }
@@ -139,4 +161,22 @@ for (const [co, popis] of zakazane) {
 if (spatne) chyba(`${spatne}× zůstalo něco skutečného — ukázku NENASAZUJI`);
 
 fs.writeFileSync(path.join(koren, 'ukazka.html'), s);
-console.log(`\n✅ ukazka.html hotová (${s.length.toLocaleString('cs-CZ')} B)`);
+console.log(`\n   ukazka.html zapsána (${s.length.toLocaleString('cs-CZ')} B)`);
+
+// --- POSLEDNÍ A NEJDŮLEŽITĚJŠÍ KROK: opravdu se to spustí? ---
+// Kontroly výš hlídají, co v souboru NEMÁ být. Že se ukázka rozjede, ale
+// neřeknou — a přesně na tom to jednou padlo: appce chyběla knihovna, skript
+// spadl hned na prvním řádku a návštěvníkovi zůstalo viset přihlašovací okno.
+// Proto se ukázka na závěr doopravdy spustí a zkontroluje se, že je
+// přihlášená a že v ní jsou data.
+console.log('\nZkouším ukázku spustit…');
+const { execFileSync } = await import('child_process');
+try {
+  const vystup = execFileSync(process.execPath, [path.join(kde, 'zkouska-startu.mjs')], { encoding: 'utf8' });
+  console.log(vystup.split('\n').filter(r => r.includes('✅') || r.includes('❌')).map(r => '  ' + r.trim()).join('\n'));
+} catch (e) {
+  console.error((e.stdout || '') + (e.stderr || ''));
+  fs.unlinkSync(path.join(koren, 'ukazka.html'));
+  chyba('ukázka se nerozjela — soubor jsem smazal, ať se omylem nenasadí');
+}
+console.log('\n✅ ukázka hotová a ověřená');
