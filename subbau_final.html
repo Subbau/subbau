@@ -4391,7 +4391,7 @@ async function submitAdminSignatureWithPlacement() {
 // Po nahrání nové verze se snadno pozná, jestli se opravdu nasadila: otevřete
 // appku, zmáčkněte F12 (na Macu ⌥⌘I) a v konzoli je vypsané tohle datum. Když
 // tam svítí starší, prohlížeč nebo GitHub drží starou verzi.
-const SUBBAU_VERZE = '2026-09-02 g — příchod: dolů jen do 10 min po celé hodině, jinak nahoru na půlhodinu'
+const SUBBAU_VERZE = '2026-09-03 a — „Neřešit platnost" jde i u dokladu, kde už datum je'
 console.log('SubBau docházka — verze ' + SUBBAU_VERZE)
 
 // ============ SUPABASE CONFIG ============
@@ -9862,6 +9862,8 @@ function docValidityCellHtml(d) {
         style="font-size:11.5px;padding:3px 6px;border:1px solid var(--brd);border-radius:6px;font-family:inherit">
       <button onclick="saveDocValidity('${d.id}')" style="${btn};border:1px solid var(--green);background:var(--green-l);color:var(--green)">Uložit</button>
       <button onclick="cancelEditDocValidity()" style="${btn};border:1px solid var(--brd);background:none;color:var(--text3)">Zrušit</button>
+      <button onclick="setDocNoExpiry('${d.id}',true,${d.valid_until ? 'true' : 'false'})" title="Platnost u tohohle dokladu vůbec neřešit — datum se zahodí"
+        style="${btn};border:1px solid var(--brd);background:none;color:var(--text3)">Neřešit platnost</button>
     </div>`
   }
   // Doklad bez expirace — jen odznak a možnost vrátit ho mezi hlídané
@@ -9877,8 +9879,8 @@ function docValidityCellHtml(d) {
     ${validityBadgeHtml(d.valid_until, 'sm')}
     <button onclick="startEditDocValidity('${d.id}')" title="Nastavit nebo přepsat datum konce platnosti — měsíc předem se to připomene"
       style="${btn};border:1px solid var(--blue);background:var(--bg2);color:var(--blue)">${label}</button>
-    ${d.valid_until ? '' : `<button onclick="setDocNoExpiry('${d.id}',true)" title="Doklad žádný konec platnosti nemá — přestaneme ji hlídat i připomínat"
-      style="${btn};border:1px solid var(--brd);background:none;color:var(--text3)">Neřešit platnost</button>`}
+    <button onclick="setDocNoExpiry('${d.id}',true,${d.valid_until ? 'true' : 'false'})" title="Doklad žádný konec platnosti nemá — přestaneme ji hlídat i připomínat"
+      style="${btn};border:1px solid var(--brd);background:none;color:var(--text3)">Neřešit platnost</button>
   </div>`
 }
 
@@ -9935,8 +9937,16 @@ async function applyDocValidity(id, workerId, docType, value) {
 // Označí doklad jako „platnost neřešíme" — nebo to vrátí zpět. Používá to tabulka
 // Dokumenty i karta pracovníka. Doklady bez konce platnosti (živnosťák, výpis,
 // příloha) se tak přestanou hlásit jako „doplňte platnost".
-async function applyDocNoExpiry(id, workerId, value) {
-  if (value && !confirm('U tohoto dokladu přestaneme hlídat platnost — nebude se připomínat ani hlásit na dashboardu.\n\nPokračovat?')) return false
+// `maDatum` říká, jestli u dokladu nějaké datum platnosti je — posílá ho tlačítko,
+// které to má přímo před sebou. Přes cache by to nešlo: na kartě pracovníka se
+// doklady načítají zvlášť a _docsCache tam může být prázdná nebo stará.
+async function applyDocNoExpiry(id, workerId, value, maDatum) {
+  if (value) {
+    const text = 'U tohoto dokladu přestaneme hlídat platnost — nebude se připomínat ani hlásit na dashboardu.'
+      + (maDatum ? '\n\nVyplněné datum platnosti se u něj smaže.' : '')
+      + '\n\nPokračovat?'
+    if (!confirm(text)) return false
+  }
   const upd = { no_expiry: !!value }
   if (value) upd.valid_until = null   // ať vedle sebe nestojí „neřešíme" a datum
   const { error } = await sb.from('documents').update(upd).eq('id', id)
@@ -10028,16 +10038,16 @@ function wdDocTypeHtml(d, workerId) {
 }
 
 // Přepnutí z tabulky Dokumenty
-async function setDocNoExpiry(id, value) {
+async function setDocNoExpiry(id, value, maDatum) {
   const doc = _docsCache.find(d => d.id === id)
-  if (!await applyDocNoExpiry(id, doc?.worker_id, value)) return
+  if (!await applyDocNoExpiry(id, doc?.worker_id, value, maDatum)) return
   _docValidityEditId = null
   await loadDocuments()
 }
 
 // Přepnutí z karty pracovníka
-async function setWdDocNoExpiry(id, workerId, value) {
-  if (!await applyDocNoExpiry(id, workerId, value)) return
+async function setWdDocNoExpiry(id, workerId, value, maDatum) {
+  if (!await applyDocNoExpiry(id, workerId, value, maDatum)) return
   _wdValidityEditId = null
   await loadWdDocs(workerId)
 }
@@ -10066,6 +10076,8 @@ function wdDocValidityHtml(d, workerId) {
         style="font-size:11.5px;padding:4px 7px;border:1px solid var(--brd);border-radius:8px;font-family:inherit">
       <button onclick="saveWdDocValidity('${d.id}','${workerId}','${d.doc_type}')" style="${btn};border:none;background:#3f7d54;color:#fff">Uložit</button>
       <button onclick="cancelEditWdDocValidity('${workerId}')" style="${btn};border:1px solid var(--brd);background:#fff;color:#9a9082">Zrušit</button>
+      <button onclick="setWdDocNoExpiry('${d.id}','${workerId}',true,${d.valid_until ? 'true' : 'false'})" title="Platnost u tohohle dokladu vůbec neřešit — datum se zahodí"
+        style="${btn};border:1px solid var(--brd);background:#fff;color:#9a9082">Neřešit platnost</button>
     </span>`
   }
   if (d.no_expiry) {
@@ -10076,8 +10088,8 @@ function wdDocValidityHtml(d, workerId) {
   return `${validityBadgeHtml(d.valid_until)}
     <button onclick="startEditWdDocValidity('${d.id}','${workerId}')" title="Nastavit nebo přepsat datum konce platnosti — měsíc předem se to připomene"
       style="${btn};border:1.5px solid #211D1A;background:#fff;color:#211D1A">${d.valid_until ? 'Upravit platnost' : '+ Doplnit platnost'}</button>
-    ${d.valid_until ? '' : `<button onclick="setWdDocNoExpiry('${d.id}','${workerId}',true)" title="Doklad žádný konec platnosti nemá — přestaneme ji hlídat i připomínat"
-      style="${btn};border:1.5px solid var(--brd);background:#fff;color:#9a9082">Neřešit platnost</button>`}`
+    <button onclick="setWdDocNoExpiry('${d.id}','${workerId}',true,${d.valid_until ? 'true' : 'false'})" title="Doklad žádný konec platnosti nemá — přestaneme ji hlídat i připomínat"
+      style="${btn};border:1.5px solid var(--brd);background:#fff;color:#9a9082">Neřešit platnost</button>`
 }
 
 async function startEditWdDocValidity(id, workerId) {
