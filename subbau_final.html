@@ -4407,7 +4407,7 @@ async function submitAdminSignatureWithPlacement() {
 // Po nahrání nové verze se snadno pozná, jestli se opravdu nasadila: otevřete
 // appku, zmáčkněte F12 (na Macu ⌥⌘I) a v konzoli je vypsané tohle datum. Když
 // tam svítí starší, prohlížeč nebo GitHub drží starou verzi.
-const SUBBAU_VERZE = '2026-09-03 d — u odkazu se počítá jen skutečné otevření'
+const SUBBAU_VERZE = '2026-09-05 a — faktura za pracovníka se uloží, IBAN jde opravit'
 console.log('SubBau docházka — verze ' + SUBBAU_VERZE)
 
 // ============ SUPABASE CONFIG ============
@@ -11965,6 +11965,9 @@ function openInvoiceEdit(id) {
   amt.value = cash > 0 ? String(cash) : ''
   amt.max = String(total)
   document.getElementById('invedit-note').value = r.cash_paid_note || ''
+  document.getElementById('invedit-iban').value = r.iban || ''
+  document.getElementById('invedit-swift').value = r.swift || ''
+  document.getElementById('invedit-iban-do-profilu').checked = false
 
   // Položky do editoru. Stará faktura je nemá — poskládá se z ní jeden řádek
   // podle toho, jak byla vystavená (hodiny × sazba, nebo rovnou celková částka),
@@ -12040,6 +12043,14 @@ async function saveInvoiceEdit() {
   if (cash > total + 0.0001) { showToast('⚠️ Záloha nesmí být vyšší než faktura'); return }
   cash = Math.round(Math.min(cash, total) * 100) / 100
   const note = String(document.getElementById('invedit-note')?.value || '').trim().slice(0, 200)
+  // Mezery v IBANu se píšou kvůli čitelnosti, do databáze patří bez nich —
+  // jinak by se dva zápisy téhož účtu tvářily jako různé.
+  const ibanNovy = String(document.getElementById('invedit-iban')?.value || '')
+    .replace(/\s+/g, '').toUpperCase().slice(0, 40)
+  const swiftNovy = String(document.getElementById('invedit-swift')?.value || '')
+    .replace(/\s+/g, '').toUpperCase().slice(0, 15)
+  const ibanDoProfilu = !!document.getElementById('invedit-iban-do-profilu')?.checked
+  if (!ibanNovy) { showToast('⚠️ Doplňte účet (IBAN) — bez něj nemá kdo zaplatit'); return }
 
   const btn = document.getElementById('invedit-save-btn')
   if (btn) { btn.disabled = true; btn.textContent = 'Přepisuji fakturu…' }
@@ -12061,7 +12072,8 @@ async function saveInvoiceEdit() {
   } catch (e) { console.warn('[faktura] kontakt se nepodařilo dotáhnout:', e?.message) }
 
   // 1) Vykresli fakturu znovu — už se zálohou
-  const dataForRender = invoiceDataFromRow({ ...r, items: polozky, total_amount: total, cash_paid: cash, cash_paid_note: note }, extra)
+  const dataForRender = invoiceDataFromRow({ ...r, items: polozky, total_amount: total,
+    cash_paid: cash, cash_paid_note: note, iban: ibanNovy, swift: swiftNovy }, extra)
   try {
     renderInvoice(dataForRender, 'en')
   } catch (e) {
@@ -12087,6 +12099,7 @@ async function saveInvoiceEdit() {
   const upd = {
     cash_paid: cash, cash_paid_note: note || null, edited_at: new Date().toISOString(),
     items: polozky, total_amount: total,
+    iban: ibanNovy, swift: swiftNovy || null,
   }
   if (uploaded) { upd.pdf_url = uploaded.url; upd.pdf_path = uploaded.path }
 
@@ -12127,9 +12140,27 @@ async function saveInvoiceEdit() {
     catch (e) { console.warn('[faktura] předchozí přepsané PDF nešlo smazat:', e?.message) }
   }
 
+  // Účet i do profilu, když si to admin zaškrtl — jinak by pracovník příští
+  // fakturu vystavil zase se špatným číslem a oprava by se opakovala.
+  let profilNeulozen = false
+  if (ibanDoProfilu && r.worker_id) {
+    // Účet pracovníka je v profilu pod invoice_iban / invoice_swift — pod
+    // těmi jmény ho ukládá i pracovníkův fakturační formulář.
+    const { error: chybaProfilu } = await sb.from('profiles')
+      .update({ invoice_iban: ibanNovy, invoice_swift: swiftNovy || null }).eq('id', r.worker_id)
+    if (chybaProfilu) {
+      profilNeulozen = true
+      console.warn('[faktura] účet se do profilu neuložil:', chybaProfilu.message)
+    }
+  }
+
   Object.assign(r, upd)
   renderWorkerInvoices()
   closeInvoiceEdit()
+  if (profilNeulozen) {
+    finish('⚠️ Faktura přepsaná, ale do profilu pracovníka se účet neuložil — opravte ho prosím na jeho kartě')
+    return
+  }
   if (bezPuvodni) {
     finish('⚠️ Záloha zapsána, ale původní verzi neuchovám — spusťte v Supabase soubor supabase-migrace-faktura-original.sql')
     return
@@ -21459,27 +21490,64 @@ async function uploadInvoicePdf(blob, workerId, invoiceNum) {
 // dokud s tím admin něco neudělá. Dřív se klíčovalo přes týden, takže druhá
 // faktura za týž týden tu první tiše přemazala.
 async function storeInvoiceRow(row) {
-  let { error } = await sb.from('worker_invoices')
-    .upsert(row, { onConflict: 'worker_id,invoice_number' })
-  // Když unikátní index na číslo v databázi ještě není (nespuštěná migrace),
-  // fakturu radši vlož jako novou, než aby se ztratila.
-  if (error && /on conflict|constraint|unique|index/i.test(error.message || '')) {
-    ;({ error } = await sb.from('worker_invoices').insert(row))
+  // Nejdřív zkusíme PŘEPSAT fakturu se stejným číslem u téhož člověka, a teprve
+  // když žádná není, založit novou.
+  //
+  // Proč ne `upsert`: unikátní index na (worker_id, invoice_number) je v databázi
+  // ČÁSTEČNÝ — má podmínku na neprázdné číslo. Na částečný index se ON CONFLICT
+  // nedokáže napojit a Postgres odmítne s „no unique constraint matching". Appka
+  // pak spadla do vkládání nové faktury, to narazilo na duplicitu a správci se
+  // ukázala hláška o chybějící tabulce. Kvůli tomu nešlo opravit fakturu
+  // pracovníkovi, který měl špatný IBAN.
+  //
+  // Přepiš-nebo-vlož funguje bez ohledu na to, jaký index v databázi je.
+  const klic = { worker_id: row.worker_id, invoice_number: String(row.invoice_number || '') }
+  if (klic.worker_id && klic.invoice_number) {
+    const { data: prepsane, error: chybaUpravy } = await sb.from('worker_invoices')
+      .update(row).eq('worker_id', klic.worker_id).eq('invoice_number', klic.invoice_number)
+      .select('id')
+    if (chybaUpravy) return chybaUpravy
+    if (prepsane && prepsane.length) return null      // hotovo, přepsali jsme
   }
-  return error
+
+  const { error: chybaVlozeni } = await sb.from('worker_invoices').insert(row)
+  if (!chybaVlozeni) return null
+
+  // Mezitím ji mohl uložit někdo jiný (pracovník ze svého telefonu ve stejnou
+  // chvíli). Zkusíme tedy ještě jednou přepsat, ať se práce neztratí.
+  if (/duplicate key|already exists|23505/i.test(chybaVlozeni.message || '') && klic.invoice_number) {
+    const { data: podruhe, error: chybaPodruhe } = await sb.from('worker_invoices')
+      .update(row).eq('worker_id', klic.worker_id).eq('invoice_number', klic.invoice_number)
+      .select('id')
+    if (!chybaPodruhe && podruhe && podruhe.length) return null
+  }
+  return chybaVlozeni
 }
 
 // Srozumitelná hláška místo databázové hantýrky
 function invoiceErrorText(error) {
   const m = error?.message || ''
-  if (/worker_invoices|does not exist|schema cache|relation/i.test(m)) {
-    return '❌ Složka Faktury není v databázi — SubBau musí spustit supabase-migrace-faktury.sql'
+  const kod = error?.code || ''
+  // POŘADÍ JE DŮLEŽITÉ. Dřív se jako první ptalo na slovo „worker_invoices",
+  // jenže to je i v názvech indexů a pravidel — takže skoro každá chyba se
+  // tvářila jako chybějící tabulka a posílala správce spouštět migraci, která
+  // s tím neměla co dělat. Napřed proto to konkrétní, obecné až nakonec.
+  if (/duplicate key|already exists/i.test(m) || kod === '23505') {
+    return '⚠️ Faktura s tímhle číslem je u toho pracovníka už uložená — zkuste to prosím znovu, přepíše se'
   }
-  if (/row-level security|policy|permission|42501/i.test(m)) {
+  if (/row-level security|policy|permission/i.test(m) || kod === '42501') {
     // Odeslanou fakturu smí měnit už jen SubBau — pracovníkovi to zakazuje RLS.
     return '⚠️ Faktura za tento týden je už odeslaná a měnit ji smí jen SubBau — ozvěte se nám'
   }
-  return '❌ Fakturu se nepodařilo odeslat: ' + m
+  // Chybějící tabulka má vlastní kód. Poznáváme ji podle něj, ne podle toho,
+  // že se někde v textu objevilo slovo „worker_invoices".
+  if (kod === 'PGRST205' || kod === '42P01' || /could not find the table/i.test(m)) {
+    return '❌ Složka Faktury není v databázi — SubBau musí spustit supabase-migrace-faktury.sql'
+  }
+  if (/could not find the .* column|schema cache/i.test(m)) {
+    return '❌ Ve složce Faktury chybí sloupec — ozvěte se SubBau: ' + m
+  }
+  return '❌ Fakturu se nepodařilo uložit: ' + m
 }
 
 function _invSendBusy(busy, label, text) {
@@ -26588,6 +26656,25 @@ document.addEventListener('visibilitychange', () => {
            style="width:100%;padding:12px;border:1.5px solid #d8cfc0;border-radius:10px;font-size:16px;font-family:inherit;box-sizing:border-box">
     <div style="font-size:11.5px;color:#9a9a9a;margin-top:5px;line-height:1.5">Kolik jste pracovníkovi vyplatil předem v hotovosti. Na faktuře se to odečte od částky k úhradě. Prázdné pole nebo 0 = žádná záloha.</div>
     <div id="invedit-warn" style="display:none;font-size:12px;color:#9c3b22;font-weight:600;margin-top:6px"></div>
+
+    <!-- Účet pro platbu. Když ho pracovník napsal špatně, Němci mu peníze
+         neposlali — a vystavovat celou fakturu znovu kvůli jednomu číslu
+         je zbytečné. Po uložení se přepíše i PDF, takže opravený účet je
+         i na samotném dokladu, ne jen v záznamu. -->
+    <label style="display:block;font-size:12px;color:#7a7168;font-weight:700;margin:16px 0 5px">Účet pro platbu (IBAN)</label>
+    <input type="text" id="invedit-iban" placeholder="např. CZ12 0600 0000 0002 5309 9571"
+           style="width:100%;padding:11px;border:1.5px solid #d8cfc0;border-radius:10px;font-size:15px;font-family:inherit;box-sizing:border-box">
+    <div style="display:flex;gap:8px;margin-top:7px">
+      <div style="flex:1;min-width:0">
+        <label style="display:block;font-size:11px;color:#9a9a9a;margin-bottom:3px">SWIFT / BIC</label>
+        <input type="text" id="invedit-swift" placeholder="např. AGBACZPP"
+               style="width:100%;padding:10px;border:1.5px solid #d8cfc0;border-radius:9px;font-size:14px;font-family:inherit;box-sizing:border-box">
+      </div>
+    </div>
+    <label style="display:flex;align-items:center;gap:8px;margin-top:9px;font-size:13px;color:#7a7168;cursor:pointer">
+      <input type="checkbox" id="invedit-iban-do-profilu" style="width:17px;height:17px;flex:none">
+      Uložit účet i do profilu pracovníka <span style="color:#9a9a9a">(ať ho příště nemusí opravovat znovu)</span>
+    </label>
 
     <label style="display:block;font-size:12px;color:#7a7168;font-weight:700;margin:14px 0 5px">Poznámka k záloze (nepovinné)</label>
     <input type="text" id="invedit-note" maxlength="200" placeholder="např. vyplaceno 20.08.2026"
