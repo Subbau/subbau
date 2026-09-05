@@ -265,20 +265,55 @@ module.exports = async (req, res) => {
     const iso = d => d.toISOString().slice(0, 10);
     const od = iso(po), doDne = iso(ne);
 
-    let radky = [];
+    // Lidé, kteří do vybraných part patří. Potřeba kvůli starší docházce:
+    // u záznamů z doby před zavedením part není parta zapsaná, takže by je
+    // odkaz nikdy neukázal a odběrateli by chyběly starší týdny.
+    let lideVeSkupinach = [];
     if (teamIds.length) {
-      const seznam = teamIds.map(encodeURIComponent).join(',');
+      try {
+        const p = await db(
+          `profiles?select=id&team_id=in.(${teamIds.map(encodeURIComponent).join(',')})`, klic);
+        lideVeSkupinach = (p || []).map(x => x.id).filter(Boolean);
+      } catch (e) { console.warn('[klient] lidé ve skupinách:', e.message); }
+    }
+
+    // Načte docházku pro zadané období: dny s partou z vybraných skupin
+    // a k tomu staré dny BEZ party u lidí, kteří do těch skupin patří.
+    // Dny se zapsanou CIZÍ partou se nepřidávají — ty patří jinému odběrateli.
+    async function nactiDochazku(sloupce, odDne, doDne2) {
+      const kus = [];
+      if (teamIds.length) {
+        kus.push(db(`attendance?select=${sloupce}` +
+          `&team_id=in.(${teamIds.map(encodeURIComponent).join(',')})` +
+          `&work_date=gte.${odDne}&work_date=lte.${doDne2}&order=work_date.asc&limit=5000`, klic));
+      }
+      if (lideVeSkupinach.length) {
+        kus.push(db(`attendance?select=${sloupce}&team_id=is.null` +
+          `&worker_id=in.(${lideVeSkupinach.map(encodeURIComponent).join(',')})` +
+          `&work_date=gte.${odDne}&work_date=lte.${doDne2}&order=work_date.asc&limit=5000`, klic));
+      }
+      const casti = await Promise.all(kus);
+      const videno = new Set(), vse = [];
+      for (const c of casti) for (const r of (c || [])) {
+        const k = r.id || (r.worker_id + '|' + r.work_date + '|' + (r.check_in || ''));
+        if (videno.has(k)) continue;
+        videno.add(k); vse.push(r);
+      }
+      return vse;
+    }
+
+    let radky = [];
+    if (teamIds.length || lideVeSkupinach.length) {
       // Adresa: nejdřív ručně zapsaná stavba, a když chybí, adresa z příchodu —
       // stejné pořadí, jaké má správce v appce (attDisplaySite). Bez té druhé
       // by u části dnů nebyla adresa žádná.
       // Ven jde jen TEXT adresy. Souřadnice (location_lat/lng) ani údaj o tom,
       // jestli ji člověk psal ručně nebo přišla z GPS (address_source), se
       // nečtou — klient tak nepozná rozdíl a ani ho poznat nemá.
-      const dochazka = await db(
-        `attendance?select=worker_id,work_date,check_in,check_out,break_start,break_end,` +
-        `break2_start,break2_end,breaks,total_hours,construction_site,location_address,work_description` +
-        `&team_id=in.(${seznam})&work_date=gte.${od}&work_date=lte.${doDne}` +
-        `&order=work_date.asc&limit=3000`, klic);
+      const dochazka = await nactiDochazku(
+        'id,worker_id,work_date,check_in,check_out,break_start,break_end,' +
+        'break2_start,break2_end,breaks,total_hours,construction_site,location_address,work_description',
+        od, doDne);
 
       const ids = [...new Set((dochazka || []).map(z => z.worker_id))];
       let jmena = {}, sazbaTed = {}, provizeTed = {}, bezProvize = new Set(), historie = {};
@@ -379,11 +414,11 @@ module.exports = async (req, res) => {
     // Které týdny má smysl nabídnout v přepínači. Bereme je z docházky těch
     // part, ať se odběratel neproklikává do prázdných týdnů.
     let tydny = [];
-    if (teamIds.length) {
+    if (teamIds.length || lideVeSkupinach.length) {
       try {
-        const seznam = teamIds.map(encodeURIComponent).join(',');
-        const vse = await db(
-          `attendance?select=kw,kw_year&team_id=in.(${seznam})&order=work_date.desc&limit=5000`, klic);
+        // Od začátku spolupráce až do dneška — odběratel má vidět celou dobu,
+        // co pro něj ti lidé dělají, ne jen probíhající týden.
+        const vse = await nactiDochazku('kw,kw_year,worker_id,work_date', '2000-01-01', nyni.den);
         const videno = new Set();
         for (const r of (vse || [])) {
           const k = r.kw_year + '-' + r.kw;

@@ -6,7 +6,7 @@
 // staré (viz 'activate' níže). Zvedněte ho pokaždé, když je podezření, že si
 // někdo drží poškozenou kopii appky — je to jediný způsob, jak mu ji zahodit
 // na dálku, aniž by sám mazal data v prohlížeči.
-const CACHE = 'subbau-v53';
+const CACHE = 'subbau-v54';
 
 self.addEventListener('install', (event) => {
   // Nová verze se má aktivovat hned, nečekat na zavření všech karet
