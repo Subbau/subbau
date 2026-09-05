@@ -1358,6 +1358,17 @@ setTimeout(function () {
                 jméno, příchod, přestávku, odchod, hodiny, stavbu a popis práce.
                 Sazby ani provize nevidí. Odkaz můžete kdykoli vypnout.
               </div>
+              <div id="odkazy-lock" class="card" style="max-width:420px;margin:14px auto 0;display:none">
+                <div class="card-h">
+                  <h4>🔒 Odkazy pro odběratele</h4>
+                  <span style="font-size:12px;color:var(--text3)">Je v nich vidět, kolik se komu fakturuje a jaká je provize</span>
+                </div>
+                <div id="odkazy-lock-err" style="display:none;color:var(--red);font-size:12px;margin-bottom:8px"></div>
+                <div class="fg"><label>Email</label><input type="email" id="odkazy-lock-email" placeholder="email@example.com" autocomplete="off"></div>
+                <div class="fg"><label>Heslo</label><input type="password" id="odkazy-lock-pwd" placeholder="••••••••" autocomplete="off"></div>
+                <button onclick="unlockOdkazy()" style="width:100%;padding:12px;background:#211D1A;color:#E8A13A;border:none;border-radius:10px;font-size:14px;font-weight:800;cursor:pointer;font-family:inherit">Odemknout</button>
+                <div style="font-size:11.5px;color:var(--text3);margin-top:9px;text-align:center">Stejné heslo jako u Provizí</div>
+              </div>
               <div id="klient-odkazy" style="display:flex;flex-direction:column;gap:10px;margin-top:10px">
                 <div style="text-align:center;color:var(--text3);padding:14px">Načítám…</div>
               </div>
@@ -4415,7 +4426,7 @@ async function submitAdminSignatureWithPlacement() {
 // Po nahrání nové verze se snadno pozná, jestli se opravdu nasadila: otevřete
 // appku, zmáčkněte F12 (na Macu ⌥⌘I) a v konzoli je vypsané tohle datum. Když
 // tam svítí starší, prohlížeč nebo GitHub drží starou verzi.
-const SUBBAU_VERZE = '2026-09-05 l — zámeček u Provizí, Odkazů a Přístup/provize'
+const SUBBAU_VERZE = '2026-09-05 m — Odkazy jsou zaheslované stejně jako Provize'
 console.log('SubBau docházka — verze ' + SUBBAU_VERZE)
 
 // ============ SUPABASE CONFIG ============
@@ -6594,6 +6605,28 @@ async function deleteProvizeAccess(id, email) {
 }
 
 // Odemčení platí jen pro tuto relaci (sessionStorage) — po zavření appky/odhlášení je nutné zadat znovu.
+// Odemčení Odkazů. Ověřuje se proti témuž seznamu hesel jako Provize
+// (tabulka provize_access), ať SubBau nespravuje dvě hesla. Kdo odemkne
+// jedno, má i druhé — obojí ukazuje ta samá citlivá čísla.
+async function unlockOdkazy() {
+  const emailEl = document.getElementById('odkazy-lock-email')
+  const pwdEl = document.getElementById('odkazy-lock-pwd')
+  const errEl = document.getElementById('odkazy-lock-err')
+  if (!emailEl || !pwdEl || !errEl) return
+  errEl.style.display = 'none'
+  const email = (emailEl.value || '').trim().toLowerCase()
+  const pwd = pwdEl.value || ''
+  if (!email || !pwd) { errEl.textContent = 'Vyplňte email i heslo'; errEl.style.display = 'block'; return }
+  if (!smiVidetProvize()) { errEl.textContent = 'Odkazy může otevřít jen správce'; errEl.style.display = 'block'; return }
+  const hash = await sha256Hex(pwd)
+  const { data, error } = await sb.from('provize_access').select('password_hash').eq('email', email).maybeSingle()
+  if (error) { errEl.textContent = 'Tabulka provize_access zatím neexistuje — kontaktujte správce appky'; errEl.style.display = 'block'; return }
+  if (!data || data.password_hash !== hash) { errEl.textContent = 'Nesprávný email nebo heslo'; errEl.style.display = 'block'; return }
+  sessionStorage.setItem('provizeUnlocked', email)
+  pwdEl.value = ''
+  loadKlientOdkazy()
+}
+
 async function unlockProvize() {
   const emailEl = document.getElementById('provize-lock-email')
   const pwdEl = document.getElementById('provize-lock-pwd')
@@ -12422,6 +12455,20 @@ function klientOdkazUrl(token) {
 async function loadKlientOdkazy() {
   const box = document.getElementById('klient-odkazy')
   if (!box) return
+  // Zamčeno stejně jako Provize — v odkazech je vidět, kolik se komu fakturuje
+  // a jaká je z něj provize. Kdo odemkl Provize, má odemčené i tohle.
+  const lock = document.getElementById('odkazy-lock')
+  if (!smiVidetProvize()) {
+    if (lock) lock.style.display = 'none'
+    box.innerHTML = '<div style="text-align:center;color:var(--text3);padding:24px">Odkazy může zobrazit jen správce.</div>'
+    return
+  }
+  if (!sessionStorage.getItem('provizeUnlocked')) {
+    if (lock) lock.style.display = 'block'
+    box.innerHTML = ''
+    return
+  }
+  if (lock) lock.style.display = 'none'
   const { data, error } = await sb.from('client_links')
     .select('id, nazev, token, aktivni, plati_do, posledni_navsteva, pocet_navstev')
     .order('vytvoreno', { ascending: false })
