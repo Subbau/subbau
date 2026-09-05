@@ -42,6 +42,13 @@
   .bezi{color:#b8860b;font-weight:800}
   .radek-bezi{background:#fffaf0}
   .probiha{color:#b8860b;font-weight:700;font-size:13px}
+  .penize{font-size:12.5px;color:var(--seda2);margin-top:3px;line-height:1.5}
+  .penize b{color:var(--tmava);font-variant-numeric:tabular-nums}
+  .souhrn{display:flex;gap:14px;flex-wrap:wrap;font-size:12.5px;color:var(--seda2);
+          margin-top:6px;padding-top:6px;border-top:1px dashed var(--ram)}
+  .souhrn b{color:var(--tmava);font-variant-numeric:tabular-nums}
+  select{font-family:inherit;font-size:14px;font-weight:700;padding:9px 12px;
+         border-radius:10px;border:1.5px solid var(--ram);background:#fff;color:var(--tmava)}
   .hod{font-weight:800;text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}
   .drobne{font-size:11.5px;color:var(--seda2)}
   .de{color:var(--seda);font-size:11.5px;font-style:italic}
@@ -77,6 +84,7 @@
 <script>
 // Token z adresy. Do stránky se nikde nevypisuje.
 var TOKEN = new URLSearchParams(location.search).get('t') || '';
+var TYDEN = null;   // {kw, rok} — když je prázdné, server dá probíhající týden
 var obal = document.getElementById('obal');
 
 function esc(s){
@@ -140,6 +148,20 @@ function vykreslit(d, preklady){
     + esc(d.od.split('-').reverse().join('.')) + ' – ' + esc(d.do.split('-').reverse().join('.'))
     + '</div></header>';
 
+  // Přepínač týdnů — odběratel si smí prolistovat i starší.
+  if (d.tydny && d.tydny.length){
+    html += '<div class="tlacitka" style="margin-bottom:6px">'
+      + '<label style="align-self:center;font-size:13px;color:var(--seda2);font-weight:700">'
+      + 'Woche · Týden</label>'
+      + '<select id="vyber-tydne" onchange="zmenTyden(this.value)">'
+      + d.tydny.map(function(t){
+          var v = t.kw + '/' + t.rok
+          return '<option value="' + v + '"' + (t.kw === d.kw && t.rok === d.rok ? ' selected' : '')
+               + '>KW ' + t.kw + ' / ' + t.rok + '</option>'
+        }).join('')
+      + '</select></div>';
+  }
+
   html += '<div class="tlacitka">'
     + '<button class="hlavni" onclick="window.print()">📄 Als PDF speichern · Uložit do PDF</button>'
     + '<button onclick="stahnoutCsv()">📊 Excel (CSV)</button>'
@@ -158,12 +180,39 @@ function vykreslit(d, preklady){
     var dny = podle[jm].slice().sort(function(a,b){ return a.datum.localeCompare(b.datum) });
     var suma = dny.reduce(function(s,r){ return s + (Number(r.hodiny)||0) }, 0);
     celkem += suma;
-    html += '<div class="clovek"><div class="hlava">'
-      + '<div class="jmeno">' + esc(jm) + '</div>'
+    // Peníze: sazba pracovníka a provize SubBau. Sčítá se den po dni, protože
+    // se sazba mohla během období změnit — jinak by to nesedělo s fakturou.
+    var mzda = 0, provizeCelkem = 0, sazby = {}, provize = {}
+    dny.forEach(function(r){
+      if (r.probiha) return
+      var h = Number(r.hodiny) || 0
+      mzda += h * (Number(r.sazba) || 0)
+      provizeCelkem += h * (Number(r.provize) || 0)
+      if (r.sazba != null) sazby[Number(r.sazba).toFixed(2)] = 1
+      if (r.provize != null) provize[Number(r.provize).toFixed(2)] = 1
+    })
+    var sazbaText = Object.keys(sazby).length === 1
+      ? hod(Object.keys(sazby)[0])
+      : (suma > 0 ? hod(mzda / suma) + '⌀' : '—')
+    var provizeText = Object.keys(provize).length === 1
+      ? hod(Object.keys(provize)[0])
+      : (suma > 0 ? hod(provizeCelkem / suma) + '⌀' : '—')
+
+    html += '<div class="clovek"><div class="hlava" style="align-items:flex-start">'
+      + '<div><div class="jmeno">' + esc(jm) + '</div>'
+      + '<div class="penize"><b>' + sazbaText + ' €</b>/Std. · '
+      + 'Provision <b>' + provizeText + ' €</b>/Std.'
+      + '<div style="font-size:11px;color:var(--seda)">hodinovka · provize</div></div></div>'
       + '<div class="soucet">' + hod(suma) + ' Std.'
       + '<small>' + (dny.some(function(x){ return x.probiha })
           ? 'ohne laufende Tage · bez probíhajících' : 'Stunden · hodin') + '</small></div>'
-      + '</div><div class="tab"><table><thead><tr>'
+      + '</div>'
+      + '<div style="padding:0 16px 10px"><div class="souhrn">'
+      + '<span>Lohn · mzda <b>' + hod(mzda) + ' €</b></span>'
+      + '<span>Provision · provize <b>' + hod(provizeCelkem) + ' €</b></span>'
+      + '<span>Gesamt · celkem <b>' + hod(mzda + provizeCelkem) + ' €</b></span>'
+      + '</div></div>'
+      + '<div class="tab"><table><thead><tr>'
       + '<th>Datum<small>datum</small></th>'
       + '<th>Beginn<small>příchod</small></th>'
       + '<th>Pause<small>přestávka</small></th>'
@@ -214,9 +263,19 @@ function vykreslit(d, preklady){
     html += '</tbody></table></div></div>';
   });
 
+  var mzdaVse = 0, provizeVse = 0;
+  d.radky.forEach(function(r){
+    if (r.probiha) return;
+    var h = Number(r.hodiny) || 0;
+    mzdaVse += h * (Number(r.sazba) || 0);
+    provizeVse += h * (Number(r.provize) || 0);
+  });
   html += '<div class="celkem"><div>Gesamt · Celkem<div style="font-size:12px;color:#cfc7bd">'
-    + jmena.length + ' Mitarbeiter · pracovníků</div></div>'
-    + '<div class="c">' + hod(celkem) + ' Std.</div></div>';
+    + jmena.length + ' Mitarbeiter · pracovníků</div>'
+    + '<div style="font-size:12.5px;color:#cfc7bd;margin-top:5px">'
+    + 'Lohn ' + hod(mzdaVse) + ' € &nbsp;·&nbsp; Provision ' + hod(provizeVse) + ' €</div></div>'
+    + '<div style="text-align:right"><div class="c">' + hod(mzdaVse + provizeVse) + ' €</div>'
+    + '<div style="font-size:13px;color:#cfc7bd">' + hod(celkem) + ' Std.</div></div></div>';
 
   html += '<div class="pata">'
     + '<b>Nach Arbeitsende wird die vollständige Arbeitszeit angezeigt.</b><br>'
@@ -228,16 +287,25 @@ function vykreslit(d, preklady){
   obal.innerHTML = html;
 }
 
+function zmenTyden(v){
+  var c = String(v || '').split('/');
+  TYDEN = { kw: parseInt(c[0], 10), rok: parseInt(c[1], 10) };
+  stav('Wird geladen…');
+  nacti(true);
+}
+
 function stahnoutCsv(){
   if (!DATA) return;
-  var hl = ['Name','Datum','Beginn','Pause','Ende','Baustelle','Taetigkeit','Stunden'];
+  var hl = ['Name','Datum','Beginn','Pause','Ende','Baustelle','Taetigkeit','Stunden','Satz','Provision'];
   var radky = DATA.radky.slice().sort(function(a,b){
     return a.jmeno.localeCompare(b.jmeno,'cs') || a.datum.localeCompare(b.datum);
   }).map(function(r){
     return [ r.jmeno, r.datum, r.probiha ? 'laeuft' : (r.prichod || ''),
       (r.pauzy||[]).map(function(p){ return p.od + '-' + p.do }).join(' '),
       r.probiha ? 'laeuft' : (r.odchod || ''), r.stavba || '', r.prace || '',
-      r.probiha ? '' : String(r.hodiny).replace('.', ',') ];
+      r.probiha ? '' : String(r.hodiny).replace('.', ','),
+      r.probiha ? '' : String(r.sazba ?? '').replace('.', ','),
+      r.probiha ? '' : String(r.provize ?? '').replace('.', ',') ];
   });
   var csv = [hl].concat(radky).map(function(r){
     return r.map(function(b){ return '"' + String(b).replace(/"/g,'""') + '"' }).join(';');
@@ -278,7 +346,8 @@ var prvniNacteni = true;
 function nacti(rucne){
   if (rucne) stav('Wird aktualisiert…');
   var adresa = '/api/klient-dochazka?t=' + encodeURIComponent(TOKEN)
-             + (prvniNacteni ? '&prvni=1' : '');
+             + (prvniNacteni ? '&prvni=1' : '')
+             + (TYDEN ? '&kw=' + TYDEN.kw + '&rok=' + TYDEN.rok : '');
   prvniNacteni = false;
   return fetch(adresa, { cache: 'no-store' })
     .then(function(r){ return r.json().then(function(j){ return { stav: r.status, j: j } }) })

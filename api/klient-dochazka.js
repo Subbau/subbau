@@ -160,6 +160,19 @@ function tydenKDatu(d) {
   const kw = Math.ceil((((t - zacRoku) / 86400000) + 1) / 7);
   return { kw, rok: t.getUTCFullYear() };
 }
+// Pondělí ISO týdne podle jeho čísla a roku. Potřeba, aby si odběratel mohl
+// listovat zpátky — ne jen koukat na probíhající týden.
+function pondeliTydne(kw, rok) {
+  // 4. leden leží vždycky v prvním ISO týdnu roku.
+  const ctvrty = new Date(Date.UTC(rok, 0, 4));
+  const den = ctvrty.getUTCDay() || 7;
+  const pondeliPrvniho = new Date(ctvrty);
+  pondeliPrvniho.setUTCDate(pondeliPrvniho.getUTCDate() - (den - 1));
+  const p = new Date(pondeliPrvniho);
+  p.setUTCDate(p.getUTCDate() + (kw - 1) * 7);
+  return p;
+}
+
 // Pondělí a neděle týdne, ve kterém dnešek leží.
 function tydenOdDo(dnes) {
   const den = dnes.getUTCDay() || 7;
@@ -233,8 +246,24 @@ module.exports = async (req, res) => {
 
     const nyni = ted();
     const dnes = new Date(nyni.den + 'T12:00:00Z');   // poledne, ať posun pásma nikdy nepřehodí den
-    const { kw, rok } = tydenKDatu(dnes);
-    const { od, do: doDne } = tydenOdDo(dnes);
+    const tedTyden = tydenKDatu(dnes);
+
+    // Odběratel si smí listovat zpátky. Čísla bereme z adresy, ale jen jako
+    // celá čísla v rozumném rozsahu — do dotazu do databáze nesmí jít nic jiného.
+    let kw = tedTyden.kw, rok = tedTyden.rok;
+    const zadanyKw = parseInt(String((req.query && req.query.kw) || ''), 10);
+    const zadanyRok = parseInt(String((req.query && req.query.rok) || ''), 10);
+    if (Number.isInteger(zadanyKw) && zadanyKw >= 1 && zadanyKw <= 53 &&
+        Number.isInteger(zadanyRok) && zadanyRok >= 2020 && zadanyRok <= 2100) {
+      // Do budoucna se listovat nedá — nemá to co ukázat.
+      if (zadanyRok < tedTyden.rok || (zadanyRok === tedTyden.rok && zadanyKw <= tedTyden.kw)) {
+        kw = zadanyKw; rok = zadanyRok;
+      }
+    }
+    const po = pondeliTydne(kw, rok);
+    const ne = new Date(po); ne.setUTCDate(ne.getUTCDate() + 6);
+    const iso = d => d.toISOString().slice(0, 10);
+    const od = iso(po), doDne = iso(ne);
 
     let radky = [];
     if (teamIds.length) {
@@ -252,13 +281,48 @@ module.exports = async (req, res) => {
         `&order=work_date.asc&limit=3000`, klic);
 
       const ids = [...new Set((dochazka || []).map(z => z.worker_id))];
-      let jmena = {};
+      let jmena = {}, sazbaTed = {}, provizeTed = {}, bezProvize = new Set(), historie = {};
       if (ids.length) {
-        // Z profilů JEN jméno. Nic víc funkce nenačte, takže nic víc nemůže uniknout.
+        const seznamIds = ids.map(encodeURIComponent).join(',');
+        // Jméno a hodinová sazba. SubBau si přeje, aby odběratel viděl u každého
+        // člověka sazbu i provizi — vyžádal si to sám, aby si mohl fakturu
+        // překontrolovat. V appce zůstává provize dál jen pro správce.
         const lidi = await db(
-          `profiles?select=id,full_name&id=in.(${ids.map(encodeURIComponent).join(',')})`, klic);
-        for (const p of (lidi || [])) jmena[p.id] = p.full_name;
+          `profiles?select=id,full_name,hourly_rate_worker&id=in.(${seznamIds})`, klic);
+        for (const p of (lidi || [])) {
+          jmena[p.id] = p.full_name;
+          sazbaTed[p.id] = Number(p.hourly_rate_worker) || 0;
+        }
+        try {
+          const prov = await db(
+            `worker_commissions?select=worker_id,provize,bez_provize&worker_id=in.(${seznamIds})`, klic);
+          for (const p of (prov || [])) {
+            if (p.bez_provize) { bezProvize.add(p.worker_id); continue; }
+            provizeTed[p.worker_id] = Number(p.provize) || 0;
+          }
+        } catch (e) { console.warn('[klient] provize se nenačetly:', e.message); }
+        // Historie sazeb — bez ní by se týden, ve kterém se sazba měnila,
+        // spočítal celý novou sazbou a nesedělo by to s fakturou.
+        try {
+          const h = await db(
+            `worker_rate_history?select=worker_id,druh,hodnota,valid_from&worker_id=in.(${seznamIds})` +
+            `&order=valid_from.asc`, klic);
+          for (const r of (h || [])) {
+            const kos = (historie[r.druh] = historie[r.druh] || {});
+            (kos[r.worker_id] = kos[r.worker_id] || []).push({
+              od: String(r.valid_from).slice(0, 10), hodnota: Number(r.hodnota) || 0,
+            });
+          }
+        } catch (e) { console.warn('[klient] historie sazeb se nenačetla:', e.message); }
       }
+      // Kolik platilo v konkrétní den. Když u člověka historie není, platí dnešní.
+      const kDni = (druh, wid, den, vychozi) => {
+        const h = historie[druh] && historie[druh][wid];
+        if (!h || !h.length) return vychozi;
+        let v = null;
+        for (let i = 0; i < h.length; i++) { if (h[i].od <= den) v = h[i].hodnota; else break; }
+        return v == null ? vychozi : v;
+      };
 
       for (const z of (dochazka || [])) {
         const zaklad = {
@@ -281,6 +345,10 @@ module.exports = async (req, res) => {
 
         const u = upravDen(z, nyni);
         if (!u) continue;
+        const sazbaDne = Number(kDni('sazba', z.worker_id, zaklad.datum, sazbaTed[z.worker_id] || 0)) || 0;
+        const provizeDne = bezProvize.has(z.worker_id)
+          ? 0
+          : Number(kDni('provize', z.worker_id, zaklad.datum, provizeTed[z.worker_id] || 0)) || 0;
         radky.push({
           ...zaklad,
           probiha: false,
@@ -288,6 +356,8 @@ module.exports = async (req, res) => {
           odchod: u.odchod,
           pauzy: u.pauzy,
           hodiny: u.hodiny,
+          sazba: sazbaDne,
+          provize: provizeDne,
         });
       }
     }
@@ -306,7 +376,24 @@ module.exports = async (req, res) => {
       body: JSON.stringify(zmena),
     }).catch(() => {});
 
-    res.status(200).json({ ok: true, nazev: odkaz.nazev, kw, rok, od, do: doDne, radky });
+    // Které týdny má smysl nabídnout v přepínači. Bereme je z docházky těch
+    // part, ať se odběratel neproklikává do prázdných týdnů.
+    let tydny = [];
+    if (teamIds.length) {
+      try {
+        const seznam = teamIds.map(encodeURIComponent).join(',');
+        const vse = await db(
+          `attendance?select=kw,kw_year&team_id=in.(${seznam})&order=work_date.desc&limit=5000`, klic);
+        const videno = new Set();
+        for (const r of (vse || [])) {
+          const k = r.kw_year + '-' + r.kw;
+          if (!videno.has(k) && r.kw && r.kw_year) { videno.add(k); tydny.push({ kw: r.kw, rok: r.kw_year }); }
+        }
+        tydny.sort((a, b) => b.rok - a.rok || b.kw - a.kw);
+      } catch (e) { console.warn('[klient] seznam týdnů:', e.message); }
+    }
+
+    res.status(200).json({ ok: true, nazev: odkaz.nazev, kw, rok, od, do: doDne, radky, tydny });
   } catch (e) {
     // Podrobnosti si nechá log na Vercelu. Ven jde jen obecná hláška, ať
     // z ní nejde vyčíst, jak je databáze postavená.
