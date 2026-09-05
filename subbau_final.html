@@ -4415,7 +4415,7 @@ async function submitAdminSignatureWithPlacement() {
 // Po nahrání nové verze se snadno pozná, jestli se opravdu nasadila: otevřete
 // appku, zmáčkněte F12 (na Macu ⌥⌘I) a v konzoli je vypsané tohle datum. Když
 // tam svítí starší, prohlížeč nebo GitHub drží starou verzi.
-const SUBBAU_VERZE = '2026-09-05 e — v odkazu rozpis sazeb místo průměru'
+const SUBBAU_VERZE = '2026-09-05 f — odběratel si v odkazu vede fotky, poznámky a známky'
 console.log('SubBau docházka — verze ' + SUBBAU_VERZE)
 
 // ============ SUPABASE CONFIG ============
@@ -12460,7 +12460,73 @@ async function loadKlientOdkazy() {
         <button onclick="zkopirujKlientOdkaz('${o.token}')" style="font-size:11.5px;padding:5px 10px;border:1px solid var(--blue);border-radius:7px;background:var(--bg2);color:var(--blue);cursor:pointer;font-family:inherit">📋 Kopírovat odkaz</button>
         <button onclick="otevriNovyOdkaz('${o.id}')" style="font-size:11.5px;padding:5px 10px;border:1px solid var(--brd);border-radius:7px;background:none;color:var(--text2);cursor:pointer;font-family:inherit">Upravit skupiny</button>
         <button onclick="prepniKlientOdkaz('${o.id}',${bezi ? 'false' : 'true'})" style="font-size:11.5px;padding:5px 10px;border:1px solid ${bezi ? 'var(--red)' : 'var(--green)'};border-radius:7px;background:none;color:${bezi ? 'var(--red)' : 'var(--green)'};cursor:pointer;font-family:inherit">${bezi ? 'Deaktivovat' : 'Zapnout'}</button>
+        <button onclick="ukazPoznamkyOdberatele('${o.id}')" style="font-size:11.5px;padding:5px 10px;border:1px solid var(--brd);border-radius:7px;background:none;color:var(--text2);cursor:pointer;font-family:inherit">📋 Co si zapsal</button>
         <button onclick="smazKlientOdkaz('${o.id}','${escAttr(o.nazev).replace(/'/g, String.fromCharCode(39))}')" style="font-size:11.5px;padding:5px 10px;border:1px solid var(--brd);border-radius:7px;background:none;color:var(--text3);cursor:pointer;font-family:inherit">Smazat</button>
+      </div>
+      <div id="pozn-${o.id}" style="display:none;margin-top:10px;padding-top:10px;border-top:1px dashed var(--brd)"></div>
+    </div>`
+  }).join('')
+}
+
+// Co si odběratel v odkazu zapsal u jednotlivých lidí — fotka, známka, poznámka.
+// SubBau to musí vidět: je to zpětná vazba od zákazníka a někdy i důvod, proč
+// někoho ze stavby stáhnout. Pracovník to nevidí, je to jen mezi vámi a klientem.
+const ZNAMKY = { 1:'výborný', 2:'chvalitebný', 3:'dobrý', 4:'dostatečný', 5:'slabý', 6:'nevyhovující' }
+
+async function ukazPoznamkyOdberatele(linkId) {
+  const box = document.getElementById('pozn-' + linkId)
+  if (!box) return
+  if (box.style.display !== 'none') { box.style.display = 'none'; return }
+  box.style.display = ''
+  box.innerHTML = '<div style="color:var(--text3);font-size:12.5px;padding:6px 0">Načítám…</div>'
+
+  const { data, error } = await sb.from('client_link_workers')
+    .select('worker_id, foto, poznamka, hodnoceni, upraveno, worker:profiles!worker_id(full_name)')
+    .eq('link_id', linkId).order('upraveno', { ascending: false })
+  if (error) {
+    box.innerHTML = /client_link_workers|does not exist|schema cache/i.test(error.message || '')
+      ? '<div style="font-size:12.5px;color:var(--amber)">Chybí tabulka — spusťte migraci <b>supabase-migrace-poznamky-odberatele.sql</b></div>'
+      : '<div style="font-size:12.5px;color:var(--red)">Chyba: ' + escAttr(error.message) + '</div>'
+    return
+  }
+  // Týdny, které si odběratel odškrtl jako uhrazené. Je to jeho přehled —
+  // s „uhrazeno" v Provizích to nemá nic společného a nepropisuje se to tam.
+  let tydnyHtml = ''
+  try {
+    const { data: tyd } = await sb.from('client_link_weeks')
+      .select('kw, rok, uhrazeno, upraveno').eq('link_id', linkId).eq('uhrazeno', true)
+      .order('rok', { ascending: false }).order('kw', { ascending: false })
+    if (tyd && tyd.length) {
+      tydnyHtml = '<div style="margin-bottom:10px;font-size:12.5px">'
+        + '<span style="color:var(--text3)">Odběratel označil jako uhrazené:</span> '
+        + tyd.map(t => `<span style="display:inline-block;background:var(--green-l);color:var(--green);`
+            + `font-weight:800;padding:2px 8px;border-radius:6px;margin:2px 3px 0 0">KW ${t.kw}/${t.rok}</span>`).join('')
+        + '</div>'
+    }
+  } catch (e) { console.warn('[odkazy] odškrtnuté týdny:', e?.message) }
+
+  const zapsane = (data || []).filter(r => r.foto || r.poznamka || r.hodnoceni)
+  if (!zapsane.length) {
+    box.innerHTML = tydnyHtml
+      + '<div style="color:var(--text3);font-size:12.5px">Odběratel si u lidí zatím nic nezapsal.</div>'
+    return
+  }
+  box.innerHTML = tydnyHtml + zapsane.map(r => {
+    const jmeno = escAttr(r.worker?.full_name || '—')
+    const zn = r.hodnoceni
+      ? `<span style="font-weight:800;color:${r.hodnoceni <= 2 ? 'var(--green)' : r.hodnoceni >= 5 ? 'var(--red)' : 'var(--amber)'}">${r.hodnoceni}</span>`
+        + `<span style="font-size:11px;color:var(--text3)"> · ${ZNAMKY[r.hodnoceni] || ''}</span>`
+      : '<span style="font-size:11.5px;color:var(--text3)">bez známky</span>'
+    return `<div style="display:flex;gap:10px;align-items:flex-start;padding:7px 0;border-bottom:1px solid var(--bg)">
+      ${r.foto
+        ? `<img src="${escAttr(r.foto)}" alt="" style="width:38px;height:38px;border-radius:50%;object-fit:cover;flex:none;border:1.5px solid var(--brd)">`
+        : '<div style="width:38px;height:38px;border-radius:50%;background:var(--bg);flex:none"></div>'}
+      <div style="min-width:0;flex:1">
+        <div style="display:flex;gap:8px;align-items:baseline;flex-wrap:wrap">
+          <b style="font-size:13.5px">${jmeno}</b>${zn}
+        </div>
+        ${r.poznamka ? `<div style="font-size:12.5px;color:var(--text2);margin-top:2px;white-space:pre-wrap">${escAttr(r.poznamka)}</div>` : ''}
+        <div style="font-size:10.5px;color:var(--text3);margin-top:2px">${r.upraveno ? datumCas(r.upraveno) : ''}</div>
       </div>
     </div>`
   }).join('')

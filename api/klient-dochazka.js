@@ -34,6 +34,11 @@ const HAJENA_DOBA_MIN = 10;
 // kdo je zrovna na stavbě; navíc je tím čas, kdy si SubBau může zápis
 // v klidu opravit dřív, než ho odběratel uvidí.
 const PRODLEVA_PO_ODCHODU_MIN = 20;
+
+// Co si smí odběratel u člověka uložit. Zapisuje sem někdo, kdo se nepřihlásil —
+// jen s odkazem — takže na velikost i tvar musí být server přísný.
+const MAX_FOTKA = 250 * 1024;    // znaků data URI ≈ 180 kB obrázku
+const MAX_POZNAMKA = 1000;
 // Den, u kterého ještě neuplynulo zdržení, se z přehledu nevyhazuje —
 // klient u něj vidí jméno a adresu stavby, ale místo časů a hodin nápis
 // „Stundenerfassung läuft". Ví tedy, kdo mu na stavbě je, ale hodiny uvidí,
@@ -208,7 +213,9 @@ module.exports = async (req, res) => {
   res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0');
   res.setHeader('Referrer-Policy', 'no-referrer');
 
-  if (req.method !== 'GET') { res.status(405).json({ ok: false, chyba: 'metoda' }); return; }
+  if (req.method !== 'GET' && req.method !== 'POST') {
+    res.status(405).json({ ok: false, chyba: 'metoda' }); return;
+  }
 
   const klic = process.env.SUPABASE_SERVICE_ROLE_KEY;
   if (!klic) {
@@ -243,6 +250,110 @@ module.exports = async (req, res) => {
     const vazby = await db(
       `client_link_teams?select=team_id&link_id=eq.${odkaz.id}`, klic);
     const teamIds = (vazby || []).map(v => v.team_id).filter(Boolean);
+
+    // ---------------------------------------------------------------
+    // ZÁPIS POZNÁMKY (POST) — fotka, poznámka a známka u pracovníka
+    //
+    // Tohle je jediné místo, kam smí zapsat někdo nepřihlášený. Proto se
+    // kontroluje všechno: platnost odkazu (výš), tvar dat, velikost, a hlavně
+    // že ten pracovník do vybraných skupin opravdu patří. Bez té poslední
+    // kontroly by šlo přes cizí odkaz psát poznámky komukoli ve firmě.
+    // ---------------------------------------------------------------
+    if (req.method === 'POST') {
+      const telo = (req.body && typeof req.body === 'object') ? req.body : {};
+
+      // Odškrtnutí týdne jako uhrazeného. Je to jen přehled pro odběratele —
+      // do plateb v Provizích to nesahá a nic v nich nepřepisuje.
+      if ('uhrazeno' in telo) {
+        const tKw = parseInt(String(telo.kw), 10);
+        const tRok = parseInt(String(telo.rok), 10);
+        if (!(Number.isInteger(tKw) && tKw >= 1 && tKw <= 53 &&
+              Number.isInteger(tRok) && tRok >= 2020 && tRok <= 2100)) {
+          res.status(400).json({ ok: false, chyba: 'spatny_tyden' }); return;
+        }
+        try {
+          const r = await fetch(`${SUPABASE_URL}/rest/v1/client_link_weeks` +
+                                `?on_conflict=link_id,kw,rok`, {
+            method: 'POST',
+            headers: { apikey: klic, Authorization: `Bearer ${klic}`,
+                       'Content-Type': 'application/json',
+                       Prefer: 'resolution=merge-duplicates,return=minimal' },
+            body: JSON.stringify({ link_id: odkaz.id, kw: tKw, rok: tRok,
+                                   uhrazeno: !!telo.uhrazeno,
+                                   upraveno: new Date().toISOString() }),
+          });
+          if (!r.ok) {
+            const t = await r.text().catch(() => '');
+            console.error('[klient] odškrtnutí týdne:', r.status, t.slice(0, 300));
+            res.status(500).json({ ok: false, chyba: 'nelze_ulozit' }); return;
+          }
+        } catch (e) {
+          console.error('[klient] odškrtnutí týdne:', e);
+          res.status(500).json({ ok: false, chyba: 'nelze_ulozit' }); return;
+        }
+        res.status(200).json({ ok: true }); return;
+      }
+
+      const workerId = String(telo.worker_id || '');
+      if (!/^[0-9a-f-]{36}$/i.test(workerId)) {
+        res.status(400).json({ ok: false, chyba: 'spatny_pracovnik' }); return;
+      }
+
+      // Smí se psát jen k lidem, kteří v těch skupinách jsou.
+      let patriSem = false;
+      if (teamIds.length) {
+        try {
+          const p = await db(
+            `profiles?select=id&id=eq.${encodeURIComponent(workerId)}` +
+            `&team_id=in.(${teamIds.map(encodeURIComponent).join(',')})&limit=1`, klic);
+          patriSem = !!(p && p.length);
+        } catch (e) { console.error('[klient] kontrola pracovníka:', e); }
+      }
+      if (!patriSem) { res.status(403).json({ ok: false, chyba: 'cizi_pracovnik' }); return; }
+
+      const zmena = { link_id: odkaz.id, worker_id: workerId, upraveno: new Date().toISOString() };
+
+      if ('foto' in telo) {
+        const f = telo.foto == null ? null : String(telo.foto);
+        if (f !== null) {
+          if (!/^data:image\/(png|jpeg|jpg|webp);base64,[A-Za-z0-9+/=]+$/.test(f)) {
+            res.status(400).json({ ok: false, chyba: 'spatna_fotka' }); return;
+          }
+          if (f.length > MAX_FOTKA) {
+            res.status(413).json({ ok: false, chyba: 'fotka_prilis_velka' }); return;
+          }
+        }
+        zmena.foto = f;
+      }
+      if ('poznamka' in telo) {
+        zmena.poznamka = String(telo.poznamka || '').slice(0, MAX_POZNAMKA) || null;
+      }
+      if ('hodnoceni' in telo) {
+        const h = parseInt(String(telo.hodnoceni), 10);
+        zmena.hodnoceni = (Number.isInteger(h) && h >= 1 && h <= 6) ? h : null;
+      }
+
+      try {
+        const r = await fetch(`${SUPABASE_URL}/rest/v1/client_link_workers` +
+                              `?on_conflict=link_id,worker_id`, {
+          method: 'POST',
+          headers: { apikey: klic, Authorization: `Bearer ${klic}`,
+                     'Content-Type': 'application/json',
+                     Prefer: 'resolution=merge-duplicates,return=minimal' },
+          body: JSON.stringify(zmena),
+        });
+        if (!r.ok) {
+          const t = await r.text().catch(() => '');
+          console.error('[klient] zápis poznámky:', r.status, t.slice(0, 300));
+          res.status(500).json({ ok: false, chyba: 'nelze_ulozit' }); return;
+        }
+      } catch (e) {
+        console.error('[klient] zápis poznámky:', e);
+        res.status(500).json({ ok: false, chyba: 'nelze_ulozit' }); return;
+      }
+      res.status(200).json({ ok: true });
+      return;
+    }
 
     const nyni = ted();
     const dnes = new Date(nyni.den + 'T12:00:00Z');   // poledne, ať posun pásma nikdy nepřehodí den
@@ -361,6 +472,7 @@ module.exports = async (req, res) => {
 
       for (const z of (dochazka || [])) {
         const zaklad = {
+          worker: z.worker_id,
           jmeno: jmena[z.worker_id] || '—',
           datum: String(z.work_date).slice(0, 10),
           stavba: adresaStavby(z),
@@ -411,6 +523,26 @@ module.exports = async (req, res) => {
       body: JSON.stringify(zmena),
     }).catch(() => {});
 
+    // Co si odběratel u lidí poznamenal — fotka, poznámka, známka.
+    let poznamky = {};
+    try {
+      const pz = await db(
+        `client_link_workers?select=worker_id,foto,poznamka,hodnoceni&link_id=eq.${odkaz.id}`, klic);
+      for (const p of (pz || [])) {
+        poznamky[p.worker_id] = { foto: p.foto || null, poznamka: p.poznamka || '',
+                                  hodnoceni: p.hodnoceni || null };
+      }
+    } catch (e) { console.warn('[klient] poznámky se nenačetly:', e.message); }
+
+    // Je tenhle týden odběratelem odškrtnutý jako uhrazený?
+    let uhrazeno = false;
+    try {
+      const u = await db(
+        `client_link_weeks?select=uhrazeno&link_id=eq.${odkaz.id}` +
+        `&kw=eq.${kw}&rok=eq.${rok}&limit=1`, klic);
+      uhrazeno = !!(u && u[0] && u[0].uhrazeno);
+    } catch (e) { console.warn('[klient] stav týdne:', e.message); }
+
     // Které týdny má smysl nabídnout v přepínači. Bereme je z docházky těch
     // part, ať se odběratel neproklikává do prázdných týdnů.
     let tydny = [];
@@ -428,7 +560,8 @@ module.exports = async (req, res) => {
       } catch (e) { console.warn('[klient] seznam týdnů:', e.message); }
     }
 
-    res.status(200).json({ ok: true, nazev: odkaz.nazev, kw, rok, od, do: doDne, radky, tydny });
+    res.status(200).json({ ok: true, nazev: odkaz.nazev, kw, rok, od, do: doDne,
+                           radky, tydny, poznamky, uhrazeno });
   } catch (e) {
     // Podrobnosti si nechá log na Vercelu. Ven jde jen obecná hláška, ať
     // z ní nejde vyčíst, jak je databáze postavená.
