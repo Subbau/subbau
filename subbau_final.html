@@ -2880,6 +2880,7 @@ setTimeout(function () {
             <div class="fg" style="margin-bottom:8px">
               <label style="font-size:11px">Vzhled faktury</label>
               <select id="wd-inv-design" onchange="ulozVzhledFaktury(this.value)" title="Každý pracovník může mít fakturu v jiné podobě. Vzhled si u něj appka zapamatuje a příště fakturu vystaví stejně." style="width:100%;font-size:12px;padding:8px;border:1.5px solid var(--brd);border-radius:8px;font-family:inherit;box-sizing:border-box"><option value="1">1 — Původní</option><option value="2">2 — Úřední, v rámečcích</option><option value="3">3 — Vzdušný, hodně místa</option><option value="4">4 — Barevný sloupec vlevo</option><option value="5">5 — Klasická účetní</option><option value="6">6 — Barevná hlavička</option><option value="7">7 — Kompaktní</option><option value="8">8 — Velké číslo a rámeček</option><option value="9">9 — Dělený na třetiny</option><option value="10">10 — Minimalistický</option></select>
+              <button onclick="ukazVzhledyPracovnika()" style="width:100%;margin-top:6px;padding:8px;background:var(--bg2);color:var(--blue);border:1px solid var(--blue);border-radius:8px;cursor:pointer;font-family:inherit;font-size:12px;font-weight:700"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:1em;height:1em;flex-shrink:0;vertical-align:-2px"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg> Náhled — projít všech 10 vzhledů</button>
               <div style="font-size:10.5px;color:var(--text3);margin-top:3px">Zapamatuje se u pracovníka. Barvu má každý svou, takže i stejný vzhled vypadá jinak.</div>
             </div>
             <div class="fg" style="margin-bottom:8px">
@@ -4430,7 +4431,7 @@ async function submitAdminSignatureWithPlacement() {
 // Po nahrání nové verze se snadno pozná, jestli se opravdu nasadila: otevřete
 // appku, zmáčkněte F12 (na Macu ⌥⌘I) a v konzoli je vypsané tohle datum. Když
 // tam svítí starší, prohlížeč nebo GitHub drží starou verzi.
-const SUBBAU_VERZE = '2026-09-05 o — číslo faktury se dá napsat, jak chcete, a řada v tom tvaru pokračuje'
+const SUBBAU_VERZE = '2026-09-05 p — náhled vzhledů faktury a vzhled u konkrétní faktury'
 console.log('SubBau docházka — verze ' + SUBBAU_VERZE)
 
 // ============ SUPABASE CONFIG ============
@@ -11962,7 +11963,9 @@ function invoiceDataFromRow(r, extra) {
     // Barva je naopak vlastnost pracovníka, tu předává volající v `extra`.
     crmCode: r.crm_code || '',
     invoiceColorIdx: e.invoiceColorIdx ?? null,
-    designIdx: e.designIdx ?? 1,
+    // Vzhled uložený u faktury má přednost — doklad zůstane v podobě, v jaké
+    // byl vystavený. Starší faktury ho nemají a spadnou na volbu z profilu.
+    designIdx: Number(r.design_idx) || e.designIdx || 1,
     today: _invFmtDate(r.issue_date),
     dueDate: _invFmtDate(r.due_date),
     workerName: r.supplier_name || '',
@@ -12016,6 +12019,17 @@ function openInvoiceEdit(id) {
   document.getElementById('invedit-iban').value = r.iban || ''
   document.getElementById('invedit-swift').value = r.swift || ''
   document.getElementById('invedit-iban-do-profilu').checked = false
+  const vzEl = document.getElementById('invedit-design')
+  const vzProfil = document.getElementById('invedit-design-do-profilu')
+  if (vzProfil) vzProfil.checked = false
+  // Vzhled uložený u faktury. Starší faktury ho nemají — u nich se doptáme
+  // profilu pracovníka, ať v nabídce svítí to, v čem se doklad opravdu vykreslí.
+  naplnVyberVzhledu(vzEl, Number(r.design_idx) || 1)
+  if (!r.design_idx && r.worker_id) {
+    sb.from('profiles').select('invoice_design').eq('id', r.worker_id).maybeSingle()
+      .then(({ data }) => { if (data && vzEl && _invEditId === id) vzEl.value = String(data.invoice_design || 1) })
+      .catch(e => console.warn('[faktura] vzhled z profilu:', e?.message))
+  }
 
   // Položky do editoru. Stará faktura je nemá — poskládá se z ní jeden řádek
   // podle toho, jak byla vystavená (hodiny × sazba, nebo rovnou celková částka),
@@ -12120,9 +12134,15 @@ async function saveInvoiceEdit() {
                         designIdx: prof.invoice_design || 1 }
   } catch (e) { console.warn('[faktura] kontakt se nepodařilo dotáhnout:', e?.message) }
 
+  // Vzhled zvolený v okně má přednost přede vším ostatním — kvůli němu se sem
+  // admin došel. Bez volby zůstane ten, ve kterém byla faktura vystavená.
+  const vzhledZvoleny = Math.min(10, Math.max(1,
+    Number(document.getElementById('invedit-design')?.value) || Number(r.design_idx) || extra.designIdx || 1))
+
   // 1) Vykresli fakturu znovu — už se zálohou
   const dataForRender = invoiceDataFromRow({ ...r, items: polozky, total_amount: total,
-    cash_paid: cash, cash_paid_note: note, iban: ibanNovy, swift: swiftNovy }, extra)
+    cash_paid: cash, cash_paid_note: note, iban: ibanNovy, swift: swiftNovy,
+    design_idx: vzhledZvoleny }, extra)
   try {
     renderInvoice(dataForRender, 'en')
   } catch (e) {
@@ -12149,6 +12169,7 @@ async function saveInvoiceEdit() {
     cash_paid: cash, cash_paid_note: note || null, edited_at: new Date().toISOString(),
     items: polozky, total_amount: total,
     iban: ibanNovy, swift: swiftNovy || null,
+    design_idx: vzhledZvoleny,
   }
   if (uploaded) { upd.pdf_url = uploaded.url; upd.pdf_path = uploaded.path }
 
@@ -12161,7 +12182,15 @@ async function saveInvoiceEdit() {
   }
 
   let bezPuvodni = false
+  let bezVzhledu = false
   let { error } = await sb.from('worker_invoices').update(upd).eq('id', r.id)
+  // Sloupec se vzhledem ještě nemusí být v databázi. PDF už je přepsané správně,
+  // takže zálohu ulož i bez něj a řekni nahlas, co chybí.
+  if (error && /design_idx/i.test(error.message || '')) {
+    bezVzhledu = true
+    delete upd.design_idx
+    ;({ error } = await sb.from('worker_invoices').update(upd).eq('id', r.id))
+  }
   // Sloupce na původní verzi ještě nemusí být v databázi. Fakturu kvůli tomu
   // neblokuj — zálohu ulož i bez nich a řekni nahlas, co chybí.
   if (error && /original_pdf/i.test(error.message || '')) {
@@ -12203,6 +12232,18 @@ async function saveInvoiceEdit() {
     }
   }
 
+  // Vzhled do profilu jen na výslovné přání — jinak by přepnutí u jedné faktury
+  // tiše změnilo podobu i všech dalších, které ten člověk teprve vystaví.
+  let vzhledDoProfiluNeulozen = false
+  if (document.getElementById('invedit-design-do-profilu')?.checked && r.worker_id) {
+    const { error: chybaVzhledu } = await sb.from('profiles')
+      .update({ invoice_design: vzhledZvoleny }).eq('id', r.worker_id)
+    if (chybaVzhledu) {
+      vzhledDoProfiluNeulozen = true
+      console.warn('[faktura] vzhled se do profilu neuložil:', chybaVzhledu.message)
+    }
+  }
+
   Object.assign(r, upd)
   renderWorkerInvoices()
   closeInvoiceEdit()
@@ -12212,6 +12253,14 @@ async function saveInvoiceEdit() {
   }
   if (bezPuvodni) {
     finish('⚠️ Záloha zapsána, ale původní verzi neuchovám — spusťte v Supabase soubor supabase-migrace-faktura-original.sql')
+    return
+  }
+  if (bezVzhledu) {
+    finish('⚠️ PDF přepsáno ve zvoleném vzhledu, ale u faktury se vzhled neuloží — spusťte v Supabase soubor supabase-migrace-vzhled-na-fakture.sql')
+    return
+  }
+  if (vzhledDoProfiluNeulozen) {
+    finish('⚠️ Faktura přepsaná, ale vzhled se do profilu pracovníka neuložil — nastavte mu ho na jeho kartě')
     return
   }
   const dovetek = r.original_pdf_url ? ' — původní verze zůstala uložená' : ''
@@ -22773,6 +22822,7 @@ function renderInvoice(d, lang = 'en') {
   _invZoom = 'fit'
   fitInvoicePreview()
   updateInvoiceSendUi()
+  nastavRezimUkazky(!!d.ukazka)
 }
 
 // Náhled = faktura v šířce A4 zmenšená na šířku obrazovky. Na mobilu je tak
@@ -22889,6 +22939,7 @@ function invoiceFileName() {
 // přes CSS ignoruje — proto fakturu vykreslíme sami a vložíme ji do PDF
 // jako jeden obrázek, který se vejde na jeden list. Žádný tiskový dialog.
 async function saveInvoicePdf() {
+  if (window._lastInvoice?.ukazka) { showToast('⚠️ Tohle je jen ukázka vzhledu — není co ukládat'); return }
   showToast('⏳ Připravuji PDF…')
   let out
   try { out = await buildInvoicePdf() }
@@ -22959,6 +23010,10 @@ function invoiceRowFromLast(sentVia) {
     currency: 'EUR',
     eur_czk_rate: Number(d.eurCzkRate) || null,
     item_description: d.serviceDesc || null,
+    // Ve kterém vzhledu byla faktura vystavená. Bez tohohle by se při pozdějším
+    // přepsání PDF vzala aktuální volba z profilu a starý doklad by vyjel jinak,
+    // než jak ho pracovník poslal.
+    design_idx: Number(d.designIdx) || 1,
     // Tyhle tři musí být v zápisu VŽDY. Při opraveném znovuodeslání se řádek přepisuje
     // (upsert) a co v něm nepošleme, to by v databázi zůstalo staré — u PDF by pak
     // adminovi svítil odkaz na starou verzi faktury a u stavu by zůstalo „vyřízeno".
@@ -22988,7 +23043,20 @@ async function uploadInvoicePdf(blob, workerId, invoiceNum) {
 // to je oprava téhož dokladu. Všechno ostatní zůstane uložené vedle sebe,
 // dokud s tím admin něco neudělá. Dřív se klíčovalo přes týden, takže druhá
 // faktura za týž týden tu první tiše přemazala.
+// Sloupec se vzhledem nemusí být v databázi (nespuštěná migrace). Faktura je
+// důležitější než vzhled — když se kvůli němu zápis nepovede, zkusí se to
+// ještě jednou bez něj a doklad se uloží.
 async function storeInvoiceRow(row) {
+  const chyba = await zapisRadekFaktury(row)
+  if (chyba && /design_idx/i.test(chyba.message || '') && 'design_idx' in row) {
+    const bezVzhledu = { ...row }
+    delete bezVzhledu.design_idx
+    return await zapisRadekFaktury(bezVzhledu)
+  }
+  return chyba
+}
+
+async function zapisRadekFaktury(row) {
   // Nejdřív zkusíme PŘEPSAT fakturu se stejným číslem u téhož člověka, a teprve
   // když žádná není, založit novou.
   //
@@ -23102,6 +23170,9 @@ function updateInvoiceSendUi() {
 
 async function sendInvoiceToSubbau() {
   if (_invSending) return
+  // Pojistka: ukázka vzhledu není faktura. Lišta s odesláním je v ní schovaná,
+  // ale kdyby se tlačítko spustilo jinak (klávesnice, starý překryv), nesmí projít.
+  if (window._lastInvoice?.ukazka) { showToast('⚠️ Tohle je jen ukázka vzhledu — faktura se neodesílá'); return }
   const d = window._lastInvoice
   if (!d || !d.workerId) { showToast('⚠️ Nejdřív vytvořte fakturu'); return }
   const row = invoiceRowFromLast('app')
@@ -23149,6 +23220,9 @@ async function sendInvoiceToSubbau() {
 // e-mail s předvyplněnou adresou a PDF uložíme do telefonu.
 async function emailInvoiceToSubbau() {
   if (_invSending) return
+  // Pojistka: ukázka vzhledu není faktura. Lišta s odesláním je v ní schovaná,
+  // ale kdyby se tlačítko spustilo jinak (klávesnice, starý překryv), nesmí projít.
+  if (window._lastInvoice?.ukazka) { showToast('⚠️ Tohle je jen ukázka vzhledu — faktura se neodesílá'); return }
   const d = window._lastInvoice
   if (!d || !d.workerId) { showToast('⚠️ Nejdřív vytvořte fakturu'); return }
 
@@ -26995,12 +27069,185 @@ async function loadWdFinance() {
   `
 }
 
+// ===== UKÁZKA VZHLEDU FAKTURY =====
+// Faktura se vykreslí úplně stejnou cestou jako doopravdy (včetně vzhledu 1,
+// který žádnou šablonu nemá), jen se místo odesílací lišty ukáže přepínač
+// vzhledů. Díky tomu je ukázka pravdivá — co je vidět, to se i vytiskne.
+const NAZVY_VZHLEDU = {
+  1: 'Původní', 2: 'Úřední, v rámečcích', 3: 'Vzdušný, hodně místa',
+  4: 'Barevný sloupec vlevo', 5: 'Klasická účetní', 6: 'Barevná hlavička',
+  7: 'Kompaktní', 8: 'Velké číslo a rámeček', 9: 'Dělený na třetiny',
+  10: 'Minimalistický',
+}
+
+// Stav ukázky: data faktury, právě zobrazený vzhled a co udělá „Použít".
+let _ukazkaVzhledu = null
+
+// Naplní nabídku vzhledů — ať jsou popisky všude stejné a nerozejdou se.
+function naplnVyberVzhledu(el, vybrany) {
+  if (!el) return
+  el.innerHTML = Object.keys(NAZVY_VZHLEDU)
+    .map(i => `<option value="${i}">${i} — ${NAZVY_VZHLEDU[i]}</option>`).join('')
+  el.value = String(Number(vybrany) || 1)
+}
+
+// Přepne překryv mezi „opravdová faktura" a „ukázka vzhledu".
+function nastavRezimUkazky(zapnuto) {
+  const akce = document.getElementById('invoice-actions')
+  const lista = document.getElementById('invoice-design-bar')
+  const nadpis = document.getElementById('invoice-title')
+  if (akce) akce.style.display = zapnuto ? 'none' : ''
+  if (lista) lista.style.display = zapnuto ? 'block' : 'none'
+  if (nadpis) nadpis.textContent = zapnuto ? '👁 Ukázka vzhledu' : '📄 Náhled faktury'
+  if (!zapnuto) return
+  const u = _ukazkaVzhledu
+  const jmeno = document.getElementById('invoice-design-name')
+  const pocet = document.getElementById('invoice-design-count')
+  const pouzit = document.getElementById('invoice-design-use')
+  const pozn = document.getElementById('invoice-design-note')
+  const i = u ? u.idx : 1
+  if (jmeno) jmeno.textContent = 'Vzhled ' + i + ' — ' + (NAZVY_VZHLEDU[i] || '')
+  if (pocet) pocet.textContent = i + ' z 10'
+  if (pouzit) pouzit.style.display = (u && u.pouzit) ? '' : 'none'
+  if (pozn) pozn.textContent = u && u.poznamka ? u.poznamka : 'Ukázka se nikam neodesílá ani neukládá.'
+}
+
+// Otevře ukázku. `data` jsou hotová data faktury (stejná, jaká jdou do
+// renderInvoice), `pouzit` je funkce, která zvolený vzhled někam uloží.
+function otevriUkazkuVzhledu(data, vybrany, pouzit, poznamka) {
+  if (!data) { showToast('⚠️ Není z čeho ukázku vykreslit'); return }
+  _ukazkaVzhledu = { data, idx: Math.min(10, Math.max(1, Number(vybrany) || 1)), pouzit: pouzit || null, poznamka: poznamka || '' }
+  ukazVzhled(_ukazkaVzhledu.idx)
+}
+
+function ukazVzhled(i) {
+  const u = _ukazkaVzhledu
+  if (!u) return
+  u.idx = Math.min(10, Math.max(1, Number(i) || 1))
+  try {
+    renderInvoice({ ...u.data, designIdx: u.idx, ukazka: true }, 'en')
+  } catch (e) {
+    console.error('[ukázka vzhledu]', e)
+    showToast('❌ Ukázku se nepodařilo vykreslit: ' + (e?.message || e))
+  }
+}
+
+function vzhledOJedenVpred() { if (_ukazkaVzhledu) ukazVzhled(_ukazkaVzhledu.idx >= 10 ? 1 : _ukazkaVzhledu.idx + 1) }
+function vzhledOJedenZpet()  { if (_ukazkaVzhledu) ukazVzhled(_ukazkaVzhledu.idx <= 1 ? 10 : _ukazkaVzhledu.idx - 1) }
+
+async function pouzitZobrazenyVzhled() {
+  const u = _ukazkaVzhledu
+  if (!u || !u.pouzit) return
+  const tl = document.getElementById('invoice-design-use')
+  if (tl) { tl.disabled = true; tl.textContent = 'Ukládám…' }
+  try {
+    await u.pouzit(u.idx)
+  } catch (e) {
+    console.error('[ukázka vzhledu] uložení:', e)
+    showToast('❌ Vzhled se neuložil: ' + (e?.message || e))
+  }
+  if (tl) { tl.disabled = false; tl.textContent = 'Použít tento vzhled' }
+}
+
+// Ukázku kreslíme radši na POSLEDNÍ SKUTEČNÉ faktuře toho člověka — je hned
+// vidět, jak bude vypadat jeho vlastní doklad se svými čísly. Kdo ještě žádnou
+// nevystavil, dostane ukázkovou fakturu poskládanou z jeho profilu.
+async function dataProUkazkuVzhledu(workerId, profil) {
+  const p = profil || {}
+  try {
+    const { data } = await sb.from('worker_invoices').select('*')
+      .eq('worker_id', workerId).order('sent_at', { ascending: false }).limit(1)
+    if (data && data.length) {
+      return invoiceDataFromRow(data[0], {
+        email: p.email, phone: p.phone, invoiceColorIdx: p.invoice_color ?? null,
+      })
+    }
+  } catch (e) { console.warn('[ukázka vzhledu] poslední faktura:', e?.message) }
+
+  // Ukázková faktura — smyšlený týden, ale skutečné údaje pracovníka, ať je
+  // vidět, jak vzhled sedne na jeho jméno, adresu i délku názvu firmy.
+  const sazba = Number(p.hourly_rate_worker) || 23
+  const hodiny = 42.5
+  return {
+    invoiceNum: '202601', items: null, crmCode: '',
+    invoiceColorIdx: p.invoice_color ?? null,
+    today: '15.01.2026', dueDate: '29.01.2026', dueDays: 14,
+    // Jméno i adresa se skládají stejnou cestou jako na opravdové faktuře,
+    // ať ukázka nesedí jinak než výsledek (u s.r.o. je nahoře název firmy).
+    workerName: (p.supplier_type === 'sro' && p.company_name) ? p.company_name : (p.full_name || 'Jméno pracovníka'),
+    workerAddr: invoiceSupplierAddress(p) || '',
+    workerIC: p.ic || '', workerVat: p.is_vat_payer ? (p.dic || '') : '',
+    isVatPayer: !!p.is_vat_payer,
+    workerEmail: p.email || null, workerPhone: p.phone || null,
+    iban: p.invoice_iban || 'CZ00 0000 0000 0000 0000 0000',
+    swift: p.invoice_swift || '',
+    serviceDesc: defaultInvoiceItem(p.profession) || 'Carpentry service',
+    serviceDescTrans: '', serviceDescSub: 'KW 3/2026 · 12.01.2026 – 18.01.2026',
+    periodFrom: '12.01.2026', periodTo: '18.01.2026',
+    totalHours: hodiny, rate: sazba, totalAmount: hodiny * sazba,
+    week: 3, year: 2026,
+    // Odběratel z profilu; kdo ho nastavený nemá, uvidí výchozí firmu z renderInvoice.
+    customer: p.invoice_customer_name ? {
+      name: p.invoice_customer_name, address: p.invoice_customer_address || '',
+      id: p.invoice_customer_id || '', vatId: p.invoice_customer_vat || '',
+    } : null,
+    cashPaid: 0, cashPaidNote: '',
+    workerId, byAdmin: true, supplierType: p.supplier_type || 'osoba',
+    issueISO: null, dueISO: null, periodFromISO: null, periodToISO: null,
+  }
+}
+
+// Karta pracovníka → projít si všech deset vzhledů a jeden si vybrat.
+async function ukazVzhledyPracovnika() {
+  if (!currentWorkerId) { showToast('❌ Není vybrán pracovník'); return }
+  showToast('⏳ Připravuji ukázku…')
+  let profil = currentWorkerProfile
+  try {
+    const { data } = await sb.from('profiles').select('*').eq('id', currentWorkerId).maybeSingle()
+    if (data) profil = data
+  } catch (e) { console.warn('[ukázka vzhledu] profil:', e?.message) }
+  const data = await dataProUkazkuVzhledu(currentWorkerId, profil)
+  const ted = Number(profil?.invoice_design) || 1
+  otevriUkazkuVzhledu(data, ted, async (idx) => {
+    await ulozVzhledFaktury(idx)
+    const sel = document.getElementById('wd-inv-design')
+    if (sel) sel.value = String(idx)
+    closeInvoiceOverlay()
+  }, 'Uloží se u pracovníka. Příští faktura mu vyjede takhle.')
+}
+
+// Složka Faktury → okno úpravy → podívat se, jak bude tahle konkrétní faktura
+// vypadat v jiném vzhledu. Neukládá — jen přepne volbu, uloží se s fakturou.
+async function ukazVzhledyFaktury() {
+  const r = _invCache.find(x => x.id === _invEditId)
+  if (!r) { showToast('⚠️ Faktura se nenašla — načtěte složku znovu'); return }
+  showToast('⏳ Připravuji ukázku…')
+  let extra = {}
+  try {
+    const { data: prof } = await sb.from('profiles')
+      .select('email, phone, invoice_color, invoice_design').eq('id', r.worker_id).maybeSingle()
+    if (prof) extra = { email: prof.email, phone: prof.phone,
+                        invoiceColorIdx: prof.invoice_color ?? null, designIdx: prof.invoice_design || 1 }
+  } catch (e) { console.warn('[ukázka vzhledu] profil:', e?.message) }
+  const sel = document.getElementById('invedit-design')
+  const ted = Number(sel?.value) || Number(r.design_idx) || extra.designIdx || 1
+  const data = invoiceDataFromRow(r, extra)
+  otevriUkazkuVzhledu(data, ted, (idx) => {
+    if (sel) sel.value = String(idx)
+    closeInvoiceOverlay()
+    showToast('✅ Vzhled vybrán — uloží se tlačítkem „Uložit a přepsat PDF"')
+  }, 'Vybere se jen pro tuhle fakturu. Uloží se až s ní.')
+}
+
 // Zavře náhled faktury. Když je pod ní otevřený detail pracovníka (admin
 // vystavil fakturu za OSVČ), nechá stránku dál zamčenou — jinak by se pod
 // modalem začalo rolovat pozadí.
 function closeInvoiceOverlay() {
   const ov = document.getElementById('invoice-overlay')
   if (ov) ov.style.display = 'none'
+  // Ať příští opravdová faktura nedostane lištu od ukázky
+  _ukazkaVzhledu = null
+  nastavRezimUkazky(false)
   const wm = document.getElementById('worker-modal')
   const sent = document.getElementById('inv-sent-modal')
   const jineOkno = (wm && wm.style.display === 'flex') || (sent && sent.style.display === 'flex')
@@ -27045,7 +27292,7 @@ async function loadWdInvoiceForm(profile) {
   const sw = document.getElementById('wd-inv-swift'); if (sw) sw.value = profile?.invoice_swift || ''
   const rt = document.getElementById('wd-inv-rate'); if (rt) rt.value = profile?.hourly_rate_worker || ''
   const vz = document.getElementById('wd-inv-design')
-  if (vz) vz.value = String((profile || currentWorkerProfile || {}).invoice_design || 1)
+  if (vz) naplnVyberVzhledu(vz, (profile || currentWorkerProfile || {}).invoice_design || 1)
   const it = document.getElementById('wd-inv-item')
   if (it) {
     const byProf = defaultInvoiceItem(profile?.profession)
@@ -27614,7 +27861,7 @@ document.addEventListener('visibilitychange', () => {
 <div id="invoice-overlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.9);z-index:10000;overflow-y:auto;padding:0">
   <div style="max-width:860px;margin:0 auto;padding:0 12px 24px">
     <div id="invoice-topbar" style="display:flex;justify-content:space-between;align-items:center;gap:8px;padding:calc(14px + env(safe-area-inset-top)) 4px 12px">
-      <div style="color:#E8A13A;font-weight:700;font-size:16px">📄 Náhled faktury</div>
+      <div id="invoice-title" style="color:#E8A13A;font-weight:700;font-size:16px">📄 Náhled faktury</div>
       <div style="display:flex;align-items:center;gap:10px">
         <div id="invoice-topbar-num" style="color:#9a9082;font-size:12px;font-weight:600"></div>
         <button onclick="toggleInvoiceZoom()" title="Přiblížit / oddálit" style="display:flex;align-items:center;gap:6px;padding:7px 11px;background:rgba(255,255,255,.15);color:#fff;border:none;border-radius:9px;cursor:pointer;font-family:inherit;font-size:12px;font-weight:700"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:15px;height:15px;flex-shrink:0"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3M8 11h6"/><path d="M11 8v6" id="inv-zoom-plus"/></svg><span id="inv-zoom-label">Přiblížit</span></button>
@@ -27626,7 +27873,22 @@ document.addEventListener('visibilitychange', () => {
 
     <!-- Akce pod náhledem. Lišta drží u spodního okraje, ať je i u dlouhé
          faktury pořád po ruce a nemusí se kvůli ní rolovat nahoru. -->
-    <div style="position:sticky;bottom:0;z-index:3;background:rgba(0,0,0,0.92);margin:0 -12px;padding:12px calc(12px + env(safe-area-inset-right)) calc(12px + env(safe-area-inset-bottom)) calc(12px + env(safe-area-inset-left))">
+    <!-- Lišta ukázky vzhledů. Je vidět jen v režimu náhledu a místo odeslání
+         nabízí listování mezi deseti vzhledy. Odeslat se z ní nedá nic. -->
+    <div id="invoice-design-bar" style="display:none;position:sticky;bottom:0;z-index:3;background:rgba(0,0,0,0.92);margin:0 -12px;padding:12px calc(12px + env(safe-area-inset-right)) calc(12px + env(safe-area-inset-bottom)) calc(12px + env(safe-area-inset-left))">
+      <div style="display:flex;align-items:center;gap:8px">
+        <button onclick="vzhledOJedenZpet()" title="Předchozí vzhled" aria-label="Předchozí vzhled" style="flex:0 0 auto;padding:12px 15px;background:rgba(255,255,255,.15);color:#fff;border:none;border-radius:10px;cursor:pointer;font-family:inherit;font-size:16px;font-weight:800">‹</button>
+        <div style="flex:1;min-width:0;text-align:center">
+          <div id="invoice-design-name" style="color:#fff;font-weight:800;font-size:14px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">Vzhled 1</div>
+          <div id="invoice-design-count" style="color:#9a9082;font-size:11.5px;margin-top:2px">1 z 10</div>
+        </div>
+        <button onclick="vzhledOJedenVpred()" title="Další vzhled" aria-label="Další vzhled" style="flex:0 0 auto;padding:12px 15px;background:rgba(255,255,255,.15);color:#fff;border:none;border-radius:10px;cursor:pointer;font-family:inherit;font-size:16px;font-weight:800">›</button>
+      </div>
+      <button id="invoice-design-use" onclick="pouzitZobrazenyVzhled()" style="width:100%;margin-top:11px;padding:15px 14px;background:#1d9e75;color:#fff;border:none;border-radius:12px;font-weight:800;cursor:pointer;font-family:inherit;font-size:15px">Použít tento vzhled</button>
+      <div id="invoice-design-note" style="color:#9a9082;font-size:11.5px;text-align:center;margin-top:7px;line-height:1.5">Ukázka se nikam neodesílá ani neukládá.</div>
+    </div>
+
+    <div id="invoice-actions" style="position:sticky;bottom:0;z-index:3;background:rgba(0,0,0,0.92);margin:0 -12px;padding:12px calc(12px + env(safe-area-inset-right)) calc(12px + env(safe-area-inset-bottom)) calc(12px + env(safe-area-inset-left))">
       <!-- Hlavní krok je jediný: odeslat. Proto stojí sám nahoře přes celou šířku
            a je zeleně zvýrazněný; uložení PDF, tisk i zavření jsou vedlejší
            a drží se pod ním v jednom nenápadném řádku. -->
@@ -28192,6 +28454,16 @@ document.addEventListener('visibilitychange', () => {
     <label style="display:flex;align-items:center;gap:8px;margin-top:9px;font-size:13px;color:#7a7168;cursor:pointer">
       <input type="checkbox" id="invedit-iban-do-profilu" style="width:17px;height:17px;flex:none">
       Uložit účet i do profilu pracovníka <span style="color:#9a9a9a">(ať ho příště nemusí opravovat znovu)</span>
+    </label>
+
+    <label style="display:block;font-size:12px;color:#7a7168;font-weight:700;margin:14px 0 5px">Vzhled faktury</label>
+    <div style="display:flex;gap:8px;align-items:center">
+      <select id="invedit-design" style="flex:1;min-width:0;padding:10px;border:1.5px solid #d8cfc0;border-radius:9px;font-size:14px;font-family:inherit;box-sizing:border-box"></select>
+      <button onclick="ukazVzhledyFaktury()" title="Projít si vzhledy na téhle faktuře" style="flex:0 0 auto;padding:10px 13px;background:#fff;color:#3b7dd8;border:1.5px solid #3b7dd8;border-radius:9px;cursor:pointer;font-family:inherit;font-size:13px;font-weight:700">Náhled</button>
+    </div>
+    <label style="display:flex;align-items:center;gap:8px;margin-top:9px;font-size:13px;color:#7a7168;cursor:pointer">
+      <input type="checkbox" id="invedit-design-do-profilu" style="width:17px;height:17px;flex:none">
+      Uložit vzhled i do profilu pracovníka <span style="color:#9a9a9a">(bude ho mít i na dalších fakturách)</span>
     </label>
 
     <label style="display:block;font-size:12px;color:#7a7168;font-weight:700;margin:14px 0 5px">Poznámka k záloze (nepovinné)</label>
