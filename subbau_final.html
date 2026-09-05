@@ -2455,15 +2455,14 @@ setTimeout(function () {
           <select id="inv-week-sel" onchange="onInvoiceWeekChange()" style="width:100%;padding:10px;border:1.5px solid var(--brd);border-radius:8px;font-size:14px;font-family:inherit;box-sizing:border-box"></select>
         </div>
 
-        <!-- Číslo faktury si určuje pracovník sám: rok je daný, dopisuje jen pořadí
-             svých faktur (01, 02, 03…). Appka mu předvyplní další volné číslo. -->
+        <!-- Číslo faktury si píše uživatel, jak chce — 202601, 01/2026, F-0042.
+             Appka předvyplní další volné a v příště zvoleném tvaru pokračuje. -->
         <div class="fg" style="margin-bottom:12px">
           <label style="font-size:12px">Číslo faktury</label>
           <div style="display:flex;align-items:center;gap:8px">
-            <span id="inv-num-year" style="font-size:18px;font-weight:800;letter-spacing:.02em;color:var(--text2)">————</span>
-            <input id="inv-num-seq" type="text" inputmode="numeric" maxlength="2" placeholder="01"
-              style="width:74px;padding:10px;border:1.5px solid var(--brd);border-radius:8px;font-size:18px;font-weight:800;text-align:center;font-family:inherit;box-sizing:border-box">
-            <span style="font-size:12px;color:var(--text3);line-height:1.35">Pořadí vaší faktury<br>v tomto roce</span>
+            <input id="inv-num-full" type="text" maxlength="24" placeholder="202601" autocomplete="off"
+              style="flex:1;min-width:0;padding:10px;border:1.5px solid var(--brd);border-radius:8px;font-size:18px;font-weight:800;letter-spacing:.02em;font-family:inherit;box-sizing:border-box">
+            <span style="font-size:12px;color:var(--text3);line-height:1.35">Můžete si ho<br>přepsat, jak chcete</span>
           </div>
         </div>
 
@@ -2890,9 +2889,9 @@ setTimeout(function () {
             <div class="fg" style="margin-bottom:8px">
               <label style="font-size:11px">Číslo faktury</label>
               <div style="display:flex;align-items:center;gap:7px">
-                <span id="wd-inv-num-year" style="font-size:15px;font-weight:800;color:var(--text2)">————</span>
-                <input type="text" id="wd-inv-num-seq" inputmode="numeric" maxlength="2" placeholder="01" style="width:62px;font-size:15px;font-weight:800;text-align:center;padding:8px;border:1.5px solid var(--brd);border-radius:8px;font-family:inherit">
+                <input type="text" id="wd-inv-num-full" maxlength="24" placeholder="202601" autocomplete="off" style="flex:1;min-width:90px;font-size:15px;font-weight:800;padding:8px;border:1.5px solid var(--brd);border-radius:8px;font-family:inherit">
               </div>
+              <div style="font-size:10.5px;color:var(--text3);margin-top:4px;line-height:1.35">Přepište si ho, jak chcete (202601, 01/2026, F-0042) — další faktury pak pokračují ve stejném tvaru.</div>
             </div>
             <div class="fg" style="margin-bottom:8px">
               <label style="font-size:11px">Položka na faktuře</label>
@@ -4431,7 +4430,7 @@ async function submitAdminSignatureWithPlacement() {
 // Po nahrání nové verze se snadno pozná, jestli se opravdu nasadila: otevřete
 // appku, zmáčkněte F12 (na Macu ⌥⌘I) a v konzoli je vypsané tohle datum. Když
 // tam svítí starší, prohlížeč nebo GitHub drží starou verzi.
-const SUBBAU_VERZE = '2026-09-05 n — deset vzhledů faktury, vzhled se pamatuje u pracovníka'
+const SUBBAU_VERZE = '2026-09-05 o — číslo faktury se dá napsat, jak chcete, a řada v tom tvaru pokračuje'
 console.log('SubBau docházka — verze ' + SUBBAU_VERZE)
 
 // ============ SUPABASE CONFIG ============
@@ -11898,7 +11897,9 @@ async function downloadInvoicePdf(id) {
   if (!r || !url) { showToast('⚠️ U této faktury není PDF'); return }
   const who = (r.worker?.full_name || r.supplier_name || '').normalize('NFD').replace(/[̀-ͯ]/g, '')
     .replace(/[^a-zA-Z0-9]+/g, '_').replace(/^_+|_+$/g, '')
-  const name = 'Faktura_' + (r.invoice_number || '') + (who ? '_' + who : '') + '.pdf'
+  // Lomítko v čísle faktury by z názvu udělalo cestu — do souboru pouštíme jen písmena a číslice.
+  const cis = String(r.invoice_number || '').replace(/[^a-zA-Z0-9_-]/g, '')
+  const name = 'Faktura_' + cis + (who ? '_' + who : '') + '.pdf'
   try {
     const resp = await fetch(url)
     if (!resp.ok) throw new Error('HTTP ' + resp.status)
@@ -17034,44 +17035,104 @@ async function posledniPolozkaFaktury(workerId) {
 }
 
 // ===== ČÍSLO FAKTURY =====
-// Formát je rok + dvouciferné pořadí, které si pracovník vede sám (202601, 202602…).
-// Předvyplní se další volné číslo podle jeho už vystavených faktur v tomhle roce.
+// Tvar čísla si určuje uživatel. Napíše si ho, jak chce — 202601, 01/2026,
+// 2026-7, F-0042 — a appka z jeho posledního čísla pozná, kde je počítadlo,
+// a další fakturu očísluje ve stejném tvaru o jedna dál.
+
+// Rozebere číslo na tři kusy: co je před počítadlem, počítadlo, co je za ním.
+// Vrátí i letopočet, jestli v čísle nějaký je, ať se v lednu dá řada začít znovu.
+function rozborCislaFaktury(cislo) {
+  const s = String(cislo == null ? '' : cislo).trim()
+  if (!s) return null
+  const skupiny = []
+  const re = /\d+/g
+  let m
+  while ((m = re.exec(s)) !== null) skupiny.push({ text: m[0], od: m.index })
+  if (!skupiny.length) return null
+  const jeRok = t => /^\d{4}$/.test(t) && Number(t) >= 2000 && Number(t) <= 2099
+  const kus = (pred, poc, za, rok) => ({ pred, poc, za, rok: rok || null })
+
+  if (skupiny.length > 1) {
+    // Počítadlo je poslední číslo, které není letopočet (01/2026 → počítadlo je 01).
+    let i = skupiny.length - 1
+    while (i >= 0 && jeRok(skupiny[i].text)) i--
+    if (i < 0) i = skupiny.length - 1
+    const g = skupiny[i]
+    const r = skupiny.find((x, j) => j !== i && jeRok(x.text))
+    return kus(s.slice(0, g.od), g.text, s.slice(g.od + g.text.length), r ? r.text : null)
+  }
+
+  // Jediná skupina číslic — letopočet a počítadlo můžou být slepené dohromady.
+  const g = skupiny[0], t = g.text
+  if (t.length >= 5 && t.length <= 8) {
+    if (jeRok(t.slice(0, 4)))   // 202601 → napřed rok
+      return kus(s.slice(0, g.od) + t.slice(0, 4), t.slice(4), s.slice(g.od + t.length), t.slice(0, 4))
+    if (jeRok(t.slice(-4)))     // 012026 → napřed pořadí
+      return kus(s.slice(0, g.od), t.slice(0, t.length - 4), t.slice(-4) + s.slice(g.od + t.length), t.slice(-4))
+  }
+  return kus(s.slice(0, g.od), t, s.slice(g.od + t.length), jeRok(t) ? t : null)
+}
+
+// Převede vzor na zadaný rok. Letopočet se v textu vymění, zbytek zůstane.
+function vzorNaRok(vzor, rok) {
+  if (!vzor) return null
+  const r = String(rok || '')
+  if (!vzor.rok || !r || vzor.rok === r) return { pred: vzor.pred, poc: vzor.poc, za: vzor.za, rok: vzor.rok }
+  return { pred: vzor.pred.split(vzor.rok).join(r), poc: vzor.poc, za: vzor.za.split(vzor.rok).join(r), rok: r }
+}
+
+// Poskládá číslo ze vzoru a pořadí. Počítadlo si drží svou šířku (7 → 07),
+// ale když přeteče, radši se rozšíří, než aby se ustřihlo.
+function slozCisloFaktury(vzor, poradi) {
+  const c = String(Math.max(1, poradi))
+  return vzor.pred + (c.length >= vzor.poc.length ? c : c.padStart(vzor.poc.length, '0')) + vzor.za
+}
+
+// Další volné číslo pro pracovníka: vezme tvar z jeho poslední faktury a
+// pokračuje v něm. Kdo ještě žádnou nemá, začne na rok + 01.
 async function dalsiCisloFaktury(workerId, rok) {
+  const zaloha = String(rok) + '01'
   try {
     const { data } = await sb.from('worker_invoices')
-      .select('invoice_number').eq('worker_id', workerId).like('invoice_number', String(rok) + '%')
+      .select('invoice_number, created_at').eq('worker_id', workerId)
+    const radky = (data || []).filter(r => String(r.invoice_number || '').trim())
+    if (!radky.length) return zaloha
+    // Tvar bereme z naposledy vystavené faktury — to je ten, co uživatel chce dál.
+    const serazene = radky.slice().sort((a, b) =>
+      String(b.created_at || '').localeCompare(String(a.created_at || '')))
+    const vzor = vzorNaRok(rozborCislaFaktury(serazene[0].invoice_number), rok)
+    if (!vzor) return zaloha
+    // Nejvyšší pořadí mezi fakturami ve stejném tvaru a stejném roce.
     let nejvyssi = 0
-    ;(data || []).forEach(r => {
-      const m = /^(\d{4})(\d{2})$/.exec(String(r.invoice_number || '').trim())
-      if (m && m[1] === String(rok)) nejvyssi = Math.max(nejvyssi, parseInt(m[2], 10) || 0)
+    radky.forEach(r => {
+      const c = rozborCislaFaktury(r.invoice_number)
+      if (!c || c.pred !== vzor.pred || c.za !== vzor.za) return
+      nejvyssi = Math.max(nejvyssi, parseInt(c.poc, 10) || 0)
     })
-    return String(Math.min(99, nejvyssi + 1)).padStart(2, '0')
+    return slozCisloFaktury(vzor, nejvyssi + 1)
   } catch (e) {
-    return '01'
+    return zaloha
   }
 }
 
-// Doplní rok a další volné pořadí do formuláře. Co si člověk přepíše, neměníme.
+// Předvyplní číslo do formuláře. Co si člověk přepíše, neměníme.
 async function predvyplnitCisloFaktury(workerId, rok, pre = 'inv', tyden = null) {
-  const rokEl = _pole(pre, 'num-year')
-  const seqEl = _pole(pre, 'num-seq')
-  if (rokEl) rokEl.textContent = String(rok)
-  if (!seqEl) return
+  const poleEl = _pole(pre, 'num-full')
+  if (!poleEl) return
 
   // Za týden, který už fakturovaný byl, drží faktura svoje původní číslo —
-  // jde o opravu, ne o nový doklad. Jinak pokračuje řada dál: 01, 02, 03…
+  // jde o opravu, ne o nový doklad.
   if (tyden != null) {
     try {
       const { data } = await sb.from('worker_invoices')
         .select('invoice_number').eq('worker_id', workerId)
         .eq('kw', parseInt(tyden)).eq('kw_year', parseInt(rok)).limit(1)
       const stare = String((data || [])[0]?.invoice_number || '').trim()
-      const m = /^(\d{4})(\d{2})$/.exec(stare)
-      if (m && m[1] === String(rok)) { seqEl.value = m[2]; return }
+      if (stare) { poleEl.value = stare; return }
     } catch (e) { /* neva, spadne se na další volné číslo */ }
   }
 
-  seqEl.value = await dalsiCisloFaktury(workerId, rok)
+  poleEl.value = await dalsiCisloFaktury(workerId, rok)
 }
 
 async function onInvoiceWeekChange() {
@@ -21011,11 +21072,8 @@ async function generateInvoiceMob(lang = 'en', override = null) {
   // Číslo faktury si určuje pracovník (nebo admin) sám: rok + dvouciferné pořadí
   // jeho faktur v tomhle roce. Když políčko chybí nebo je prázdné, spadne se
   // zpátky na starý tvar rok+týden, ať se faktura vystaví za každou cenu.
-  const zadaneCislo = String(override?.invoiceNum ?? document.getElementById('inv-num-seq')?.value ?? '').trim()
-  const cisloSeq = /^\d{1,2}$/.test(zadaneCislo) ? zadaneCislo.padStart(2, '0') : ''
-  const invoiceNum = cisloSeq
-    ? `${year}${cisloSeq}`
-    : (String(override?.invoiceNum || '').trim() || `${year}${week.toString().padStart(2,'0')}`)
+  const zadaneCislo = String(override?.invoiceNum ?? document.getElementById('inv-num-full')?.value ?? '').trim()
+  const invoiceNum = zadaneCislo || `${year}${week.toString().padStart(2,'0')}`
 
   // Číslo se zpětně neopravuje — když je něco špatně, vystaví se nová faktura.
   // O to důležitější je nepoužít jedno číslo dvakrát. Faktura za tentýž týden
@@ -22382,8 +22440,9 @@ function renderInvoice(d, lang = 'en') {
   const totalCZK = (toPay * eurCzkRate).toFixed(2).replace('.', ',')
   const rateStr = `${eurCzkRate.toFixed(2)} CZK / 1 EUR`
 
-  // Variabilný symbol = číslo faktúry
-  const varSymbol = d.invoiceNum
+  // Variabilní symbol = číslo faktury, ale banka bere jen číslice (max 10).
+  // Z „2026/07" tedy vyjde 202607; když v čísle žádná číslice není, VS se vynechá.
+  const varSymbol = String(d.invoiceNum || '').replace(/\D/g, '').slice(-10)
   const constSymbol = '0308'
 
   // Položku si píše OSVČ ručně — do HTML faktury ji pouštíme jen ošetřenou.
@@ -27156,7 +27215,7 @@ async function generateInvoiceAdmin() {
     // Položky a číslo faktury z adminského formuláře. Bez položek se faktura
     // vystaví po starém, jen s hodinami × sazbou.
     items: sebratPolozkyFaktury('wd-inv'),
-    invoiceNum: document.getElementById('wd-inv-num-seq')?.value || ''
+    invoiceNum: document.getElementById('wd-inv-num-full')?.value || ''
   })
 }
 
