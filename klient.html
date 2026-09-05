@@ -182,26 +182,36 @@ function vykreslit(d, preklady){
     celkem += suma;
     // Peníze: sazba pracovníka a provize SubBau. Sčítá se den po dni, protože
     // se sazba mohla během období změnit — jinak by to nesedělo s fakturou.
-    var fakturovano = 0, provizeCelkem = 0, sazby = {}, provize = {}
+    //
+    // Když se sazba měnila, NEUKAZUJEME průměr. Průměrné číslo (22,80) neodpovídá
+    // žádné skutečné sazbě a odběratele jen mate. Místo toho se vypíše rozpis:
+    // kolik hodin za kolik. Stejně to má i faktura, když sazba skočí uprostřed týdne.
+    var fakturovano = 0, provizeCelkem = 0
+    var podleSazby = {}, podleProvize = {}
     dny.forEach(function(r){
       if (r.probiha) return
       var h = Number(r.hodiny) || 0
-      fakturovano += h * (Number(r.sazba) || 0)
-      provizeCelkem += h * (Number(r.provize) || 0)
-      if (r.sazba != null) sazby[Number(r.sazba).toFixed(2)] = 1
-      if (r.provize != null) provize[Number(r.provize).toFixed(2)] = 1
+      var sz = Number(r.sazba) || 0
+      var pr = Number(r.provize) || 0
+      fakturovano += h * sz
+      provizeCelkem += h * pr
+      podleSazby[sz.toFixed(2)] = (podleSazby[sz.toFixed(2)] || 0) + h
+      podleProvize[pr.toFixed(2)] = (podleProvize[pr.toFixed(2)] || 0) + h
     })
-    var sazbaText = Object.keys(sazby).length === 1
-      ? hod(Object.keys(sazby)[0])
-      : (suma > 0 ? hod(fakturovano / suma) + '⌀' : '—')
-    var provizeText = Object.keys(provize).length === 1
-      ? hod(Object.keys(provize)[0])
-      : (suma > 0 ? hod(provizeCelkem / suma) + '⌀' : '—')
+    // „20,00 Std. × 22,00 €" pro každou sazbu, od nejnižší
+    function rozpis(mapa, jednotka){
+      var klice = Object.keys(mapa).sort(function(a,b){ return Number(a) - Number(b) })
+      if (!klice.length) return '—'
+      if (klice.length === 1) return '<b>' + hod(klice[0]) + ' €</b>/' + jednotka
+      return klice.map(function(k){
+        return '<b>' + hod(mapa[k]) + ' Std.</b> × <b>' + hod(k) + ' €</b>'
+      }).join(' &nbsp;·&nbsp; ')
+    }
 
     html += '<div class="clovek"><div class="hlava" style="align-items:flex-start">'
       + '<div><div class="jmeno">' + esc(jm) + '</div>'
-      + '<div class="penize"><b>' + sazbaText + ' €</b>/Std. · '
-      + 'Provision <b>' + provizeText + ' €</b>/Std.'
+      + '<div class="penize">' + rozpis(podleSazby, 'Std.')
+      + '<div style="margin-top:2px">Provision ' + rozpis(podleProvize, 'Std.') + '</div>'
       + '<div style="font-size:11px;color:var(--seda)">hodinovka · provize</div></div></div>'
       + '<div class="soucet">' + hod(suma) + ' Std.'
       + '<small>' + (dny.some(function(x){ return x.probiha })
