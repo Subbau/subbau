@@ -121,6 +121,26 @@ ok((sel.innerHTML.match(/<option/g) || []).length === 10, 'v nabídce je všech 
 ok(sel.value === '6', 'předvybraný je ten uložený')
 ok(Object.keys(M.NAZVY_VZHLEDU).length === 10, 'názvů vzhledů je deset')
 
+console.log('\n── barvy si jde vybrat ──')
+const kodBarev = src.slice(src.indexOf('async function ulozBarvuFaktury'), src.indexOf('async function ulozVzhledFaktury'))
+ok(/n < 0 \|\| n >= INVOICE_COLORS\.length/.test(kodBarev), 'mimo paletu se barva neuloží')
+ok(/invoice_color: n/.test(kodBarev), 'ukládá se do sloupce invoice_color')
+ok(src.includes('id="invoice-design-colors"'), 'vzorník je v ukázce vzhledů')
+ok(src.includes('id="wd-inv-colors"'), 'vzorník je i na kartě pracovníka')
+ok(/invoiceColorIdx: u\.barva/.test(src), 'ukázka se překreslí ve zvolené barvě')
+ok(/await u\.pouzit\(u\.idx, u\.barva\)/.test(src), 'tlačítko Použít předá vzhled i barvu')
+
+console.log('\n── číslo staré faktury jde přepsat ──')
+const kodUpravy = src.slice(src.indexOf('async function saveInvoiceEdit'), src.indexOf('async function deleteWorkerInvoice'))
+ok(src.includes('id="invedit-number"'), 'v okně úpravy je pole s číslem')
+ok(/invedit-number/.test(kodUpravy), 'ukládání to pole čte')
+ok(/if \(!cisloNove\)/.test(kodUpravy), 'prázdné číslo se odmítne')
+ok(/\.eq\('invoice_number', cisloNove\)[\s\S]{0,80}\.neq\('id', r\.id\)/.test(kodUpravy), 'hlídá se, aby číslo neměla už jiná faktura téhož pracovníka')
+ok(/invoice_number: cisloNove/.test(kodUpravy), 'nové číslo se zapíše k faktuře')
+ok(/uploadInvoicePdf\(out\.blob, r\.worker_id, cisloNove\)/.test(kodUpravy), 'nové PDF se pojmenuje novým číslem')
+ok(/design_idx: vzhledZvoleny, invoice_number: cisloNove/.test(kodUpravy)
+   || /invoice_number: cisloNove \}, extra\)/.test(kodUpravy), 'faktura se překreslí s novým číslem')
+
 console.log(chyb ? `\n❌ ${chyb} chyb` : '\n✅ VZHLED U FAKTURY FUNGUJE')
 
 // ── KONTROLNÍ VZORKY: každá kontrola musí umět selhat ──
@@ -132,6 +152,10 @@ const kontroly = [
    () => { prvek('invoice-actions').style.display = 'blok-navic'; return prvek('invoice-actions').style.display === 'none' }],
   ['zdrojová kontrola volání v renderInvoice',
    () => /nastavRezimUkazky\(!!d\.NEEXISTUJE\)/.test(telo)],
+  ['hlídání kolize čísla',
+   () => /\.eq\('invoice_number', TAKOVA_PROMENNA_NENI\)/.test(kodUpravy)],
+  ['vzorník barev v ukázce',
+   () => src.includes('id="invoice-design-colors-neexistuje"')],
   ['ořez mimo rozsah',
    () => { M.otevriUkazkuVzhledu({}, 1, null, ''); M.ukazVzhled(99); return vykresleno.at(-1).designIdx === 99 }],
 ]

@@ -57,6 +57,21 @@ const seZalohou = {...zaklad, zalohaJe:true, zaloha:'300.00', kUhrade:'1068.50',
 const platce = {...zaklad, dodavatel:{...zaklad.dodavatel, platceDph:true},
                 L:{...L, vatNote:'Plátce DPH · USt-pflichtig · VAT payer'}}
 
+// Hustota sazby — appka ji počítá v renderInvoice podle toho, kolik toho na
+// faktuře je. Bez ní by šablony dosadily undefined do rozměrů a faktura by se
+// rozsypala, aniž by na ní chyběl jediný údaj.
+function sHustotou(V) {
+  const p = V.jePolozkova ? (V.polozky || []) : []
+  const napln = V.jePolozkova
+    ? p.reduce((s, x) => s + 1 + Math.floor(String(x.popis || '').length / 55), 0) : 1
+  const st = napln >= 14 ? 3 : napln >= 7 ? 2 : napln >= 4 ? 1 : 0
+  return { ...V,
+    radekY: ['13px','7px','3px','2px'][st],
+    pismoPolozky: ['12.5px','11px','9.5px','8.5px'][st],
+    mezera: ['26px','16px','7px','5px'][st],
+    husto: st > 0 }
+}
+
 const POVINNE = [
   ['nadpis', v=>v.L.title],['číslo faktury', v=>v.cislo],
   ['dodavatel', v=>v.dodavatel.jmeno],['IČO dodavatele', v=>v.dodavatel.ic],
@@ -74,7 +89,8 @@ for (const n of [2,3,4,5,6,7,8,9,10]) {
   const f = S[n]
   if (!f) { console.log(`  ❌ vzhled ${n}: chybí`); chyb++; continue }
   let potize = []
-  for (const [jm, V] of [['běžná',zaklad],['položková',polozkova],['se zálohou',seZalohou],['plátce DPH',platce]]) {
+  for (const [jm, syrove] of [['běžná',zaklad],['položková',polozkova],['se zálohou',seZalohou],['plátce DPH',platce]]) {
+    const V = sHustotou(syrove)
     let h
     try { h = f(V) } catch(e){ potize.push(`${jm}: SPADLO ${e.message}`); continue }
     if (/undefined|NaN|\[object Object\]/.test(h)) potize.push(`${jm}: v HTML je undefined/NaN`)

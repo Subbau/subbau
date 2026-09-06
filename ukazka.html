@@ -3548,7 +3548,8 @@ setTimeout(function () {
             <div class="fg" style="margin-bottom:8px">
               <label style="font-size:11px">Vzhled faktury</label>
               <select id="wd-inv-design" onchange="ulozVzhledFaktury(this.value)" title="Každý pracovník může mít fakturu v jiné podobě. Vzhled si u něj appka zapamatuje a příště fakturu vystaví stejně." style="width:100%;font-size:12px;padding:8px;border:1.5px solid var(--brd);border-radius:8px;font-family:inherit;box-sizing:border-box"><option value="1">1 — Původní</option><option value="2">2 — Úřední, v rámečcích</option><option value="3">3 — Dopisní, patkové písmo</option><option value="4">4 — Barevný sloupec vlevo</option><option value="5">5 — Účetní sešit</option><option value="6">6 — Barevná hlavička</option><option value="7">7 — Kompaktní</option><option value="8">8 — Velké číslo a rámeček</option><option value="9">9 — Karty</option><option value="10">10 — Spodní pruh</option></select>
-              <button onclick="ukazVzhledyPracovnika()" style="width:100%;margin-top:6px;padding:8px;background:var(--bg2);color:var(--blue);border:1px solid var(--blue);border-radius:8px;cursor:pointer;font-family:inherit;font-size:12px;font-weight:700"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:1em;height:1em;flex-shrink:0;vertical-align:-2px"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg> Náhled — projít všech 10 vzhledů</button>
+              <div id="wd-inv-colors" style="display:flex;flex-wrap:wrap;gap:6px;margin-top:7px"></div>
+              <button onclick="ukazVzhledyPracovnika()" style="width:100%;margin-top:7px;padding:8px;background:var(--bg2);color:var(--blue);border:1px solid var(--blue);border-radius:8px;cursor:pointer;font-family:inherit;font-size:12px;font-weight:700"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:1em;height:1em;flex-shrink:0;vertical-align:-2px"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg> Náhled — projít všech 10 vzhledů</button>
               <div style="font-size:10.5px;color:var(--text3);margin-top:3px">Zapamatuje se u pracovníka. Barvu má každý svou, takže i stejný vzhled vypadá jinak.</div>
             </div>
             <div class="fg" style="margin-bottom:8px">
@@ -5099,7 +5100,7 @@ async function submitAdminSignatureWithPlacement() {
 // Po nahrání nové verze se snadno pozná, jestli se opravdu nasadila: otevřete
 // appku, zmáčkněte F12 (na Macu ⌥⌘I) a v konzoli je vypsané tohle datum. Když
 // tam svítí starší, prohlížeč nebo GitHub drží starou verzi.
-const SUBBAU_VERZE = '2026-09-05 q — vzhledy 3, 5, 9 a 10 nakresleny znovu, všechny sedí na A4'
+const SUBBAU_VERZE = '2026-09-06 a — výběr barvy faktury, přepis čísla u staré faktury, všechny vzhledy sedí na A4'
 console.log('StavKo docházka — verze ' + SUBBAU_VERZE)
 
 // ============ SUPABASE CONFIG ============
@@ -12681,6 +12682,8 @@ function openInvoiceEdit(id) {
   document.getElementById('invedit-iban').value = r.iban || ''
   document.getElementById('invedit-swift').value = r.swift || ''
   document.getElementById('invedit-iban-do-profilu').checked = false
+  const cisloEl = document.getElementById('invedit-number')
+  if (cisloEl) cisloEl.value = String(r.invoice_number || '')
   const vzEl = document.getElementById('invedit-design')
   const vzProfil = document.getElementById('invedit-design-do-profilu')
   if (vzProfil) vzProfil.checked = false
@@ -12796,6 +12799,21 @@ async function saveInvoiceEdit() {
                         designIdx: prof.invoice_design || 1 }
   } catch (e) { console.warn('[faktura] kontakt se nepodařilo dotáhnout:', e?.message) }
 
+  // Admin smí číslo faktury přepsat. Prázdné nechat nejde — bez čísla se doklad
+  // nedá spárovat a rozbil by se i přepis podle (pracovník, číslo).
+  const cisloNove = String(document.getElementById('invedit-number')?.value || '').trim().slice(0, 24)
+  if (!cisloNove) { finish('⚠️ Číslo faktury nesmí zůstat prázdné'); return }
+  if (cisloNove !== String(r.invoice_number || '')) {
+    try {
+      const { data: kolize } = await sb.from('worker_invoices')
+        .select('id').eq('worker_id', r.worker_id).eq('invoice_number', cisloNove).neq('id', r.id)
+      if (kolize && kolize.length) {
+        finish('⚠️ Číslo ' + cisloNove + ' už má jiná faktura tohohle pracovníka — zvolte jiné')
+        return
+      }
+    } catch (e) { console.warn('[faktura] kontrola čísla:', e?.message) }
+  }
+
   // Vzhled zvolený v okně má přednost přede vším ostatním — kvůli němu se sem
   // admin došel. Bez volby zůstane ten, ve kterém byla faktura vystavená.
   const vzhledZvoleny = Math.min(10, Math.max(1,
@@ -12804,7 +12822,7 @@ async function saveInvoiceEdit() {
   // 1) Vykresli fakturu znovu — už se zálohou
   const dataForRender = invoiceDataFromRow({ ...r, items: polozky, total_amount: total,
     cash_paid: cash, cash_paid_note: note, iban: ibanNovy, swift: swiftNovy,
-    design_idx: vzhledZvoleny }, extra)
+    design_idx: vzhledZvoleny, invoice_number: cisloNove }, extra)
   try {
     renderInvoice(dataForRender, 'en')
   } catch (e) {
@@ -12817,7 +12835,7 @@ async function saveInvoiceEdit() {
   let uploaded = null
   try {
     const out = await buildInvoicePdf()
-    uploaded = await uploadInvoicePdf(out.blob, r.worker_id, r.invoice_number)
+    uploaded = await uploadInvoicePdf(out.blob, r.worker_id, cisloNove)
   } catch (e) {
     console.error('[faktura] nové PDF se nepodařilo vytvořit:', e)
     closeInvoiceOverlay()
@@ -12832,6 +12850,7 @@ async function saveInvoiceEdit() {
     items: polozky, total_amount: total,
     iban: ibanNovy, swift: swiftNovy || null,
     design_idx: vzhledZvoleny,
+    invoice_number: cisloNove,
   }
   if (uploaded) { upd.pdf_url = uploaded.url; upd.pdf_path = uploaded.path }
 
@@ -21997,21 +22016,21 @@ ${V.dodavatel.platceDph ? `<td style="padding:6px 0 0;vertical-align:top">
 ${V.jePolozkova
   ? (V.polozky || []).map(function (p) {
       return `<tr>
-<td style="border:1px solid ${V.linka};padding:8px 9px;font-size:11px">${p.popis}</td>
-<td style="border:1px solid ${V.linka};padding:8px 9px;text-align:right;font-size:11px">${p.mnozstvi}</td>
-<td style="border:1px solid ${V.linka};padding:8px 9px;text-align:right;font-size:11px">${p.cena}</td>
-<td style="border:1px solid ${V.linka};padding:8px 9px;text-align:right;font-size:11px;font-weight:600">${p.castka}</td>
+<td style="border:1px solid ${V.linka};padding:${V.radekY} 9px;font-size:${V.pismoPolozky}">${p.popis}</td>
+<td style="border:1px solid ${V.linka};padding:${V.radekY} 9px;text-align:right;font-size:${V.pismoPolozky}">${p.mnozstvi}</td>
+<td style="border:1px solid ${V.linka};padding:${V.radekY} 9px;text-align:right;font-size:${V.pismoPolozky}">${p.cena}</td>
+<td style="border:1px solid ${V.linka};padding:${V.radekY} 9px;text-align:right;font-size:${V.pismoPolozky};font-weight:600">${p.castka}</td>
 </tr>`;
     }).join('')
   : `<tr>
-<td style="border:1px solid ${V.linka};padding:8px 9px 9px">
+<td style="border:1px solid ${V.linka};padding:${V.radekY} 9px">
 <div style="font-size:${V.popisFont}${typeof V.popisFont === 'number' ? 'px' : ''};font-weight:600;line-height:1.35">${V.popisPlneni}</div>
 ${V.popisPrekl ? `<div style="font-size:9.5px;color:#5F5952;margin-top:3px;line-height:1.35">${V.popisPrekl}</div>` : ''}
 ${V.popisPod ? `<div style="font-size:9px;color:#8A837C;margin-top:3px;line-height:1.35">${V.popisPod}</div>` : ''}
 </td>
-<td style="border:1px solid ${V.linka};padding:8px 9px;text-align:right;font-size:11px;vertical-align:top">${V.hodiny}</td>
-<td style="border:1px solid ${V.linka};padding:8px 9px;text-align:right;font-size:11px;vertical-align:top">${V.sazba}</td>
-<td style="border:1px solid ${V.linka};padding:8px 9px;text-align:right;font-size:11px;font-weight:600;vertical-align:top">${V.celkem}</td>
+<td style="border:1px solid ${V.linka};padding:${V.radekY} 9px;text-align:right;font-size:${V.pismoPolozky};vertical-align:top">${V.hodiny}</td>
+<td style="border:1px solid ${V.linka};padding:${V.radekY} 9px;text-align:right;font-size:${V.pismoPolozky};vertical-align:top">${V.sazba}</td>
+<td style="border:1px solid ${V.linka};padding:${V.radekY} 9px;text-align:right;font-size:${V.pismoPolozky};font-weight:600;vertical-align:top">${V.celkem}</td>
 </tr>`}
 </table>
 
@@ -22090,10 +22109,10 @@ window.SABLONY_FAKTUR[3] = function (V) {
     <td style="padding:4px 0;font-size:10.5pt;color:#1a1a1a;text-align:right;white-space:nowrap;vertical-align:bottom">${h}</td>
   </tr>`
   return `<div id="invoice-page" style="width:794px;min-height:1123px;background:#fff;font-family:Georgia,'Times New Roman',serif;color:#1a1a1a;box-sizing:border-box">
-<div id="invoice-body" style="width:794px;min-height:1123px;box-sizing:border-box;padding:56px 64px 44px;display:flex;flex-direction:column">
+<div id="invoice-body" style="width:794px;min-height:1123px;box-sizing:border-box;padding:38px 56px 28px;display:flex;flex-direction:column">
 
   <!-- hlavička: dodavatel vpravo jako na firemním papíře -->
-  <div style="display:flex;justify-content:space-between;align-items:flex-start;border-bottom:2px solid ${V.barva};padding-bottom:16px">
+  <div style="display:flex;justify-content:space-between;align-items:flex-start;border-bottom:2px solid ${V.barva};padding-bottom:12px">
     <div style="width:52%">
       <div style="font-size:8.5pt;letter-spacing:.16em;text-transform:uppercase;color:#8a8078">${V.L.title}</div>
       <div style="margin-top:10px;font-size:30pt;line-height:1;color:${V.barva}">${V.cislo}</div>
@@ -22101,8 +22120,8 @@ window.SABLONY_FAKTUR[3] = function (V) {
     </div>
     <div style="width:44%;text-align:right">
       <div style="font-size:14pt;font-weight:700;line-height:1.3">${V.dodavatel.jmeno}</div>
-      <div style="margin-top:6px;font-size:9.5pt;line-height:1.6;color:#4a443e">${V.dodavatel.adresa.replace(/\n/g, '<br>')}</div>
-      <div style="margin-top:8px;font-size:9pt;line-height:1.6;color:#6b6257">
+      <div style="margin-top:6px;font-size:9.5pt;line-height:1.5;color:#4a443e">${V.dodavatel.adresa.replace(/\n/g, '<br>')}</div>
+      <div style="margin-top:6px;font-size:9pt;line-height:1.5;color:#6b6257">
         ${V.L.id} ${V.dodavatel.ic}${V.dodavatel.platceDph ? `<br>${V.L.vatId} ${V.dodavatel.dic}` : ''}
         ${V.dodavatel.email ? `<br>${V.dodavatel.email}` : ''}${V.dodavatel.telefon ? `<br>${V.dodavatel.telefon}` : ''}
       </div>
@@ -22110,12 +22129,12 @@ window.SABLONY_FAKTUR[3] = function (V) {
   </div>
 
   <!-- okénková poloha: odběratel vlevo, termíny vpravo -->
-  <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-top:38px">
+  <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-top:${V.mezera}">
     <div style="width:52%">
       <div style="font-size:8.5pt;letter-spacing:.14em;text-transform:uppercase;color:#8a8078">${V.L.customer}</div>
-      <div style="margin-top:12px;font-size:15pt;font-weight:700;line-height:1.35">${V.odberatel.jmeno}</div>
-      <div style="margin-top:7px;font-size:10.5pt;line-height:1.65;color:#4a443e">${V.odberatel.adresa.replace(/\n/g, '<br>')}</div>
-      <div style="margin-top:9px;font-size:9.5pt;line-height:1.6;color:#6b6257">${V.L.id} ${V.odberatel.ic}<br>${V.L.vatId} ${V.odberatel.dic}</div>
+      <div style="margin-top:9px;font-size:15pt;font-weight:700;line-height:1.35">${V.odberatel.jmeno}</div>
+      <div style="margin-top:7px;font-size:10.5pt;line-height:1.5;color:#4a443e">${V.odberatel.adresa.replace(/\n/g, '<br>')}</div>
+      <div style="margin-top:7px;font-size:9.5pt;line-height:1.5;color:#6b6257">${V.L.id} ${V.odberatel.ic}<br>${V.L.vatId} ${V.odberatel.dic}</div>
     </div>
     <div style="width:44%">
       <table style="width:100%;border-collapse:collapse">
@@ -22123,7 +22142,7 @@ window.SABLONY_FAKTUR[3] = function (V) {
         ${radek(V.L.due, V.datumSplatnosti)}
         ${radek(V.L.days, V.splatnostDni)}
       </table>
-      <div style="margin-top:12px;padding-top:10px;border-top:1px solid ${V.linka}">
+      <div style="margin-top:9px;padding-top:8px;border-top:1px solid ${V.linka}">
         <div style="font-size:8.5pt;letter-spacing:.12em;text-transform:uppercase;color:#8a8078">${V.L.period}</div>
         <div style="margin-top:4px;font-size:10.5pt">${V.obdobiOd} &ndash; ${V.obdobiDo}</div>
       </div>
@@ -22131,7 +22150,7 @@ window.SABLONY_FAKTUR[3] = function (V) {
   </div>
 
   <!-- plnění -->
-  <table style="width:100%;border-collapse:collapse;margin-top:36px">
+  <table style="width:100%;border-collapse:collapse;margin-top:${V.mezera}">
     <tr>
       <td style="padding:0 0 7px;font-size:8.5pt;letter-spacing:.1em;text-transform:uppercase;color:#8a8078;border-bottom:1.5px solid ${V.barva}">${V.L.description}</td>
       <td style="width:88px;padding:0 0 7px;font-size:8.5pt;color:#8a8078;text-align:right;border-bottom:1.5px solid ${V.barva};white-space:nowrap">${S.m}</td>
@@ -22140,25 +22159,25 @@ window.SABLONY_FAKTUR[3] = function (V) {
     </tr>
     ${V.jePolozkova
       ? V.polozky.map(p => `<tr>
-      <td style="padding:12px 14px 12px 0;font-size:11pt;line-height:1.5;vertical-align:top;border-bottom:1px solid #eceae6">${p.popis}</td>
-      <td style="padding:12px 0;font-size:11pt;text-align:right;vertical-align:top;border-bottom:1px solid #eceae6">${p.mnozstvi}</td>
-      <td style="padding:12px 0;font-size:11pt;text-align:right;vertical-align:top;border-bottom:1px solid #eceae6">${p.cena}</td>
-      <td style="padding:12px 0;font-size:11pt;text-align:right;vertical-align:top;border-bottom:1px solid #eceae6">${p.castka}</td>
+      <td style="padding:${V.radekY} 14px ${V.radekY} 0;font-size:${V.pismoPolozky};line-height:1.45;vertical-align:top;border-bottom:1px solid #eceae6">${p.popis}</td>
+      <td style="padding:${V.radekY} 0;font-size:${V.pismoPolozky};text-align:right;vertical-align:top;border-bottom:1px solid #eceae6">${p.mnozstvi}</td>
+      <td style="padding:${V.radekY} 0;font-size:${V.pismoPolozky};text-align:right;vertical-align:top;border-bottom:1px solid #eceae6">${p.cena}</td>
+      <td style="padding:${V.radekY} 0;font-size:${V.pismoPolozky};text-align:right;vertical-align:top;border-bottom:1px solid #eceae6">${p.castka}</td>
     </tr>`).join('')
       : `<tr>
-      <td style="padding:14px 14px 14px 0;vertical-align:top;border-bottom:1px solid #eceae6">
+      <td style="padding:${V.radekY} 14px ${V.radekY} 0;vertical-align:top;border-bottom:1px solid #eceae6">
         <div style="font-size:12pt;line-height:1.45">${V.popisPlneni}</div>
         ${V.popisPrekl ? `<div style="margin-top:4px;font-size:10pt;color:#4a443e;font-style:italic">${V.popisPrekl}</div>` : ''}
         ${V.popisPod ? `<div style="margin-top:4px;font-size:9.5pt;color:#8a8078">${V.popisPod}</div>` : ''}
       </td>
-      <td style="padding:14px 0;font-size:11pt;text-align:right;vertical-align:top;border-bottom:1px solid #eceae6">${V.hodiny}</td>
-      <td style="padding:14px 0;font-size:11pt;text-align:right;vertical-align:top;border-bottom:1px solid #eceae6">${V.sazba}</td>
-      <td style="padding:14px 0;font-size:11pt;text-align:right;vertical-align:top;border-bottom:1px solid #eceae6">${V.celkem}</td>
+      <td style="padding:${V.radekY} 0;font-size:${V.pismoPolozky};text-align:right;vertical-align:top;border-bottom:1px solid #eceae6">${V.hodiny}</td>
+      <td style="padding:${V.radekY} 0;font-size:${V.pismoPolozky};text-align:right;vertical-align:top;border-bottom:1px solid #eceae6">${V.sazba}</td>
+      <td style="padding:${V.radekY} 0;font-size:${V.pismoPolozky};text-align:right;vertical-align:top;border-bottom:1px solid #eceae6">${V.celkem}</td>
     </tr>`}
   </table>
 
   <!-- součty -->
-  <div style="display:flex;justify-content:flex-end;margin-top:22px">
+  <div style="display:flex;justify-content:flex-end;margin-top:14px">
     <table style="border-collapse:collapse;width:400px">
       ${radek(V.L.total, V.celkem + ' EUR')}
       ${V.zalohaJe ? radek(V.L.cashPaid + (V.zalohaPozn ? ' (' + V.zalohaPozn + ')' : ''), '&minus; ' + V.zaloha + ' EUR') : ''}
@@ -22170,10 +22189,10 @@ window.SABLONY_FAKTUR[3] = function (V) {
     </table>
   </div>
 
-  <div style="flex:1;min-height:24px"></div>
+  <div style="flex:1;min-height:0"></div>
 
   <!-- pata: platba a daňová poznámka -->
-  <div style="border-top:1px solid ${V.linka};padding-top:16px">
+  <div style="border-top:1px solid ${V.linka};padding-top:12px">
     <div style="font-size:8.5pt;letter-spacing:.12em;text-transform:uppercase;color:#8a8078">${V.L.paymentInfo}</div>
     <table style="width:100%;border-collapse:collapse;margin-top:9px">
       <tr>
@@ -22189,11 +22208,11 @@ window.SABLONY_FAKTUR[3] = function (V) {
         <td style="font-size:10.5pt">${V.ks}</td>
       </tr>
     </table>
-    <div style="margin-top:16px;padding:12px 15px;background:${V.podklad};border-left:3px solid ${V.barva}">
+    <div style="margin-top:10px;padding:10px 14px;background:${V.podklad};border-left:3px solid ${V.barva}">
       <div style="font-size:10.5pt;font-weight:700">${V.L.vatReason}</div>
       <div style="margin-top:3px;font-size:9pt;line-height:1.55;color:#4a443e">${V.L.vatReasonSub}</div>
     </div>
-    <div style="margin-top:10px;font-size:9pt;color:#8a8078">${V.L.vatNote}</div>
+    <div style="margin-top:7px;font-size:9pt;color:#8a8078">${V.L.vatNote}</div>
   </div>
 
 </div></div>`
@@ -22203,7 +22222,6 @@ window.SABLONY_FAKTUR[4] = function (V) {
   return `<div id="invoice-page" style="width:794px;min-height:1123px;background:#fff;font-family:-apple-system,'Segoe UI',Arial,sans-serif;color:#211D1A;box-sizing:border-box">
 <div id="invoice-body" style="display:flex;align-items:stretch;min-height:1123px;box-sizing:border-box">
 <div style="width:200px;flex:0 0 200px;background:${V.barva};color:#fff;box-sizing:border-box;padding:34px 20px 28px 22px;display:flex;flex-direction:column">
-<div style="font-family:Georgia,'Times New Roman',serif;font-size:34px;line-height:1;letter-spacing:-1px;opacity:.9">§</div>
 <div style="width:34px;height:2px;background:#fff;opacity:.55;margin:14px 0 26px"></div>
 <div style="font-size:7.5px;letter-spacing:2.4px;text-transform:uppercase;opacity:.7;margin-bottom:8px">${V.L.supplier || 'Dodavatel'}</div>
 <div style="font-size:13px;font-weight:700;line-height:1.3;margin-bottom:7px">${V.dodavatel.jmeno}</div>
@@ -22274,14 +22292,14 @@ ${V.dodavatel.platceDph ? `<div>${V.L.dic || 'DIČ'} ${V.dodavatel.dic}</div>` :
 ${V.jePolozkova
   ? V.polozky.map(function (p) {
       return `<tr>
-<td style="font-size:11px;line-height:1.5;padding:10px 0;border-bottom:1px solid ${V.linka};vertical-align:top">${p.popis.split('\n').join('<br>')}</td>
-<td style="font-size:11px;text-align:right;padding:10px 0 10px 10px;border-bottom:1px solid ${V.linka};vertical-align:top">${p.mnozstvi}</td>
-<td style="font-size:11px;text-align:right;padding:10px 0 10px 10px;border-bottom:1px solid ${V.linka};vertical-align:top">${p.cena}</td>
-<td style="font-size:11px;text-align:right;font-weight:700;padding:10px 0 10px 10px;border-bottom:1px solid ${V.linka};vertical-align:top">${p.castka}</td>
+<td style="font-size:${V.pismoPolozky};line-height:1.5;padding:${V.radekY} 0;border-bottom:1px solid ${V.linka};vertical-align:top">${p.popis.split('\n').join('<br>')}</td>
+<td style="font-size:${V.pismoPolozky};text-align:right;padding:${V.radekY} 0 ${V.radekY} 10px;border-bottom:1px solid ${V.linka};vertical-align:top">${p.mnozstvi}</td>
+<td style="font-size:${V.pismoPolozky};text-align:right;padding:${V.radekY} 0 ${V.radekY} 10px;border-bottom:1px solid ${V.linka};vertical-align:top">${p.cena}</td>
+<td style="font-size:${V.pismoPolozky};text-align:right;font-weight:700;padding:${V.radekY} 0 ${V.radekY} 10px;border-bottom:1px solid ${V.linka};vertical-align:top">${p.castka}</td>
 </tr>`;
     }).join('')
   : `<tr>
-<td style="padding:12px 0;border-bottom:1px solid ${V.linka};vertical-align:top">
+<td style="padding:${V.radekY} 0;border-bottom:1px solid ${V.linka};vertical-align:top">
 <div style="font-size:${V.popisFont};line-height:1.45;font-weight:600">${V.popisPlneni.split('\n').join('<br>')}</div>
 ${V.popisPrekl ? `<div style="font-size:10px;line-height:1.5;color:#5A544F;font-style:italic;margin-top:4px">${V.popisPrekl.split('\n').join('<br>')}</div>` : ``}
 ${V.popisPod ? `<div style="font-size:9.5px;line-height:1.5;color:#6B6560;margin-top:4px">${V.popisPod.split('\n').join('<br>')}</div>` : ``}
@@ -22328,6 +22346,8 @@ ${V.zalohaPozn ? `<div style="font-size:9px;color:#6B6560;line-height:1.45;paddi
 window.SABLONY_FAKTUR[5] = function (V) {
   const MONO = "'SF Mono',Menlo,Consolas,'DejaVu Sans Mono',monospace"
   const bunka = 'padding:6px 10px;border:1px solid ' + V.linka + ';font-size:9pt;vertical-align:top'
+  // Řádky plnění se u delší faktury stáhnou, ať se doklad vejde na jednu A4.
+  const bunkaP = 'padding:' + V.radekY + ' 10px;border:1px solid ' + V.linka + ';font-size:' + V.pismoPolozky + ';vertical-align:top'
   const nadpisek = 'padding:5px 10px;border:1px solid ' + V.linka + ';background:' + V.podklad
     + ';font-size:7.5pt;letter-spacing:.06em;text-transform:uppercase;color:#5f574f;vertical-align:top;line-height:1.3'
   const par = (l, h, mono) => `<tr><td style="${bunka}">
@@ -22389,10 +22409,10 @@ window.SABLONY_FAKTUR[5] = function (V) {
       </tr>
       ${V.jePolozkova
         ? V.polozky.map((p, i) => `<tr style="background:${i % 2 ? V.podklad : '#fff'}">
-        <td style="${bunka};line-height:1.5">${p.popis}</td>
-        <td style="${bunka};font-family:${MONO};text-align:right">${p.mnozstvi}</td>
-        <td style="${bunka};font-family:${MONO};text-align:right">${p.cena}</td>
-        <td style="${bunka};font-family:${MONO};text-align:right;font-weight:700">${p.castka}</td>
+        <td style="${bunkaP};line-height:1.45">${p.popis}</td>
+        <td style="${bunkaP};font-family:${MONO};text-align:right">${p.mnozstvi}</td>
+        <td style="${bunkaP};font-family:${MONO};text-align:right">${p.cena}</td>
+        <td style="${bunkaP};font-family:${MONO};text-align:right;font-weight:700">${p.castka}</td>
       </tr>`).join('')
         : `<tr>
         <td style="${bunka}">
@@ -22468,9 +22488,9 @@ window.SABLONY_FAKTUR[6] = function (V) {
   return `<div id="invoice-page" style="width:794px;min-height:1123px;background:#fff;font-family:-apple-system,'Segoe UI',Arial,sans-serif;color:#211D1A;box-sizing:border-box">
     <div id="invoice-body" style="display:flex;flex-direction:column;min-height:1123px;box-sizing:border-box">
 
-      <div style="height:120px;background:${V.barva};color:#fff;display:flex;align-items:center;justify-content:space-between;padding:0 46px;box-sizing:border-box;flex:none">
+      <div style="height:${V.husto ? "94px" : "120px"};background:${V.barva};color:#fff;display:flex;align-items:center;justify-content:space-between;padding:0 46px;box-sizing:border-box;flex:none">
         <div>
-          <div style="font-size:19pt;font-weight:300;letter-spacing:.1em;line-height:1.1">${V.L.title}</div>
+          <div style="font-size:23pt;font-weight:400;letter-spacing:.05em;line-height:1.08">${V.L.title}</div>
           <div style="width:54px;height:2px;background:#fff;opacity:.55;margin-top:12px"></div>
         </div>
         <div style="text-align:right">
@@ -22479,7 +22499,7 @@ window.SABLONY_FAKTUR[6] = function (V) {
         </div>
       </div>
 
-      <div style="padding:34px 46px 40px;box-sizing:border-box;display:flex;flex-direction:column;flex:1">
+      <div style="padding:${V.husto ? "20px" : "34px"} 46px ${V.husto ? "22px" : "40px"};box-sizing:border-box;display:flex;flex-direction:column;flex:1">
 
         <div style="display:flex;padding-bottom:14px;border-bottom:1px solid ${V.linka}">
           <div style="flex:1;padding-right:14px">
@@ -22500,7 +22520,7 @@ window.SABLONY_FAKTUR[6] = function (V) {
           </div>
         </div>
 
-        <div style="display:flex;margin-top:26px">
+        <div style="display:flex;margin-top:${V.mezera}">
           <div style="width:50%;padding-right:26px;box-sizing:border-box">
             <div style="font-size:6.5pt;letter-spacing:.22em;text-transform:uppercase;color:${V.barva};font-weight:700;margin-bottom:8px">${V.L.supplier}</div>
             <div style="font-size:12.5pt;font-weight:700;line-height:1.25">${V.dodavatel.jmeno}</div>
@@ -22517,7 +22537,7 @@ window.SABLONY_FAKTUR[6] = function (V) {
           </div>
         </div>
 
-        <table style="width:100%;border-collapse:collapse;margin-top:34px">
+        <table style="width:100%;border-collapse:collapse;margin-top:${V.mezera}">
           <tr>
             <th style="text-align:left;padding:0 10px 8px 0;font-size:6pt;font-weight:700;letter-spacing:.2em;text-transform:uppercase;color:#9A948E;border-bottom:1.5px solid ${V.barva}">${V.L.deliveryName}</th>
             <th style="text-align:center;padding:0 10px 8px;font-size:6pt;font-weight:700;letter-spacing:.2em;text-transform:uppercase;color:#9A948E;border-bottom:1.5px solid ${V.barva};white-space:nowrap">${V.L.qty}</th>
@@ -22527,21 +22547,21 @@ window.SABLONY_FAKTUR[6] = function (V) {
           ${V.jePolozkova
             ? V.polozky.map(function (p) {
                 return `<tr>
-            <td style="padding:11px 10px 11px 0;font-size:9.5pt;font-weight:600;line-height:1.45;border-bottom:1px solid ${V.linka}">${String(p.popis).split('\n').join('<br>')}</td>
-            <td style="padding:11px 10px;text-align:center;font-size:9.5pt;white-space:nowrap;border-bottom:1px solid ${V.linka}">${p.mnozstvi}</td>
-            <td style="padding:11px 10px;text-align:right;font-size:9.5pt;white-space:nowrap;border-bottom:1px solid ${V.linka}">${p.cena}</td>
-            <td style="padding:11px 0 11px 10px;text-align:right;font-size:10pt;font-weight:700;white-space:nowrap;border-bottom:1px solid ${V.linka}">${p.castka}</td>
+            <td style="padding:${V.radekY} 10px ${V.radekY} 0;font-size:${V.pismoPolozky};font-weight:600;line-height:1.4;border-bottom:1px solid ${V.linka}">${String(p.popis).split('\n').join('<br>')}</td>
+            <td style="padding:${V.radekY} 10px;text-align:center;font-size:${V.pismoPolozky};white-space:nowrap;border-bottom:1px solid ${V.linka}">${p.mnozstvi}</td>
+            <td style="padding:${V.radekY} 10px;text-align:right;font-size:${V.pismoPolozky};white-space:nowrap;border-bottom:1px solid ${V.linka}">${p.cena}</td>
+            <td style="padding:${V.radekY} 0 ${V.radekY} 10px;text-align:right;font-size:${V.pismoPolozky};font-weight:700;white-space:nowrap;border-bottom:1px solid ${V.linka}">${p.castka}</td>
           </tr>`;
               }).join('')
             : `<tr>
-            <td style="padding:11px 10px 11px 0;font-size:${V.popisFont};font-weight:600;line-height:1.45;border-bottom:1px solid ${V.linka}">${String(V.popisPlneni).split('\n').join('<br>')}${V.popisPrekl ? `<div style="font-size:8pt;font-weight:400;font-style:italic;color:#8A847E;margin-top:3px">${V.popisPrekl}</div>` : ''}${V.popisPod ? `<div style="font-size:7.5pt;font-weight:400;color:#9A948E;margin-top:3px">${V.popisPod}</div>` : ''}</td>
-            <td style="padding:11px 10px;text-align:center;font-size:9.5pt;white-space:nowrap;border-bottom:1px solid ${V.linka};vertical-align:top">${V.hodiny}</td>
-            <td style="padding:11px 10px;text-align:right;font-size:9.5pt;white-space:nowrap;border-bottom:1px solid ${V.linka};vertical-align:top">${V.sazba}</td>
-            <td style="padding:11px 0 11px 10px;text-align:right;font-size:10pt;font-weight:700;white-space:nowrap;border-bottom:1px solid ${V.linka};vertical-align:top">${V.celkem}</td>
+            <td style="padding:${V.radekY} 10px ${V.radekY} 0;font-size:${V.popisFont};font-weight:600;line-height:1.45;border-bottom:1px solid ${V.linka}">${String(V.popisPlneni).split('\n').join('<br>')}${V.popisPrekl ? `<div style="font-size:8pt;font-weight:400;font-style:italic;color:#8A847E;margin-top:3px">${V.popisPrekl}</div>` : ''}${V.popisPod ? `<div style="font-size:7.5pt;font-weight:400;color:#9A948E;margin-top:3px">${V.popisPod}</div>` : ''}</td>
+            <td style="padding:${V.radekY} 10px;text-align:center;font-size:${V.pismoPolozky};white-space:nowrap;border-bottom:1px solid ${V.linka};vertical-align:top">${V.hodiny}</td>
+            <td style="padding:${V.radekY} 10px;text-align:right;font-size:${V.pismoPolozky};white-space:nowrap;border-bottom:1px solid ${V.linka};vertical-align:top">${V.sazba}</td>
+            <td style="padding:${V.radekY} 0 ${V.radekY} 10px;text-align:right;font-size:${V.pismoPolozky};font-weight:700;white-space:nowrap;border-bottom:1px solid ${V.linka};vertical-align:top">${V.celkem}</td>
           </tr>`}
         </table>
 
-        <div style="display:flex;margin-top:30px;align-items:flex-start">
+        <div style="display:flex;margin-top:${V.mezera};align-items:flex-start">
           <div style="flex:1;padding-right:34px">
             <div style="font-size:6.5pt;letter-spacing:.22em;text-transform:uppercase;color:${V.barva};font-weight:700;margin-bottom:10px">${V.L.paymentInfo}</div>
             <div style="display:flex;padding:6px 0;border-bottom:1px solid ${V.linka}">
@@ -22577,7 +22597,7 @@ window.SABLONY_FAKTUR[6] = function (V) {
             </div>${V.zalohaPozn ? `<div style="font-size:7pt;color:#9A948E;padding:5px 0 0;line-height:1.4">${V.zalohaPozn}</div>` : ''}` : ''}
             <div style="background:${V.podklad};padding:14px 16px;margin-top:14px;box-sizing:border-box">
               <div style="font-size:6.5pt;letter-spacing:.2em;text-transform:uppercase;color:${V.barva};font-weight:700;line-height:1.4">${V.L.forPayment}</div>
-              <div style="font-size:27pt;font-weight:800;color:${V.barva};line-height:1.15;margin-top:4px;white-space:nowrap;text-align:right">${V.kUhrade}</div>
+              <div style="font-size:35pt;font-weight:800;color:${V.barva};line-height:1.1;margin-top:4px;white-space:nowrap;text-align:right">${V.kUhrade}</div>
             </div>
             <div style="display:flex;justify-content:space-between;align-items:baseline;margin-top:9px">
               <div style="font-size:7pt;color:#9A948E;padding-right:10px">${V.L.exchangeRate} ${V.kurz}</div>
@@ -22586,7 +22606,7 @@ window.SABLONY_FAKTUR[6] = function (V) {
           </div>
         </div>
 
-        <div style="margin-top:auto;padding-top:22px">
+        <div style="margin-top:auto;padding-top:16px">
           <div style="border-top:1px solid ${V.linka};padding-top:14px;display:flex;align-items:flex-start">
             <div style="flex:none;padding-right:20px">
               <div style="font-size:11pt;font-weight:800;letter-spacing:.04em;color:${V.barva};line-height:1.2">${V.L.vatReason}</div>
@@ -22776,7 +22796,7 @@ window.SABLONY_FAKTUR[8] = function (V) {
 </div>
 </div>
 
-<div style="height:5px;background:${V.barva};margin:18px 0 0"></div>
+<div style="height:5px;background:${V.barva};margin:${V.mezera} 0 0"></div>
 
 <div style="display:flex;align-items:stretch;padding:16px 0 18px">
 <div style="width:50%;box-sizing:border-box;padding-right:22px">
@@ -22829,10 +22849,10 @@ window.SABLONY_FAKTUR[8] = function (V) {
 ${V.jePolozkova
       ? (V.polozky || []).map(function (p) {
         return `<tr>
-<td style="padding:11px 10px 11px 0;font-size:12.5px;line-height:1.5;border-bottom:1px solid ${V.linka};vertical-align:top">${String(p.popis || '').split('\n').join('<br>')}</td>
-<td style="padding:11px 10px;font-size:12px;text-align:right;border-bottom:1px solid ${V.linka};vertical-align:top;font-family:'Menlo','Consolas',monospace">${p.mnozstvi}</td>
-<td style="padding:11px 10px;font-size:12px;text-align:right;border-bottom:1px solid ${V.linka};vertical-align:top;font-family:'Menlo','Consolas',monospace">${p.cena}</td>
-<td style="padding:11px 0 11px 10px;font-size:12.5px;font-weight:700;text-align:right;border-bottom:1px solid ${V.linka};vertical-align:top;font-family:'Menlo','Consolas',monospace">${p.castka}</td>
+<td style="padding:${V.radekY} 10px ${V.radekY} 0;font-size:${V.pismoPolozky};line-height:1.45;border-bottom:1px solid ${V.linka};vertical-align:top">${String(p.popis || '').split('\n').join('<br>')}</td>
+<td style="padding:${V.radekY} 10px;font-size:${V.pismoPolozky};text-align:right;border-bottom:1px solid ${V.linka};vertical-align:top;font-family:'Menlo','Consolas',monospace">${p.mnozstvi}</td>
+<td style="padding:${V.radekY} 10px;font-size:${V.pismoPolozky};text-align:right;border-bottom:1px solid ${V.linka};vertical-align:top;font-family:'Menlo','Consolas',monospace">${p.cena}</td>
+<td style="padding:${V.radekY} 0 ${V.radekY} 10px;font-size:${V.pismoPolozky};font-weight:700;text-align:right;border-bottom:1px solid ${V.linka};vertical-align:top;font-family:'Menlo','Consolas',monospace">${p.castka}</td>
 </tr>`;
       }).join('')
       : `<tr>
@@ -22841,9 +22861,9 @@ ${V.jePolozkova
 ${V.popisPrekl ? `<div style="font-size:11.5px;font-style:italic;color:#4A4440;line-height:1.5;margin-top:4px">${String(V.popisPrekl).split('\n').join('<br>')}</div>` : ''}
 ${V.popisPod ? `<div style="font-size:10.5px;color:#6B635D;line-height:1.5;margin-top:5px">${String(V.popisPod).split('\n').join('<br>')}</div>` : ''}
 </td>
-<td style="padding:13px 10px;font-size:12px;text-align:right;border-bottom:1px solid ${V.linka};vertical-align:top;font-family:'Menlo','Consolas',monospace">${V.hodiny}</td>
-<td style="padding:13px 10px;font-size:12px;text-align:right;border-bottom:1px solid ${V.linka};vertical-align:top;font-family:'Menlo','Consolas',monospace">${V.sazba}</td>
-<td style="padding:13px 0 13px 10px;font-size:12.5px;font-weight:700;text-align:right;border-bottom:1px solid ${V.linka};vertical-align:top;font-family:'Menlo','Consolas',monospace">${V.celkem}</td>
+<td style="padding:13px 10px;font-size:${V.pismoPolozky};text-align:right;border-bottom:1px solid ${V.linka};vertical-align:top;font-family:'Menlo','Consolas',monospace">${V.hodiny}</td>
+<td style="padding:13px 10px;font-size:${V.pismoPolozky};text-align:right;border-bottom:1px solid ${V.linka};vertical-align:top;font-family:'Menlo','Consolas',monospace">${V.sazba}</td>
+<td style="padding:13px 0 13px 10px;font-size:${V.pismoPolozky};font-weight:700;text-align:right;border-bottom:1px solid ${V.linka};vertical-align:top;font-family:'Menlo','Consolas',monospace">${V.celkem}</td>
 </tr>`}
 </tbody>
 </table>
@@ -22895,10 +22915,10 @@ window.SABLONY_FAKTUR[9] = function (V) {
     <div style="margin-top:5px;font-size:12.5px;font-weight:600;color:#211d1a">${h}</div>
   </div>`
   return `<div id="invoice-page" style="width:794px;min-height:1123px;background:${V.podklad};font-family:-apple-system,'Segoe UI',Arial,sans-serif;color:#211d1a;box-sizing:border-box">
-<div id="invoice-body" style="width:794px;min-height:1123px;box-sizing:border-box;padding:30px;display:flex;flex-direction:column;gap:14px">
+<div id="invoice-body" style="width:794px;min-height:1123px;box-sizing:border-box;padding:20px;display:flex;flex-direction:column;gap:${V.husto ? "8px" : "12px"}">
 
   <!-- hlavní karta: čeho se doklad týká -->
-  <div style="${karta};padding:24px 26px;display:flex;justify-content:space-between;align-items:flex-start">
+  <div style="${karta};padding:18px 22px;display:flex;justify-content:space-between;align-items:flex-start">
     <div style="width:56%">
       <div style="${stitek}">${V.L.title}</div>
       <div style="margin-top:8px;font-size:30px;font-weight:700;letter-spacing:-.01em;color:${V.barva}">${V.cislo}</div>
@@ -22913,7 +22933,7 @@ window.SABLONY_FAKTUR[9] = function (V) {
   </div>
 
   <!-- karta s termíny -->
-  <div style="${karta};padding:18px 26px;display:flex;gap:22px">
+  <div style="${karta};padding:14px 22px;display:flex;gap:22px">
     ${udaj(V.L.dateIssue, V.datumVystaveni)}
     ${udaj(V.L.dueDate, V.datumSplatnosti)}
     ${udaj(V.L.dueDays, V.splatnostDni)}
@@ -22921,27 +22941,27 @@ window.SABLONY_FAKTUR[9] = function (V) {
 
   <!-- dvě karty vedle sebe: kdo komu -->
   <div style="display:flex;gap:14px">
-    <div style="${karta};width:50%;padding:20px 24px">
+    <div style="${karta};width:50%;padding:15px 20px">
       <div style="${stitek}">${V.L.supplier}</div>
       <div style="margin-top:10px;font-size:15px;font-weight:700;line-height:1.35">${V.dodavatel.jmeno}</div>
-      <div style="margin-top:7px;font-size:12px;line-height:1.7;color:#5c554e">${V.dodavatel.adresa.replace(/\n/g, '<br>')}</div>
-      <div style="margin-top:11px;padding-top:11px;border-top:1px solid ${V.linka};font-size:11.5px;line-height:1.7;color:#5c554e">
+      <div style="margin-top:7px;font-size:12px;line-height:1.55;color:#5c554e">${V.dodavatel.adresa.replace(/\n/g, '<br>')}</div>
+      <div style="margin-top:9px;padding-top:9px;border-top:1px solid ${V.linka};font-size:11.5px;line-height:1.55;color:#5c554e">
         ${V.L.id} ${V.dodavatel.ic}${V.dodavatel.platceDph ? `<br>${V.L.vatId} ${V.dodavatel.dic}` : ''}
         ${V.dodavatel.email ? `<br>${V.dodavatel.email}` : ''}${V.dodavatel.telefon ? `<br>${V.dodavatel.telefon}` : ''}
       </div>
     </div>
-    <div style="${karta};width:50%;padding:20px 24px">
+    <div style="${karta};width:50%;padding:15px 20px">
       <div style="${stitek}">${V.L.customer}</div>
       <div style="margin-top:10px;font-size:15px;font-weight:700;line-height:1.35">${V.odberatel.jmeno}</div>
-      <div style="margin-top:7px;font-size:12px;line-height:1.7;color:#5c554e">${V.odberatel.adresa.replace(/\n/g, '<br>')}</div>
-      <div style="margin-top:11px;padding-top:11px;border-top:1px solid ${V.linka};font-size:11.5px;line-height:1.7;color:#5c554e">
+      <div style="margin-top:7px;font-size:12px;line-height:1.55;color:#5c554e">${V.odberatel.adresa.replace(/\n/g, '<br>')}</div>
+      <div style="margin-top:9px;padding-top:9px;border-top:1px solid ${V.linka};font-size:11.5px;line-height:1.55;color:#5c554e">
         ${V.L.id} ${V.odberatel.ic}<br>${V.L.vatId} ${V.odberatel.dic}
       </div>
     </div>
   </div>
 
   <!-- karta s plněním; roste do zbylé výšky, ať mezi kartami nezůstane prázdno -->
-  <div style="${karta};padding:20px 26px 22px;flex:1;display:flex;flex-direction:column">
+  <div style="${karta};padding:15px 22px 16px;flex:1;display:flex;flex-direction:column">
     <div style="${stitek}">${V.L.deliveryName}</div>
     <table style="width:100%;border-collapse:collapse;margin-top:12px">
       <tr>
@@ -22952,27 +22972,27 @@ window.SABLONY_FAKTUR[9] = function (V) {
       </tr>
       ${V.jePolozkova
         ? V.polozky.map(p => `<tr>
-        <td style="padding:12px 14px 12px 0;font-size:12.5px;line-height:1.55;vertical-align:top;border-bottom:1px solid ${V.podklad}">${p.popis}</td>
-        <td style="padding:12px 0;font-size:12.5px;text-align:right;vertical-align:top;color:#5c554e;border-bottom:1px solid ${V.podklad}">${p.mnozstvi}</td>
-        <td style="padding:12px 0;font-size:12.5px;text-align:right;vertical-align:top;color:#5c554e;border-bottom:1px solid ${V.podklad}">${p.cena}</td>
-        <td style="padding:12px 0;font-size:12.5px;text-align:right;vertical-align:top;font-weight:700;border-bottom:1px solid ${V.podklad}">${p.castka}</td>
+        <td style="padding:${V.radekY} 14px ${V.radekY} 0;font-size:${V.pismoPolozky};line-height:1.5;vertical-align:top;border-bottom:1px solid ${V.podklad}">${p.popis}</td>
+        <td style="padding:${V.radekY} 0;font-size:${V.pismoPolozky};text-align:right;vertical-align:top;color:#5c554e;border-bottom:1px solid ${V.podklad}">${p.mnozstvi}</td>
+        <td style="padding:${V.radekY} 0;font-size:${V.pismoPolozky};text-align:right;vertical-align:top;color:#5c554e;border-bottom:1px solid ${V.podklad}">${p.cena}</td>
+        <td style="padding:${V.radekY} 0;font-size:${V.pismoPolozky};text-align:right;vertical-align:top;font-weight:700;border-bottom:1px solid ${V.podklad}">${p.castka}</td>
       </tr>`).join('')
         : `<tr>
-        <td style="padding:14px 14px 14px 0;vertical-align:top">
+        <td style="padding:${V.radekY} 14px ${V.radekY} 0;vertical-align:top">
           <div style="font-size:13.5px;font-weight:600;line-height:1.45">${V.popisPlneni}</div>
           ${V.popisPrekl ? `<div style="margin-top:3px;font-size:11.5px;color:#5c554e">${V.popisPrekl}</div>` : ''}
           ${V.popisPod ? `<div style="margin-top:3px;font-size:11px;color:#8f8880">${V.popisPod}</div>` : ''}
         </td>
-        <td style="padding:14px 0;font-size:12.5px;text-align:right;vertical-align:top;color:#5c554e">${V.hodiny}</td>
-        <td style="padding:14px 0;font-size:12.5px;text-align:right;vertical-align:top;color:#5c554e">${V.sazba}</td>
-        <td style="padding:14px 0;font-size:12.5px;text-align:right;vertical-align:top;font-weight:700">${V.celkem}</td>
+        <td style="padding:${V.radekY} 0;font-size:${V.pismoPolozky};text-align:right;vertical-align:top;color:#5c554e">${V.hodiny}</td>
+        <td style="padding:${V.radekY} 0;font-size:${V.pismoPolozky};text-align:right;vertical-align:top;color:#5c554e">${V.sazba}</td>
+        <td style="padding:${V.radekY} 0;font-size:${V.pismoPolozky};text-align:right;vertical-align:top;font-weight:700">${V.celkem}</td>
       </tr>`}
     </table>
   </div>
 
   <!-- karta s částkou: barevná, ať je jasné, co se má poslat -->
   <div style="display:flex;gap:14px">
-    <div style="${karta};width:50%;padding:20px 24px">
+    <div style="${karta};width:50%;padding:15px 20px">
       <div style="${stitek}">${V.L.paymentInfo}</div>
       <div style="margin-top:12px;font-size:8px;letter-spacing:.14em;text-transform:uppercase;color:#8f8880">IBAN</div>
       <div style="margin-top:3px;font-size:12.5px;font-weight:700;letter-spacing:.01em">${V.iban}</div>
@@ -22982,7 +23002,7 @@ window.SABLONY_FAKTUR[9] = function (V) {
         ${udaj('KS', V.ks)}
       </div>
     </div>
-    <div style="width:50%;background:${V.barva};border-radius:14px;padding:20px 24px;box-sizing:border-box;color:#fff;display:flex;flex-direction:column;justify-content:center">
+    <div style="width:50%;background:${V.barva};border-radius:14px;padding:16px 20px;box-sizing:border-box;color:#fff;display:flex;flex-direction:column;justify-content:center">
       <div style="display:flex;justify-content:space-between;align-items:baseline;font-size:11.5px;opacity:.82">
         <div>${V.L.total}</div><div>${V.celkem} EUR</div>
       </div>
@@ -22996,7 +23016,7 @@ window.SABLONY_FAKTUR[9] = function (V) {
   </div>
 
   <!-- karta s daňovou poznámkou -->
-  <div style="${karta};padding:16px 24px;border-left:4px solid ${V.barva}">
+  <div style="${karta};padding:12px 20px;border-left:4px solid ${V.barva}">
     <div style="font-size:13px;font-weight:700;color:${V.barva}">${V.L.vatReason}</div>
     <div style="margin-top:4px;font-size:11px;line-height:1.6;color:#5c554e">${V.L.vatReasonSub}</div>
     <div style="margin-top:8px;font-size:11px;color:#8f8880">${V.L.vatNote}</div>
@@ -23014,7 +23034,7 @@ window.SABLONY_FAKTUR[10] = function (V) {
   return `<div id="invoice-page" style="width:794px;min-height:1123px;background:#fff;font-family:-apple-system,'Segoe UI',Arial,sans-serif;color:#211d1a;box-sizing:border-box">
 <div id="invoice-body" style="width:794px;min-height:1123px;box-sizing:border-box;display:flex;flex-direction:column">
 
-  <div style="flex:1;padding:52px 56px 30px;display:flex;flex-direction:column">
+  <div style="flex:1;padding:34px 48px 22px;display:flex;flex-direction:column">
 
     <div style="display:flex;justify-content:space-between;align-items:flex-start">
       <div style="width:54%">
@@ -23031,15 +23051,15 @@ window.SABLONY_FAKTUR[10] = function (V) {
       </div>
     </div>
 
-    <div style="margin-top:14px;height:4px;width:120px;background:${V.barva}"></div>
+    <div style="margin-top:10px;height:4px;width:120px;background:${V.barva}"></div>
 
     <!-- strany pod sebou v levém sloupci, období vpravo -->
-    <div style="margin-top:34px;display:flex;justify-content:space-between;align-items:flex-start">
+    <div style="margin-top:${V.mezera};display:flex;justify-content:space-between;align-items:flex-start">
       <div style="width:46%">
         <div style="${stitek}">${V.L.supplier}</div>
         <div style="margin-top:9px;font-size:16px;font-weight:700;line-height:1.35">${V.dodavatel.jmeno}</div>
-        <div style="margin-top:6px;font-size:12px;line-height:1.7;color:#5c554e">${V.dodavatel.adresa.replace(/\n/g, '<br>')}</div>
-        <div style="margin-top:8px;font-size:11.5px;line-height:1.7;color:#5c554e">
+        <div style="margin-top:5px;font-size:12px;line-height:1.5;color:#5c554e">${V.dodavatel.adresa.replace(/\n/g, '<br>')}</div>
+        <div style="margin-top:8px;font-size:11.5px;line-height:1.55;color:#5c554e">
           ${V.L.id} ${V.dodavatel.ic}${V.dodavatel.platceDph ? `<br>${V.L.vatId} ${V.dodavatel.dic}` : ''}
           ${V.dodavatel.email ? `<br>${V.dodavatel.email}` : ''}${V.dodavatel.telefon ? `<br>${V.dodavatel.telefon}` : ''}
         </div>
@@ -23047,19 +23067,19 @@ window.SABLONY_FAKTUR[10] = function (V) {
       <div style="width:46%">
         <div style="${stitek}">${V.L.customer}</div>
         <div style="margin-top:9px;font-size:16px;font-weight:700;line-height:1.35">${V.odberatel.jmeno}</div>
-        <div style="margin-top:6px;font-size:12px;line-height:1.7;color:#5c554e">${V.odberatel.adresa.replace(/\n/g, '<br>')}</div>
-        <div style="margin-top:8px;font-size:11.5px;line-height:1.7;color:#5c554e">
+        <div style="margin-top:5px;font-size:12px;line-height:1.5;color:#5c554e">${V.odberatel.adresa.replace(/\n/g, '<br>')}</div>
+        <div style="margin-top:8px;font-size:11.5px;line-height:1.55;color:#5c554e">
           ${V.L.id} ${V.odberatel.ic}<br>${V.L.vatId} ${V.odberatel.dic}
         </div>
       </div>
     </div>
 
-    <div style="margin-top:26px;padding:11px 16px;background:${V.podklad};display:flex;justify-content:space-between;align-items:center">
+    <div style="margin-top:${V.mezera};padding:9px 14px;background:${V.podklad};display:flex;justify-content:space-between;align-items:center">
       <div style="${stitek}">${V.L.supplyPeriod}</div>
       <div style="font-size:13px;font-weight:700">${V.obdobiOd} &ndash; ${V.obdobiDo}</div>
     </div>
 
-    <table style="width:100%;border-collapse:collapse;margin-top:26px">
+    <table style="width:100%;border-collapse:collapse;margin-top:${V.mezera}">
       <tr>
         <td style="padding:0 0 9px;border-bottom:2px solid #211d1a;${stitek}">${V.L.deliveryName}</td>
         <td style="width:80px;padding:0 0 9px;border-bottom:2px solid #211d1a;text-align:right;${stitek}">Množ.<br>Menge · Qty</td>
@@ -23068,24 +23088,24 @@ window.SABLONY_FAKTUR[10] = function (V) {
       </tr>
       ${V.jePolozkova
         ? V.polozky.map(p => `<tr>
-        <td style="padding:13px 14px 13px 0;font-size:12.5px;line-height:1.55;vertical-align:top;border-bottom:1px solid ${V.linka}">${p.popis}</td>
-        <td style="padding:13px 0;font-size:12.5px;text-align:right;vertical-align:top;color:#5c554e;border-bottom:1px solid ${V.linka}">${p.mnozstvi}</td>
-        <td style="padding:13px 0;font-size:12.5px;text-align:right;vertical-align:top;color:#5c554e;border-bottom:1px solid ${V.linka}">${p.cena}</td>
-        <td style="padding:13px 0;font-size:12.5px;text-align:right;vertical-align:top;font-weight:700;border-bottom:1px solid ${V.linka}">${p.castka}</td>
+        <td style="padding:${V.radekY} 14px ${V.radekY} 0;font-size:${V.pismoPolozky};line-height:1.55;vertical-align:top;border-bottom:1px solid ${V.linka}">${p.popis}</td>
+        <td style="padding:${V.radekY} 0;font-size:${V.pismoPolozky};text-align:right;vertical-align:top;color:#5c554e;border-bottom:1px solid ${V.linka}">${p.mnozstvi}</td>
+        <td style="padding:${V.radekY} 0;font-size:${V.pismoPolozky};text-align:right;vertical-align:top;color:#5c554e;border-bottom:1px solid ${V.linka}">${p.cena}</td>
+        <td style="padding:${V.radekY} 0;font-size:${V.pismoPolozky};text-align:right;vertical-align:top;font-weight:700;border-bottom:1px solid ${V.linka}">${p.castka}</td>
       </tr>`).join('')
         : `<tr>
-        <td style="padding:15px 14px 15px 0;vertical-align:top;border-bottom:1px solid ${V.linka}">
+        <td style="padding:${V.radekY} 14px ${V.radekY} 0;vertical-align:top;border-bottom:1px solid ${V.linka}">
           <div style="font-size:14px;font-weight:600;line-height:1.45">${V.popisPlneni}</div>
           ${V.popisPrekl ? `<div style="margin-top:3px;font-size:12px;color:#5c554e">${V.popisPrekl}</div>` : ''}
           ${V.popisPod ? `<div style="margin-top:3px;font-size:11px;color:#8f8880">${V.popisPod}</div>` : ''}
         </td>
-        <td style="padding:15px 0;font-size:12.5px;text-align:right;vertical-align:top;color:#5c554e;border-bottom:1px solid ${V.linka}">${V.hodiny}</td>
-        <td style="padding:15px 0;font-size:12.5px;text-align:right;vertical-align:top;color:#5c554e;border-bottom:1px solid ${V.linka}">${V.sazba}</td>
-        <td style="padding:15px 0;font-size:12.5px;text-align:right;vertical-align:top;font-weight:700;border-bottom:1px solid ${V.linka}">${V.celkem}</td>
+        <td style="padding:${V.radekY} 0;font-size:${V.pismoPolozky};text-align:right;vertical-align:top;color:#5c554e;border-bottom:1px solid ${V.linka}">${V.hodiny}</td>
+        <td style="padding:${V.radekY} 0;font-size:${V.pismoPolozky};text-align:right;vertical-align:top;color:#5c554e;border-bottom:1px solid ${V.linka}">${V.sazba}</td>
+        <td style="padding:${V.radekY} 0;font-size:${V.pismoPolozky};text-align:right;vertical-align:top;font-weight:700;border-bottom:1px solid ${V.linka}">${V.celkem}</td>
       </tr>`}
     </table>
 
-    <div style="display:flex;justify-content:flex-end;margin-top:14px">
+    <div style="display:flex;justify-content:flex-end;margin-top:10px">
       <table style="border-collapse:collapse;width:340px">
         <tr>
           <td style="padding:4px 14px 4px 0;font-size:11.5px;color:#5c554e;line-height:1.4">${V.L.total}</td>
@@ -23098,7 +23118,7 @@ window.SABLONY_FAKTUR[10] = function (V) {
       </table>
     </div>
 
-    <div style="flex:1;min-height:14px"></div>
+    <div style="flex:1;min-height:0"></div>
 
     <div style="padding:12px 16px;background:${V.podklad};border-left:4px solid ${V.barva}">
       <div style="font-size:13px;font-weight:700;color:${V.barva}">${V.L.vatReason}</div>
@@ -23108,15 +23128,15 @@ window.SABLONY_FAKTUR[10] = function (V) {
   </div>
 
   <!-- těžký barevný pruh na dně: co poslat a kam -->
-  <div style="background:${V.barva};color:#fff;padding:26px 56px 30px;display:flex;justify-content:space-between;align-items:flex-end">
+  <div style="background:${V.barva};color:#fff;padding:20px 48px 22px;display:flex;justify-content:space-between;align-items:flex-end">
     <div style="width:52%">
       <div style="${stitekB}">${V.L.paymentInfo}</div>
       <div style="margin-top:11px;${stitekB}">IBAN</div>
       <div style="margin-top:3px;font-size:14px;font-weight:700;letter-spacing:.01em">${V.iban}</div>
       <div style="margin-top:11px;display:flex;gap:24px">
-        <div><div style="${stitekB}">SWIFT / BIC</div><div style="margin-top:3px;font-size:12.5px;font-weight:600">${V.swift}</div></div>
-        <div><div style="${stitekB}">VS</div><div style="margin-top:3px;font-size:12.5px;font-weight:600">${V.vs}</div></div>
-        <div><div style="${stitekB}">KS</div><div style="margin-top:3px;font-size:12.5px;font-weight:600">${V.ks}</div></div>
+        <div><div style="${stitekB}">SWIFT / BIC</div><div style="margin-top:3px;font-size:${V.pismoPolozky};font-weight:600">${V.swift}</div></div>
+        <div><div style="${stitekB}">VS</div><div style="margin-top:3px;font-size:${V.pismoPolozky};font-weight:600">${V.vs}</div></div>
+        <div><div style="${stitekB}">KS</div><div style="margin-top:3px;font-size:${V.pismoPolozky};font-weight:600">${V.ks}</div></div>
       </div>
     </div>
     <div style="width:44%;text-align:right">
@@ -23270,6 +23290,13 @@ function renderInvoice(d, lang = 'en') {
   // Vzhled č. 1 je ten původní a jeho HTML zůstává níž beze změny — na živých
   // fakturách se tím nemění vůbec nic.
   // ===================================================================
+  // Kolik toho na faktuře je: každá položka je řádek, dlouhý popis se zalomí
+  // na víc. Podle toho se pak sází hustěji, ať se doklad vejde na jednu A4.
+  const naplnFaktury = jePolozkova
+    ? polozky.reduce((soucet, pol) => soucet + 1 + Math.floor(String(pol.popis || '').length / 55), 0)
+    : 1
+  const stupenHustoty = naplnFaktury >= 14 ? 3 : naplnFaktury >= 7 ? 2 : naplnFaktury >= 4 ? 1 : 0
+
   const V = {
     // hlavička
     cislo: String(d.invoiceNum || ''), crmKod: d.crmCode || '',
@@ -23304,6 +23331,14 @@ function renderInvoice(d, lang = 'en') {
     kUhrade: toPay.toFixed(2), czk: totalCZK, kurz: rateStr,
     // barvy
     barva: barvaF || '#211D1A', podklad: barvaPodklad || '#f6f2ec', linka: barvaLinka || '#e0d9cf',
+    // Jak nahusto sázet. Faktura se do PDF vkládá jako JEDEN obrázek — když
+    // přeteče A4, zmenší se celá a vyjede menší, s bílými pruhy po stranách.
+    // U delších faktur se proto řádky i mezery samy stáhnou. Šablona jen dosadí,
+    // nic nepočítá.
+    radekY: ['13px', '7px', '3px', '2px'][stupenHustoty],
+    pismoPolozky: ['12.5px', '11px', '9.5px', '8.5px'][stupenHustoty],
+    mezera: ['26px', '16px', '7px', '5px'][stupenHustoty],
+    husto: stupenHustoty > 0,
     // popisky
     L,
   }
@@ -27756,6 +27791,28 @@ function naplnVyberVzhledu(el, vybrany) {
   el.value = String(Number(vybrany) || 1)
 }
 
+// Vykreslí vzorník barev pod přepínačem vzhledů. Kliknutím se ukázka
+// překreslí, uloží se ale až tlačítkem — ať jde barvy prolistovat naprázdno.
+function vykresliBarvyUkazky() {
+  const box = document.getElementById('invoice-design-colors')
+  const u = _ukazkaVzhledu
+  if (!box || !u) return
+  box.innerHTML = INVOICE_COLORS.map((barva, i) => {
+    const vybrana = Number(u.barva) === i
+    return `<button type="button" onclick="ukazBarvu(${i})" title="Barva ${i + 1}" aria-label="Barva ${i + 1}"
+      style="width:26px;height:26px;border-radius:50%;background:${barva};cursor:pointer;padding:0;
+      border:${vybrana ? '3px solid #fff' : '1px solid rgba(255,255,255,.35)'};
+      box-shadow:${vybrana ? '0 0 0 2px ' + barva : 'none'}"></button>`
+  }).join('')
+}
+
+function ukazBarvu(i) {
+  const u = _ukazkaVzhledu
+  if (!u) return
+  u.barva = i
+  ukazVzhled(u.idx)
+}
+
 // Přepne překryv mezi „opravdová faktura" a „ukázka vzhledu".
 function nastavRezimUkazky(zapnuto) {
   const akce = document.getElementById('invoice-actions')
@@ -27775,13 +27832,16 @@ function nastavRezimUkazky(zapnuto) {
   if (pocet) pocet.textContent = i + ' z 10'
   if (pouzit) pouzit.style.display = (u && u.pouzit) ? '' : 'none'
   if (pozn) pozn.textContent = u && u.poznamka ? u.poznamka : 'Ukázka se nikam neodesílá ani neukládá.'
+  vykresliBarvyUkazky()
 }
 
 // Otevře ukázku. `data` jsou hotová data faktury (stejná, jaká jdou do
 // renderInvoice), `pouzit` je funkce, která zvolený vzhled někam uloží.
-function otevriUkazkuVzhledu(data, vybrany, pouzit, poznamka) {
+function otevriUkazkuVzhledu(data, vybrany, pouzit, poznamka, barva) {
   if (!data) { showToast('⚠️ Není z čeho ukázku vykreslit'); return }
-  _ukazkaVzhledu = { data, idx: Math.min(10, Math.max(1, Number(vybrany) || 1)), pouzit: pouzit || null, poznamka: poznamka || '' }
+  _ukazkaVzhledu = { data, idx: Math.min(10, Math.max(1, Number(vybrany) || 1)),
+                     barva: (barva == null ? data.invoiceColorIdx : barva),
+                     pouzit: pouzit || null, poznamka: poznamka || '' }
   ukazVzhled(_ukazkaVzhledu.idx)
 }
 
@@ -27790,7 +27850,7 @@ function ukazVzhled(i) {
   if (!u) return
   u.idx = Math.min(10, Math.max(1, Number(i) || 1))
   try {
-    renderInvoice({ ...u.data, designIdx: u.idx, ukazka: true }, 'en')
+    renderInvoice({ ...u.data, designIdx: u.idx, invoiceColorIdx: u.barva ?? null, ukazka: true }, 'en')
   } catch (e) {
     console.error('[ukázka vzhledu]', e)
     showToast('❌ Ukázku se nepodařilo vykreslit: ' + (e?.message || e))
@@ -27806,7 +27866,7 @@ async function pouzitZobrazenyVzhled() {
   const tl = document.getElementById('invoice-design-use')
   if (tl) { tl.disabled = true; tl.textContent = 'Ukládám…' }
   try {
-    await u.pouzit(u.idx)
+    await u.pouzit(u.idx, u.barva)
   } catch (e) {
     console.error('[ukázka vzhledu] uložení:', e)
     showToast('❌ Vzhled se neuložil: ' + (e?.message || e))
@@ -27873,12 +27933,14 @@ async function ukazVzhledyPracovnika() {
   } catch (e) { console.warn('[ukázka vzhledu] profil:', e?.message) }
   const data = await dataProUkazkuVzhledu(currentWorkerId, profil)
   const ted = Number(profil?.invoice_design) || 1
-  otevriUkazkuVzhledu(data, ted, async (idx) => {
+  otevriUkazkuVzhledu(data, ted, async (idx, barva) => {
+    if (barva != null && barva !== profil?.invoice_color) await ulozBarvuFaktury(barva)
     await ulozVzhledFaktury(idx)
     const sel = document.getElementById('wd-inv-design')
     if (sel) sel.value = String(idx)
     closeInvoiceOverlay()
-  }, 'Uloží se u pracovníka. Příští faktura mu vyjede takhle.')
+  }, 'Vzhled i barva se uloží u pracovníka. Příští faktura mu vyjede takhle.',
+     profil?.invoice_color)
 }
 
 // Složka Faktury → okno úpravy → podívat se, jak bude tahle konkrétní faktura
@@ -27897,11 +27959,22 @@ async function ukazVzhledyFaktury() {
   const sel = document.getElementById('invedit-design')
   const ted = Number(sel?.value) || Number(r.design_idx) || extra.designIdx || 1
   const data = invoiceDataFromRow(r, extra)
-  otevriUkazkuVzhledu(data, ted, (idx) => {
+  otevriUkazkuVzhledu(data, ted, async (idx, barva) => {
     if (sel) sel.value = String(idx)
+    // Vzhled patří téhle faktuře, barva ale pracovníkovi — ta se proto ukládá hned.
+    let barvaUlozena = false
+    if (barva != null && barva !== extra.invoiceColorIdx) {
+      const puvodni = currentWorkerId
+      currentWorkerId = r.worker_id
+      barvaUlozena = await ulozBarvuFaktury(barva)
+      currentWorkerId = puvodni
+    }
     closeInvoiceOverlay()
-    showToast('✅ Vzhled vybrán — uloží se tlačítkem „Uložit a přepsat PDF"')
-  }, 'Vybere se jen pro tuhle fakturu. Uloží se až s ní.')
+    showToast(barvaUlozena
+      ? '✅ Barva uložena u pracovníka, vzhled se uloží tlačítkem „Uložit a přepsat PDF"'
+      : '✅ Vzhled vybrán — uloží se tlačítkem „Uložit a přepsat PDF"')
+  }, 'Vzhled se uloží až s fakturou, barva se ukládá pracovníkovi rovnou.',
+     extra.invoiceColorIdx)
 }
 
 // Zavře náhled faktury. Když je pod ní otevřený detail pracovníka (admin
@@ -27958,6 +28031,7 @@ async function loadWdInvoiceForm(profile) {
   const rt = document.getElementById('wd-inv-rate'); if (rt) rt.value = profile?.hourly_rate_worker || ''
   const vz = document.getElementById('wd-inv-design')
   if (vz) naplnVyberVzhledu(vz, (profile || currentWorkerProfile || {}).invoice_design || 1)
+  vykresliBarvyPracovnika((profile || currentWorkerProfile || {}).invoice_color)
   const it = document.getElementById('wd-inv-item')
   if (it) {
     const byProf = defaultInvoiceItem(profile?.profession)
@@ -28087,6 +28161,37 @@ async function updateWdInvoiceHours() {
 
 // Vzhled faktury se ukládá hned při přepnutí — ať se na to nezapomene
 // v okamžiku, kdy se faktura vystavuje.
+// Barva je vlastnost pracovníka (rámečky, linky, zvýrazněná částka) — jeden
+// vzhled tak u dvou lidí vypadá jinak. Ukládá se do profilu jako vzhled.
+async function ulozBarvuFaktury(idx) {
+  if (!currentWorkerId) return false
+  const n = parseInt(idx, 10)
+  if (!Number.isInteger(n) || n < 0 || n >= INVOICE_COLORS.length) return false
+  const { error } = await sb.from('profiles').update({ invoice_color: n }).eq('id', currentWorkerId)
+  if (error) {
+    showToast(/invoice_color|column|schema cache/i.test(error.message || '')
+      ? '❌ Chybí sloupec invoice_color — barvy zatím nejdou nastavit'
+      : '❌ Barva se neuložila: ' + error.message)
+    return false
+  }
+  if (currentWorkerProfile) currentWorkerProfile.invoice_color = n
+  vykresliBarvyPracovnika(n)
+  return true
+}
+
+// Vzorník na kartě pracovníka — ať se barva dá přehodit i bez otevírání ukázky.
+function vykresliBarvyPracovnika(vybrana) {
+  const box = document.getElementById('wd-inv-colors')
+  if (!box) return
+  const ted = vybrana == null ? (currentWorkerProfile || {}).invoice_color : vybrana
+  box.innerHTML = INVOICE_COLORS.map((barva, i) => {
+    const je = Number(ted) === i
+    return `<button type="button" onclick="ulozBarvuFaktury(${i})" title="Barva ${i + 1}" aria-label="Barva ${i + 1}"
+      style="width:22px;height:22px;border-radius:50%;background:${barva};cursor:pointer;padding:0;
+      border:${je ? '2.5px solid #fff' : '1px solid var(--brd)'};box-shadow:${je ? '0 0 0 2px ' + barva : 'none'}"></button>`
+  }).join('')
+}
+
 async function ulozVzhledFaktury(hodnota) {
   if (!currentWorkerId) return
   const n = parseInt(hodnota, 10)
@@ -28549,6 +28654,8 @@ document.addEventListener('visibilitychange', () => {
         </div>
         <button onclick="vzhledOJedenVpred()" title="Další vzhled" aria-label="Další vzhled" style="flex:0 0 auto;padding:12px 15px;background:rgba(255,255,255,.15);color:#fff;border:none;border-radius:10px;cursor:pointer;font-family:inherit;font-size:16px;font-weight:800">›</button>
       </div>
+      <!-- vzorník barev; barva je vlastnost pracovníka, vzhled a barva se ukládají spolu -->
+      <div id="invoice-design-colors" style="display:flex;flex-wrap:wrap;gap:7px;justify-content:center;margin-top:12px"></div>
       <button id="invoice-design-use" onclick="pouzitZobrazenyVzhled()" style="width:100%;margin-top:11px;padding:15px 14px;background:#1d9e75;color:#fff;border:none;border-radius:12px;font-weight:800;cursor:pointer;font-family:inherit;font-size:15px">Použít tento vzhled</button>
       <div id="invoice-design-note" style="color:#9a9082;font-size:11.5px;text-align:center;margin-top:7px;line-height:1.5">Ukázka se nikam neodesílá ani neukládá.</div>
     </div>
@@ -29061,6 +29168,11 @@ document.addEventListener('visibilitychange', () => {
       </div>
       <button type="button" onclick="closeInvoiceEdit()" aria-label="Zavřít" style="background:none;border:none;font-size:24px;line-height:1;color:#9a9a9a;cursor:pointer;padding:0 2px;font-family:inherit">&times;</button>
     </div>
+
+    <label style="display:block;font-size:12px;color:#7a7168;font-weight:700;margin:16px 0 5px">Číslo faktury</label>
+    <input type="text" id="invedit-number" maxlength="24" autocomplete="off"
+           style="width:100%;padding:12px;border:1.5px solid #d8cfc0;border-radius:10px;font-size:16px;font-weight:800;font-family:inherit;box-sizing:border-box">
+    <div style="font-size:11px;color:#9a9a9a;margin-top:4px;line-height:1.45">Přepsané číslo se propíše i do PDF. Další faktury pak pokračují v tomhle tvaru.</div>
 
     <div style="background:#faf7f2;border-radius:12px;padding:14px;margin:16px 0">
       <div style="display:flex;justify-content:space-between;font-size:13px;padding:3px 0">
