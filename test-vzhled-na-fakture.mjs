@@ -1,7 +1,7 @@
 // Zkouška vzhledu u faktury. Kód se vytahuje PŘÍMO z appky, ne z kopie —
 // jinak by zkouška ověřovala něco jiného, než co je nasazené.
 import fs from 'fs'
-const src = fs.readFileSync('nasazeni4/subbau_final.html', 'utf8')
+const src = fs.readFileSync(process.argv[2] || 'subbau_final.html', 'utf8')
 
 function vytahni(od, doo) {
   const i = src.indexOf(od); if (i < 0) throw new Error('nenašel jsem: ' + od)
@@ -19,6 +19,8 @@ const hlasky = []
 const vykresleno = []
 
 const kod = [
+  // Paletu bereme z appky, ať zkouška měří na týchž barvách.
+  vytahni('const INVOICE_COLORS = [', '\n// Z indexu udělá barvu'),
   vytahni('const NAZVY_VZHLEDU = {', '// Zavře náhled faktury.'),
   vytahni('function invoiceDataFromRow(r, extra)', '\nlet _invEditId'),
   vytahni('function invoiceRowFromLast(sentVia)', '\n// Nahraje PDF do složky'),

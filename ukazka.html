@@ -3128,7 +3128,7 @@ setTimeout(function () {
         <div class="fg" style="margin-bottom:12px">
           <label style="font-size:12px">Číslo faktury</label>
           <div style="display:flex;align-items:center;gap:8px">
-            <input id="inv-num-full" type="text" maxlength="24" placeholder="202601" autocomplete="off"
+            <input oninput="oznacCisloRucne(this)" id="inv-num-full" type="text" maxlength="24" placeholder="202601" autocomplete="off"
               style="flex:1;min-width:0;padding:10px;border:1.5px solid var(--brd);border-radius:8px;font-size:18px;font-weight:800;letter-spacing:.02em;font-family:inherit;box-sizing:border-box">
             <span style="font-size:12px;color:var(--text3);line-height:1.35">Můžete si ho<br>přepsat, jak chcete</span>
           </div>
@@ -3559,7 +3559,7 @@ setTimeout(function () {
             <div class="fg" style="margin-bottom:8px">
               <label style="font-size:11px">Číslo faktury</label>
               <div style="display:flex;align-items:center;gap:7px">
-                <input type="text" id="wd-inv-num-full" maxlength="24" placeholder="202601" autocomplete="off" style="flex:1;min-width:90px;font-size:15px;font-weight:800;padding:8px;border:1.5px solid var(--brd);border-radius:8px;font-family:inherit">
+                <input oninput="oznacCisloRucne(this)" type="text" id="wd-inv-num-full" maxlength="24" placeholder="202601" autocomplete="off" style="flex:1;min-width:90px;font-size:15px;font-weight:800;padding:8px;border:1.5px solid var(--brd);border-radius:8px;font-family:inherit">
               </div>
               <div style="font-size:10.5px;color:var(--text3);margin-top:4px;line-height:1.35">Přepište si ho, jak chcete (202601, 01/2026, F-0042) — další faktury pak pokračují ve stejném tvaru.</div>
             </div>
@@ -5100,7 +5100,7 @@ async function submitAdminSignatureWithPlacement() {
 // Po nahrání nové verze se snadno pozná, jestli se opravdu nasadila: otevřete
 // appku, zmáčkněte F12 (na Macu ⌥⌘I) a v konzoli je vypsané tohle datum. Když
 // tam svítí starší, prohlížeč nebo GitHub drží starou verzi.
-const SUBBAU_VERZE = '2026-09-06 b — barva se ukládá vždy správnému pracovníkovi'
+const SUBBAU_VERZE = '2026-09-06 c — opravy po velké prověrce faktur'
 console.log('StavKo docházka — verze ' + SUBBAU_VERZE)
 
 // ============ SUPABASE CONFIG ============
@@ -12690,9 +12690,17 @@ function openInvoiceEdit(id) {
   // Vzhled uložený u faktury. Starší faktury ho nemají — u nich se doptáme
   // profilu pracovníka, ať v nabídce svítí to, v čem se doklad opravdu vykreslí.
   naplnVyberVzhledu(vzEl, Number(r.design_idx) || 1)
+  // Dokud správce do nabídky nesáhne, bereme vzhled z faktury (a u starých
+  // faktur z profilu). Bez tohohle příznaku by se všem starým fakturám při
+  // přepsání PDF vnutil vzhled 1 — nabídka totiž nikdy není prázdná.
+  if (vzEl) vzEl.dataset.dotknuto = ''
   if (!r.design_idx && r.worker_id) {
     sb.from('profiles').select('invoice_design').eq('id', r.worker_id).maybeSingle()
-      .then(({ data }) => { if (data && vzEl && _invEditId === id) vzEl.value = String(data.invoice_design || 1) })
+      .then(({ data }) => {
+        if (data && vzEl && _invEditId === id && vzEl.dataset.dotknuto !== '1') {
+          vzEl.value = String(data.invoice_design || 1)
+        }
+      })
       .catch(e => console.warn('[faktura] vzhled z profilu:', e?.message))
   }
 
@@ -12804,20 +12812,29 @@ async function saveInvoiceEdit() {
   const cisloNove = String(document.getElementById('invedit-number')?.value || '').trim().slice(0, 24)
   if (!cisloNove) { finish('⚠️ Číslo faktury nesmí zůstat prázdné'); return }
   if (cisloNove !== String(r.invoice_number || '')) {
+    // Knihovna chybu nevyhazuje, vrací ji v objektu. Bez přečtení `error` by
+    // neúspěšný dotaz vypadal jako „číslo je volné" a duplicita by prošla.
+    let kolize = null, chybaKolize = null
     try {
-      const { data: kolize } = await sb.from('worker_invoices')
-        .select('id').eq('worker_id', r.worker_id).eq('invoice_number', cisloNove).neq('id', r.id)
-      if (kolize && kolize.length) {
-        finish('⚠️ Číslo ' + cisloNove + ' už má jiná faktura tohohle pracovníka — zvolte jiné')
-        return
-      }
-    } catch (e) { console.warn('[faktura] kontrola čísla:', e?.message) }
+      ;({ data: kolize, error: chybaKolize } = await sb.from('worker_invoices')
+        .select('id').eq('worker_id', r.worker_id).eq('invoice_number', cisloNove).neq('id', r.id))
+    } catch (e) { chybaKolize = e }
+    if (chybaKolize) {
+      finish('❌ Nepodařilo se ověřit, jestli je číslo volné — zkuste to prosím znovu')
+      return
+    }
+    if (kolize && kolize.length) {
+      finish('⚠️ Číslo ' + cisloNove + ' už má jiná faktura tohohle pracovníka — zvolte jiné')
+      return
+    }
   }
 
   // Vzhled zvolený v okně má přednost přede vším ostatním — kvůli němu se sem
   // admin došel. Bez volby zůstane ten, ve kterém byla faktura vystavená.
+  const vzEl2 = document.getElementById('invedit-design')
   const vzhledZvoleny = Math.min(10, Math.max(1,
-    Number(document.getElementById('invedit-design')?.value) || Number(r.design_idx) || extra.designIdx || 1))
+    (vzEl2 && vzEl2.dataset.dotknuto === '1' ? Number(vzEl2.value) : 0)
+    || Number(r.design_idx) || extra.designIdx || 1))
 
   // 1) Vykresli fakturu znovu — už se zálohou
   const dataForRender = invoiceDataFromRow({ ...r, items: polozky, total_amount: total,
@@ -17781,9 +17798,7 @@ function rozborCislaFaktury(cislo) {
   const s = String(cislo == null ? '' : cislo).trim()
   if (!s) return null
   const skupiny = []
-  const re = /\d+/g
-  let m
-  while ((m = re.exec(s)) !== null) skupiny.push({ text: m[0], od: m.index })
+  for (const m of s.matchAll(/\d+/g)) skupiny.push({ text: m[0], od: m.index })
   if (!skupiny.length) return null
   const jeRok = t => /^\d{4}$/.test(t) && Number(t) >= 2000 && Number(t) <= 2099
   const kus = (pred, poc, za, rok) => ({ pred, poc, za, rok: rok || null })
@@ -17852,9 +17867,16 @@ async function dalsiCisloFaktury(workerId, rok) {
 }
 
 // Předvyplní číslo do formuláře. Co si člověk přepíše, neměníme.
+// Jakmile do čísla někdo sáhne, appka mu ho už nepřepíše. Dřív ho smazal
+// každý úhoz do sazby (ta si vyžádá nové předvyplnění) i návrat na záložku.
+function oznacCisloRucne(el) {
+  if (el) el.dataset.rucne = String(el.value || '').trim() ? '1' : ''
+}
+
 async function predvyplnitCisloFaktury(workerId, rok, pre = 'inv', tyden = null) {
   const poleEl = _pole(pre, 'num-full')
   if (!poleEl) return
+  if (poleEl.dataset.rucne === '1') return
 
   // Za týden, který už fakturovaný byl, drží faktura svoje původní číslo —
   // jde o opravu, ne o nový doklad.
@@ -21792,6 +21814,16 @@ async function generateInvoiceMob(lang = 'en', override = null) {
     if (!stejne) return
   }
 
+  // Předchozí pojistka hlídá jen faktury počítané z hodin. S položkami se dá
+  // vystavit doklad na nulu i tak — stačí prázdné množství nebo cena.
+  // Faktura na 0 € nedává smysl nikdy, tak se na ni zeptáme taky.
+  if (!(totalAmount > 0)) {
+    const stejne = confirm('Faktura by vyšla na 0 €.\n\n'
+      + 'Zkontrolujte prosím hodiny nebo množství a cenu u položek.\n\n'
+      + 'Opravdu ji vystavit?')
+    if (!stejne) return
+  }
+
   // Data faktury. Admin může vystavit i zpětně — pak se použije jeho datum
   // vystavení a splatnost se počítá od něj, ne od dneška.
   let today = new Date()
@@ -21811,20 +21843,34 @@ async function generateInvoiceMob(lang = 'en', override = null) {
   const zadaneCislo = String(override?.invoiceNum ?? document.getElementById('inv-num-full')?.value ?? '').trim()
   const invoiceNum = zadaneCislo || `${year}${week.toString().padStart(2,'0')}`
 
-  // Číslo se zpětně neopravuje — když je něco špatně, vystaví se nová faktura.
+  // Číslo si píše pracovník sám; admin ho může později opravit v okně úpravy.
   // O to důležitější je nepoužít jedno číslo dvakrát. Faktura za tentýž týden
   // je v pořádku (přepisuje tu původní), ale stejné číslo na jiném týdnu je chyba.
+  // Dřív se tu dalo pokračovat tlačítkem „Vystavit i tak" — jenže zápis faktury
+  // přepisuje řádek podle (pracovník, číslo), takže by se tím původní doklad za
+  // jiný týden CELÝ přepsal a zmizel by i odkaz na jeho PDF. Proto se pokračovat
+  // nedá: číslo za jiný týden se odmítne a řekne se, které je volné.
   try {
-    const { data: kolize } = await sb.from('worker_invoices')
+    const { data: kolize, error: chybaKolize } = await sb.from('worker_invoices')
       .select('kw, kw_year').eq('worker_id', workerId).eq('invoice_number', invoiceNum)
+    if (chybaKolize) {
+      showToast('❌ Nepodařilo se ověřit, jestli je číslo volné — zkuste to prosím znovu')
+      return
+    }
     const jinyTyden = (kolize || []).some(r => String(r.kw) !== String(week) || String(r.kw_year) !== String(year))
     if (jinyTyden) {
-      const stejnePrec = confirm('Fakturu s číslem ' + invoiceNum + ' už tenhle pracovník vystavil za jiný týden.\n\n'
-        + 'Dvě faktury se stejným číslem dělají v účetnictví nepořádek. Doporučuju zvolit další volné číslo.\n\n'
-        + 'Vystavit i tak?')
-      if (!stejnePrec) return
+      let volne = ''
+      try { volne = await dalsiCisloFaktury(workerId, year) } catch (e) { volne = '' }
+      alert('Fakturu s číslem ' + invoiceNum + ' už tenhle pracovník vystavil za jiný týden.\n\n'
+        + 'Použít ho podruhé nejde — přepsala by se tím ta původní.\n\n'
+        + (volne ? 'Volné číslo je ' + volne + '.' : 'Zvolte prosím jiné číslo.'))
+      return
     }
-  } catch (e) { console.warn('[faktura] kontrola čísla:', e?.message) }
+  } catch (e) {
+    console.warn('[faktura] kontrola čísla:', e?.message)
+    showToast('❌ Nepodařilo se ověřit, jestli je číslo volné — zkuste to prosím znovu')
+    return
+  }
 
   // Popis plnění pro finanční úřad: CO se dělalo, KDY (přesné období) a KOLIK hodin.
   // Hlavní řádek anglicky (čte ho německý odběratel), pod ním překlad DE · CZ.
@@ -22076,11 +22122,11 @@ ${V.popisPod ? `<div style="font-size:9px;color:#8A837C;margin-top:3px;line-heig
 </tr>
 ${V.zalohaJe ? `<tr>
 <td style="border:1px solid ${V.linka};border-top:0;padding:6px 9px 7px;font-size:6.5px;letter-spacing:1.3px;text-transform:uppercase;color:#7A736C">${V.L.cashPaid}${V.zalohaPozn ? `<div style="font-size:8.5px;letter-spacing:0;text-transform:none;color:#8A837C;margin-top:3px">${V.zalohaPozn}</div>` : ''}</td>
-<td style="border:1px solid ${V.linka};border-top:0;border-left:0;padding:6px 9px 7px;text-align:right;font-size:12px;font-weight:600;vertical-align:top">${V.zaloha}</td>
+<td style="border:1px solid ${V.linka};border-top:0;border-left:0;padding:6px 9px 7px;text-align:right;font-size:12px;font-weight:600;vertical-align:top">&minus; ${V.zaloha} EUR</td>
 </tr>` : ''}
 <tr>
 <td style="border:2px solid ${V.linka};border-top:0;background:${V.podklad};padding:9px;font-size:7px;letter-spacing:1.4px;text-transform:uppercase;color:#3C3733;font-weight:700;vertical-align:middle">${V.L.toPay || 'K úhradě · Zahlbetrag · Amount due'}</td>
-<td style="border:2px solid ${V.linka};border-top:0;border-left:0;background:${V.podklad};padding:9px;text-align:right;font-size:23px;font-weight:800;letter-spacing:0.4px;color:${V.barva};vertical-align:middle">${V.kUhrade}</td>
+<td style="border:2px solid ${V.linka};border-top:0;border-left:0;background:${V.podklad};padding:9px;text-align:right;font-size:23px;font-weight:800;letter-spacing:0.4px;color:${V.barva};vertical-align:middle">${V.kUhrade} EUR</td>
 </tr>
 <tr>
 <td colspan="2" style="border:1px solid ${V.linka};border-top:0;padding:5px 9px 6px;text-align:right;font-size:9px;color:#5F5952">
@@ -22146,7 +22192,7 @@ window.SABLONY_FAKTUR[3] = function (V) {
       <table style="width:100%;border-collapse:collapse">
         ${radek(V.L.issued, V.datumVystaveni)}
         ${radek(V.L.due, V.datumSplatnosti)}
-        ${radek(V.L.days, V.splatnostDni)}
+        ${radek(V.L.dueDate.split(" · ")[0] + " · Fällig · Due", V.splatnostDni + " dní/Tage/days")}
       </table>
       <div style="margin-top:9px;padding-top:8px;border-top:1px solid ${V.linka}">
         <div style="font-size:8.5pt;letter-spacing:.12em;text-transform:uppercase;color:#8a8078">${V.L.period}</div>
@@ -22328,7 +22374,7 @@ ${V.zalohaJe ? `<div style="display:flex;justify-content:space-between;align-ite
 ${V.zalohaPozn ? `<div style="font-size:9px;color:#6B6560;line-height:1.45;padding:5px 14px 0;text-align:right">${V.zalohaPozn}</div>` : ``}` : ``}
 <div style="background:${V.barva};color:#fff;padding:13px 14px;margin-top:10px;display:flex;justify-content:space-between;align-items:center">
 <span style="font-size:8px;letter-spacing:2px;text-transform:uppercase;opacity:.85;max-width:120px;line-height:1.35">${V.L.toPay || 'K úhradě'}</span>
-<span style="font-family:Georgia,'Times New Roman',serif;font-size:27px;line-height:1;font-weight:700">${V.kUhrade}</span>
+<span style="font-family:Georgia,'Times New Roman',serif;font-size:27px;line-height:1;font-weight:700">${V.kUhrade} EUR</span>
 </div>
 <div style="text-align:right;font-size:9px;color:#6B6560;margin-top:6px">${V.czk} &nbsp;·&nbsp; ${V.kurz}</div>
 </div>
@@ -22382,8 +22428,8 @@ window.SABLONY_FAKTUR[5] = function (V) {
           <tr><td colspan="2" style="${nadpisek};font-weight:700;color:${V.barva}">${V.L.supplier}</td></tr>
           <tr><td colspan="2" style="${bunka};font-size:11pt;font-weight:700">${V.dodavatel.jmeno}</td></tr>
           <tr><td colspan="2" style="${bunka};line-height:1.55;color:#4a443e">${V.dodavatel.adresa.replace(/\n/g, '<br>')}</td></tr>
-          <tr><td style="${nadpisek};width:34%">IČO</td><td style="${bunka};font-family:${MONO}">${V.dodavatel.ic}</td></tr>
-          ${V.dodavatel.platceDph ? `<tr><td style="${nadpisek}">DIČ</td><td style="${bunka};font-family:${MONO}">${V.dodavatel.dic}</td></tr>` : ''}
+          <tr><td style="${nadpisek};width:34%">${V.L.id}</td><td style="${bunka};font-family:${MONO}">${V.dodavatel.ic}</td></tr>
+          ${V.dodavatel.platceDph ? `<tr><td style="${nadpisek}">${V.L.vatId}</td><td style="${bunka};font-family:${MONO}">${V.dodavatel.dic}</td></tr>` : ''}
         </table>
       </div>
       <div style="width:34%">
@@ -22391,8 +22437,8 @@ window.SABLONY_FAKTUR[5] = function (V) {
           <tr><td colspan="2" style="${nadpisek};font-weight:700;color:${V.barva}">${V.L.customer}</td></tr>
           <tr><td colspan="2" style="${bunka};font-size:11pt;font-weight:700">${V.odberatel.jmeno}</td></tr>
           <tr><td colspan="2" style="${bunka};line-height:1.55;color:#4a443e">${V.odberatel.adresa.replace(/\n/g, '<br>')}</td></tr>
-          <tr><td style="${nadpisek};width:34%">IČO</td><td style="${bunka};font-family:${MONO}">${V.odberatel.ic}</td></tr>
-          <tr><td style="${nadpisek}">DIČ</td><td style="${bunka};font-family:${MONO}">${V.odberatel.dic}</td></tr>
+          <tr><td style="${nadpisek};width:34%">${V.L.id}</td><td style="${bunka};font-family:${MONO}">${V.odberatel.ic}</td></tr>
+          <tr><td style="${nadpisek}">${V.L.vatId}</td><td style="${bunka};font-family:${MONO}">${V.odberatel.dic}</td></tr>
         </table>
       </div>
       <div style="width:32%">
@@ -22455,7 +22501,7 @@ window.SABLONY_FAKTUR[5] = function (V) {
           </tr>` : ''}
           <tr>
             <td style="${nadpisek};background:${V.barva};color:#fff;border-color:${V.barva};font-weight:800;font-size:8pt">${V.L.forPayment}</td>
-            <td style="${bunka};background:${V.barva};border-color:${V.barva};font-family:${MONO};text-align:right;font-size:14pt;font-weight:800;color:#fff">${V.kUhrade}</td>
+            <td style="${bunka};background:${V.barva};border-color:${V.barva};font-family:${MONO};text-align:right;font-size:14pt;font-weight:800;color:#fff">${V.kUhrade} EUR</td>
           </tr>
           <tr>
             <td style="${nadpisek}">${V.L.czk}</td>
@@ -22494,7 +22540,7 @@ window.SABLONY_FAKTUR[6] = function (V) {
   return `<div id="invoice-page" style="width:794px;min-height:1123px;background:#fff;font-family:-apple-system,'Segoe UI',Arial,sans-serif;color:#211D1A;box-sizing:border-box">
     <div id="invoice-body" style="display:flex;flex-direction:column;min-height:1123px;box-sizing:border-box">
 
-      <div style="height:${V.husto ? "94px" : "120px"};background:${V.barva};color:#fff;display:flex;align-items:center;justify-content:space-between;padding:0 46px;box-sizing:border-box;flex:none">
+      <div style="height:${V.husto ? "84px" : "120px"};background:${V.barva};color:#fff;display:flex;align-items:center;justify-content:space-between;padding:0 46px;box-sizing:border-box;flex:none">
         <div>
           <div style="font-size:23pt;font-weight:400;letter-spacing:.05em;line-height:1.08">${V.L.title}</div>
           <div style="width:54px;height:2px;background:#fff;opacity:.55;margin-top:12px"></div>
@@ -22599,11 +22645,11 @@ window.SABLONY_FAKTUR[6] = function (V) {
             </div>
             ${V.zalohaJe ? `<div style="display:flex;justify-content:space-between;align-items:baseline;padding:8px 0;border-bottom:1px solid ${V.linka}">
               <div style="font-size:7.5pt;color:#9A948E;padding-right:10px;line-height:1.4">${V.L.cashPaid}</div>
-              <div style="font-size:10pt;font-weight:700;white-space:nowrap">${V.zaloha}</div>
+              <div style="font-size:10pt;font-weight:700;white-space:nowrap">&minus; ${V.zaloha} EUR</div>
             </div>${V.zalohaPozn ? `<div style="font-size:7pt;color:#9A948E;padding:5px 0 0;line-height:1.4">${V.zalohaPozn}</div>` : ''}` : ''}
             <div style="background:${V.podklad};padding:14px 16px;margin-top:14px;box-sizing:border-box">
               <div style="font-size:6.5pt;letter-spacing:.2em;text-transform:uppercase;color:${V.barva};font-weight:700;line-height:1.4">${V.L.forPayment}</div>
-              <div style="font-size:35pt;font-weight:800;color:${V.barva};line-height:1.1;margin-top:4px;white-space:nowrap;text-align:right">${V.kUhrade}</div>
+              <div style="font-size:35pt;font-weight:800;color:${V.barva};line-height:1.1;margin-top:4px;white-space:nowrap;text-align:right">${V.kUhrade}</div><div style="font-size:11pt;font-weight:700;color:${V.barva};text-align:right;margin-top:1px">EUR</div>
             </div>
             <div style="display:flex;justify-content:space-between;align-items:baseline;margin-top:9px">
               <div style="font-size:7pt;color:#9A948E;padding-right:10px">${V.L.exchangeRate} ${V.kurz}</div>
@@ -22762,7 +22808,7 @@ window.SABLONY_FAKTUR[7] = function (V) {
           </tr>` : ''}
           <tr>
             <td style="padding:5px 8px;font-size:9px;letter-spacing:.8px;text-transform:uppercase;color:#fff;background:${V.barva};vertical-align:middle">${V.L.toPay}</td>
-            <td style="padding:5px 8px;font-size:22px;font-weight:800;text-align:right;white-space:nowrap;color:#fff;background:${V.barva};line-height:1.1">${V.kUhrade}</td>
+            <td style="padding:5px 8px;font-size:22px;font-weight:800;text-align:right;white-space:nowrap;color:#fff;background:${V.barva};line-height:1.1">${V.kUhrade} EUR</td>
           </tr>
           <tr>
             <td style="padding:3px 8px;font-size:9px;color:#8A837C">${V.L.czk} · ${V.kurz}</td>
@@ -23140,9 +23186,9 @@ window.SABLONY_FAKTUR[10] = function (V) {
       <div style="margin-top:11px;${stitekB}">IBAN</div>
       <div style="margin-top:3px;font-size:14px;font-weight:700;letter-spacing:.01em">${V.iban}</div>
       <div style="margin-top:11px;display:flex;gap:24px">
-        <div><div style="${stitekB}">SWIFT / BIC</div><div style="margin-top:3px;font-size:${V.pismoPolozky};font-weight:600">${V.swift}</div></div>
-        <div><div style="${stitekB}">VS</div><div style="margin-top:3px;font-size:${V.pismoPolozky};font-weight:600">${V.vs}</div></div>
-        <div><div style="${stitekB}">KS</div><div style="margin-top:3px;font-size:${V.pismoPolozky};font-weight:600">${V.ks}</div></div>
+        <div><div style="${stitekB}">SWIFT / BIC</div><div style="margin-top:3px;font-size:12.5px;font-weight:600">${V.swift}</div></div>
+        <div><div style="${stitekB}">VS</div><div style="margin-top:3px;font-size:12.5px;font-weight:600">${V.vs}</div></div>
+        <div><div style="${stitekB}">KS</div><div style="margin-top:3px;font-size:12.5px;font-weight:600">${V.ks}</div></div>
       </div>
     </div>
     <div style="width:44%;text-align:right">
@@ -23305,26 +23351,33 @@ function renderInvoice(d, lang = 'en') {
 
   const V = {
     // hlavička
-    cislo: String(d.invoiceNum || ''), crmKod: d.crmCode || '',
+    cislo: escHtml(String(d.invoiceNum || '')), crmKod: escHtml(d.crmCode || ''),
     datumVystaveni: d.today, datumSplatnosti: d.dueDate, splatnostDni: d.dueDays || 14,
     obdobiOd: d.periodFrom, obdobiDo: d.periodTo,
-    // dodavatel
+    // Do šablon jde jen OŠETŘENÝ text. Jméno, adresu i číslo faktury píše člověk
+    // a šablony 2–10 je vkládají rovnou do HTML — bez tohohle by lomená závorka
+    // ve jméně firmy rozhodila celý doklad. Zalomení řádků escHtml nemění,
+    // takže .replace(/\n/g,'<br>') v šablonách funguje dál.
     dodavatel: {
-      jmeno: d.workerName || '', adresa: String(d.workerAddr || ''),
-      ic: d.workerIC || '', dic: d.workerVat || '',
-      email: d.workerEmail || '', telefon: d.workerPhone || '',
+      jmeno: escHtml(d.workerName || ''), adresa: escHtml(String(d.workerAddr || '')),
+      ic: escHtml(d.workerIC || ''), dic: escHtml(d.workerVat || ''),
+      email: escHtml(d.workerEmail || ''), telefon: escHtml(d.workerPhone || ''),
       platceDph: !!d.isVatPayer,
     },
     // odběratel
-    odberatel: { jmeno: cust.name || '', adresa: String(cust.address || ''),
-                 ic: cust.id || '', dic: cust.vatId || '' },
+    odberatel: { jmeno: escHtml(cust.name || ''), adresa: escHtml(String(cust.address || '')),
+                 ic: escHtml(cust.id || ''), dic: escHtml(cust.vatId || '') },
     // platba
-    iban: d.iban || '', swift: d.swift || '', vs: varSymbol, ks: constSymbol,
+    iban: escHtml(d.iban || ''), swift: escHtml(d.swift || ''),
+    vs: escHtml(varSymbol), ks: constSymbol,
     // položky — už spočítané, šablona jen vypisuje
     jePolozkova,
     polozky: (jePolozkova ? polozky : []).map(pol => {
       const mn = mnozstviPolozky(pol), c = Number(pol.cena) || 0
-      return { popis: escHtml(String(pol.popis || '')).replace(/\r?\n/g, '<br>'),
+      // Řádek bez popisu by na daňovém dokladu neřekl, za co se platí — radši
+      // doplníme obecný název práce než abychom nechali prázdno.
+      const popisRadku = String(pol.popis || '').trim() || INVOICE_ITEM_FALLBACK.en
+      return { popis: escHtml(popisRadku).replace(/\r?\n/g, '<br>'),
                mnozstvi: Number.isInteger(mn) ? String(mn) : String(mn),
                cena: c.toFixed(2), castka: (Math.round(mn * c * 100) / 100).toFixed(2) }
     }),
@@ -23387,9 +23440,9 @@ function renderInvoice(d, lang = 'en') {
       </div>
       <div style="text-align:right">
         <div style="display:inline-block;background:${barvaPodklad || '#faf6ee'};border:1.5px solid ${barvaF || '#E8A13A'};padding:5px 14px;border-radius:8px">
-          <span style="font-size:7pt;color:${barvaF || '#8B5930'};letter-spacing:.5px">Č. · Nr. · No.&nbsp;&nbsp;</span><span style="font-size:13pt;font-weight:800;color:#211D1A;vertical-align:middle">${d.invoiceNum}</span>
+          <span style="font-size:7pt;color:${barvaF || '#8B5930'};letter-spacing:.5px">Č. · Nr. · No.&nbsp;&nbsp;</span><span style="font-size:13pt;font-weight:800;color:#211D1A;vertical-align:middle">${escHtml(String(d.invoiceNum || ""))}</span>
         </div>
-        ${d.crmCode ? `<div style="font-size:8pt;font-weight:800;letter-spacing:.06em;color:${invoiceColor(d.invoiceColorIdx) || '#8B5930'};margin-top:3px">${d.crmCode}</div>` : ''}
+        ${d.crmCode ? `<div style="font-size:8pt;font-weight:800;letter-spacing:.06em;color:${invoiceColor(d.invoiceColorIdx) || '#8B5930'};margin-top:3px">${escHtml(String(d.crmCode || ""))}</div>` : ''}
       </div>
     </div>
 
@@ -27821,6 +27874,10 @@ function ukazBarvu(i) {
 
 // Přepne překryv mezi „opravdová faktura" a „ukázka vzhledu".
 function nastavRezimUkazky(zapnuto) {
+  // Okno úpravy faktury má z-index 10050. Bez tohohle by se ukázka vykreslila
+  // POD ním — byla by neviditelná a nešla by ovládat.
+  const prekryv = document.getElementById('invoice-overlay')
+  if (prekryv) prekryv.style.zIndex = zapnuto ? '10060' : '10000'
   const akce = document.getElementById('invoice-actions')
   const lista = document.getElementById('invoice-design-bar')
   const nadpis = document.getElementById('invoice-title')
@@ -27939,11 +27996,16 @@ async function ukazVzhledyPracovnika() {
   } catch (e) { console.warn('[ukázka vzhledu] profil:', e?.message) }
   const data = await dataProUkazkuVzhledu(currentWorkerId, profil)
   const ted = Number(profil?.invoice_design) || 1
+  // Komu ukázku otevíráme si zapamatujeme. Než správce vybere, může mezitím
+  // otevřít kartu někoho jiného — a volba by pak padla na špatného člověka.
+  const proKoho = currentWorkerId
   otevriUkazkuVzhledu(data, ted, async (idx, barva) => {
-    if (barva != null && barva !== profil?.invoice_color) await ulozBarvuFaktury(barva)
-    await ulozVzhledFaktury(idx)
-    const sel = document.getElementById('wd-inv-design')
-    if (sel) sel.value = String(idx)
+    if (barva != null && barva !== profil?.invoice_color) await ulozBarvuFaktury(barva, proKoho)
+    await ulozVzhledFaktury(idx, proKoho)
+    if (proKoho === currentWorkerId) {
+      const sel = document.getElementById('wd-inv-design')
+      if (sel) sel.value = String(idx)
+    }
     closeInvoiceOverlay()
   }, 'Vzhled i barva se uloží u pracovníka. Příští faktura mu vyjede takhle.',
      profil?.invoice_color)
@@ -27965,14 +28027,24 @@ async function ukazVzhledyFaktury() {
   const sel = document.getElementById('invedit-design')
   const ted = Number(sel?.value) || Number(r.design_idx) || extra.designIdx || 1
   const data = invoiceDataFromRow(r, extra)
+  // Okno úpravy se mezitím může zavřít — pak není kam vzhled uložit a nesmíme
+  // tvrdit, že uložený je.
+  const proFakturu = _invEditId
   otevriUkazkuVzhledu(data, ted, async (idx, barva) => {
-    if (sel) sel.value = String(idx)
+    const oknoBezi = _invEditId === proFakturu && document.getElementById('invedit-dialog')?.style.display === 'flex'
+    if (oknoBezi && sel) { sel.value = String(idx); sel.dataset.dotknuto = '1' }
     // Vzhled patří téhle faktuře, barva ale pracovníkovi — ta se proto ukládá hned.
     let barvaUlozena = false
     if (barva != null && barva !== extra.invoiceColorIdx) {
       barvaUlozena = await ulozBarvuFaktury(barva, r.worker_id)
     }
     closeInvoiceOverlay()
+    if (!oknoBezi) {
+      showToast(barvaUlozena
+        ? '⚠️ Barva uložena, ale okno úpravy se mezitím zavřelo — vzhled vyberte znovu'
+        : '⚠️ Okno úpravy se mezitím zavřelo — vzhled vyberte znovu')
+      return
+    }
     showToast(barvaUlozena
       ? '✅ Barva uložena u pracovníka, vzhled se uloží tlačítkem „Uložit a přepsat PDF"'
       : '✅ Vzhled vybrán — uloží se tlačítkem „Uložit a přepsat PDF"')
@@ -28202,18 +28274,19 @@ function vykresliBarvyPracovnika(vybrana) {
   }).join('')
 }
 
-async function ulozVzhledFaktury(hodnota) {
-  if (!currentWorkerId) return
+async function ulozVzhledFaktury(hodnota, workerId) {
+  const kdo = workerId || currentWorkerId
+  if (!kdo) return
   const n = parseInt(hodnota, 10)
   if (!Number.isInteger(n) || n < 1 || n > 10) return
-  const { error } = await sb.from('profiles').update({ invoice_design: n }).eq('id', currentWorkerId)
+  const { error } = await sb.from('profiles').update({ invoice_design: n }).eq('id', kdo)
   if (error) {
     showToast(/invoice_design|column|schema cache/i.test(error.message || '')
       ? '❌ Chybí sloupec invoice_design — spusťte migraci supabase-migrace-vzhled-faktury.sql'
       : '❌ Vzhled se neuložil: ' + error.message)
     return
   }
-  if (currentWorkerProfile) currentWorkerProfile.invoice_design = n
+  if (kdo === currentWorkerId && currentWorkerProfile) currentWorkerProfile.invoice_design = n
   showToast('✅ Vzhled faktury uložen — příště se vystaví takhle')
 }
 
@@ -29245,7 +29318,7 @@ document.addEventListener('visibilitychange', () => {
 
     <label style="display:block;font-size:12px;color:#7a7168;font-weight:700;margin:14px 0 5px">Vzhled faktury</label>
     <div style="display:flex;gap:8px;align-items:center">
-      <select id="invedit-design" style="flex:1;min-width:0;padding:10px;border:1.5px solid #d8cfc0;border-radius:9px;font-size:14px;font-family:inherit;box-sizing:border-box"></select>
+      <select id="invedit-design" onchange="this.dataset.dotknuto='1'" style="flex:1;min-width:0;padding:10px;border:1.5px solid #d8cfc0;border-radius:9px;font-size:14px;font-family:inherit;box-sizing:border-box"></select>
       <button onclick="ukazVzhledyFaktury()" title="Projít si vzhledy na téhle faktuře" style="flex:0 0 auto;padding:10px 13px;background:#fff;color:#3b7dd8;border:1.5px solid #3b7dd8;border-radius:9px;cursor:pointer;font-family:inherit;font-size:13px;font-weight:700">Náhled</button>
     </div>
     <label style="display:flex;align-items:center;gap:8px;margin-top:9px;font-size:13px;color:#7a7168;cursor:pointer">

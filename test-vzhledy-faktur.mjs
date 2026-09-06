@@ -1,7 +1,7 @@
 // Vykreslí všech 9 nových vzhledů se zkušebními daty a zkontroluje,
 // že v každém jsou VŠECHNY povinné údaje daňového dokladu.
 import fs from 'fs'
-const src = fs.readFileSync('nasazeni4/subbau_final.html','utf8')
+const src = fs.readFileSync(process.argv[2] || 'subbau_final.html','utf8')
 const blok = /window\.SABLONY_FAKTUR = window\.SABLONY_FAKTUR \|\| \{\};[\s\S]*?(?=\nfunction renderInvoice)/.exec(src)[0]
 globalThis.window = {}
 eval(blok)

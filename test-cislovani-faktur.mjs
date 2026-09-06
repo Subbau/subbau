@@ -1,7 +1,7 @@
 // Zkouška číslování faktur: uživatel si napíše číslo, jak chce, a appka musí
 // pokračovat ve STEJNÉM tvaru. Testuje se na kódu vytaženém z appky, ne na kopii.
 import fs from 'fs'
-const src = fs.readFileSync('nasazeni4/subbau_final.html','utf8')
+const src = fs.readFileSync(process.argv[2] || 'subbau_final.html','utf8')
 const kus = (od, doo) => {
   const i = src.indexOf(od); const j = src.indexOf(doo, i)
   if (i < 0 || j < 0) throw new Error('nenašel jsem ' + od)
