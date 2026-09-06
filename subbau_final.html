@@ -4432,7 +4432,7 @@ async function submitAdminSignatureWithPlacement() {
 // Po nahrání nové verze se snadno pozná, jestli se opravdu nasadila: otevřete
 // appku, zmáčkněte F12 (na Macu ⌥⌘I) a v konzoli je vypsané tohle datum. Když
 // tam svítí starší, prohlížeč nebo GitHub drží starou verzi.
-const SUBBAU_VERZE = '2026-09-06 a — výběr barvy faktury, přepis čísla u staré faktury, všechny vzhledy sedí na A4'
+const SUBBAU_VERZE = '2026-09-06 b — barva se ukládá vždy správnému pracovníkovi'
 console.log('SubBau docházka — verze ' + SUBBAU_VERZE)
 
 // ============ SUPABASE CONFIG ============
@@ -12217,6 +12217,12 @@ async function saveInvoiceEdit() {
     delete upd.original_pdf_url
     delete upd.original_pdf_path
     ;({ error } = await sb.from('worker_invoices').update(upd).eq('id', r.id))
+  }
+  // Na číslo je v databázi unikátní index. Kdyby ho mezitím obsadila jiná
+  // faktura, ať admin nečte hlášku z Postgresu, ale ví, co má udělat.
+  if (error && /duplicate key|already exists|23505|cislo_uniq/i.test(error.message || '')) {
+    finish('⚠️ Číslo ' + cisloNove + ' už mezitím dostala jiná faktura — zvolte jiné')
+    return
   }
   if (error && /items/i.test(error.message || '')) {
     finish('❌ Chybí migrace — spusťte v Supabase soubor supabase-migrace-polozky-faktury.sql')
@@ -27302,10 +27308,7 @@ async function ukazVzhledyFaktury() {
     // Vzhled patří téhle faktuře, barva ale pracovníkovi — ta se proto ukládá hned.
     let barvaUlozena = false
     if (barva != null && barva !== extra.invoiceColorIdx) {
-      const puvodni = currentWorkerId
-      currentWorkerId = r.worker_id
-      barvaUlozena = await ulozBarvuFaktury(barva)
-      currentWorkerId = puvodni
+      barvaUlozena = await ulozBarvuFaktury(barva, r.worker_id)
     }
     closeInvoiceOverlay()
     showToast(barvaUlozena
@@ -27501,19 +27504,26 @@ async function updateWdInvoiceHours() {
 // v okamžiku, kdy se faktura vystavuje.
 // Barva je vlastnost pracovníka (rámečky, linky, zvýrazněná částka) — jeden
 // vzhled tak u dvou lidí vypadá jinak. Ukládá se do profilu jako vzhled.
-async function ulozBarvuFaktury(idx) {
-  if (!currentWorkerId) return false
+// Komu barvu uložit se PŘEDÁVÁ, nepřehazuje se kvůli tomu currentWorkerId:
+// kdyby zápis spadl, zůstal by v appce jako otevřený někdo jiný a další úprava
+// by mohla padnout na špatného člověka.
+async function ulozBarvuFaktury(idx, workerId) {
+  const kdo = workerId || currentWorkerId
+  if (!kdo) return false
   const n = parseInt(idx, 10)
   if (!Number.isInteger(n) || n < 0 || n >= INVOICE_COLORS.length) return false
-  const { error } = await sb.from('profiles').update({ invoice_color: n }).eq('id', currentWorkerId)
+  const { error } = await sb.from('profiles').update({ invoice_color: n }).eq('id', kdo)
   if (error) {
     showToast(/invoice_color|column|schema cache/i.test(error.message || '')
       ? '❌ Chybí sloupec invoice_color — barvy zatím nejdou nastavit'
       : '❌ Barva se neuložila: ' + error.message)
     return false
   }
-  if (currentWorkerProfile) currentWorkerProfile.invoice_color = n
-  vykresliBarvyPracovnika(n)
+  // Kartu překresli, jen když jde opravdu o otevřeného pracovníka.
+  if (kdo === currentWorkerId) {
+    if (currentWorkerProfile) currentWorkerProfile.invoice_color = n
+    vykresliBarvyPracovnika(n)
+  }
   return true
 }
 
