@@ -5100,7 +5100,7 @@ async function submitAdminSignatureWithPlacement() {
 // Po nahrání nové verze se snadno pozná, jestli se opravdu nasadila: otevřete
 // appku, zmáčkněte F12 (na Macu ⌥⌘I) a v konzoli je vypsané tohle datum. Když
 // tam svítí starší, prohlížeč nebo GitHub drží starou verzi.
-const SUBBAU_VERZE = '2026-09-06 c — opravy po velké prověrce faktur'
+const SUBBAU_VERZE = '2026-09-07 a — u nadpisu firmy uhrazená provize, červeně po splatnosti'
 console.log('StavKo docházka — verze ' + SUBBAU_VERZE)
 
 // ============ SUPABASE CONFIG ============
@@ -7680,6 +7680,35 @@ async function toggleProvizePaid(checkbox, workerId, mode, periodKey) {
 // „Bez provize" — pracovník odešel dřív, než za něj StavKo dostane zaplaceno,
 // takže se mu provize nemá počítat nikam. Sazba u něj zůstane uložená, aby se
 // dalo kliknutí vzít zpět.
+// Zaplatila nám firma provizi za tenhle týden? Vlastní záznam u firmy — se
+// zaškrtáváním u jednotlivých pracovníků to NIJAK nesouvisí a nic jim nemění.
+// Slouží jen k přehledu, kdo už StavKo zaplatil.
+async function toggleProvizeFirma(checkbox, firmIdx) {
+  const firma = (window._provizeFirmy || [])[firmIdx]
+  if (!firma) return
+  const uhrazeno = checkbox.checked
+  checkbox.disabled = true
+
+  const ted = new Date().toISOString()
+  const { error } = await sb.from('provize_platby_firem').upsert({
+    firma: firma.nazev, period_key: firma.weekKey,
+    paid: uhrazeno, paid_at: uhrazeno ? ted : null, updated_at: ted,
+  }, { onConflict: 'firma,period_key' })
+
+  checkbox.disabled = false
+  if (error) {
+    checkbox.checked = !uhrazeno
+    showToast(/relation .*provize_platby_firem.* does not exist|schema cache/i.test(error.message || '')
+      ? '❌ Chybí tabulka — spusťte migraci supabase-migrace-provize-uhrazeno-firmou.sql'
+      : '❌ Uhrazení se neuložilo: ' + error.message)
+    return
+  }
+  showToast(uhrazeno
+    ? `✅ ${firma.nazev} — provizi nám uhradila`
+    : `↩️ ${firma.nazev} — uhrazení zrušeno`)
+  await renderProvizeContent()
+}
+
 async function toggleBezProvize(checkbox, workerId) {
   const bez = checkbox.checked
   const tr = checkbox.closest('tr')
@@ -8098,6 +8127,18 @@ async function renderProvizeContent() {
     ;(payRows || []).forEach(p => { payMap[p.worker_id] = p })
   } catch (e) { paymentsTableMissing = true }
 
+  // Uhrazená provize OD FIRMY. Vlastní záznam, ne součet lidí — je to přehled
+  // o tom, jestli firma zaplatila StavKo, a se zaškrtáváním u jednotlivých
+  // pracovníků nemá nic společného.
+  const firmaPay = {}
+  let firmaPayTableMissing = false
+  try {
+    const { data: fRows, error: fErr } = await sb.from('provize_platby_firem')
+      .select('firma, paid').eq('period_key', weekKey)
+    if (fErr) throw fErr
+    ;(fRows || []).forEach(p => { firmaPay[p.firma] = !!p.paid })
+  } catch (e) { firmaPayTableMissing = true }
+
   // Splatnost = kód "dny_do_faktury/dny_do_splatnosti" (např. "7/14"). Faktura se vystavuje
   // v sobotu daného týdne, splatnost je pak X dní po vystavení. Když ten den uplyne a
   // pracovník ještě nemá zaškrtnuto "Uhrazeno", je po splatnosti.
@@ -8185,6 +8226,9 @@ async function renderProvizeContent() {
   // Index řádků pro doplňkové výpočty v tabulce (souhrny za firmu).
   window._provizeIndex = {}
   window._provizeFirmTotals = []
+  // Kdo za kterou firmu má v zobrazeném týdnu nějakou provizi — podle toho se
+  // řídí zaškrtávátko u nadpisu firmy.
+  window._provizeFirmy = []
 
   const firmsHtml = firmNames.map((firm, firmIdx) => {
     const members = byFirm.get(firm)
@@ -8192,6 +8236,16 @@ async function renderProvizeContent() {
     const gc = groupColor(firm, 'company')
     const safeFirm = firm.replace(/'/g, String.fromCharCode(39))
     let fDay = 0, fWeek = 0, fMonth = 0, fYear = 0, fEarn = 0, fEarnDay = 0, fPaidCount = 0
+    // Má firma za tenhle týden vůbec co platit? Lidi bez odpracovaných hodin
+    // a ty s „bez provize" nepočítáme — jinak by u firmy svítilo nezaplaceno
+    // i v týdnu, kdy se pro ni nedělalo.
+    const kUhrade = members.filter(r => !r.bezProvize && r.commWeek > 0.005)
+    const firmaUhrazena = !!firmaPay[firm]
+    const firmaSplatnost = kUhrade.length
+      ? new Date(Math.min(...kUhrade.map(r => r.dueDate.getTime())))
+      : null
+    const dnesekProvize = new Date(); dnesekProvize.setHours(0, 0, 0, 0)
+    const firmaPoSplatnosti = !firmaUhrazena && !!firmaSplatnost && firmaSplatnost < dnesekProvize
     const memberRows = members.map(r => {
       fDay += r.commDay; fWeek += r.commWeek; fMonth += r.commMonth; fYear += r.commYear; fEarn += r.earnWeek; fEarnDay += r.earnDay; if (r.paid) fPaidCount++
       window._provizeIndex[r.id] = { hoursDay: r.hoursDay, hoursWeek: r.hoursWeek, hoursMonth: r.hoursMonth, hoursYear: r.hoursYear, prov: r.prov, rate: r.rate, firmIdx }
@@ -8217,11 +8271,25 @@ async function renderProvizeContent() {
     // Do firemního součtu jde jen to, co je v tabulce vidět. Celkové souhrny
     // nahoře se berou ze `souhrn`, tedy ze všech lidí.
     window._provizeFirmTotals[firmIdx] = { day: fDay, week: fWeek, month: fMonth, year: fYear, earn: fEarn }
+    window._provizeFirmy[firmIdx] = { nazev: firm, weekKey }
     return `
-    <div class="card" style="border-left:6px solid ${gc.border};margin-bottom:16px">
-      <div class="card-h" style="flex-wrap:wrap;gap:10px">
+    <div class="card" style="border-left:6px solid ${firmaUhrazena ? 'var(--green)' : (firmaPoSplatnosti ? 'var(--red)' : gc.border)};margin-bottom:16px">
+      <div class="card-h" style="flex-wrap:wrap;gap:10px;${firmaUhrazena ? 'background:var(--green-l)' : (firmaPoSplatnosti ? 'background:var(--red-l)' : '')}">
         <h4 style="color:${gc.text};font-size:${isNoFirm ? '18px' : '16px'}">🏢 ${firm}</h4>
         <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+          ${kUhrade.length ? `<label title="${firmaPayTableMissing ? 'Nejdřív spusťte migraci supabase-migrace-provize-uhrazeno-firmou.sql' : (firmaUhrazena ? 'Provize za tenhle týden od firmy dorazila' : (firmaPoSplatnosti ? 'Provize je po splatnosti a od firmy zatím nedorazila' : 'Zaškrtněte, až od firmy provize dorazí'))}"
+            style="display:flex;align-items:center;gap:9px;padding:9px 14px;border-radius:10px;cursor:${firmaPayTableMissing ? 'not-allowed' : 'pointer'};font-size:14px;font-weight:800;
+            background:${firmaUhrazena ? 'var(--green-l)' : (firmaPoSplatnosti ? 'var(--red-l)' : 'var(--bg2)')};
+            color:${firmaUhrazena ? 'var(--green)' : (firmaPoSplatnosti ? 'var(--red)' : 'var(--text2)')};
+            border:2px solid ${firmaUhrazena ? 'var(--green)' : (firmaPoSplatnosti ? 'var(--red)' : 'var(--brd)')}">
+            <input type="checkbox" ${firmaUhrazena ? 'checked' : ''} ${firmaPayTableMissing ? 'disabled' : ''}
+              onchange="toggleProvizeFirma(this,${firmIdx})"
+              style="width:22px;height:22px;cursor:${firmaPayTableMissing ? 'not-allowed' : 'pointer'};accent-color:var(--green)">
+            <span>${firmaUhrazena ? '✅ Uhrazená provize' : (firmaPoSplatnosti ? '⚠️ Provize po splatnosti' : 'Uhrazená provize')}</span>
+            ${firmaPayTableMissing
+              ? '<span style="font-weight:600;font-size:11px;color:var(--amber)">⚠️ neukládá se — chybí migrace</span>'
+              : (firmaSplatnost && !firmaUhrazena ? `<span style="font-weight:600;font-size:12px;opacity:.85">${firmaPoSplatnosti ? 'byla' : 'splatnost'} ${firmaSplatnost.toLocaleDateString('cs-CZ')}</span>` : '')}
+          </label>` : ''}
           <span style="font-size:13px;color:var(--text3)">${members.length} lidí · ${fPaidCount}/${members.length} uhrazeno (týden)</span>
           <button onclick="generateProvizeFirmReport('${safeFirm}','week')" style="font-size:12px;padding:6px 11px;border:1px solid var(--brd);border-radius:7px;cursor:pointer;background:#fff;font-family:inherit">📄 Týdenní provize</button>
           <button onclick="generateProvizeFirmReport('${safeFirm}','month')" style="font-size:12px;padding:6px 11px;border:1px solid var(--brd);border-radius:7px;cursor:pointer;background:#fff;font-family:inherit">📄 Měsíční provize</button>
