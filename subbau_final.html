@@ -4432,7 +4432,7 @@ async function submitAdminSignatureWithPlacement() {
 // Po nahrání nové verze se snadno pozná, jestli se opravdu nasadila: otevřete
 // appku, zmáčkněte F12 (na Macu ⌥⌘I) a v konzoli je vypsané tohle datum. Když
 // tam svítí starší, prohlížeč nebo GitHub drží starou verzi.
-const SUBBAU_VERZE = '2026-09-07 a — u nadpisu firmy uhrazená provize, červeně po splatnosti'
+const SUBBAU_VERZE = '2026-09-10 a — vícelistý doklad se uloží celý, ne jen dvě strany'
 console.log('SubBau docházka — verze ' + SUBBAU_VERZE)
 
 // ============ SUPABASE CONFIG ============
@@ -26752,10 +26752,10 @@ function openUploadForWorker() {
         <div id="admin-upload-preview1" style="margin-top:6px;display:none"><img style="max-width:100%;max-height:150px;border-radius:8px;object-fit:contain"></div>
       </div>
       <div id="admin-upload-side2" class="fg" style="margin-bottom:10px">
-        <label style="font-size:12px;color:var(--text3)">Další listy (nepovinné, až 4)</label>
+        <label style="font-size:12px;color:var(--text3)" id="admin-side2-label">Další listy (nepovinné, až 4)</label>
         <label id="admin-cam2-btn" for="admin-upload-cam2" style="display:none;align-items:center;justify-content:center;gap:9px;width:100%;padding:13px;background:#211D1A;color:#E8A13A;border-radius:10px;font-size:14px;font-weight:800;cursor:pointer;font-family:inherit;margin-bottom:7px">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" style="width:19px;height:19px"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg>
-          Vyfotit druhou stranu
+          <span id="admin-cam2-text">Vyfotit druhou stranu</span>
         </label>
         <input type="file" id="admin-upload-cam2" accept="image/*" capture="environment" style="display:none" onchange="adminFileSelect(this,2)">
         <input type="file" id="admin-upload-file2" accept="image/*,application/pdf" multiple style="width:100%;padding:8px;border:1.5px solid var(--brd);border-radius:8px;font-size:13px" onchange="adminFileSelect(this,2)">
@@ -26850,6 +26850,7 @@ function adminDocTypeChange() {
   const p2 = document.getElementById('admin-upload-preview2'); if(p2) p2.style.display='none'
   adminUploadFiles2 = []
   const l2 = document.getElementById('admin-upload-list2'); if(l2) l2.innerHTML=''
+  adminOsvezPocetListu()
 }
 
 // Druhé pole bere víc souborů najednou — doklad jako A1 má klidně pět listů
@@ -26857,22 +26858,62 @@ function adminDocTypeChange() {
 // nejvýš čtyři, ať se dokument nerozpadne na nepřehlednou hromadu.
 const ADMIN_MAX_LISTU = 5
 
+// Průběžně píše, kolik listů je vybráno a kolik se jich ještě vejde — jinak
+// není poznat, že jde přidat další, a člověk skončí u dvou stran.
+function adminOsvezPocetListu() {
+  const dalsich = adminUploadFiles2.length
+  const zbyva = (ADMIN_MAX_LISTU - 1) - dalsich
+  const lbl = document.getElementById('admin-side2-label')
+  if (lbl) lbl.textContent = dalsich
+    ? 'Další listy — vybráno ' + dalsich + (zbyva > 0 ? ', ještě lze přidat ' + zbyva : ' (víc už ne)')
+    : 'Další listy (nepovinné, až ' + (ADMIN_MAX_LISTU - 1) + ')'
+  const txt = document.getElementById('admin-cam2-text')
+  if (txt) txt.textContent = zbyva <= 0
+    ? 'Víc listů už nelze'
+    : (dalsich ? 'Vyfotit další list (' + (dalsich + 2) + '. z ' + ADMIN_MAX_LISTU + ')' : 'Vyfotit druhou stranu')
+  const btn = document.getElementById('admin-cam2-btn')
+  if (btn) btn.style.opacity = zbyva <= 0 ? '0.5' : ''
+}
+
+// Odebere jeden z vybraných listů, aniž by se musel výběr dělat znovu.
+function adminOdeberList(i) {
+  adminUploadFiles2.splice(i, 1)
+  adminUploadFile2 = adminUploadFiles2[0] || null
+  const vstup = document.getElementById('admin-upload-file2')
+  if (vstup) adminFileSelect(vstup, 2)   // překreslí seznam i počty
+}
+
 function adminFileSelect(input, side) {
   if (side === 2) {
-    let vybrane = Array.from(input.files || [])
-    // Focení druhé strany přidává jeden snímek k tomu, co už je vybrané.
-    if (input.id === 'admin-upload-cam2' && vybrane.length) vybrane = adminUploadFiles2.concat(vybrane)
+    // Nově vybrané listy se PŘIDÁVAJÍ k těm dosavadním. Dřív se přidávaly jen
+    // u focení a výběr souboru je přemazal — kdo vybíral listy po jednom
+    // (a tak to admini dělají), skončil vždycky u dvou stran, i když appka
+    // slibuje pět.
+    const prichozi = Array.from(input.files || [])
+    let vybrane = prichozi.length ? adminUploadFiles2.concat(prichozi) : adminUploadFiles2
     const max = ADMIN_MAX_LISTU - 1
     if (vybrane.length > max) {
-      showToast('⚠️ Nejvýš ' + ADMIN_MAX_LISTU + ' listů celkem — beru prvních ' + max + ' dalších')
+      showToast('⚠️ Nejvýš ' + ADMIN_MAX_LISTU + ' listů celkem — víc se jich nevejde')
       vybrane = vybrane.slice(0, max)
     }
     adminUploadFiles2 = vybrane
     adminUploadFile2 = vybrane[0] || null
+    // Vstup vynulovat, jinak se stejně pojmenovaná fotka podruhé nevybere:
+    // prohlížeč nepovažuje shodný soubor za změnu a událost onchange nepošle.
+    // Kvůli tomu šly u dokladu vyfotit jen dvě strany, i když jich appka slibuje pět.
+    input.value = ''
     const seznam = document.getElementById('admin-upload-list2')
+    // U každého listu křížek — když se vybere omylem špatný soubor, ať se dá
+    // odebrat a nemusí se začínat od začátku.
     if (seznam) seznam.innerHTML = vybrane.length
-      ? vybrane.map((f, i) => '📄 ' + (i + 2) + '. list — ' + escAttr(f.name)).join('<br>')
+      ? vybrane.map((f, i) => '<div style="display:flex;align-items:center;gap:8px;padding:3px 0">'
+          + '<span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">📄 '
+          + (i + 2) + '. list — ' + escAttr(f.name) + '</span>'
+          + '<button type="button" onclick="adminOdeberList(' + i + ')" title="Odebrat tento list" aria-label="Odebrat tento list"'
+          + ' style="flex:0 0 auto;border:1px solid var(--red);background:#fff;color:var(--red);border-radius:6px;'
+          + 'cursor:pointer;font-family:inherit;font-size:12px;line-height:1;padding:4px 7px">✕</button></div>').join('')
       : ''
+    adminOsvezPocetListu()
     const prev2 = document.getElementById('admin-upload-preview2')
     if (prev2 && vybrane[0] && vybrane[0].type.startsWith('image/')) {
       const img = prev2.querySelector('img')
@@ -26883,6 +26924,10 @@ function adminFileSelect(input, side) {
   }
   const file = input.files[0]; if (!file) return
   adminUploadFile1 = file
+  // Jen u focení: vynulovat, ať jde tutéž fotku vyfotit znovu. U viditelného
+  // výběru souboru to nemažeme — vypadalo by to, že nic vybrané není.
+  if (input.id === 'admin-upload-cam1') input.value = ''
+  adminOsvezPocetListu()
   const prev = document.getElementById('admin-upload-preview1')
   if (prev && file.type.startsWith('image/')) {
     const img = prev.querySelector('img')
@@ -26974,6 +27019,7 @@ async function uploadDocumentForWorker() {
   adminUploadFile2 = null
   const l2h = document.getElementById('admin-upload-list2'); if (l2h) l2h.innerHTML = ''
   const f2h = document.getElementById('admin-upload-file2'); if (f2h) f2h.value = ''
+  adminOsvezPocetListu()
   if(st){st.textContent='Dokument nahran!'}
   setTimeout(() => { closeUploadForWorker(); loadWdDocs(uploadingForWorkerId || currentWorkerId) }, 1200)
 }
