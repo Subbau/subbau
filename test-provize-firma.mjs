@@ -12,8 +12,25 @@ let puppeteer
 try { puppeteer = (await import('puppeteer')).default }
 catch (e) { console.error('❌ Chybí puppeteer — zkouška NEPROBĚHLA. Spusťte: npm i puppeteer'); process.exit(2) }
 
+// POJISTKA: ukázka se generuje z appky. Když se nepřegeneruje, běžela by
+// zkouška na starém kódu a tvrdila by nesmysly — to se už jednou stalo.
+function stejnaVerze(appka, ukazka) {
+  const ver = t => (t.match(/SUBBAU_VERZE\s*=\s*'([^']*)'/) || [])[1] || null
+  const a = ver(fs.readFileSync(appka, 'utf8')), u = ver(fs.readFileSync(ukazka, 'utf8'))
+  if (!a || !u) { console.error('❌ Nenašel jsem verzi — zkouška NEPROBĚHLA'); process.exit(2) }
+  if (a !== u) {
+    console.error('❌ Ukázka je starší než appka — zkouška NEPROBĚHLA.')
+    console.error('   appka:  ' + a)
+    console.error('   ukázka: ' + u)
+    console.error('   Spusťte: node ukazka/generuj.mjs')
+    process.exit(2)
+  }
+}
+
+
 const APP = process.argv[2] || 'subbau_final.html'
 const UKAZKA = process.argv[3] || 'ukazka.html'
+stejnaVerze(APP, UKAZKA)
 const src = fs.readFileSync(APP, 'utf8')
 
 let chyb = 0

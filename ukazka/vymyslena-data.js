@@ -62,6 +62,16 @@
       business_type: 'osvec', is_osvec: true, german_level: i % 3 === 0 ? 'B1' : 'A2',
       has_car: i % 4 === 0, ic: String(60000000 + i * 137), is_vat_payer: false,
       invoice_address: 'Nádražní ' + (10 + i) + ', 370 01 České Budějovice',
+      // Fakturační údaje — ať jde v ukázce projít i vystavení faktury
+      // a zálohové faktury. Čísla jsou vymyšlená.
+      invoice_iban: 'CZ' + (10 + i) + ' 0600 0000 0002 5309 95' + (10 + i),
+      invoice_swift: 'AGBACZPP', invoice_due_days: 14,
+      invoice_customer_name: i % 2 ? 'Weber Dach & Fassade GmbH' : 'Bauunternehmen Hoffmann GmbH',
+      invoice_customer_address: i % 2
+        ? 'Lindenweg 8\n86150 Augsburg\nDeutschland'
+        : 'Riemer Straße 12\n81829 München\nDeutschland',
+      invoice_customer_id: '8141356' + (10 + i),
+      invoice_customer_vat: 'DE8141356' + (10 + i),
       cooperation_start: dnes(-200 - i * 10),
       created_at: new Date().toISOString(),
     });
@@ -84,7 +94,9 @@
   ];
   D.attendance = [];
   const dnesniDen = new Date().getDay() || 7;   // 1=Po … 7=Ne
-  for (let zpet = 20; zpet >= 0; zpet--) {
+  // Osm týdnů zpět, ať je v ukázce vidět i týden po splatnosti provize
+  // a dá se prolistovat historie. Dřív to bylo jen tři týdny.
+  for (let zpet = 56; zpet >= 0; zpet--) {
     const den = dnes(-zpet);
     const dow = new Date(den + 'T00:00:00').getDay();
     if (dow === 0) continue;                     // v neděli se nedělá
@@ -131,6 +143,8 @@
   });
 
   // ---- Faktury ----
+  // Zálohové faktury — v ukázce prázdné, ať si je jde zkusit vystavit.
+  D.zalohove_faktury = [];
   D.worker_invoices = [];
   lideId.slice(0, 8).forEach((w, i) => {
     const t = tyden(dnes(-7));

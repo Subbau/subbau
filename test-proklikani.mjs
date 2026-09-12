@@ -1,8 +1,26 @@
 // Skutečné proklikání appky v prohlížeči. Používá ukázkovou verzi, protože
 // ta běží bez serveru a s vymyšlenými daty — ale je to TÁŽ appka.
 import puppeteer from 'puppeteer'
+import fs from 'fs'
 import path from 'path'
 const SOUBOR = 'file://' + path.resolve('../nasazeni4/ukazka.html')
+
+// POJISTKA: ukázka se generuje z appky. Když se nepřegeneruje, běžela by
+// zkouška na starém kódu a tvrdila by nesmysly — to se už jednou stalo.
+function stejnaVerze(appka, ukazka) {
+  const ver = t => (t.match(/SUBBAU_VERZE\s*=\s*'([^']*)'/) || [])[1] || null
+  const a = ver(fs.readFileSync(appka, 'utf8')), u = ver(fs.readFileSync(ukazka, 'utf8'))
+  if (!a || !u) { console.error('❌ Nenašel jsem verzi — zkouška NEPROBĚHLA'); process.exit(2) }
+  if (a !== u) {
+    console.error('❌ Ukázka je starší než appka — zkouška NEPROBĚHLA.')
+    console.error('   appka:  ' + a)
+    console.error('   ukázka: ' + u)
+    console.error('   Spusťte: node ukazka/generuj.mjs')
+    process.exit(2)
+  }
+}
+
+stejnaVerze('../nasazeni4/subbau_final.html'.replace('../nasazeni4/', ''), SOUBOR.replace('file://', ''))
 const b = await puppeteer.launch({ args: ['--no-sandbox'] })
 const p = await b.newPage()
 await p.setViewport({ width: 1280, height: 900 })

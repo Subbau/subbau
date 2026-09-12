@@ -77,6 +77,7 @@
     'vacations.worker_id': 'profiles',
     'weekly_hour_sheets.worker_id': 'profiles',
     'worker_invoices.worker_id': 'profiles',
+    'zalohove_faktury.worker_id': 'profiles',
     'chat_messages.worker_id': 'profiles',
     'notifications.worker_id': 'profiles',
     'site_photos.worker_id': 'profiles',
