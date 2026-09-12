@@ -4507,7 +4507,7 @@ async function submitAdminSignatureWithPlacement() {
 // Po nahrání nové verze se snadno pozná, jestli se opravdu nasadila: otevřete
 // appku, zmáčkněte F12 (na Macu ⌥⌘I) a v konzoli je vypsané tohle datum. Když
 // tam svítí starší, prohlížeč nebo GitHub drží starou verzi.
-const SUBBAU_VERZE = '2026-09-12 b — bez zámečku u Zálohových faktur'
+const SUBBAU_VERZE = '2026-09-12 c — u dne jde vypnout výplata nebo provize, nebo přepsat částku'
 console.log('SubBau docházka — verze ' + SUBBAU_VERZE)
 
 // ============ SUPABASE CONFIG ============
@@ -6987,9 +6987,24 @@ function hodinyPodleSazeb(radky, sazbaKDni) {
     .forEach(r => {
       const h = Number(r.total_hours) || 0
       if (!h) return
+      // Den, za který pracovník nedostane zaplaceno, se NEFAKTURUJE vůbec —
+      // nejdou do faktury ani jeho hodiny. Provize SubBau se to netýká.
+      if (r.bez_vyplaty) return
       const den = String(r.work_date || '').slice(0, 10)
-      const sz = Number(sazbaKDni(den)) || 0
       hodiny += h
+      // Ručně přepsaná částka za den. Hodiny × sazba by ji nedaly, proto má
+      // takový den na faktuře vlastní řádek s pevnou částkou.
+      if (r.vyplata_castka != null && r.vyplata_castka !== '') {
+        const pevna = Math.max(0, Number(r.vyplata_castka) || 0)
+        castka += pevna
+        const kp = 'pevna:' + den
+        const gp = podleSazby.get(kp) || { sazba: 0, hodiny: 0, od: den, do: den, pevna: true, castka: 0 }
+        gp.hodiny += h
+        gp.castka += pevna
+        podleSazby.set(kp, gp)
+        return
+      }
+      const sz = Number(sazbaKDni(den)) || 0
       castka += h * sz
       const k = sz.toFixed(4)
       const g = podleSazby.get(k) || { sazba: sz, hodiny: 0, od: den, do: den }
@@ -6999,7 +7014,10 @@ function hodinyPodleSazeb(radky, sazbaKDni) {
       podleSazby.set(k, g)
     })
   const skupiny = [...podleSazby.values()].sort((a, b) => a.od.localeCompare(b.od))
-  skupiny.forEach(g => { g.hodiny = Math.round(g.hodiny * 100) / 100 })
+  skupiny.forEach(g => {
+    g.hodiny = Math.round(g.hodiny * 100) / 100
+    if (g.pevna) g.castka = Math.round(g.castka * 100) / 100
+  })
   return { hodiny: Math.round(hodiny * 100) / 100, castka: Math.round(castka * 100) / 100, skupiny }
 }
 
@@ -7179,7 +7197,7 @@ async function generateProvizeFirmReport(firmName, mode) {
       sb.from('teams').select('id, name, company_id'),
       sb.from('companies').select('id, name'),
       sb.from('attendance')
-        .select('worker_id, work_date, check_in, check_out, break_start, break_end, total_hours, team_id')
+        .select('worker_id, work_date, check_in, check_out, break_start, break_end, total_hours, team_id, bez_vyplaty, bez_provize_den, vyplata_castka')
         .gte('work_date', startStr).lte('work_date', endStr)
     ])
     // Kdo je označený „bez provize", do vyúčtování nepatří — odešel dřív, než za
@@ -7249,9 +7267,16 @@ async function generateProvizeFirmReport(firmName, mode) {
 
     const hoursByWorker = {}
     const commByWorker = {}
+    // Hodiny, ze kterých provize opravdu plyne. Den označený „bez provize" se
+    // do nich nepočítá — jinak by průměrná sazba v reportu vyšla uměle níž
+    // a hodiny × sazba by nedaly výslednou částku.
+    const provHoursByWorker = {}
+    let dnuBezProvize = 0
     ;(att || []).forEach(a => {
       const h = hoursOf(a)
       hoursByWorker[a.worker_id] = (hoursByWorker[a.worker_id] || 0) + h
+      if (a.bez_provize_den) { if (h) dnuBezProvize++; return }
+      provHoursByWorker[a.worker_id] = (provHoursByWorker[a.worker_id] || 0) + h
       commByWorker[a.worker_id] = (commByWorker[a.worker_id] || 0) + h * provKDni(a.worker_id, a.work_date)
     })
 
@@ -7268,7 +7293,8 @@ async function generateProvizeFirmReport(firmName, mode) {
       const comm = commByWorker[w.id] || 0
       // Když se sazba během období změnila, není jedno číslo — ukážeme průměr
       // na hodinu, ať sloupec „provize" pořád dává smysl s výslednou částkou.
-      const prov = hrs > 0 ? comm / hrs : (provMap[w.id] || 0)
+      const provHrs = provHoursByWorker[w.id] || 0
+      const prov = provHrs > 0 ? comm / provHrs : (provMap[w.id] || 0)
       total += comm
       return `<tr>
         <td style="padding:8px 10px;border:1px solid #ccc">${escAttr(w.full_name)}${w.is_active === false ? ' (bývalý)' : ''}</td>
@@ -7293,6 +7319,7 @@ async function generateProvizeFirmReport(firmName, mode) {
         <div style="font-size:11px;color:#888;letter-spacing:1px;text-transform:uppercase">SubBau s.r.o. — Provize</div>
         <h1 style="font-size:20px;margin:2px 0">${firmName}</h1>
         <div style="font-size:13px;color:#555">${mode === 'week' ? 'Týdenní' : 'Měsíční'} přehled provize · ${periodLabel}</div>
+        ${dnuBezProvize ? `<div style="font-size:12px;color:#9c3b22;margin-top:4px">Poznámka: ${dnuBezProvize} ${dnuBezProvize === 1 ? 'den je' : 'dnů je'} v přehledu bez provize — hodiny jsou ve sloupci Hodiny, do odměny se nepočítají.</div>` : ''}
       </div>
       <table>
         <thead><tr><th>Pracovník</th><th style="text-align:right">Hodiny</th><th style="text-align:right">Provize/h</th><th style="text-align:right">Odměna</th></tr></thead>
@@ -7421,7 +7448,7 @@ async function renderProvizeContent() {
   const ATT_PAGE = 1000
   for (let fromRow = 0; fromRow < 200000; fromRow += ATT_PAGE) {
     const { data: page, error: pageErr } = await sb.from('attendance')
-      .select('worker_id, work_date, check_in, check_out, break_start, break_end, total_hours, team_id')
+      .select('worker_id, work_date, check_in, check_out, break_start, break_end, total_hours, team_id, bez_vyplaty, bez_provize_den, vyplata_castka')
       .gte('work_date', fetchStart).lte('work_date', fetchEnd)
       .order('id').range(fromRow, fromRow + ATT_PAGE - 1)
     if (pageErr || !page || !page.length) break
@@ -7497,9 +7524,17 @@ async function renderProvizeContent() {
     const h = hoursOf(a)
     if (!h) return
     const den = a.work_date
-    const provDen = bezProvize.has(a.worker_id)
+    // Výjimky u jednoho dne. Jsou nezávislé: „bez výplaty" se týká jen
+    // pracovníka, „bez provize" jen SubBau.
+    const provDen = (bezProvize.has(a.worker_id) || a.bez_provize_den)
       ? 0 : Number(hodnotaKDni('provize', a.worker_id, den, provMap[a.worker_id] || 0)) || 0
-    const sazbaDen = Number(hodnotaKDni('sazba', a.worker_id, den, sazbaAktualni[a.worker_id] || 0)) || 0
+    // Kolik za ten den dostane pracovník. Ručně přepsaná částka platí celá za
+    // den, ne za hodinu — proto se dělí hodinami, ať sedí i násobení níž.
+    const sazbaDen = a.bez_vyplaty
+      ? 0
+      : ((a.vyplata_castka != null && a.vyplata_castka !== '')
+          ? (Math.max(0, Number(a.vyplata_castka) || 0) / h)
+          : (Number(hodnotaKDni('sazba', a.worker_id, den, sazbaAktualni[a.worker_id] || 0)) || 0))
     // `dnes` je opravdu dnešek, ne vybraný den — dlaždice nahoře se nesmí měnit,
     // když se šipkami listuje po minulých dnech.
     if (den === dnesStrStat) { bucket.dnes += h; bucket.pDnes += h * provDen }
@@ -21068,7 +21103,7 @@ function editAttRecord(id, date, ci, co, bs, be) {
   // (a hodiny by se přepočítaly nahoru).
   const ulozBtn = document.querySelector('#edit-att-modal button[onclick="saveEditAttRecord()"]')
   if (ulozBtn) { ulozBtn.disabled = true; ulozBtn.dataset.puvodni = ulozBtn.textContent; ulozBtn.textContent = 'Načítám…' }
-  sb.from('attendance').select('construction_site,work_description,break2_start,break2_end').eq('id',id).single()
+  sb.from('attendance').select('*').eq('id',id).single()
     .then(({data:attData, error:attErr}) => {
       if (attErr || !attData) {
         showToast('❌ Záznam se nepodařilo načíst — zavřete okno a zkuste to znovu')
@@ -21076,6 +21111,7 @@ function editAttRecord(id, date, ci, co, bs, be) {
       }
       document.getElementById('edit-att-site').value = attData.construction_site || ''
       document.getElementById('edit-att-desc').value = attData.work_description || ''
+      nastavVyplatuDne(attData)
       setEditTime('bs2', attData.break2_start ? attData.break2_start.slice(0,5) : '')
       setEditTime('be2', attData.break2_end ? attData.break2_end.slice(0,5) : '')
       if (ulozBtn) { ulozBtn.disabled = false; ulozBtn.textContent = ulozBtn.dataset.puvodni || 'Uložit' }
@@ -21138,6 +21174,8 @@ async function openWeekEdit(workerId, week, year, workerName, focusDate) {
       <div style="font-size:10px;color:var(--text3)">${_DAY_NAMES[i]}</div>
       <div style="font-size:11px;font-weight:700;color:${hasData?'var(--blue)':'var(--text3)'}">${hasData?(denHodin+'h'):'—'}</div>
       ${denZaznamy.length > 1 ? `<div style="font-size:9px;color:var(--amber);font-weight:800">${denZaznamy.length}×</div>` : ''}
+      ${denZaznamy.some(r => r.bez_vyplaty || r.bez_provize_den || r.vyplata_castka != null)
+        ? '<div title="U tohohle dne je výjimka ve výplatě nebo provizi" style="font-size:10px;line-height:1">💶</div>' : ''}
     </button>`
   }
   picker.innerHTML = html
@@ -21196,6 +21234,7 @@ function pickEditDay(ds, idx) {
     setEditTime('be2', rec.break2_end ? rec.break2_end.slice(0,5) : '')
     document.getElementById('edit-att-site').value = rec.construction_site || ''
     document.getElementById('edit-att-desc').value = rec.work_description || ''
+    nastavVyplatuDne(rec)
   } else {
     // Nový den — předvyplň příchod 7:00, odchod minuty 00 (hodinu dopíše admin), pauzu nech prázdnou
     setEditTime('ci', '7:00')
@@ -21206,6 +21245,7 @@ function pickEditDay(ds, idx) {
     setEditTime('be2', '')
     document.getElementById('edit-att-site').value = ''
     document.getElementById('edit-att-desc').value = ''
+    nastavVyplatuDne(null)
   }
   // GPS adresa pracovníka z docházky (poslední známá)
   fillGpsHint(ds, rec)
@@ -21294,6 +21334,19 @@ function updateEditHoursPreview() {
   }
 }
 
+// Naplní políčka výjimky u dne. Když záznam neexistuje (zakládá se nový den),
+// všechno se vynuluje — jinak by výjimka přeskočila z předchozího dne.
+function nastavVyplatuDne(rec) {
+  const bv = document.getElementById('edit-att-bez-vyplaty')
+  const bp = document.getElementById('edit-att-bez-provize')
+  const ca = document.getElementById('edit-att-castka')
+  const po = document.getElementById('edit-att-vyplata-pozn')
+  if (bv) bv.checked = !!(rec && rec.bez_vyplaty)
+  if (bp) bp.checked = !!(rec && rec.bez_provize_den)
+  if (ca) ca.value = (rec && rec.vyplata_castka != null) ? String(rec.vyplata_castka) : ''
+  if (po) po.value = (rec && rec.vyplata_poznamka) || ''
+}
+
 async function saveEditAttRecord() {
   const id = document.getElementById('edit-att-id').value
   const ci = document.getElementById('edit-att-ci').value
@@ -21319,6 +21372,16 @@ async function saveEditAttRecord() {
   const site = document.getElementById('edit-att-site')?.value.trim() || null
   const desc = document.getElementById('edit-att-desc')?.value.trim() || null
 
+  // Výjimka u dne. Prázdná částka = počítá se normálně z hodin.
+  const castkaRaw = String(document.getElementById('edit-att-castka')?.value || '').replace(',', '.').trim()
+  const castkaDne = castkaRaw === '' ? null : Math.max(0, Number(castkaRaw) || 0)
+  const vyjimka = {
+    bez_vyplaty: !!document.getElementById('edit-att-bez-vyplaty')?.checked,
+    bez_provize_den: !!document.getElementById('edit-att-bez-provize')?.checked,
+    vyplata_castka: castkaDne,
+    vyplata_poznamka: document.getElementById('edit-att-vyplata-pozn')?.value.trim() || null,
+  }
+
   // Pole "breaks" má při zobrazování PŘEDNOST před break_start/break_end (kvůli
   // více pauzám za směnu) — pokud bychom ho tady nepřepsali, staré pauzy z
   // mobilní appky by v přehledech zůstaly viset i po ruční úpravě admina.
@@ -21343,25 +21406,42 @@ async function saveEditAttRecord() {
 
   let updData, error
   window.zapisProbiha = true
+  // Výjimka u dne se ukládá spolu se zbytkem. Když sloupce ještě v databázi
+  // nejsou (nespuštěná migrace), uloží se den bez nich a řekne se to nahlas —
+  // docházka se kvůli tomu zastavit nesmí.
+  const payloadSVyjimkou = { ...payload, ...vyjimka }
+  const maVyjimku = vyjimka.bez_vyplaty || vyjimka.bez_provize_den
+    || vyjimka.vyplata_castka != null || !!vyjimka.vyplata_poznamka
+  let bezVyjimky = false
   try {
     if (id) {
       // Úprava existujícího záznamu
-      ;({ data: updData, error } = await sb.from('attendance').update(payload).eq('id', id).select())
+      ;({ data: updData, error } = await sb.from('attendance').update(payloadSVyjimkou).eq('id', id).select())
+      if (error && /bez_vyplaty|bez_provize_den|vyplata_castka|vyplata_poznamka/i.test(error.message || '')) {
+        bezVyjimky = true
+        ;({ data: updData, error } = await sb.from('attendance').update(payload).eq('id', id).select())
+      }
     } else {
       // Nový den (z týdenního přehledu) — vlož nový záznam
       if (!workerId || !dateStr) { showToast('❌ Chybí pracovník nebo datum'); return }
       const kw = parseInt(document.getElementById('edit-att-kw').value) || getKW(new Date(dateStr)).week
       const kwYear = parseInt(document.getElementById('edit-att-kwyear').value) || getKW(new Date(dateStr)).year
-      ;({ data: updData, error } = await dochazkaInsert({
-        ...payload, worker_id: workerId, work_date: dateStr, kw, kw_year: kwYear,
-        team_id: await skupinaPracovnika(workerId)
-      }, { vratitSeznam: true }))
+      const zaklad = { worker_id: workerId, work_date: dateStr, kw, kw_year: kwYear,
+                       team_id: await skupinaPracovnika(workerId) }
+      ;({ data: updData, error } = await dochazkaInsert({ ...payloadSVyjimkou, ...zaklad }, { vratitSeznam: true }))
+      if (error && /bez_vyplaty|bez_provize_den|vyplata_castka|vyplata_poznamka/i.test(error.message || '')) {
+        bezVyjimky = true
+        ;({ data: updData, error } = await dochazkaInsert({ ...payload, ...zaklad }, { vratitSeznam: true }))
+      }
     }
   } finally {
     window.zapisProbiha = false
   }
 
   if (error) { showToast('❌ Chyba: ' + error.message); return }
+  if (bezVyjimky && maVyjimku) {
+    showToast('⚠️ Den uložen, ale výjimka u výplaty se neuložila — spusťte migraci supabase-migrace-den-bez-vyplaty.sql')
+  }
   if (!updData || updData.length === 0) {
     showToast('❌ Záznam nelze uložit — zkontrolujte oprávnění v Supabase (RLS)')
     return
@@ -21909,11 +21989,16 @@ async function generateInvoiceMob(lang = 'en', override = null) {
   // jednotková cena — hodiny × sazba by nedaly výslednou částku. Rozepíšeme to
   // na řádek za každou sazbu, ať si to odběratel i účetní přepočítá na papíře.
   const denCz = d => { const x = new Date(d + 'T00:00:00'); return isNaN(x) ? d : x.toLocaleDateString('cs-CZ') }
-  const polozkySazeb = (!maPolozky && rozpis.skupiny.length > 1)
-    ? rozpis.skupiny.map(g => ({
-        popis: invoiceItem + '\n' + denCz(g.od) + (g.do !== g.od ? ' – ' + denCz(g.do) : ''),
-        mnozstvi: g.hodiny, cena: g.sazba
-      }))
+  // Rozepsat se musí i tehdy, když má některý den ručně přepsanou částku —
+  // hodiny × sazba by pak nedaly výslednou částku.
+  const jePevna = rozpis.skupiny.some(g => g.pevna)
+  const polozkySazeb = (!maPolozky && (rozpis.skupiny.length > 1 || jePevna))
+    ? rozpis.skupiny.map(g => g.pevna
+        ? { popis: invoiceItem + '\n' + denCz(g.od), mnozstvi: 1, cena: g.castka }
+        : {
+            popis: invoiceItem + '\n' + denCz(g.od) + (g.do !== g.od ? ' – ' + denCz(g.do) : ''),
+            mnozstvi: g.hodiny, cena: g.sazba
+          })
     : null
   const totalAmount = maPolozky
     ? soucetPolozek(polozkyFaktury)
@@ -29165,6 +29250,36 @@ document.addEventListener('visibilitychange', () => {
       <label style="font-size:12px;font-weight:600">Náplň práce</label>
       <textarea id="edit-att-desc" rows="2" placeholder="napr. betonáž, montáž lešení..." style="width:100%;padding:9px;border:1.5px solid var(--brd);border-radius:8px;font-size:13px;resize:vertical;font-family:inherit"></textarea>
     </div>
+    <!-- Výjimka u jednoho dne: pracovník nedostane zaplaceno, nebo my nemáme
+         provizi. Obojí nezávisle. Normálně zůstává všechno nezaškrtnuté. -->
+    <div style="display:flex;align-items:center;gap:8px;margin:18px 0 10px">
+      <span style="font-size:13px;font-weight:700;color:var(--amber)">💶 Výplata a provize za tenhle den</span>
+      <div style="flex:1;height:1px;background:var(--brd)"></div>
+    </div>
+    <label style="display:flex;align-items:flex-start;gap:9px;margin-bottom:9px;cursor:pointer">
+      <input type="checkbox" id="edit-att-bez-vyplaty" style="width:18px;height:18px;flex:none;margin-top:1px;accent-color:var(--red)">
+      <span style="font-size:13px;color:var(--text2);line-height:1.45"><b>Pracovník za tenhle den nedostane zaplaceno</b><br>
+        <span style="font-size:11.5px;color:var(--text3)">Den mu vypadne z faktury — hodiny i peníze. Naše provize za něj běží dál.</span></span>
+    </label>
+    <label style="display:flex;align-items:flex-start;gap:9px;margin-bottom:10px;cursor:pointer">
+      <input type="checkbox" id="edit-att-bez-provize" style="width:18px;height:18px;flex:none;margin-top:1px;accent-color:var(--red)">
+      <span style="font-size:13px;color:var(--text2);line-height:1.45"><b>My za tenhle den nedostaneme provizi</b><br>
+        <span style="font-size:11.5px;color:var(--text3)">Pracovníka se to netýká, ten zaplaceno má.</span></span>
+    </label>
+    <div style="display:grid;grid-template-columns:1fr 1.4fr;gap:10px;margin-bottom:6px">
+      <div class="fg" style="margin:0">
+        <label style="font-size:12px;font-weight:600">Částka pro pracovníka (€)</label>
+        <input type="number" step="0.01" min="0" id="edit-att-castka" placeholder="hodiny × sazba"
+          style="width:100%;padding:9px;border:1.5px solid var(--brd);border-radius:8px;font-size:13px;font-family:inherit;box-sizing:border-box">
+        <div style="font-size:10.5px;color:var(--text3);margin-top:3px">Prázdné = počítá se normálně. Provizi to nemění.</div>
+      </div>
+      <div class="fg" style="margin:0">
+        <label style="font-size:12px;font-weight:600">Proč (jen pro nás)</label>
+        <input type="text" id="edit-att-vyplata-pozn" maxlength="200" placeholder="např. rozbil míchačku"
+          style="width:100%;padding:9px;border:1.5px solid var(--brd);border-radius:8px;font-size:13px;font-family:inherit;box-sizing:border-box">
+      </div>
+    </div>
+
     <div style="display:flex;gap:10px;margin-top:8px">
       <button onclick="deleteAttRecord()" style="padding:14px 18px;background:var(--red-l);color:var(--red);border:none;border-radius:10px;cursor:pointer;font-family:inherit;font-size:14px;font-weight:600">Smazat</button>
       <button onclick="saveEditAttRecord()" class="btn-pri" style="flex:1;padding:14px;font-size:15px;font-weight:700">Uložit změny</button>

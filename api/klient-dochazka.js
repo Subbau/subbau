@@ -423,7 +423,11 @@ module.exports = async (req, res) => {
       // nečtou — klient tak nepozná rozdíl a ani ho poznat nemá.
       const dochazka = await nactiDochazku(
         'id,worker_id,work_date,check_in,check_out,break_start,break_end,' +
-        'break2_start,break2_end,breaks,total_hours,construction_site,location_address,work_description',
+        'break2_start,break2_end,breaks,total_hours,construction_site,location_address,work_description,' +
+        // Výjimky u jednoho dne. Bez nich by se tady počítalo po staru a nikdo
+        // by se to nedozvěděl — Supabase u chybějícího sloupce v tomhle dotazu
+        // nevrátí chybu, jen by se sem nic nedoneslo.
+        'bez_vyplaty,bez_provize_den,vyplata_castka',
         od, doDne);
 
       const ids = [...new Set((dochazka || []).map(z => z.worker_id))];
@@ -492,8 +496,15 @@ module.exports = async (req, res) => {
 
         const u = upravDen(z, nyni);
         if (!u) continue;
-        const sazbaDne = Number(kDni('sazba', z.worker_id, zaklad.datum, sazbaTed[z.worker_id] || 0)) || 0;
-        const provizeDne = bezProvize.has(z.worker_id)
+        // Den, za který pracovník nedostane zaplaceno, se nefakturuje — sazba
+        // je nula. Provize SubBau za něj běží dál, pokud není vypnutá zvlášť.
+        const sazbaZHistorie = Number(kDni('sazba', z.worker_id, zaklad.datum, sazbaTed[z.worker_id] || 0)) || 0;
+        const pevnaCastka = (z.vyplata_castka != null && z.vyplata_castka !== '')
+          ? Math.max(0, Number(z.vyplata_castka) || 0) : null;
+        const sazbaDne = z.bez_vyplaty
+          ? 0
+          : (pevnaCastka != null && u.hodiny > 0 ? pevnaCastka / u.hodiny : sazbaZHistorie);
+        const provizeDne = (bezProvize.has(z.worker_id) || z.bez_provize_den)
           ? 0
           : Number(kDni('provize', z.worker_id, zaklad.datum, provizeTed[z.worker_id] || 0)) || 0;
         radky.push({
@@ -505,6 +516,9 @@ module.exports = async (req, res) => {
           hodiny: u.hodiny,
           sazba: sazbaDne,
           provize: provizeDne,
+          // Ať stránka pozná, že u dne je výjimka, a může ho označit.
+          bezVyplaty: !!z.bez_vyplaty,
+          bezProvize: !!z.bez_provize_den,
         });
       }
     }
