@@ -4507,7 +4507,7 @@ async function submitAdminSignatureWithPlacement() {
 // Po nahrání nové verze se snadno pozná, jestli se opravdu nasadila: otevřete
 // appku, zmáčkněte F12 (na Macu ⌥⌘I) a v konzoli je vypsané tohle datum. Když
 // tam svítí starší, prohlížeč nebo GitHub drží starou verzi.
-const SUBBAU_VERZE = '2026-09-12 c — u dne jde vypnout výplata nebo provize, nebo přepsat částku'
+const SUBBAU_VERZE = '2026-09-13 a — neplacený den je v docházce proškrtnutý'
 console.log('SubBau docházka — verze ' + SUBBAU_VERZE)
 
 // ============ SUPABASE CONFIG ============
@@ -9292,7 +9292,13 @@ async function loadKWData() {
     workers[wid].days[day] = (workers[wid].days[day] || 0) + h
     // Ulož časy pro detailní zobrazení; sbírej VŠECHNY pauzy ze všech záznamů dne
     workers[wid].dayInfo = workers[wid].dayInfo || {}
-    const di = workers[wid].dayInfo[day] || { ci: null, co: null, breaks: [], running: false }
+    const di = workers[wid].dayInfo[day] || { ci: null, co: null, breaks: [], running: false,
+                                              bezVyplaty: false, bezProvize: false, pevnaCastka: null, poznamka: '' }
+    // Výjimky u dne — stačí, aby je měl jeden ze záznamů dne.
+    if (r.bez_vyplaty) di.bezVyplaty = true
+    if (r.bez_provize_den) di.bezProvize = true
+    if (r.vyplata_castka != null && r.vyplata_castka !== '') di.pevnaCastka = Number(r.vyplata_castka) || 0
+    if (r.vyplata_poznamka && !di.poznamka) di.poznamka = String(r.vyplata_poznamka)
     const ci = r.check_in ? r.check_in.slice(0,5) : null
     const co = r.check_out ? r.check_out.slice(0,5) : null
     // nejstarší příchod
@@ -9349,8 +9355,19 @@ async function loadKWData() {
       const hLabel = info.running
         ? `<span style="color:var(--amber)">${h.toFixed(1)}h▶</span>`
         : `${h.toFixed(1)}h`
-      return `<td class="kw-day" data-date="${dateStr}" style="padding:4px 3px;vertical-align:middle">
-        <div style="position:relative;min-height:52px;display:flex;align-items:center;justify-content:center">
+      // Den, za který pracovník nedostane zaplaceno, je proškrtnutý a červený —
+      // ať je na první pohled vidět, že se nefakturuje.
+      const nezaplaceno = !!info.bezVyplaty
+      const popisVyjimky = nezaplaceno
+        ? 'Za tenhle den pracovník nedostane zaplaceno — nefakturuje se' + (info.poznamka ? ' (' + info.poznamka + ')' : '')
+        : (info.bezProvize ? 'Za tenhle den nemáme provizi' + (info.poznamka ? ' (' + info.poznamka + ')' : '')
+        : (info.pevnaCastka != null ? 'Ručně nastavená částka ' + info.pevnaCastka.toFixed(2) + ' €'
+           + (info.poznamka ? ' (' + info.poznamka + ')' : '') : ''))
+      return `<td class="kw-day" data-date="${dateStr}"${popisVyjimky ? ` title="${escAttr(popisVyjimky)}"` : ''} style="padding:4px 3px;vertical-align:middle${nezaplaceno ? ';background:var(--red-l)' : ''}">
+        <div style="position:relative;min-height:52px;display:flex;align-items:center;justify-content:center${nezaplaceno ? ';text-decoration:line-through;text-decoration-color:var(--red);text-decoration-thickness:2px;opacity:.75' : ''}">
+          ${!nezaplaceno && (info.bezProvize || info.pevnaCastka != null)
+            ? '<span style="position:absolute;top:50%;left:3px;transform:translateY(-50%);font-size:13px;line-height:1;color:var(--amber)">•</span>'
+            : ''}
           <span style="position:absolute;top:0;left:2px;font-size:11.5px;font-weight:700;color:var(--green)">${info.ci || ''}</span>
           <span style="position:absolute;top:0;right:2px;font-size:11.5px;font-weight:700;color:var(--red)">${info.co || ''}</span>
           <span style="font-size:16px;font-weight:800;color:var(--blue);font-family:'Archivo',-apple-system,sans-serif">${hLabel}</span>
@@ -27434,8 +27451,18 @@ async function loadWdAttendance() {
       if (delka <= 0 || delka >= SHIFT.breakLen) return zapsany
       return `${zapsany}<div style="font-size:10px;color:var(--text3);margin-top:1px">počítá se do ${minToTime(zac + SHIFT.breakLen)}</div>`
     })()
-    return `<tr>
-      <td style="font-size:12px;white-space:nowrap">${r.work_date ? new Date(r.work_date).toLocaleDateString('cs-CZ') : '—'}</td>
+    // Den, za který pracovník nedostane zaplaceno, je proškrtnutý a podbarvený.
+    const nezaplaceno = !!r.bez_vyplaty
+    const duvod = r.vyplata_poznamka ? ' — ' + r.vyplata_poznamka : ''
+    const vyjimkaOdznak = nezaplaceno
+      ? `<span title="Nefakturuje se${escAttr(duvod)}" style="margin-left:6px;font-size:9.5px;font-weight:800;letter-spacing:.04em;color:var(--red);background:var(--red-l);border-radius:5px;padding:1px 5px;text-decoration:none;white-space:nowrap">NEPLACENO</span>`
+      : (r.bez_provize_den
+        ? `<span title="Za tenhle den nemáme provizi${escAttr(duvod)}" style="margin-left:6px;font-size:9.5px;font-weight:800;color:var(--amber);background:var(--amber-l);border-radius:5px;padding:1px 5px;white-space:nowrap">BEZ PROVIZE</span>`
+        : (r.vyplata_castka != null
+          ? `<span title="Ručně nastavená částka${escAttr(duvod)}" style="margin-left:6px;font-size:9.5px;font-weight:800;color:var(--amber);background:var(--amber-l);border-radius:5px;padding:1px 5px;white-space:nowrap">${(Number(r.vyplata_castka)||0).toFixed(0)} €</span>`
+          : ''))
+    return `<tr${nezaplaceno ? ' style="background:var(--red-l);text-decoration:line-through;text-decoration-color:var(--red);text-decoration-thickness:2px"' : ''}>
+      <td style="font-size:12px;white-space:nowrap">${r.work_date ? new Date(r.work_date).toLocaleDateString('cs-CZ') : '—'}${vyjimkaOdznak}</td>
       <td>
         <span style="font-weight:700;color:var(--green)">${adj.checkIn || (r.check_in ? r.check_in.slice(0,5) : '—')}</span>
         ${adj.flags.lateIn ? ' ' + flagBadge('lateIn', 'pozdě') : ''}

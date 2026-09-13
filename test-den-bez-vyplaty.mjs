@@ -138,6 +138,41 @@ const v = await p.evaluate(async () => {
   for (const d of tyden) await sb.from('attendance').update({ bez_vyplaty: false }).eq('id', d.id)
 
   out.provize = { pred, poBezProvize, poBezVyplaty, dnu: tyden.length }
+
+  // ── zvýraznění v docházce ──
+  const { data: jeho } = await sb.from('attendance').select('*').eq('worker_id', kdo)
+    .not('total_hours', 'is', null).order('work_date', { ascending: false }).limit(3)
+  await sb.from('attendance').update({ bez_vyplaty: true, vyplata_poznamka: 'rozbil míchačku' }).eq('id', jeho[0].id)
+  if (jeho[1]) await sb.from('attendance').update({ bez_provize_den: true }).eq('id', jeho[1].id)
+
+  // karta pracovníka
+  await openWorkerModal(kdo); await new Promise(r => setTimeout(r, 900))
+  wdTab('dochazka', document.querySelector('.wd-tab[onclick*="dochazka"]'))
+  await new Promise(r => setTimeout(r, 1400))
+  const radky = [...document.querySelectorAll('#wd-att-table tr')]
+  const radekNeplaceno = radky.find(tr => (tr.textContent || '').includes('NEPLACENO'))
+  out.karta = {
+    maOdznak: !!radekNeplaceno,
+    proskrtnuto: radekNeplaceno ? /line-through/.test(radekNeplaceno.getAttribute('style') || '') : false,
+    maBezProvize: radky.some(tr => (tr.textContent || '').includes('BEZ PROVIZE')),
+  }
+  const zavri = document.querySelector('#worker-modal .x-close'); if (zavri) zavri.click()
+  await new Promise(r => setTimeout(r, 400))
+
+  // týdenní přehled
+  sv('dochazka', document.querySelector('button[onclick*="dochazka"]'))
+  await new Promise(r => setTimeout(r, 1000))
+  if (typeof loadKWData === 'function') { await loadKWData(); await new Promise(r => setTimeout(r, 900)) }
+  const tr2 = [...document.querySelectorAll('tr.kw-row')].find(x => x.dataset.id === kdo)
+  const bunky = tr2 ? [...tr2.querySelectorAll('td.kw-day')] : []
+  out.tyden = {
+    radekNalezen: !!tr2,
+    proskrtnutaBunka: bunky.some(td => /line-through/.test(td.innerHTML || '')),
+    cervenyPodklad: bunky.some(td => /line-through/.test(td.innerHTML || '') && /red-l/.test(td.getAttribute('style') || '')),
+    tecka: bunky.some(td => (td.textContent || '').includes('•')),
+    prekryvPopisku: /NEPLACENO|BEZ PROVIZE/.test(tr2 ? tr2.textContent : ''),
+  }
+  for (const d of jeho) await sb.from('attendance').update({ bez_vyplaty: false, bez_provize_den: false }).eq('id', d.id)
   return out
 })
 await b.close()
@@ -162,6 +197,16 @@ if (v.provize) {
      'dny „bez výplaty" sníží výdělek pracovníka (' + v.provize.pred.vydelek + ' € → ' + v.provize.poBezVyplaty.vydelek + ' €)')
   ok(v.provize.poBezVyplaty.provize === v.provize.pred.provize,
      'a naše provize za ně běží dál (' + v.provize.poBezVyplaty.provize + ' €)')
+}
+if (v.karta) {
+  console.log('\n── zvýraznění v docházce ──')
+  ok(v.karta.maOdznak, 'na kartě pracovníka je u dne odznak NEPLACENO')
+  ok(v.karta.proskrtnuto, 'a celý řádek je proškrtnutý')
+  ok(v.karta.maBezProvize, 'den bez provize má svůj odznak')
+  ok(v.tyden.radekNalezen && v.tyden.proskrtnutaBunka, 'v týdenním přehledu je den proškrtnutý')
+  ok(v.tyden.cervenyPodklad, 'a podbarvený červeně')
+  ok(v.tyden.tecka, 'den s jinou výjimkou má tečku')
+  ok(!v.tyden.prekryvPopisku, 'v týdenní buňce se nekreslí popisky přes časy')
 }
 ok(!chybyStranky.filter(x => !/favicon/i.test(x)).length, 'na stránce nenastala chyba')
 
