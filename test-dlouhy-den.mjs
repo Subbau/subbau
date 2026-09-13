@@ -69,6 +69,25 @@ const v = await p.evaluate(async () => {
   await loadLongDayAlert(); await new Promise(r => setTimeout(r, 400))
   out.poZnovunacteni = { videt: box.style.display, text: txt().slice(0, 40) }
 
+  // ── někteří lidi opravdu dělají do osmi: uložení správcem = potvrzení ──
+  await sb.from('attendance').update({ check_out: '20:30:00', total_hours: 13, dlouhy_den_potvrzen: null }).eq('id', d.id)
+  await loadLongDayAlert(); await new Promise(r => setTimeout(r, 400))
+  out.pred20 = box.style.display
+  box.querySelector('button[onclick*="opravDlouhyDen"]').click()
+  await new Promise(r => setTimeout(r, 1100))
+  out.predvyplneno = document.getElementById('edit-att-co-t')?.value
+  // správce NIC nemění, jen uloží — tím ty časy potvrdí
+  await saveEditAttRecord(); await new Promise(r => setTimeout(r, 1300))
+  const z = (await sb.from('attendance').select('*').eq('id', d.id)).data[0]
+  out.potvrzeni = { odchod: z.check_out, znacka: z.dlouhy_den_potvrzen, upozorneni: box.style.display }
+  await loadLongDayAlert(); await new Promise(r => setTimeout(r, 400))
+  out.potvrzeniPoZnovunacteni = box.style.display
+  // když se ten den znovu změní, potvrzení neplatí
+  await sb.from('attendance').update({ check_out: '21:15:00', total_hours: 13.7 }).eq('id', d.id)
+  await loadLongDayAlert(); await new Promise(r => setTimeout(r, 400))
+  out.poDalsiZmene = box.style.display
+  await sb.from('attendance').update({ dlouhy_den_potvrzen: null }).eq('id', d.id)
+
   // a když je den zase dlouhý, upozornění se vrátí (pravda se neschovává)
   await sb.from('attendance').update({ check_out: '21:00:00', total_hours: 13.5 }).eq('id', d.id)
   await loadLongDayAlert(); await new Promise(r => setTimeout(r, 400))
@@ -90,6 +109,16 @@ else {
   ok(v.poZnovunacteni.videt === 'none', 'a po znovunačtení se nevrátí')
   ok(v.kdyzZaseDlouhy.videt === 'block' && v.kdyzZaseDlouhy.jeTamPo19,
      'když je den zase dlouhý, upozornění se objeví (nic se nezametlo)')
+
+  console.log('\n── kdo opravdu dělá do osmi ──')
+  ok(v.pred20 === 'block', 'den do 20:30 se napřed ukáže')
+  ok(v.predvyplneno === '20:30', 'Opravit otevře ten den s jeho časy (' + v.predvyplneno + ')')
+  ok(v.potvrzeni.odchod === '20:30:00', 'správce časy nemění, jen uloží')
+  ok(v.potvrzeni.znacka && v.potvrzeni.znacka.endsWith('|20:30'),
+     'uložením se ty časy potvrdí (' + v.potvrzeni.znacka + ')')
+  ok(v.potvrzeni.upozorneni === 'none', 'a upozornění zmizí, i když den po 19:00 pořád končí')
+  ok(v.potvrzeniPoZnovunacteni === 'none', 'po znovunačtení se nevrátí')
+  ok(v.poDalsiZmene === 'block', 'když se ten den znovu změní, potvrzení padá a upozornění se vrátí')
 }
 ok(!chybyStranky.filter(x => !/favicon/i.test(x)).length, 'na stránce nenastala chyba')
 

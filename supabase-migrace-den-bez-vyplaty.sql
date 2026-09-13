@@ -39,6 +39,17 @@ alter table public.attendance
 alter table public.attendance
   add column if not exists vyplata_poznamka text;
 
+-- POTVRZENÍ DLOUHÉHO DNE. Někteří lidi opravdu dělají do osmi večer. Když
+-- správce takový den v docházce projde a uloží, je tím potvrzený a upozornění
+-- na dashboardu („Dlouhá pracovní doba — po 19:00") se u něj přestane ukazovat.
+-- Není to skrytí: platí jen pro ty časy, které správce uložil. Když se časy
+-- toho dne znovu změní, potvrzení padá a upozornění se vrátí.
+alter table public.attendance
+  add column if not exists dlouhy_den_potvrzen text;
+
+comment on column public.attendance.dlouhy_den_potvrzen is
+  'Časy dlouhého dne, které správce potvrdil (např. "07:00|20:30"). Jiné časy = potvrzení neplatí.';
+
 comment on column public.attendance.bez_vyplaty is
   'Pracovník za tenhle den nedostane zaplaceno a den se mu nefakturuje. Provize SubBau běží dál.';
 comment on column public.attendance.bez_provize_den is

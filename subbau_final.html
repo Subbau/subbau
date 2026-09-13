@@ -4507,7 +4507,7 @@ async function submitAdminSignatureWithPlacement() {
 // Po nahrání nové verze se snadno pozná, jestli se opravdu nasadila: otevřete
 // appku, zmáčkněte F12 (na Macu ⌥⌘I) a v konzoli je vypsané tohle datum. Když
 // tam svítí starší, prohlížeč nebo GitHub drží starou verzi.
-const SUBBAU_VERZE = '2026-09-13 b — upozornění na dlouhý den mizí opravou docházky, ne skrýváním'
+const SUBBAU_VERZE = '2026-09-13 c — uložení dlouhého dne správcem ho potvrdí a upozornění zmizí'
 console.log('SubBau docházka — verze ' + SUBBAU_VERZE)
 
 // ============ SUPABASE CONFIG ============
@@ -8515,6 +8515,11 @@ async function computeLongDayAlerts() {
     // Alarm spouštěl jen čas odchodu (po 19:00). Den s nesmyslným počtem hodin
     // tím propadl na dashboardu bez povšimnutí.
     if (endedAt <= cutoff && hod <= 14) return   // skončil do 19:00 a hodiny dávají smysl
+    // Den, který správce v docházce prošel a uložil, je potvrzený — někteří lidi
+    // do osmi večer opravdu dělají. Potvrzení platí jen pro ty časy, které uložil;
+    // po další změně časů se upozornění vrátí.
+    const casy = String(r.check_in || '').slice(0, 5) + '|' + String(r.check_out || '').slice(0, 5)
+    if (r.dlouhy_den_potvrzen && String(r.dlouhy_den_potvrzen) === casy) return
     items.push({ ...r, _kind: 'long', _startedAt: startedAt, _endedAt: endedAt, _hours: hod })
   })
 
@@ -21356,7 +21361,13 @@ async function saveEditAttRecord() {
   // Výjimka u dne se ukládá spolu se zbytkem. Když sloupce ještě v databázi
   // nejsou (nespuštěná migrace), uloží se den bez nich a řekne se to nahlas —
   // docházka se kvůli tomu zastavit nesmí.
-  const payloadSVyjimkou = { ...payload, ...vyjimka }
+  // Uložení dne správcem je zároveň potvrzením časů. Někteří lidi opravdu
+  // dělají do osmi večer — když to správce projde a uloží, nemá mu to dál
+  // svítit na dashboardu. Ukládáme KONKRÉTNÍ potvrzené časy: kdyby se den
+  // později změnil, potvrzení neplatí a upozornění se vrátí.
+  // Nezavřená směna se nepotvrzuje — chybějící odchod je pořád problém.
+  const potvrzeniDne = co ? (ci + '|' + co) : null
+  const payloadSVyjimkou = { ...payload, ...vyjimka, dlouhy_den_potvrzen: potvrzeniDne }
   const maVyjimku = vyjimka.bez_vyplaty || vyjimka.bez_provize_den
     || vyjimka.vyplata_castka != null || !!vyjimka.vyplata_poznamka
   let bezVyjimky = false
@@ -21364,7 +21375,7 @@ async function saveEditAttRecord() {
     if (id) {
       // Úprava existujícího záznamu
       ;({ data: updData, error } = await sb.from('attendance').update(payloadSVyjimkou).eq('id', id).select())
-      if (error && /bez_vyplaty|bez_provize_den|vyplata_castka|vyplata_poznamka/i.test(error.message || '')) {
+      if (error && /bez_vyplaty|bez_provize_den|vyplata_castka|vyplata_poznamka|dlouhy_den_potvrzen/i.test(error.message || '')) {
         bezVyjimky = true
         ;({ data: updData, error } = await sb.from('attendance').update(payload).eq('id', id).select())
       }
@@ -21376,7 +21387,7 @@ async function saveEditAttRecord() {
       const zaklad = { worker_id: workerId, work_date: dateStr, kw, kw_year: kwYear,
                        team_id: await skupinaPracovnika(workerId) }
       ;({ data: updData, error } = await dochazkaInsert({ ...payloadSVyjimkou, ...zaklad }, { vratitSeznam: true }))
-      if (error && /bez_vyplaty|bez_provize_den|vyplata_castka|vyplata_poznamka/i.test(error.message || '')) {
+      if (error && /bez_vyplaty|bez_provize_den|vyplata_castka|vyplata_poznamka|dlouhy_den_potvrzen/i.test(error.message || '')) {
         bezVyjimky = true
         ;({ data: updData, error } = await dochazkaInsert({ ...payload, ...zaklad }, { vratitSeznam: true }))
       }
