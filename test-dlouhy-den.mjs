@@ -1,4 +1,4 @@
-// Upozornění na dashboardu „Dlouhá pracovní doba — po 19:00".
+// Upozornění na dashboardu „Dlouhá pracovní doba — po 20:30".
 // Nesmí se dát schovat. Zmizí jedině tím, že den 19:00 překračovat přestane —
 // a po znovunačtení se nevrátí.
 //
@@ -47,11 +47,11 @@ const v = await p.evaluate(async () => {
   if (!d) return { chyba: 'v ukázce není žádný uzavřený den' }
 
   // uděláme z něj dlouhý den
-  await sb.from('attendance').update({ check_out: '20:30:00', total_hours: 13 }).eq('id', d.id)
+  await sb.from('attendance').update({ check_out: '21:15:00', total_hours: 13 }).eq('id', d.id)
   await loadLongDayAlert(); await new Promise(r => setTimeout(r, 400))
   const box = document.getElementById('dash-unclosed-shifts')
   const txt = () => (box.textContent || '').replace(/\s+/g, ' ').trim()
-  out.ukazalo = { videt: box.style.display, jeTamPo19: /po 19:00/.test(txt()),
+  out.ukazalo = { videt: box.style.display, jeTamPo19: /po 20:30/.test(txt()),
     maOpravit: !!box.querySelector('button[onclick*="opravDlouhyDen"]'),
     maSkryvani: /Vyřízeno|Skryto|Obnovit skryté|Zobrazit skryté/.test(txt()) }
 
@@ -70,7 +70,7 @@ const v = await p.evaluate(async () => {
   out.poZnovunacteni = { videt: box.style.display, text: txt().slice(0, 40) }
 
   // ── někteří lidi opravdu dělají do osmi: uložení správcem = potvrzení ──
-  await sb.from('attendance').update({ check_out: '20:30:00', total_hours: 13, dlouhy_den_potvrzen: null }).eq('id', d.id)
+  await sb.from('attendance').update({ check_out: '21:15:00', total_hours: 13, dlouhy_den_potvrzen: null }).eq('id', d.id)
   await loadLongDayAlert(); await new Promise(r => setTimeout(r, 400))
   out.pred20 = box.style.display
   box.querySelector('button[onclick*="opravDlouhyDen"]').click()
@@ -83,7 +83,7 @@ const v = await p.evaluate(async () => {
   await loadLongDayAlert(); await new Promise(r => setTimeout(r, 400))
   out.potvrzeniPoZnovunacteni = box.style.display
   // když se ten den znovu změní, potvrzení neplatí
-  await sb.from('attendance').update({ check_out: '21:15:00', total_hours: 13.7 }).eq('id', d.id)
+  await sb.from('attendance').update({ check_out: '21:45:00', total_hours: 14.2 }).eq('id', d.id)
   await loadLongDayAlert(); await new Promise(r => setTimeout(r, 400))
   out.poDalsiZmene = box.style.display
   await sb.from('attendance').update({ dlouhy_den_potvrzen: null }).eq('id', d.id)
@@ -91,7 +91,7 @@ const v = await p.evaluate(async () => {
   // a když je den zase dlouhý, upozornění se vrátí (pravda se neschovává)
   await sb.from('attendance').update({ check_out: '21:00:00', total_hours: 13.5 }).eq('id', d.id)
   await loadLongDayAlert(); await new Promise(r => setTimeout(r, 400))
-  out.kdyzZaseDlouhy = { videt: box.style.display, jeTamPo19: /po 19:00/.test(txt()) }
+  out.kdyzZaseDlouhy = { videt: box.style.display, jeTamPo19: /po 20:30/.test(txt()) }
   await sb.from('attendance').update({ check_out: d.check_out, total_hours: d.total_hours }).eq('id', d.id)
   return out
 })
@@ -111,12 +111,12 @@ else {
      'když je den zase dlouhý, upozornění se objeví (nic se nezametlo)')
 
   console.log('\n── kdo opravdu dělá do osmi ──')
-  ok(v.pred20 === 'block', 'den do 20:30 se napřed ukáže')
-  ok(v.predvyplneno === '20:30', 'Opravit otevře ten den s jeho časy (' + v.predvyplneno + ')')
-  ok(v.potvrzeni.odchod === '20:30:00', 'správce časy nemění, jen uloží')
-  ok(v.potvrzeni.znacka && v.potvrzeni.znacka.endsWith('|20:30'),
+  ok(v.pred20 === 'block', 'den do 21:15 se napřed ukáže')
+  ok(v.predvyplneno === '21:15', 'Opravit otevře ten den s jeho časy (' + v.predvyplneno + ')')
+  ok(v.potvrzeni.odchod === '21:15:00', 'správce časy nemění, jen uloží')
+  ok(v.potvrzeni.znacka && v.potvrzeni.znacka.endsWith('|21:15'),
      'uložením se ty časy potvrdí (' + v.potvrzeni.znacka + ')')
-  ok(v.potvrzeni.upozorneni === 'none', 'a upozornění zmizí, i když den po 19:00 pořád končí')
+  ok(v.potvrzeni.upozorneni === 'none', 'a upozornění zmizí, i když den po 20:30 pořád končí')
   ok(v.potvrzeniPoZnovunacteni === 'none', 'po znovunačtení se nevrátí')
   ok(v.poDalsiZmene === 'block', 'když se ten den znovu změní, potvrzení padá a upozornění se vrátí')
 }

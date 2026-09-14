@@ -695,7 +695,7 @@ setTimeout(function () {
         <p>Zadejte přihlašovací údaje</p>
         <div id="login-err" class="err-box" style="display:none"></div>
         <div class="fg"><label>E-mail</label><input type="email" id="login-email" placeholder="vas@email.cz" autocomplete="username" inputmode="email" autocapitalize="none" autocorrect="off"></div>
-        <div class="fg"><label>Heslo</label><input type="password" id="login-pwd" placeholder="••••••••" autocomplete="current-password" autocapitalize="none"></div>
+        <div class="fg"><label>Heslo</label><input type="password" id="login-pwd" placeholder="••••••••" autocomplete="current-password" autocapitalize="none" autocorrect="off" spellcheck="false"></div>
         <button class="btn-login" onclick="doLogin()" id="login-btn">Přihlásit se →</button>
         <div style="margin-top:12px;text-align:center;font-size:13px;color:var(--text2)">
           <a href="#" onclick="showForgotForm()" style="color:var(--text2)">Zapomněli jste heslo?</a>
@@ -4507,7 +4507,7 @@ async function submitAdminSignatureWithPlacement() {
 // Po nahrání nové verze se snadno pozná, jestli se opravdu nasadila: otevřete
 // appku, zmáčkněte F12 (na Macu ⌥⌘I) a v konzoli je vypsané tohle datum. Když
 // tam svítí starší, prohlížeč nebo GitHub drží starou verzi.
-const SUBBAU_VERZE = '2026-09-13 c — uložení dlouhého dne správcem ho potvrdí a upozornění zmizí'
+const SUBBAU_VERZE = '2026-09-14 a — docházka jde zapsat i bez GPS, srozumitelné hlášky u přihlášení, dlouhý den až od 20:30'
 console.log('SubBau docházka — verze ' + SUBBAU_VERZE)
 
 // ============ SUPABASE CONFIG ============
@@ -5207,7 +5207,12 @@ async function _initAppInner(user) {
     showLogin()
     if (loginErr) {
       loginErr.style.display = 'block'
-      loginErr.innerHTML = 'Nepodařilo se načíst profil — spojení s databází bylo pomalé.<br>Zkuste to prosím <b>znovu za chvíli</b> (stačí načíst stránku znovu). Pokud potíže trvají, kontaktujte správce.'
+      // Buď je pomalá síť, nebo účet nemá řádek v profiles — a to druhé se
+      // novým heslem nespraví ani po desátém pokusu. Proto to říkáme rovnou.
+      loginErr.innerHTML = 'Přihlášení proběhlo, ale nenačetl se váš profil.<br>' +
+        'Zkuste prosím <b>načíst stránku znovu</b>.<br>' +
+        'Pokud to ani pak nejde, <b>nedělejte si nové heslo</b> — to nepomůže. ' +
+        'Ozvěte se prosím do kanceláře, musíme to spravit my.'
     }
     return
   }
@@ -5839,6 +5844,37 @@ function showOsvec(profile) {
 let loginInProgress = false
 let registrationInProgress = false
 
+// Přeloží chybu od Supabase do věty, která člověku řekne, co s tím. Špatné
+// heslo je jen jedna z možností — a nejčastěji to špatné heslo NENÍ.
+function popisChybyPrihlaseni(error) {
+  const zprava = String(error?.message || '')
+  const stav = error?.status || 0
+  const kod = String(error?.code || '')
+
+  // Jediný případ, kdy je opravdu chyba v e-mailu nebo hesle.
+  if (/invalid[_ ]login[_ ]credentials/i.test(zprava) || kod === 'invalid_credentials') {
+    return 'Nesprávný e-mail nebo heslo.'
+  }
+  if (/email[_ ]not[_ ]confirmed/i.test(zprava)) {
+    return 'E-mail zatím není potvrzený. Podívejte se do schránky.'
+  }
+  if (stav === 429 || /rate limit|too many/i.test(zprava)) {
+    return 'Moc pokusů za sebou. Počkejte prosím minutu a zkuste to znovu.<br>' +
+           '<b>Heslo je nejspíš v pořádku</b> — nové si nedělejte.'
+  }
+  // Tohle je ta zákeřná skupina: appka nebo server, ne heslo.
+  if (/api key|refresh token|jwt|expired|signature/i.test(zprava) || stav === 401 || stav === 403) {
+    return 'Aplikace se teď nedomluvila se serverem.<br>' +
+           'Zavřete appku, otevřete ji znovu a přihlaste se.<br>' +
+           '<b>Není to heslem</b> — nové si nedělejte, nepomůže to.'
+  }
+  if (stav >= 500 || /fetch|network|failed to fetch|timeout/i.test(zprava)) {
+    return 'Server teď neodpovídá. Zkuste to prosím za chvíli.<br>' +
+           '<b>Není to heslem.</b>'
+  }
+  return 'Přihlášení se nepovedlo: ' + zprava + '<br>Pokud to nepřejde, ozvěte se prosím do kanceláře.'
+}
+
 async function doLogin() {
   if (loginInProgress) return
   const email = document.getElementById('login-email').value.trim()
@@ -5884,7 +5920,11 @@ async function doLogin() {
   }
 
   if (error) {
-    err.textContent = error.message.includes('Invalid') ? 'Nesprávný email nebo heslo.' : 'Chyba: ' + error.message
+    // POZOR: dřív tu stálo `message.includes('Invalid')`. Do toho spadlo i
+    // „Invalid API key" nebo „Invalid Refresh Token" — tedy chyby, se kterými
+    // heslo nemá nic společného. Lidem to napsalo „nesprávné heslo", oni si
+    // dělali nové a nepomohlo to. Proto se teď rozlišuje.
+    err.innerHTML = popisChybyPrihlaseni(error)
     err.style.display = 'block'
     btn.textContent = 'Přihlásit se →'
     btn.disabled = false
@@ -6118,6 +6158,21 @@ async function doRegister() {
       msg = '⚠️ Chyba registrace: ' + (msg || JSON.stringify(authErr))
     }
     err.textContent = msg
+    err.style.display = 'block'
+    btn.textContent = 'Odeslat registraci →'
+    btn.disabled = false
+    return
+  }
+
+  // Když se někdo registruje na e-mail, který už v systému je, Supabase
+  // NEVRÁTÍ chybu — vrátí uživatele s prázdným `identities` a heslo nezmění.
+  // Appka dřív napsala „registrace odeslána", člověk čekal, že mu nové heslo
+  // funguje, ono nefungovalo, a tak si ho dělal pořád dokola. Tohle to utne.
+  const identity = authData.user?.identities
+  if (Array.isArray(identity) && identity.length === 0) {
+    err.innerHTML = '⚠️ Na tenhle e-mail už účet existuje.<br>' +
+      'Novou registrací se <b>heslo nezmění</b>. Přihlaste se prosím původním heslem, ' +
+      'a když ho nevíte, ozvěte se do kanceláře — heslo vám nastavíme.'
     err.style.display = 'block'
     btn.textContent = 'Odeslat registraci →'
     btn.disabled = false
@@ -8404,10 +8459,15 @@ async function refreshPendingRegistrations() {
   } catch(e) { /* ticho — jen automatické obnovení */ }
 }
 
-// Hranice dlouhé pracovní doby. Kdo je na stavbě i po 19:00, má za sebou
+// Hranice dlouhé pracovní doby. Kdo je na stavbě i po 20:30, má za sebou
 // nadstandardně dlouhý den a admin se o tom má dozvědět. Docházka se tím
 // nijak nemění — uloží se přesně tak, jak ji pracovník zapsal.
-const LONG_DAY_HOUR = 19
+// Bylo 19:00, jenže řada lidí běžně dělá do 20:00 a upozornění pak hlásilo
+// normální dny. Proto je hranice posunutá na 20:30.
+const LONG_DAY_HOUR = 20
+const LONG_DAY_MIN = 30
+// Hranice na jednom místě i jako text, ať se v hláškách nerozejde s výpočtem.
+const LONG_DAY_POPIS = LONG_DAY_HOUR + ':' + String(LONG_DAY_MIN).padStart(2, '0')
 
 // Klíč, pod kterým se dřív skrývala upozornění na dlouhý den. Skrývání už
 // neexistuje, ale ostatní seznamy sdílejí tutéž tabulku doc_alert_dismissals
@@ -8417,7 +8477,7 @@ const LONG_KEY_PREFIX = 'long|'
 // Upozornění se NESKRÝVÁ. Dřív šlo dát „Vyřízeno" a den se schoval — jenže pak
 // nebylo poznat, jestli je docházka opravená, nebo jen zametená pod koberec,
 // a přes „Obnovit skryté" se to vracelo. Teď platí prosté pravidlo: upozornění
-// zmizí tehdy, když den 19:00 opravdu překračovat přestane. Cesta k tomu je
+// zmizí tehdy, když den 20:30 opravdu překračovat přestane. Cesta k tomu je
 // jediná — opravit docházku (tlačítko Opravit), nebo den smazat.
 
 // „Opravit" u jednoho dne — otevře ten den v úpravě docházky. Když z něj
@@ -8467,7 +8527,7 @@ function attDateTime(dateStr, timeStr) {
   return isNaN(d) ? null : d
 }
 
-// Najde dny, které přesáhly 19:00 — buď pracovník skončil až po 19:00
+// Najde dny, které přesáhly 20:30 — buď pracovník skončil až po 20:30
 // (dlouhá pracovní doba), nebo den vůbec neukončil (zapomenutý odchod).
 // Zároveň naplní window.unclosedWorkerIds pro odznak v tabulce Pracovníci.
 async function computeLongDayAlerts() {
@@ -8498,8 +8558,8 @@ async function computeLongDayAlerts() {
   ;(openRes.data || []).forEach(r => {
     const startedAt = attDateTime(r.work_date, r.check_in)
     if (!startedAt) return
-    // Rozdělaná směna se ozve až po 19:00 — během dne běží normálně a nemá otravovat.
-    const cutoff = new Date(startedAt); cutoff.setHours(LONG_DAY_HOUR, 0, 0, 0)
+    // Rozdělaná směna se ozve až po 20:30 — během dne běží normálně a nemá otravovat.
+    const cutoff = new Date(startedAt); cutoff.setHours(LONG_DAY_HOUR, LONG_DAY_MIN, 0, 0)
     if (now < cutoff) return
     openIds.add(r.worker_id)
     items.push({ ...r, _kind: 'open', _startedAt: startedAt, _hours: (now - startedAt) / 3600000 })
@@ -8510,11 +8570,11 @@ async function computeLongDayAlerts() {
     const endedAt = attDateTime(r.work_date, r.check_out)
     if (!startedAt || !endedAt) return
     if (endedAt < startedAt) endedAt.setDate(endedAt.getDate() + 1)  // odchod až po půlnoci
-    const cutoff = new Date(startedAt); cutoff.setHours(LONG_DAY_HOUR, 0, 0, 0)
+    const cutoff = new Date(startedAt); cutoff.setHours(LONG_DAY_HOUR, LONG_DAY_MIN, 0, 0)
     const hod = r.total_hours || 0
-    // Alarm spouštěl jen čas odchodu (po 19:00). Den s nesmyslným počtem hodin
+    // Alarm spouštěl jen čas odchodu (po 20:30). Den s nesmyslným počtem hodin
     // tím propadl na dashboardu bez povšimnutí.
-    if (endedAt <= cutoff && hod <= 14) return   // skončil do 19:00 a hodiny dávají smysl
+    if (endedAt <= cutoff && hod <= 14) return   // skončil do 20:30 a hodiny dávají smysl
     // Den, který správce v docházce prošel a uložil, je potvrzený — někteří lidi
     // do osmi večer opravdu dělají. Potvrzení platí jen pro ty časy, které uložil;
     // po další změně časů se upozornění vrátí.
@@ -8531,7 +8591,7 @@ async function computeLongDayAlerts() {
   return items
 }
 
-// ⚠️ Upozornění na dlouhou pracovní dobu — práce po 19:00 a zapomenuté odchody
+// ⚠️ Upozornění na dlouhou pracovní dobu — práce po 20:30 a zapomenuté odchody
 async function loadLongDayAlert() {
   const div = document.getElementById('dash-unclosed-shifts')
   if (!div) return
@@ -8556,18 +8616,18 @@ async function loadLongDayAlert() {
     <div style="background:var(--red-l);border-left:4px solid var(--red);border-radius:8px;padding:12px 16px">
       <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:8px">
         <span style="font-size:13px;font-weight:700;color:var(--red)">
-          ⚠️ Dlouhá pracovní doba — ${n} ${zaznamy} po ${LONG_DAY_HOUR}:00
+          ⚠️ Dlouhá pracovní doba — ${n} ${zaznamy} po ${LONG_DAY_POPIS}
         </span>
       </div>
       <div style="font-size:11.5px;color:var(--text2);margin:-2px 0 9px;line-height:1.5">
-        <b>Opravit</b> = otevře ten den a upraví časy. Jakmile den 19:00 překračovat přestane, upozornění samo zmizí.
+        <b>Opravit</b> = otevře ten den a upraví časy. Jakmile den 20:30 překračovat přestane, upozornění samo zmizí.
         <b>Smazat docházku</b> = smaže celý záznam dne včetně odpracovaných hodin.
       </div>
       ${items.map(r => {
         const jmeno = r.worker?.full_name || '—'
         const popis = r._kind === 'open'
           ? `${den(r.work_date)} · příchod ${cas(r._startedAt)} · <b>odchod nezaznamenán</b> (běží ${r._hours.toFixed(1)} h)`
-          : `${den(r.work_date)} · ${cas(r._startedAt)} → ${cas(r._endedAt)} · skončil po ${LONG_DAY_HOUR}:00`
+          : `${den(r.work_date)} · ${cas(r._startedAt)} → ${cas(r._endedAt)} · skončil po ${LONG_DAY_POPIS}`
         // Totéž bez HTML — jde do potvrzovacího okna u mazání, ať admin vidí, který den maže.
         const popisText = r._kind === 'open'
           ? `${den(r.work_date)} · příchod ${cas(r._startedAt)} · odchod nezaznamenán`
@@ -8583,7 +8643,7 @@ async function loadLongDayAlert() {
             </div>
             <div style="display:flex;align-items:center;gap:7px;flex-shrink:0">
               ${odznak}
-              <button onclick="event.stopPropagation();opravDlouhyDen('${r.worker_id||''}','${String(r.work_date||'').slice(0,10)}',${parseInt(r.kw)||0},${parseInt(r.kw_year)||0},'${arg(jmeno)}')" title="Otevře tenhle den a upraví časy. Jakmile den 19:00 překračovat přestane, upozornění samo zmizí." style="font-size:11px;padding:3px 9px;border:1px solid var(--blue);border-radius:7px;background:var(--bg2);color:var(--blue);cursor:pointer;font-family:inherit;font-weight:700;display:inline-flex;align-items:center;gap:4px;white-space:nowrap"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" style="width:12px;height:12px"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/></svg>Opravit</button>
+              <button onclick="event.stopPropagation();opravDlouhyDen('${r.worker_id||''}','${String(r.work_date||'').slice(0,10)}',${parseInt(r.kw)||0},${parseInt(r.kw_year)||0},'${arg(jmeno)}')" title="Otevře tenhle den a upraví časy. Jakmile den 20:30 překračovat přestane, upozornění samo zmizí." style="font-size:11px;padding:3px 9px;border:1px solid var(--blue);border-radius:7px;background:var(--bg2);color:var(--blue);cursor:pointer;font-family:inherit;font-weight:700;display:inline-flex;align-items:center;gap:4px;white-space:nowrap"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" style="width:12px;height:12px"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/></svg>Opravit</button>
               <button onclick="event.stopPropagation();deleteLongDayRecord('${r.id}','${r.worker_id||''}','${arg(jmeno)}','${arg(popisText)}')" title="POZOR: smaže celý záznam docházky toho dne včetně odpracovaných hodin. Chcete-li jen schovat upozornění, dejte Vyřízeno." style="font-size:11px;padding:3px 9px;border:1px solid var(--red);border-radius:7px;background:#fff;color:var(--red);cursor:pointer;font-family:inherit;font-weight:600;display:inline-flex;align-items:center;gap:4px;white-space:nowrap"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" style="width:12px;height:12px"><path d="M3 6h18M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6M14 11v6"/></svg>Smazat docházku</button>
             </div>
           </div>`
@@ -8835,7 +8895,7 @@ async function loadWorkers() {
     const subName = w.subteam_id ? (subteamById[w.subteam_id]?.name||'') : ''
     return `
     <tr style="cursor:pointer" class="worker-row" data-id="${w.id}" data-name="${escAttr(((w.full_name||'') + ' ' + (w.email||'')).replace(/"/g,'&quot;'))}">
-      <td><b>${escAttr(w.full_name)}</b>${w.has_car ? ' <span style="font-size:11px;background:#eef7ee;color:#2e7d32;border:1px solid #b8dcb8;font-weight:700;padding:1px 6px;border-radius:8px;white-space:nowrap" title="Má vlastní auto">🚗 auto</span>' : ''}${(window.unclosedWorkerIds && window.unclosedWorkerIds.has(w.id)) ? ' <span style="background:var(--red);color:#fff;font-size:10px;font-weight:700;padding:2px 6px;border-radius:8px;white-space:nowrap" title="Nemá ukončený den — směna běží i po 19:00">⚠️ neukončeno</span>' : ''}</td>
+      <td><b>${escAttr(w.full_name)}</b>${w.has_car ? ' <span style="font-size:11px;background:#eef7ee;color:#2e7d32;border:1px solid #b8dcb8;font-weight:700;padding:1px 6px;border-radius:8px;white-space:nowrap" title="Má vlastní auto">🚗 auto</span>' : ''}${(window.unclosedWorkerIds && window.unclosedWorkerIds.has(w.id)) ? ' <span style="background:var(--red);color:#fff;font-size:10px;font-weight:700;padding:2px 6px;border-radius:8px;white-space:nowrap" title="Nemá ukončený den — směna běží i po 20:30">⚠️ neukončeno</span>' : ''}</td>
       <td>${groupCellHtml(teamName, subName)}</td>
       <td>${escAttr(profLabel(w.profession)||'—')}</td>
       <td style="font-size:12px">${escAttr(w.email)}</td>
@@ -15255,16 +15315,15 @@ async function mobCheckin(type) {
     return
   }
   if (checkinInProgress) { showToast('⏳ Počkejte...'); return }
-  // Adresa stavby je povinná. Když ji GPS nezachytila, musí ji pracovník dopsat
-  // ručně — jinak by ve výkazu zůstal den bez místa a nedalo by se dohledat,
-  // kde se pracovalo. Příchod (type 'in') tím nikdy neblokujeme: GPS se rozjíždí
-  // až po něm a směna musí jít začít vždycky.
-  if (type !== 'in' && attAddressMissing()) {
-    showManualAddress('📍 Adresa stavby chybí — vyplňte ji, teprve pak jde pokračovat', true)
-    const el = document.getElementById('mob-manual-street')
-    if (el) setTimeout(() => { try { el.focus() } catch (e) {} }, 350)
-    showToast('📍 Nejdřív vyplňte adresu stavby')
-    return
+  // Panel s ruční adresou ukážeme až po zápisu (viz níž), ať nic nezdržuje.
+  // DOCHÁZKA SE MUSÍ ZAPSAT VŽDYCKY. Dřív tady stálo `return`, když appka
+  // neznala adresu stavby — pauza ani odchod se tím vůbec nezapsaly a lidem
+  // na stavbě to prostě „nešlo odkliknout". Adresa je důležitá, ale je až
+  // druhá v pořadí: nejdřív se zapíše čas, pak se doptáme na adresu.
+  const chybiAdresa = (type !== 'in' && attAddressMissing())
+  if (chybiAdresa) {
+    // Panel na adresu ukážeme hned, ale NIC tím nezastavujeme — zápis běží dál.
+    showManualAddress('📍 Adresa stavby chybí — doplňte ji prosím, ať víme, kde se pracovalo', true)
   }
   // Když currentUser chybí (Chrome občas ztratí proměnnou) — zkus ho dotáhnout ze session
   if (!currentUser) {
@@ -15583,7 +15642,7 @@ async function mobCheckin(type) {
         // „co jsem dnes dělal" se ukáže vždycky, ať odchod neuvízne na otázce na adresu.
         if (stillNoAddr) {
           if (gpsAddr) saveGpsAddressSilently(todayAttId)
-          else showManualAddress('📍 Adresa stavby chybí — bez ní nejde pokračovat, doplňte ji ručně', true)
+          else showManualAddress('📍 Adresa stavby chybí — doplňte ji prosím ručně, ať víme, kde se pracovalo', true)
         }
         showCheckoutDialog()
         checkinInProgress = false
@@ -18885,6 +18944,40 @@ async function startLocationForCheckIn(attId) {
 }
 
 // Zapíše zjištěnou GPS adresu k záznamu bez ptaní — pracovník nic nepotvrzuje.
+// Uloží adresu ke dni a OPRAVDU si ověří, že se to povedlo. Dřív se zápis
+// posílal naslepo: chyba skončila jen v konzoli telefonu a update, který prošel
+// bez chyby, ale netrefil ani jeden řádek, se tvářil jako úspěch. Na displeji
+// adresa naskočila, do adminu nedorazilo nic.
+async function ulozAdresuDne(attId, adresa, zdroj, lat, lng) {
+  if (!attId || !adresa) return { ok: false, duvod: 'chybí den nebo adresa' }
+  const zaklad = { location_address: adresa, address_source: zdroj || 'gps' }
+  const plne = { ...zaklad, gps_address: adresa }
+  if (lat && lng) { plne.location_lat = lat; plne.location_lng = lng }
+
+  const zkus = async (data) => {
+    try {
+      // .select('id') je tu schválně — bez něj se nepozná zápis, který projde
+      // bez chyby, ale nezmění ani řádek (jiné id, práva, uzavřená směna).
+      const { data: radky, error } = await sb.from('attendance')
+        .update(data).eq('id', attId).select('id')
+      if (error) return { ok: false, error }
+      if (!radky || !radky.length) return { ok: false, error: { message: 'zápis nezměnil žádný řádek' } }
+      return { ok: true }
+    } catch (e) { return { ok: false, error: e } }
+  }
+
+  let v = await zkus(plne)
+  // Starší databáze nemusí mít gps_address ani souřadnice — ať kvůli nim
+  // nespadne i hlavní adresa.
+  if (!v.ok && /gps_address|location_lat|location_lng|column|schema cache/i.test(v.error?.message || '')) {
+    v = await zkus(zaklad)
+  }
+  // Slabý signál: jeden opakovaný pokus, ať se adresa neztratí kvůli výpadku.
+  if (!v.ok) { await new Promise(r => setTimeout(r, 1200)); v = await zkus(zaklad) }
+  if (!v.ok) console.warn('[adresa] uložení selhalo:', v.error?.message)
+  return { ok: v.ok, duvod: v.error?.message || '' }
+}
+
 function saveGpsAddressSilently(attId) {
   if (!attId || !gpsAddr) return
   // Do dne, který upravil SubBau, GPS potichu nesahá — jeho adresa je nadřazená
@@ -18898,11 +18991,8 @@ function saveGpsAddressSilently(attId) {
   }
   lsSet('lastConstructionSite', gpsAddr)
   const mg = document.getElementById('mob-gps'); if (mg) mg.textContent = '📍 ' + gpsAddr
-  sb.from('attendance').update(upd).eq('id', attId).then(({ error }) => {
-    if (!error) return
-    // Starší databáze nemusí mít gps_address — ulož aspoň hlavní adresu
-    console.warn('[adresa] tichý zápis se separátními poli selhal:', error.message)
-    sb.from('attendance').update({ location_address: gpsAddr, address_source: 'gps' }).eq('id', attId)
+  ulozAdresuDne(attId, gpsAddr, 'gps', gpsLat, gpsLng).then(v => {
+    if (!v.ok) showToast('⚠️ Adresu se nepodařilo uložit — zkuste ji prosím zadat ručně')
   })
 }
 
@@ -18929,7 +19019,9 @@ function askAddressIfNeeded(attId, actionLabel) {
   // Během dne (přestávka, odchod) polohu nebudíme — šetříme baterku. Když ji
   // appka zná už z příchodu, potichu ji dopíšeme, jinak nabídneme ruční zadání.
   if (gpsAddr) { saveGpsAddressSilently(attId); return }
-  showManualAddress('📍 Adresa stavby chybí — bez ní nejde pokračovat, doplňte ji ručně', true)
+  // Čas už je zapsaný — tohle je prosba, ne podmínka. Dřív tu stálo „bez ní
+  // nejde pokračovat", což lidi děsilo a mysleli si, že se pauza neuložila.
+  showManualAddress('📍 Adresa stavby chybí — doplňte ji prosím, ať víme, kde se pracovalo', true)
 }
 
 let _gpsWatchId = null
@@ -19102,8 +19194,11 @@ function getGPS(force) {
         gpsUpd.address_source = 'gps'
         if (todayRecord) { todayRecord.location_address = gpsAddr; todayRecord.address_source = 'gps' }
       }
-      sb.from('attendance').update(gpsUpd).eq('id', todayAttId).then(({error}) => {
-        if (error) console.warn('[GPS adresa] uložení selhalo (chybí gps_address?):', error.message)
+      // Pozor: todayAttId se mohl mezitím vynulovat (odchod) — proto si ho
+      // podržíme a výsledek zápisu si ověříme.
+      const denProZapis = todayAttId
+      ulozAdresuDne(denProZapis, gpsAddr, gpsUpd.address_source || 'gps', gpsLat, gpsLng).then(v => {
+        if (!v.ok) showToast('⚠️ Poloha se nepodařila uložit — zadejte prosím adresu ručně')
       })
     }
     // Pokud pracovník mezitím zadal adresu ručně, GPS nepřepíše zobrazení, jen se uloží na pozadí
@@ -19193,12 +19288,16 @@ async function applyManualAddress() {
   if (todayAttId) {
     const upd = { manual_address: val, location_address: val, address_source: 'manual' }
     if (!haveGps) { upd.gps_address = null; upd.location_lat = null; upd.location_lng = null }
-    let { error } = await sb.from('attendance').update(upd).eq('id', todayAttId)
+    // `.select('id')` je tu schválně: update, který nenajde ani jeden řádek,
+    // se tváří jako úspěch (chyba je null). Bez téhle kontroly by appka řekla
+    // „✅ uloženo“ i ve chvíli, kdy se do admina nedostalo nic.
+    let { data: radky, error } = await sb.from('attendance').update(upd).eq('id', todayAttId).select('id')
+    if (!error && (!radky || !radky.length)) error = { message: 'zápis nezměnil žádný řádek' }
     if (error) {
       // Starší databáze nemusí mít sloupec manual_address — zkus zápis bez něj
       console.warn('[ruční adresa] update s manual_address selhal, zkouším bez:', error.message)
-      const r2 = await sb.from('attendance').update({ location_address: val, address_source: 'manual' }).eq('id', todayAttId)
-      error = r2.error
+      const r2 = await sb.from('attendance').update({ location_address: val, address_source: 'manual' }).eq('id', todayAttId).select('id')
+      error = r2.error || ((!r2.data || !r2.data.length) ? { message: 'zápis nezměnil žádný řádek' } : null)
     }
     if (error) {
       showToast(chybaText(error, 'Adresa se neuložila'))
@@ -19217,7 +19316,9 @@ async function applyManualAddress() {
   // Bez GPS → zastav GPS sledování (jen ruční záznam). S GPS → nech doběhnout.
   if (!haveGps) { _manualAddressLocked = true; gpsLat = null; gpsLng = null; stopGPS() }
   else stopGPS()
-  showToast('✅ Adresa nastavena')
+  // Bez rozjetého dne není kam adresu zapsat — uloží se až s příchodem.
+  // Dřív tu padlo „✅ Adresa nastavena“ pokaždé, i když do databáze nešlo nic.
+  showToast(todayAttId ? '✅ Adresa uložena' : '✅ Adresa zapamatována — uloží se s příchodem')
 }
 
 function startClock() {
@@ -26975,8 +27076,8 @@ function buildKWOptions() {
 
 // ============ ZAOKROUHLENÍ HODIN - PRACOVNÍ PRAVIDLA ============
 // Standardní směna: příchod 7:00, přestávka 11:00-11:30, odchod 16:00.
-// abnormal = hranice dlouhé pracovní doby (19:00), stejná jako u upozornění na dashboardu.
-const SHIFT = { start: 7*60, breakStart: 11*60, breakLen: 30, end: 16*60, abnormal: 19*60 }
+// abnormal = hranice dlouhé pracovní doby (20:30), stejná jako u upozornění na dashboardu.
+const SHIFT = { start: 7*60, breakStart: 11*60, breakLen: 30, end: 16*60, abnormal: 20*60+30 }
 // Kolik minut po CELÉ hodině se ještě odpouští dolů. 7:08 → 7:00, ale 7:11 → 7:30.
 // Po půlhodině se neodpouští nic: 9:37 → 10:00.
 const HAJENA_DOBA_MIN = 10
@@ -27217,7 +27318,7 @@ function flagBadge(flag, text) {
     lateBreak:  { bg: '#fff3cd', color: '#856404', label: 'Pozdní návrat z přestávky' },
     earlyOut:   { bg: '#cfe2ff', color: '#0a58ca', label: 'Brzy odešel' },
     overtime:   { bg: '#d1e7dd', color: '#146c43', label: 'Přesčas' },
-    abnormal:   { bg: '#f8d7da', color: '#842029', label: 'Dlouhá pracovní doba — konec po 19:00' },
+    abnormal:   { bg: '#f8d7da', color: '#842029', label: 'Dlouhá pracovní doba — konec po 20:30' },
     incomplete: { bg: '#f8d7da', color: '#842029', label: 'Nesplněná směna (< 8h)' }
   }
   const b = badges[flag]
