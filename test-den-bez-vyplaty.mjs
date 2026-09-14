@@ -78,12 +78,13 @@ await new Promise(r => setTimeout(r, 2500))
 
 const v = await p.evaluate(async () => {
   const out = {}
+  const cekej = ms => new Promise(r => setTimeout(r, ms))
   const { data: dny } = await sb.from('attendance').select('*').not('total_hours', 'is', null).limit(1)
   const den = (dny || [])[0]
   if (!den) return { chyba: 'v ukázce není žádný den docházky' }
 
   await openWeekEdit(den.worker_id, den.kw, den.kw_year, 'Zkouška', den.work_date)
-  await new Promise(r => setTimeout(r, 900))
+  await cekej(900)
   out.poleJsou = ['edit-att-bez-vyplaty', 'edit-att-bez-provize', 'edit-att-castka', 'edit-att-vyplata-pozn']
     .every(id => !!document.getElementById(id))
   out.napoprvePrazdne = !document.getElementById('edit-att-bez-vyplaty').checked
@@ -94,17 +95,18 @@ const v = await p.evaluate(async () => {
   document.getElementById('edit-att-castka').value = '150'
   document.getElementById('edit-att-vyplata-pozn').value = 'rozbil míchačku'
   await saveEditAttRecord()
-  await new Promise(r => setTimeout(r, 900))
+  await cekej(900)
   const poUlozeni = (await sb.from('attendance').select('*').eq('id', den.id)).data[0]
   out.ulozeno = { bezVyplaty: poUlozeni.bez_vyplaty, castka: Number(poUlozeni.vyplata_castka),
                   pozn: poUlozeni.vyplata_poznamka, hodiny: poUlozeni.total_hours }
 
   // znovu otevřít — musí se to načíst zpátky
   await openWeekEdit(den.worker_id, den.kw, den.kw_year, 'Zkouška', den.work_date)
-  await new Promise(r => setTimeout(r, 900))
+  await cekej(900)
   out.nacteno = { bezVyplaty: document.getElementById('edit-att-bez-vyplaty').checked,
                   castka: document.getElementById('edit-att-castka').value,
                   pozn: document.getElementById('edit-att-vyplata-pozn').value }
+
   // ── v prohlížeči: promítne se to do Provizí? ──
   sessionStorage.setItem('provizeUnlocked', 'ukazka')
   const sekce = document.getElementById('provize-content')
@@ -117,68 +119,150 @@ const v = await p.evaluate(async () => {
   })
 
   // Uklidíme, co jsme nastavili výš, ať to do měření nemluví.
-  await sb.from('attendance').update({ bez_vyplaty: false, vyplata_castka: null }).eq('id', den.id)
-  await renderProvizeContent(); await new Promise(r => setTimeout(r, 600))
-  const kdo = den.worker_id
-  const pred = stav(kdo)
+  await sb.from('attendance')
+    .update({ bez_vyplaty: false, vyplata_castka: null, vyplata_poznamka: null }).eq('id', den.id)
 
-  // Provize ukazují AKTUÁLNÍ týden, ne ten, ze kterého je `den`. Označíme proto
-  // všechny dny toho člověka — jinak by se v zobrazeném týdnu nic nezměnilo
-  // a zkouška by tvrdila, že to nefunguje.
-  const { data: dnyC } = await sb.from('attendance').select('id').eq('worker_id', kdo)
-    .not('total_hours', 'is', null)
-  const tyden = (dnyC || [])
+  const kdo = den.worker_id
+
+  // POZOR — tohle je jádro poctivého měření:
+  // Provize i oba docházkové přehledy ukazují VŽDY JEN JEDEN TÝDEN. Výchozí je
+  // ten dnešní, jenže v pondělí v něm bývá u člověka jediný záznam — rozdělaná
+  // směna s total_hours = null, jejíž hodiny se dopočítávají „do teď", takže
+  // sama od sebe roste mezi dvěma měřeními. Označit se navíc nedá (staré znění
+  // zkoušky si dny filtrovalo přes .not('total_hours','is',null), takže tenhle
+  // řádek vždycky minulo) → čísla se nehnula a zkouška to hlásila jako chybu
+  // appky. Měříme proto v posledním týdnu, kde má ten člověk UZAVŘENÉ dny.
+  const { data: uzavrene } = await sb.from('attendance').select('*').eq('worker_id', kdo)
+    .not('check_out', 'is', null).not('total_hours', 'is', null)
+    .order('work_date', { ascending: false }).limit(1)
+  if (!uzavrene || !uzavrene.length) return { ...out, chyba: 'v ukázce nemá ten člověk ani jeden uzavřený den' }
+  const mericiDen = uzavrene[0]
+  const kwText = mericiDen.kw + '-' + mericiDen.kw_year
+
+  provizeMode = 'week'
+  provizeAnchor = new Date(mericiDen.work_date + 'T12:00:00')
+  await renderProvizeContent(); await cekej(600)
+  const [wS, wE] = provizePeriodRange('week', provizeAnchor)
+  const odStr = localDateStr(wS), doStr = localDateStr(wE)
+
+  // Všechny jeho záznamy v zobrazeném týdnu — i rozdělané. Kdyby jediný zůstal
+  // neoznačený, číslo by nespadlo na nulu a měření by lhalo.
+  const { data: dnyC } = await sb.from('attendance').select('id, work_date, total_hours, check_out')
+    .eq('worker_id', kdo).gte('work_date', odStr).lte('work_date', doStr)
+  const tyden = dnyC || []
+
+  // Kontrolní pracovník: jemu se nesahá na nic. Když se pohnou i jeho čísla,
+  // neměříme výjimku, ale něco úplně jiného.
+  const { data: vsichni } = await sb.from('attendance').select('worker_id')
+    .gte('work_date', odStr).lte('work_date', doStr).not('total_hours', 'is', null)
+  const kontrolniKdo = [...new Set((vsichni || []).map(a => a.worker_id))]
+    .find(id => id !== kdo && document.getElementById('pv-w-' + id)) || null
+
+  const pred = stav(kdo)
+  const kPred = kontrolniKdo ? stav(kontrolniKdo) : null
+
   for (const d of tyden) await sb.from('attendance').update({ bez_provize_den: true }).eq('id', d.id)
-  await renderProvizeContent(); await new Promise(r => setTimeout(r, 600))
+  await renderProvizeContent(); await cekej(600)
   const poBezProvize = stav(kdo)
+  const kPoBezProvize = kontrolniKdo ? stav(kontrolniKdo) : null
 
   for (const d of tyden) await sb.from('attendance').update({ bez_provize_den: false, bez_vyplaty: true }).eq('id', d.id)
-  await renderProvizeContent(); await new Promise(r => setTimeout(r, 600))
+  await renderProvizeContent(); await cekej(600)
   const poBezVyplaty = stav(kdo)
+  const kPoBezVyplaty = kontrolniKdo ? stav(kontrolniKdo) : null
+
   for (const d of tyden) await sb.from('attendance').update({ bez_vyplaty: false }).eq('id', d.id)
 
-  out.provize = { pred, poBezProvize, poBezVyplaty, dnu: tyden.length }
+  out.mereni = {
+    tyden: kwText, od: odStr, do: doStr,
+    dny: tyden.map(d => d.work_date + ' ' + (d.total_hours == null ? 'rozdělaná' : d.total_hours + ' h')),
+  }
+  out.provize = { pred, poBezProvize, poBezVyplaty, dnu: tyden.length,
+                  kontrolniKdo: !!kontrolniKdo,
+                  kontrola: { pred: kPred, poBezProvize: kPoBezProvize, poBezVyplaty: kPoBezVyplaty } }
 
   // ── zvýraznění v docházce ──
+  // Označujeme dny z TOHO týdne, který se pak zobrazí. Staré znění bralo
+  // „poslední dny s hodinami" (= minulý týden) a dívalo se do týdne dnešního,
+  // takže odznaky hledalo tam, kde žádná výjimka nebyla.
   const { data: jeho } = await sb.from('attendance').select('*').eq('worker_id', kdo)
-    .not('total_hours', 'is', null).order('work_date', { ascending: false }).limit(3)
-  await sb.from('attendance').update({ bez_vyplaty: true, vyplata_poznamka: 'rozbil míchačku' }).eq('id', jeho[0].id)
-  if (jeho[1]) await sb.from('attendance').update({ bez_provize_den: true }).eq('id', jeho[1].id)
+    .gte('work_date', odStr).lte('work_date', doStr)
+    .not('total_hours', 'is', null).not('check_out', 'is', null)
+    .order('work_date', { ascending: false }).limit(3)
+  if (!jeho || jeho.length < 2) return { ...out, chyba: 'v měřeném týdnu nejsou aspoň dva uzavřené dny' }
 
   // karta pracovníka
-  await openWorkerModal(kdo); await new Promise(r => setTimeout(r, 900))
+  await openWorkerModal(kdo); await cekej(900)
   wdTab('dochazka', document.querySelector('.wd-tab[onclick*="dochazka"]'))
-  await new Promise(r => setTimeout(r, 1400))
-  const radky = [...document.querySelectorAll('#wd-att-table tr')]
-  const radekNeplaceno = radky.find(tr => (tr.textContent || '').includes('NEPLACENO'))
-  out.karta = {
-    maOdznak: !!radekNeplaceno,
-    proskrtnuto: radekNeplaceno ? /line-through/.test(radekNeplaceno.getAttribute('style') || '') : false,
-    maBezProvize: radky.some(tr => (tr.textContent || '').includes('BEZ PROVIZE')),
+  await cekej(1400)
+  const kwSel = document.getElementById('wd-kw-sel')
+  if (!kwSel || ![...kwSel.options].some(o => o.value === kwText)) {
+    return { ...out, chyba: 'na kartě pracovníka nejde vybrat týden ' + kwText }
   }
+  kwSel.value = kwText
+  await loadWdAttendance(); await cekej(900)
+  const zmerKartu = () => {
+    const radky = [...document.querySelectorAll('#wd-att-table tr')]
+    const radekNeplaceno = radky.find(tr => (tr.textContent || '').includes('NEPLACENO'))
+    return {
+      radku: radky.length,
+      maOdznak: !!radekNeplaceno,
+      proskrtnuto: radekNeplaceno ? /line-through/.test(radekNeplaceno.getAttribute('style') || '') : false,
+      maBezProvize: radky.some(tr => (tr.textContent || '').includes('BEZ PROVIZE')),
+    }
+  }
+  out.kartaPred = zmerKartu()          // negativní kontrola: zatím nic označeného není
+
+  await sb.from('attendance')
+    .update({ bez_vyplaty: true, vyplata_poznamka: 'rozbil míchačku' }).eq('id', jeho[0].id)
+  await sb.from('attendance').update({ bez_provize_den: true }).eq('id', jeho[1].id)
+  out.oznaceno = { neplaceno: jeho[0].work_date, bezProvize: jeho[1].work_date, vTydnu: kwText }
+
+  await loadWdAttendance(); await cekej(900)
+  out.karta = zmerKartu()
   const zavri = document.querySelector('#worker-modal .x-close'); if (zavri) zavri.click()
-  await new Promise(r => setTimeout(r, 400))
+  await cekej(400)
 
   // týdenní přehled
   sv('dochazka', document.querySelector('button[onclick*="dochazka"]'))
-  await new Promise(r => setTimeout(r, 1000))
-  if (typeof loadKWData === 'function') { await loadKWData(); await new Promise(r => setTimeout(r, 900)) }
-  const tr2 = [...document.querySelectorAll('tr.kw-row')].find(x => x.dataset.id === kdo)
-  const bunky = tr2 ? [...tr2.querySelectorAll('td.kw-day')] : []
-  out.tyden = {
-    radekNalezen: !!tr2,
-    proskrtnutaBunka: bunky.some(td => /line-through/.test(td.innerHTML || '')),
-    cervenyPodklad: bunky.some(td => /line-through/.test(td.innerHTML || '') && /red-l/.test(td.getAttribute('style') || '')),
-    tecka: bunky.some(td => (td.textContent || '').includes('•')),
-    prekryvPopisku: /NEPLACENO|BEZ PROVIZE/.test(tr2 ? tr2.textContent : ''),
+  await cekej(1000)
+  const kwGlob = document.getElementById('kw-select')
+  if (!kwGlob || ![...kwGlob.options].some(o => o.value === kwText)) {
+    return { ...out, chyba: 'v týdenním přehledu nejde vybrat týden ' + kwText }
   }
-  for (const d of jeho) await sb.from('attendance').update({ bez_vyplaty: false, bez_provize_den: false }).eq('id', d.id)
+  kwGlob.value = kwText
+  await loadKWData(); await cekej(900)
+  const zmerTyden = () => {
+    const tr2 = [...document.querySelectorAll('tr.kw-row')].find(x => x.dataset.id === kdo)
+    const bunky = tr2 ? [...tr2.querySelectorAll('td.kw-day')] : []
+    return {
+      radekNalezen: !!tr2, bunek: bunky.length,
+      proskrtnutaBunka: bunky.some(td => /line-through/.test(td.innerHTML || '')),
+      cervenyPodklad: bunky.some(td => /line-through/.test(td.innerHTML || '') && /red-l/.test(td.getAttribute('style') || '')),
+      tecka: bunky.some(td => (td.textContent || '').includes('•')),
+      prekryvPopisku: /NEPLACENO|BEZ PROVIZE/.test(tr2 ? tr2.textContent : ''),
+    }
+  }
+  out.tyden = zmerTyden()
+
+  // Uklidit a změřit znovu — negativní kontrola, že zvýraznění umí i zmizet.
+  for (const d of jeho) {
+    await sb.from('attendance')
+      .update({ bez_vyplaty: false, bez_provize_den: false, vyplata_poznamka: null }).eq('id', d.id)
+  }
+  await loadKWData(); await cekej(900)
+  out.tydenPoUklidu = zmerTyden()
   return out
 })
 await b.close()
 
-if (v.chyba) { chyb++; console.log('  ❌ ' + v.chyba) }
-else {
+if (v.mereni) {
+  console.log('\n   měřený týden ' + v.mereni.tyden + ' (' + v.mereni.od + ' – ' + v.mereni.do + ')')
+  console.log('   dny v něm: ' + (v.mereni.dny.join(', ') || '(žádné)'))
+}
+if (v.oznaceno) console.log('   označeno: NEPLACENO ' + v.oznaceno.neplaceno + ', BEZ PROVIZE ' + v.oznaceno.bezProvize)
+
+if (v.poleJsou !== undefined) {
   ok(v.poleJsou, 'v okně jsou obě zaškrtávátka, částka i poznámka')
   ok(v.napoprvePrazdne, 'u běžného dne je všechno prázdné')
   ok(v.ulozeno.bezVyplaty === true && v.ulozeno.castka === 150 && v.ulozeno.pozn === 'rozbil míchačku',
@@ -187,10 +271,19 @@ else {
   ok(v.nacteno.bezVyplaty === true && v.nacteno.castka === '150' && v.nacteno.pozn === 'rozbil míchačku',
      'po znovuotevření se výjimka načte zpátky')
 }
+if (v.chyba) { chyb++; console.log('  ❌ ' + v.chyba) }
+
 if (v.provize) {
   console.log('\n── promítne se to do Provizí ──')
+  // Bez tohohle je celý zbytek téhle sekce bezcenný: kdyby v měřeném týdnu
+  // nebyly žádné peníze, „snížilo se to" by neprošlo ani při rozbité appce.
+  ok(v.provize.pred.provize > 0 && v.provize.pred.vydelek > 0 && v.provize.dnu > 0,
+     'v měřeném týdnu je vůbec co měřit (' + v.provize.dnu + ' dnů, ' +
+     v.provize.pred.provize + ' € provize, ' + v.provize.pred.vydelek + ' € výdělek)')
   ok(v.provize.poBezProvize.provize < v.provize.pred.provize,
      'označené dny sníží provizi (' + v.provize.pred.provize + ' € → ' + v.provize.poBezProvize.provize + ' €)')
+  ok(v.provize.poBezProvize.provize === 0,
+     'a spadne až na nulu, když jsou označené všechny dny týdne (' + v.provize.poBezProvize.provize + ' €)')
   ok(v.provize.poBezProvize.vydelek === v.provize.pred.vydelek,
      'a výdělku pracovníka se nedotknou (' + v.provize.poBezProvize.vydelek + ' €)')
   ok(v.provize.poBezVyplaty.vydelek < v.provize.pred.vydelek,
@@ -211,10 +304,33 @@ if (v.karta) {
 ok(!chybyStranky.filter(x => !/favicon/i.test(x)).length, 'na stránce nenastala chyba')
 
 console.log('\n════ kontrolní vzorky ════')
+// Tady se zkouší SAMA ZKOUŠKA: každý řádek musí být „ne", jinak by kontroly
+// výš mohly svítit zeleně i nad rozbitou appkou.
 const kontroly = [
   ['vynechání dne z faktury', () => hodinyPodleSazeb([{ work_date: '2026-09-08', total_hours: 8, bez_vyplaty: true }], sazba).hodiny !== 0],
   ['pevná částka', () => hodinyPodleSazeb([{ work_date: '2026-09-08', total_hours: 8, vyplata_castka: 100 }], sazba).castka !== 100],
   ['sloupce v odkazu pro odběratele', () => !/bez_vyplaty,bez_provize_den,vyplata_castka/.test(api)],
+  // Neoznačený pracovník ve stejném týdnu se hnout nesmí — jinak neměříme výjimku,
+  // ale to, že se přehled překreslil.
+  ['neoznačený kolega zůstal beze změny', () => {
+    const k = v.provize && v.provize.kontrola
+    if (!k || !k.pred) return true               // bez kontrolního člověka je měření slabé → hlásit
+    return !(k.pred.provize > 0
+      && k.poBezProvize.provize === k.pred.provize && k.poBezVyplaty.provize === k.pred.provize
+      && k.poBezProvize.vydelek === k.pred.vydelek && k.poBezVyplaty.vydelek === k.pred.vydelek)
+  }],
+  // Před označením žádný odznak být nesmí — jinak by detektor hlásil „nalezeno" pořád.
+  ['před označením žádný odznak není', () => {
+    const k = v.kartaPred
+    if (!k) return true
+    return !(k.radku > 1 && !k.maOdznak && !k.maBezProvize)
+  }],
+  // A po úklidu musí zvýraznění zase zmizet.
+  ['po zrušení výjimek zvýraznění zmizí', () => {
+    const t = v.tydenPoUklidu
+    if (!t) return true
+    return !(t.radekNalezen && !t.proskrtnutaBunka && !t.cervenyPodklad && !t.tecka)
+  }],
 ]
 let umi = 0
 for (const [popis, f] of kontroly) {

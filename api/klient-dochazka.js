@@ -388,6 +388,15 @@ module.exports = async (req, res) => {
       } catch (e) { console.warn('[klient] lidé ve skupinách:', e.message); }
     }
 
+    const mimoVykaz = new Set();
+    try {
+      const v = await db(`profiles?select=id&ve_vykazu=is.false`, klic);
+      (v || []).forEach(x => { if (x.id) mimoVykaz.add(x.id); });
+    } catch (e) { console.warn('[klient] ve_vykazu se nenačetlo (migrace?):', e.message); }
+    if (mimoVykaz.size) {
+      lideVeSkupinach = lideVeSkupinach.filter(id => !mimoVykaz.has(id));
+    }
+
     // Načte docházku pro zadané období: dny s partou z vybraných skupin
     // a k tomu staré dny BEZ party u lidí, kteří do těch skupin patří.
     // Dny se zapsanou CIZÍ partou se nepřidávají — ty patří jinému odběrateli.
@@ -406,6 +415,7 @@ module.exports = async (req, res) => {
       const casti = await Promise.all(kus);
       const videno = new Set(), vse = [];
       for (const c of casti) for (const r of (c || [])) {
+        if (r.worker_id && mimoVykaz.has(r.worker_id)) continue;
         const k = r.id || (r.worker_id + '|' + r.work_date + '|' + (r.check_in || ''));
         if (videno.has(k)) continue;
         videno.add(k); vse.push(r);

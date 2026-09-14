@@ -5190,7 +5190,7 @@ async function submitAdminSignatureWithPlacement() {
 // Po nahrání nové verze se snadno pozná, jestli se opravdu nasadila: otevřete
 // appku, zmáčkněte F12 (na Macu ⌥⌘I) a v konzoli je vypsané tohle datum. Když
 // tam svítí starší, prohlížeč nebo GitHub drží starou verzi.
-const SUBBAU_VERZE = '2026-09-14 a — docházka jde zapsat i bez GPS, srozumitelné hlášky u přihlášení, dlouhý den až od 20:30'
+const SUBBAU_VERZE = '2026-09-14 b — v Týmech jde odškrtnout, kdo nemá být ve výkazu'
 console.log('StavKo docházka — verze ' + SUBBAU_VERZE)
 
 // ============ SUPABASE CONFIG ============
@@ -9625,6 +9625,49 @@ async function toggleAccess(id, current) {
 
 // Přepne, zda OSVČ může zaznamenávat docházku. Do appky se dál přihlásí,
 // ale zápis příchodu/odchodu/pauzy je blokován (can_track_hours=false).
+// ============ KDO PATŘÍ DO VÝKAZU ============
+// Jedno místo, kde se to rozhoduje, ať se to nikde v appce nerozejde.
+// Chybějící sloupec (neproběhlá migrace) i prázdná hodnota znamenají „patří" —
+// nikdo se tedy z výkazů neztratí jen proto, že se ještě nespustila migrace.
+function patriDoVykazu(w) {
+  return !w || w.ve_vykazu !== false
+}
+
+// Přepne, jestli se člověk počítá do výkazů hodin. NESAHÁ na provize, faktury
+// ani na zapisování docházky — ta mu běží dál. Zaškrtávátko je v sekci Týmy.
+async function prepniVeVykazu(id, el) {
+  const zapnout = !!(el && el.checked)
+  if (el) el.disabled = true
+  const { data, error } = await sb.from('profiles')
+    .update({ ve_vykazu: zapnout }).eq('id', id).select('id, ve_vykazu')
+  if (el) el.disabled = false
+  if (error) {
+    if (el) el.checked = !zapnout           // vrátit zaškrtnutí, změna neprošla
+    showToast(/ve_vykazu|column|schema cache/i.test(error.message || '')
+      ? '❌ Chybí sloupec ve_vykazu — spusťte migraci supabase-migrace-ve-vykazu.sql'
+      : '❌ Chyba: ' + error.message)
+    return
+  }
+  // Update, který kvůli právům netrefí ani jeden řádek, vrací úspěch bez chyby.
+  if (!data || !data.length) {
+    if (el) el.checked = !zapnout
+    showToast('❌ Změna se neuložila (zkontrolujte oprávnění)')
+    return
+  }
+  // A databáze může zápis přijmout, ale hodnotu tiše vrátit zpátky — přesně to
+  // dělá zámek z migrace, když se o změnu pokusí někdo jiný než správce.
+  // Bez téhle kontroly by appka hlásila úspěch a obrazovka by lhala.
+  if (data[0].ve_vykazu !== zapnout) {
+    if (el) el.checked = !zapnout
+    showToast('❌ Změnu zablokovala databáze — odškrtnout smí jen správce')
+    return
+  }
+  const w = (_workersCache || []).find(x => x.id === id)
+  if (w) w.ve_vykazu = zapnout
+  showToast(zapnout ? '✅ Počítá se do výkazů' : '🚫 Ve výkazech nebude (docházku zapisuje dál)')
+  renderTeams()
+}
+
 async function toggleTracking(id, currentlyCan) {
   const newVal = !currentlyCan
   const { data, error } = await sb.from('profiles').update({ can_track_hours: newVal }).eq('id', id).select('id,can_track_hours')
@@ -9895,11 +9938,22 @@ async function loadKWData() {
 
   // Všichni aktivní pracovníci — i ti se zablokovanou docházkou.
   // (Jinak by z přehledu zmizely i hodiny, které stihli odpracovat před zablokováním.)
-  const { data: allWorkers } = await sb.from('profiles')
-    .select('id, full_name, profession, team_id, subteam_id, can_track_hours')
+  let { data: allWorkers, error: chybaKW } = await sb.from('profiles')
+    .select('id, full_name, profession, team_id, subteam_id, can_track_hours, ve_vykazu')
     .in('role', ['osvec', 'partak'])
     .eq('is_active', true)
     .order('full_name')
+  // Bez migrace sloupec ve_vykazu neexistuje a dotaz spadne. Přehled hodin je
+  // to poslední, co smí kvůli tomu zmizet — tak se zkusí ještě jednou bez něj.
+  if (!allWorkers && chybaKW
+      && (chybaKW.code === '42703' || /ve_vykazu|column .* does not exist|schema cache/i.test(chybaKW.message || ''))) {
+    ;({ data: allWorkers } = await sb.from('profiles')
+      .select('id, full_name, profession, team_id, subteam_id, can_track_hours')
+      .in('role', ['osvec', 'partak'])
+      .eq('is_active', true)
+      .order('full_name'))
+  }
+  if (!allWorkers) { console.warn('[přehled KW] lidi se nenačetli:', chybaKW?.message); return }
 
   // Názvy skupin (firem) a podskupin
   const { data: kwTeams } = await sb.from('teams').select('id, name')
@@ -9942,6 +9996,7 @@ async function loadKWData() {
       firm: w.team_id ? (kwTeamName[w.team_id] || '') : '',
       sub: w.subteam_id ? (kwSubteamById[w.subteam_id]?.name || '') : '',
       blocked: w.can_track_hours === false,
+      mimoVykaz: !patriDoVykazu(w),
       days:{}, total:0 }
   })
 
@@ -10086,7 +10141,7 @@ async function loadKWData() {
 
   const kwHtml = list.map(w=>`
     <tr style="cursor:pointer;height:56px" class="kw-row" data-id="${w.id||''}" data-name="${(w.name||'').replace(/"/g,'&quot;')}">
-      <td class="kw-name" title="Klikněte pro otevření profilu pracovníka" style="vertical-align:middle;overflow:hidden"><b>${w.name}</b>${w.byvaly?' <span style="font-size:10px;font-weight:700;background:var(--bg);color:var(--text3);border:1px solid var(--brd);padding:1px 6px;border-radius:8px;white-space:nowrap" title="Pracovník už do aplikace nemá přístup. Hodiny, které stihl odpracovat, zůstávají v přehledu.">📦 bývalý</span>':''}${w.blocked?' <span style="font-size:10px;font-weight:700;background:var(--red-l);color:var(--red);border:1px solid #e8c4ba;padding:1px 6px;border-radius:8px;white-space:nowrap" title="Pracovník má dočasně zablokované zapisování docházky">🚫 docházka zablokovaná</span>':''}${(w.firm||w.sub)?`<div style="margin-top:3px">${groupCellHtml(w.firm, w.sub)}</div>`:''}</td><td style="font-size:12px;vertical-align:middle">${profLabel(w.prof)||''}</td>
+      <td class="kw-name" title="Klikněte pro otevření profilu pracovníka" style="vertical-align:middle;overflow:hidden"><b>${w.name}</b>${w.byvaly?' <span style="font-size:10px;font-weight:700;background:var(--bg);color:var(--text3);border:1px solid var(--brd);padding:1px 6px;border-radius:8px;white-space:nowrap" title="Pracovník už do aplikace nemá přístup. Hodiny, které stihl odpracovat, zůstávají v přehledu.">📦 bývalý</span>':''}${w.mimoVykaz?' <span style="font-size:10px;font-weight:700;background:var(--bg);color:var(--red);border:1px solid var(--red);padding:1px 6px;border-radius:8px;white-space:nowrap" title="V Týmech je odškrtnutý. Tady ho vidíte i s hodinami, ale do vytištěného výkazu se nedostane — proto tam bude jiný součet.">🚫 mimo výkaz</span>':''}${w.blocked?' <span style="font-size:10px;font-weight:700;background:var(--red-l);color:var(--red);border:1px solid #e8c4ba;padding:1px 6px;border-radius:8px;white-space:nowrap" title="Pracovník má dočasně zablokované zapisování docházky">🚫 docházka zablokovaná</span>':''}${(w.firm||w.sub)?`<div style="margin-top:3px">${groupCellHtml(w.firm, w.sub)}</div>`:''}</td><td style="font-size:12px;vertical-align:middle">${profLabel(w.prof)||''}</td>
       ${dayCell(w,1)}${dayCell(w,2)}${dayCell(w,3)}${dayCell(w,4)}${dayCell(w,5)}${dayCell(w,6)}${dayCell(w,7)}
       <td style="vertical-align:middle"><b style="color:var(--blue)">${w.total.toFixed(1)}h</b></td>
     </tr>`).join('')
@@ -14308,7 +14363,7 @@ async function loadTeams() {
   // Týmy, lidi, podskupiny a firmy na sobě nezávisí — ptáme se na všechno naráz.
   // Dřív se čekalo na každý dotaz zvlášť; na pomalejším připojení, kde jedna cesta
   // na server trvá i vteřinu, se z toho nasčítalo přes deset vteřin čekání.
-  const SLOUPCE_LIDI = 'id, full_name, profession, role, team_id, subteam_id, is_active, can_track_hours'
+  const SLOUPCE_LIDI = 'id, full_name, profession, role, team_id, subteam_id, is_active, can_track_hours, ve_vykazu'
   const [rTeams, rWorkers, rSubteams, rComps] = await Promise.all([
     sb.from('teams').select('*').eq('is_active', true).order('name'),
     sb.from('profiles').select(SLOUPCE_LIDI).in('role', ['osvec', 'partak']).order('full_name'),
@@ -14323,8 +14378,17 @@ async function loadTeams() {
   // ať se seznam členů načte i před spuštěním migrací, jen bez té které informace.
   // Zkouší se to, jen když ten bohatší dotaz výše neprošel.
   let workers = rWorkers.data
-  if (!workers) {
+  // Ústup jen když sloupec opravdu chybí (42703 = neproběhlá migrace). Při
+  // výpadku sítě se ustupovat nesmí — načetl by se seznam bez ve_vykazu
+  // a odškrtnutí lidé by se v Týmech tvářili jako zaškrtnutí.
+  const chybiSloupec = (e) => !!e && (e.code === '42703' || /ve_vykazu|column .* does not exist|schema cache/i.test(e.message || ''))
+  if (!workers && !chybiSloupec(rWorkers.error)) {
+    console.warn('[Týmy] lidi se nenačetli:', rWorkers.error?.message)
+  }
+  if (!workers && chybiSloupec(rWorkers.error)) {
     for (const cols of [
+      // Bez ve_vykazu — když migrace supabase-migrace-ve-vykazu.sql ještě neproběhla.
+      'id, full_name, profession, role, team_id, subteam_id, is_active, can_track_hours',
       'id, full_name, profession, role, team_id, subteam_id, is_active',
       'id, full_name, profession, role, team_id, is_active',
       'id, full_name, profession, role, team_id'
@@ -14392,6 +14456,9 @@ function renderTeamMembers(t, members, qWorker, profLabels) {
     </select>`
 
   const memberRow = (m) => {
+    // Zaškrtnuto = počítat do výkazu. Chybějící sloupec (neproběhlá migrace)
+    // se bere jako zaškrtnuto, aby se před migrací nikdo z výkazů neztratil.
+    const vyk = patriDoVykazu(m)
     const match = qWorker && (m.full_name||'').toLowerCase().includes(qWorker)
     const mv = subs.length ? moveOptions(m.subteam_id).replace('%MID%', m.id) : ''
     return `
@@ -14400,6 +14467,10 @@ function renderTeamMembers(t, members, qWorker, profLabels) {
           <span style="font-size:13px;font-weight:${match?'800':'600'};color:var(--blue)">${escAttr(m.full_name)} ↗</span>
           <span style="font-size:11px;color:var(--text3);margin-left:6px">${profLabels[m.role]||''}</span>
         </div>
+        <label onclick="event.stopPropagation()" title="Zaškrtnuto = tenhle člověk je ve výkazech hodin. Odškrtnutím ho z výkazů vyndáte — docházku si ale zapisuje dál a na provize ani faktury to nesahá. POZOR: platí to i zpětně, zmizí i z už odeslaných týdnů v odkazu pro odběratele." style="display:inline-flex;align-items:center;gap:4px;font-size:11px;color:${vyk?'var(--text3)':'var(--red)'};cursor:pointer;white-space:nowrap;font-weight:${vyk?'400':'700'}">
+          <input type="checkbox" ${vyk?'checked':''} onchange="event.stopPropagation();prepniVeVykazu('${m.id}', this)" style="width:15px;height:15px;cursor:pointer;accent-color:var(--blue)">
+          ${vyk ? 've výkazu' : 'mimo výkaz'}
+        </label>
         ${mv}
         <button class="x-close" onclick="event.stopPropagation();removeFromTeam('${m.id}')" title="Odebrat z týmu" style="padding:2px 8px;font-size:11px;border:1px solid var(--brd);border-radius:6px;cursor:pointer;background:none;font-family:inherit;flex-shrink:0"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:20px;height:20px;display:block"><path d="M18 6L6 18M6 6l12 12"/></svg></button>
       </div>`
@@ -14582,6 +14653,8 @@ function renderTeams() {
   if (teams.length && shownTeams.length) {
     div.innerHTML = stWarn + shownTeams.map(t => {
       let members = workers.filter(w => w.team_id === t.id)
+      const skryti = (_workersCache || []).filter(w => w.team_id === t.id
+        && (w.is_active === false || w.can_track_hours === false))
       // Barva podle firmy — stejná paleta jako pilulky "🏢 Firma" jinde v appce,
       // aby šlo na první pohled poznat, kde jedna firma končí a druhá začíná.
       const gc = groupColor(cleanTeamName(t.name), 'company')
@@ -14605,6 +14678,16 @@ function renderTeams() {
           </div>
         </div>
         ${renderTeamMembers(t, members, qWorker, profLabels)}
+        ${skryti.length ? `<div style="margin-top:8px;padding-top:8px;border-top:1px dashed var(--brd)">
+          <div style="font-size:11px;color:var(--text3);margin-bottom:5px">Nezapisují docházku, ale jejich odpracované hodiny ve výkazech zůstávají:</div>
+          ${skryti.map(m => `<div style="display:flex;justify-content:space-between;align-items:center;gap:6px;padding:5px 9px;opacity:.75">
+            <span style="font-size:12px;color:var(--text2)">${escAttr(m.full_name)}${m.is_active === false ? ' (bývalý)' : ' (docházka zablokovaná)'}</span>
+            <label onclick="event.stopPropagation()" title="Zaškrtnuto = jeho hodiny jsou ve výkazech. Odškrtnutím ho z výkazů vyndáte, a to i zpětně — zmizí i z už odeslaných týdnů v odkazu pro odběratele." style="display:inline-flex;align-items:center;gap:4px;font-size:11px;color:${patriDoVykazu(m)?'var(--text3)':'var(--red)'};cursor:pointer;white-space:nowrap;font-weight:${patriDoVykazu(m)?'400':'700'}">
+              <input type="checkbox" ${patriDoVykazu(m)?'checked':''} onchange="event.stopPropagation();prepniVeVykazu('${m.id}', this)" style="width:15px;height:15px;cursor:pointer;accent-color:var(--blue)">
+              ${patriDoVykazu(m) ? 've výkazu' : 'mimo výkaz'}
+            </label>
+          </div>`).join('')}
+        </div>` : ''}
         <div style="font-size:11px;color:var(--text3);margin-top:8px;text-align:right">${members.length} ${members.length===1?'člen':'členů'}</div>
         <div style="margin-top:10px;padding-top:10px;border-top:1px dashed var(--brd);display:flex;flex-wrap:wrap;gap:8px;align-items:center">
           <span style="font-size:11px;color:var(--text3);font-weight:600">📄 Docházka týmu:</span>
@@ -14648,7 +14731,8 @@ async function populateTeamPdfWeeks() {
   const workers = _workersCache || []
   for (const sel of selects) {
     const teamId = sel.getAttribute('data-team-id')
-    const memberIds = workers.filter(w => w.team_id === teamId).map(w => w.id)
+    // Odškrtnutí lidé (Týmy → „mimo výkaz") se do výkazu nepočítají.
+    const memberIds = workers.filter(w => w.team_id === teamId && patriDoVykazu(w)).map(w => w.id)
     if (!memberIds.length) {
       sel.innerHTML = '<option value="">— žádní členové —</option>'
       continue
@@ -14689,7 +14773,8 @@ async function generateTeamAttendancePdf(teamId, teamName) {
   const [week, year] = val.split('/').map(Number)
 
   const workers = _workersCache || []
-  const members = workers.filter(w => w.team_id === teamId)
+  // Kdo je v Týmech odškrtnutý, ve výkazu není — i když hodiny odpracoval.
+  const members = workers.filter(w => w.team_id === teamId && patriDoVykazu(w))
   if (!members.length) { showToast('⚠️ Tým nemá žádné členy'); return }
   const ids = members.map(m => m.id)
 
@@ -20058,11 +20143,20 @@ async function exportKW() {
   const endDate = new Date(startDate); endDate.setDate(endDate.getDate() + 6)
   const fmt = d => localDateStr(d)
 
-  const { data: att } = await sb.from('attendance')
+  const { data: attVse } = await sb.from('attendance')
     .select('*, worker:profiles!worker_id(full_name, profession)')
     .gte('work_date', fmt(startDate))
     .lte('work_date', fmt(endDate))
     .order('work_date')
+
+  // Kdo je v Týmech odškrtnutý („mimo výkaz"), do tohohle přehledu nepatří.
+  // Když sloupec ještě neexistuje (neproběhlá migrace), nevyřadí se nikdo.
+  const mimoVykaz = new Set()
+  try {
+    const { data: vyrazeni } = await sb.from('profiles').select('id').eq('ve_vykazu', false)
+    ;(vyrazeni || []).forEach(x => mimoVykaz.add(x.id))
+  } catch (e) { console.warn('[exportKW] ve_vykazu se nenačetlo:', e) }
+  const att = (attVse || []).filter(r => !mimoVykaz.has(r.worker_id))
 
   if (!att?.length) { showToast('❌ Žádná data pro tento týden'); return }
 
@@ -20162,8 +20256,17 @@ async function initExportForm() {
   // Bývalí pracovníci se nabídnou taky — jejich odpracovaná doba nikam nezmizela
   // a občas je potřeba vyexportovat i zpětně. Zaškrtnutí ale nedostanou, aby se
   // do běžného exportu nepletli; kdo je potřebuje, klikne na ně.
-  const { data: workers } = await sb.from('profiles')
-    .select('id, full_name, profession, is_active').in('role',['osvec','partak']).order('full_name')
+  let { data: workers, error: chybaLidi } = await sb.from('profiles')
+    .select('id, full_name, profession, is_active, ve_vykazu').in('role',['osvec','partak']).order('full_name')
+  // Bez sloupce ve_vykazu (neproběhlá migrace) vrátí dotaz chybu a prázdno.
+  // Bez téhle pojistky by se správci ukázalo „Žádní pracovníci" a export by
+  // přestal fungovat. Ustupuje se ale JEN u chybějícího sloupce — při výpadku
+  // sítě by seznam bez ve_vykazu předzaškrtl i lidi, kteří jsou mimo výkaz.
+  if (!workers?.length && chybaLidi
+      && (chybaLidi.code === '42703' || /ve_vykazu|column .* does not exist|schema cache/i.test(chybaLidi.message || ''))) {
+    ;({ data: workers } = await sb.from('profiles')
+      .select('id, full_name, profession, is_active').in('role',['osvec','partak']).order('full_name'))
+  }
   if (!workers?.length) { list.innerHTML = '<div style="text-align:center;color:var(--text3);font-size:13px;padding:10px">Žádní pracovníci</div>'; return }
   const serazeni = workers.slice().sort((a, b) => {
     const ab = a.is_active === false ? 1 : 0, bb = b.is_active === false ? 1 : 0
@@ -20172,10 +20275,14 @@ async function initExportForm() {
   })
   list.innerHTML = serazeni.map(w => {
     const byvaly = w.is_active === false
+    // „Mimo výkaz" se chová stejně jako bývalý: v seznamu je, ale nezaškrtnutý.
+    // Kdo ho přesto potřebuje, klikne na něj — nic mu v tom nebrání.
+    const mimo = !patriDoVykazu(w)
+    const vychoziZaskrtnuty = !byvaly && !mimo
     return `
-    <label class="export-wrow${byvaly ? '' : ' on'}" data-name="${escAttr((w.full_name||'').toLowerCase().replace(/"/g,'&quot;'))}">
-      <input type="checkbox" class="export-wcheck" value="${w.id}"${byvaly ? '' : ' checked'} onchange="updateExportRowStyle(this)">
-      <span class="ew-name"><b>${escAttr(w.full_name)}${byvaly ? ' (bývalý)' : ''}</b><small>${escAttr(profLabel(w.profession)||'—')}</small></span>
+    <label class="export-wrow${vychoziZaskrtnuty ? ' on' : ''}" data-name="${escAttr((w.full_name||'').toLowerCase().replace(/"/g,'&quot;'))}">
+      <input type="checkbox" class="export-wcheck" value="${w.id}"${vychoziZaskrtnuty ? ' checked' : ''} onchange="updateExportRowStyle(this)">
+      <span class="ew-name"><b>${escAttr(w.full_name)}${byvaly ? ' (bývalý)' : mimo ? ' (mimo výkaz)' : ''}</b><small>${escAttr(profLabel(w.profession)||'—')}</small></span>
       <span class="ew-toggle"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg></span>
     </label>`
   }).join('')
