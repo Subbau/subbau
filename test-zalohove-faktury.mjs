@@ -44,11 +44,16 @@ ok(/zalohove_faktury_vlastni[\s\S]{0,200}for select/.test(fs.readFileSync('supab
 ok(/zalohy_pouzite: Array\.isArray\(d\.zalohyPouzite\)/.test(src), 'odečet se ukládá K FAKTUŘE, ne do zálohových faktur')
 ok(!/zuctujZalohy/.test(src), 'pracovník nikam do zálohových faktur nezapisuje')
 
-const b = await puppeteer.launch({ args: ['--no-sandbox'] })
+// protocolTimeout: bez něj se čekání na stránku protáhne na 3 minuty a zkouška
+// jen mlčí. Takhle se to pozná do půl minuty.
+const b = await puppeteer.launch({ headless: 'new', args: ['--no-sandbox'], protocolTimeout: 30000 })
 const p = await b.newPage()
 await p.setViewport({ width: 1400, height: 1000 })
 const chybyStranky = []
 p.on('pageerror', e => chybyStranky.push(e.message.slice(0, 140)))
+// Nativní confirm/alert by stránku v prohlížeči bez okna zablokoval napořád.
+const dialogy = []
+p.on('dialog', async d => { dialogy.push(d.message().slice(0,80)); try { await d.accept() } catch (e) {} })
 await p.goto('file://' + path.resolve(UKAZKA), { waitUntil: 'networkidle0' })
 await new Promise(r => setTimeout(r, 2500))
 
@@ -86,40 +91,97 @@ const v = await p.evaluate(async () => {
   }
   zavriZalohovyDoklad()
 
+  // --- vlastní pracovník, ať měření nestojí na tom, co je zrovna v ukázce ---
+  // Dřív se bral `lide[0]` a z nabídky týdnů ta PRVNÍ položka — jenže ta je
+  // vždycky právě běžící týden. V něm má ukázkový člověk leda dnešek bez
+  // zapsaného odchodu, takže faktura vyšla na 0 € a „záloha se neodečetla"
+  // bylo měření prázdna, ne chyba appky. Zkouška si proto člověka i jeho
+  // hodiny vyrobí sama a měří v uzavřeném týdnu.
+  const uuid = window.__demoUuid ||
+    (() => 'xxxxxxxx-xxxx-4xxx-8xxx-xxxxxxxxxxxx'.replace(/x/g, () => (Math.random() * 16 | 0).toString(16)))
+  const tydenMereni = getKW(new Date(Date.now() - 14 * 86400000))
+  const KW = tydenMereni.week + '/' + tydenMereni.year
+  async function vyrobPracovnika(jmeno, sazba, hodinNaDen) {
+    const id = uuid()
+    await sb.from('profiles').insert({
+      id, full_name: jmeno, role: 'osvec', profession: 'Tesař', is_active: true,
+      registration_status: 'approved', hourly_rate_worker: sazba,
+      business_type: 'osvec', is_osvec: true, ic: '12345678', is_vat_payer: false,
+      email: 'zkouska@ukazka.cz', invoice_address: 'Nádražní 1, 370 01 České Budějovice',
+      invoice_iban: 'CZ65 0800 0000 1920 0014 5399', invoice_swift: 'GIBACZPX', invoice_due_days: 14,
+      invoice_customer_name: 'Bauunternehmen Hoffmann GmbH',
+      invoice_customer_address: 'Riemer Straße 12\n81829 München\nDeutschland',
+      invoice_customer_id: '814135610', invoice_customer_vat: 'DE814135610',
+      created_at: new Date().toISOString(),
+    })
+    // Pondělí až pátek, všechny dny UZAVŘENÉ (má odchod i hodiny) — jinak se
+    // fakturuje nula a neměří se nic.
+    const po = getWeekStartDate(tydenMereni.week, tydenMereni.year)
+    const dny = []
+    for (let i = 0; i < 5; i++) {
+      const den = new Date(po); den.setDate(po.getDate() + i)
+      dny.push({ id: uuid(), worker_id: id, work_date: localDateStr(den),
+        kw: tydenMereni.week, kw_year: tydenMereni.year,
+        check_in: '07:00:00', check_out: '16:00:00', break_start: '11:00:00', break_end: '11:30:00',
+        total_hours: hodinNaDen, construction_site: 'Riemer Straße 12, München',
+        location_address: 'Riemer Straße 12, München', address_source: 'gps',
+        work_description: 'Bednění stropu', is_manual: false, created_at: new Date().toISOString() })
+    }
+    await sb.from('attendance').insert(dny)
+    return { id, jmeno, sazba, hodiny: hodinNaDen * 5, celkem: Math.round(hodinNaDen * 5 * sazba * 100) / 100 }
+  }
+  const IBAN_ZK = 'CZ65 0800 0000 1920 0014 5399'
+  const ODBERATEL_ZK = 'Bauunternehmen Hoffmann GmbH'
+
+  // Faktura se vystaví tak, jak to dělá správce z karty pracovníka. Týden se
+  // vybírá podle ČÍSLA, ne „ten první v nabídce". Číslo faktury taky zadáváme,
+  // ať se zkouška netrefí do dokladu z vymyšlených dat.
+  async function vystavFakturu(workerId, cislo) {
+    window._lastInvoice = null
+    await openWorkerModal(workerId); await new Promise(r => setTimeout(r, 800))
+    wdTab('finance', document.querySelector('.wd-tab[onclick*="finance"]'))
+    await new Promise(r => setTimeout(r, 900))
+    const sel = document.getElementById('wd-inv-week')
+    const vNabidce = [...(sel ? sel.options : [])].some(o => o.value === KW)
+    if (sel) { sel.value = KW; sel.dispatchEvent(new Event('change')) }
+    await new Promise(r => setTimeout(r, 1200))
+    const hodinyText = (document.getElementById('wd-inv-hours') || {}).textContent || ''
+    const cisloPole = document.getElementById('wd-inv-num-full')
+    if (cisloPole && cislo) cisloPole.value = cislo
+    await generateInvoiceAdmin(); await new Promise(r => setTimeout(r, 1500))
+    return { vNabidce, hodinyText: hodinyText.trim(), d: window._lastInvoice,
+             doklad: (document.getElementById('invoice-page') || {}).textContent || '' }
+  }
+
   // --- odečet z faktury -----------------------------------------------------
-  const { data: lide } = await sb.from('profiles').select('*').in('role', ['osvec', 'partak']).limit(2)
-  const kdo = lide[0]
-  const lide2 = lide.slice(1)
-  const zaloha = { cislo: 'Z202601', worker_id: kdo.id, supplier_name: kdo.full_name,
-    iban: kdo.invoice_iban, customer_name: kdo.invoice_customer_name,
+  const kdo = await vyrobPracovnika('Zkouška Odečet', 20, 8)   // 40 h × 20 € = 800 €
+  const zaloha = { cislo: 'Z202601', worker_id: kdo.id, supplier_name: kdo.jmeno,
+    iban: IBAN_ZK, customer_name: ODBERATEL_ZK,
     issue_date: '2026-09-01', due_date: '2026-09-15', castka: 500,
     popis: 'Anzahlung für Bauleistungen', stav: 'otevrena', zuctovano: 0 }
   await sb.from('zalohove_faktury').insert(zaloha)
 
-  await openWorkerModal(kdo.id); await new Promise(r => setTimeout(r, 800))
-  wdTab('finance', document.querySelector('.wd-tab[onclick*="finance"]'))
-  await new Promise(r => setTimeout(r, 900))
-  const tyden = document.getElementById('wd-inv-week')
-  if (tyden && tyden.options.length) { tyden.value = tyden.options[0].value; tyden.dispatchEvent(new Event('change')) }
-  await new Promise(r => setTimeout(r, 900))
-  await generateInvoiceAdmin(); await new Promise(r => setTimeout(r, 1400))
-  const d = window._lastInvoice
-  const f = document.getElementById('invoice-page')
+  const vys = await vystavFakturu(kdo.id, 'T202601')
+  const d = vys.d
+  // Na čem se vlastně měřilo. Bez tohohle vypadá prázdná faktura jako rozbitý odečet.
+  out.mereni = { pracovnik: kdo.jmeno, tyden: KW, tydenVNabidce: vys.vNabidce,
+                 hodinyVeFormulari: vys.hodinyText.slice(0, 90),
+                 hodiny: d ? d.totalHours : null, celkem: d ? d.totalAmount : null,
+                 cekaneHodiny: kdo.hodiny, cekanaCastka: kdo.celkem }
   out.odecet = d ? { celkem: d.totalAmount, zaloha: d.cashPaid, popis: d.cashPaidNote,
     zeZF: !!d.zalohaZeZalohoveFaktury, pouzito: (d.zalohyPouzite || []).length,
-    vorschussNaDokladu: f ? f.textContent.includes('Vorschuss') : false,
-    hotovostNaDokladu: f ? f.textContent.includes('Bar erhalten') : false } : null
+    vorschussNaDokladu: vys.doklad.includes('Vorschuss'),
+    hotovostNaDokladu: vys.doklad.includes('Bar erhalten') } : null
 
   // --- odečet zapsaný u faktury a opakované vystavení -----------------------
   // Uložení faktury napodobíme přímo — v ukázce nejsou knihovny na PDF.
   await sb.from('worker_invoices').insert({ worker_id: kdo.id, invoice_number: d.invoiceNum,
     total_amount: d.totalAmount, cash_paid: d.cashPaid, cash_paid_note: d.cashPaidNote,
     zalohy_pouzite: d.zalohyPouzite, kw: d.week, kw_year: d.year })
-  // V ukázce může mít pracovník fakturu s týmž číslem už z vymyšlených dat —
-  // bereme tu, která odečet opravdu nese.
+  // Pracovník je vyrobený jen pro tuhle zkoušku, takže má jedinou fakturu —
+  // hledat „tu, která odečet nese" už není potřeba a nic se tím nezakryje.
   out.uFaktury = ((await sb.from('worker_invoices').select('invoice_number, zalohy_pouzite')
-    .eq('worker_id', kdo.id)).data || [])
-    .map(f => f.zalohy_pouzite).find(x => Array.isArray(x) && x.length)
+    .eq('worker_id', kdo.id)).data || []).map(f => f.zalohy_pouzite)[0]
   // táž faktura znovu — odečet musí zůstat, ne zmizet
   out.znovuTaSama = (await zalohyKOdecteni(kdo.id, d.invoiceNum, d.totalAmount)).castka
   // jiná faktura — už není co odečíst
@@ -133,11 +195,15 @@ const v = await p.evaluate(async () => {
   // --- bez spuštěné migrace se faktura musí vystavit dál --------------------
   const zalohaTabulka = window.__demoDATA ? window.__demoDATA.zalohove_faktury : null
   if (window.__demoDATA) delete window.__demoDATA.zalohove_faktury
+  window._lastInvoice = null
   const tyd2 = document.getElementById('wd-inv-week')
-  if (tyd2 && tyd2.options.length) { tyd2.value = tyd2.options[0].value; tyd2.dispatchEvent(new Event('change')) }
-  await new Promise(r => setTimeout(r, 700))
+  if (tyd2) { tyd2.value = KW; tyd2.dispatchEvent(new Event('change')) }
+  await new Promise(r => setTimeout(r, 900))
+  const cislo2 = document.getElementById('wd-inv-num-full')
+  if (cislo2) cislo2.value = 'T202609'
   await generateInvoiceAdmin(); await new Promise(r => setTimeout(r, 1200))
-  out.bezMigrace = { fakturaVznikla: !!document.getElementById('invoice-page'),
+  out.bezMigrace = { fakturaVznikla: !!document.getElementById('invoice-page') && !!window._lastInvoice,
+                     celkem: window._lastInvoice?.totalAmount,
                      zaloha: window._lastInvoice?.cashPaid }
   closeInvoiceOverlay()
   if (window.__demoDATA) window.__demoDATA.zalohove_faktury = zalohaTabulka || []
@@ -158,9 +224,9 @@ const v = await p.evaluate(async () => {
   // Tohle je místo, kde se nejsnáz rozejdou peníze: druhý zápis nesmí přepsat
   // ten první, jinak by se část zálohy dala odečíst dvakrát.
   // Na jiném pracovníkovi, ať do toho nemluví zálohy z předchozích kroků.
-  const druhy = lide2[0]
+  const druhy = await vyrobPracovnika('Zkouška Dělení', 20, 8)
   await sb.from('zalohove_faktury').insert({ cislo: 'Z202603', worker_id: druhy.id,
-    supplier_name: druhy.full_name, iban: druhy.invoice_iban, customer_name: druhy.invoice_customer_name,
+    supplier_name: druhy.jmeno, iban: IBAN_ZK, customer_name: ODBERATEL_ZK,
     issue_date: '2026-09-01', due_date: '2026-09-15', castka: 1000,
     popis: 'Anzahlung', stav: 'otevrena', zuctovano: 0, zuctovani: {} })
   const ulozFakturu = async (cislo, celkem, pouzite) =>
@@ -187,6 +253,36 @@ const v = await p.evaluate(async () => {
   await sb.from('zalohove_faktury').update({ stav: 'stornovana' }).eq('cislo', 'Z202602')
   const poStornu = await zalohyKOdecteni(kdo.id, 'NOVA2', 300)
   out.poStornu = poStornu.castka
+  // Přímo a nezávisle na předchozích krocích: člověk s JEDINOU zálohou, a tou
+  // stornovanou. Kontrola nad tímhle řádkem totiž stojí na tom, že Z202601 už
+  // spolykala faktura — kdyby se to rozešlo, vypadalo by storno funkčně,
+  // i kdyby nefungovalo vůbec.
+  const stornoSam = await vyrobPracovnika('Zkouška Storno', 20, 8)
+  const zalohaStorno = { worker_id: stornoSam.id, supplier_name: stornoSam.jmeno,
+    iban: IBAN_ZK, customer_name: ODBERATEL_ZK, due_date: '2026-09-15',
+    castka: 400, popis: 'Anzahlung', zuctovano: 0 }
+  await sb.from('zalohove_faktury').insert({ ...zalohaStorno, cislo: 'Z202604',
+    issue_date: '2026-09-01', stav: 'stornovana' })
+  out.jenStornovana = (await zalohyKOdecteni(stornoSam.id, 'STORNO1', 900)).castka
+  // …a rovnou k tomu vzorek: TÁŽ záloha, jen otevřená, se odečíst MUSÍ.
+  // Jinak by nula nahoře nedokazovala storno, ale že se neodečítá nikdy.
+  await sb.from('zalohove_faktury').insert({ ...zalohaStorno, cislo: 'Z202605',
+    issue_date: '2026-09-02', stav: 'otevrena' })
+  out.stejnaOtevrena = (await zalohyKOdecteni(stornoSam.id, 'STORNO1', 900)).castka
+
+  // --- NEGATIVNÍ KONTROLY: ať je vidět, že zkouška umí říct i „ne" ----------
+  // 1) Týž postup, ale pracovník nemá žádnou zálohu. Kdyby i tady vyšlo
+  //    „odečteno" nebo „Vorschuss", neměřila by zkouška odečet, ale něco jiného.
+  const bezZalohy = await vyrobPracovnika('Zkouška Bez zálohy', 20, 8)
+  const vysBZ = await vystavFakturu(bezZalohy.id, 'T202607')
+  out.bezZalohy = { celkem: vysBZ.d ? vysBZ.d.totalAmount : null,
+                    zaloha: vysBZ.d ? vysBZ.d.cashPaid : null,
+                    vorschuss: vysBZ.doklad.includes('Vorschuss'),
+                    hotovost: vysBZ.doklad.includes('Bar erhalten') }
+  closeInvoiceOverlay()
+  // 2) Past, na kterou zkouška dřív sedla: z faktury na 0 € se neodečte nic.
+  //    Proto se musí měřit v uzavřeném týdnu s hodinami, ne v tom rozjetém.
+  out.prazdnaFaktura = (await zalohyKOdecteni(kdo.id, 'PRAZDNA1', 0)).castka
   return out
 })
 await b.close()
@@ -208,6 +304,17 @@ ok(v.doklad.iban, 'je na něm IBAN')
 ok(v.doklad.listaZaloha === 'block' && v.doklad.listaOdeslani === 'none',
    'nabízí stažení PDF, ne odeslání faktury')
 
+// Nejdřív se ptáme, jestli měření vůbec dávalo smysl. Kdyby se ukázková data
+// zase rozešla, ať je vidět „měřilo se na prázdnu", ne „appka neodečítá".
+console.log('\n── na čem se měřilo ──')
+ok(v.mereni.tydenVNabidce, 'týden ' + v.mereni.tyden + ' je v nabídce týdnů')
+ok(v.mereni.hodiny === v.mereni.cekaneHodiny,
+   'pracovník má v tom týdnu ' + v.mereni.cekaneHodiny + ' odpracovaných hodin (' + v.mereni.hodiny + ')')
+ok(v.mereni.celkem === v.mereni.cekanaCastka,
+   'faktura vyšla na ' + v.mereni.cekanaCastka + ' €, ne na nulu (' + v.mereni.celkem + ')')
+ok(!dialogy.length, 'appka se během měření na nic neptala'
+   + (dialogy.length ? ' — vyskočilo: „' + dialogy[0] + '"' : ''))
+
 console.log('\n── odečet z faktury pracovníka ──')
 ok(v.odecet && v.odecet.zaloha === 500, 'z faktury se odečte 500 € (odečteno ' + (v.odecet?.zaloha) + ')')
 ok(v.odecet && /Z202601/.test(v.odecet.popis || ''), 'na faktuře je číslo zálohové faktury')
@@ -220,10 +327,13 @@ ok(Array.isArray(v.uFaktury) && v.uFaktury[0]?.vzato === 500,
 ok(v.znovuTaSama === 500, 'při opravě TÉŽE faktury odečet nezmizí (' + v.znovuTaSama + ')')
 ok(v.jinaFaktura === 0, 'na jinou fakturu se už neodečte znovu (' + v.jinaFaktura + ')')
 ok(v.velkaZaloha === 300, 'záloha vyšší než faktura se odečte jen do výše faktury (' + v.velkaZaloha + ')')
-ok(v.poStornu === 0, 'stornovaná záloha se neodečítá')
+ok(v.poStornu === 0, 'stornovaná záloha se neodečítá (' + v.poStornu + ')')
+ok(v.jenStornovana === 0,
+   'a když je stornovaná ta JEDINÁ, co člověk má, neodečte se nic (' + v.jenStornovana + ')')
 
 console.log('\n── nerozbilo to běžné faktury ──')
-ok(v.bezMigrace.fakturaVznikla, 'bez spuštěné migrace se faktura vystaví dál')
+ok(v.bezMigrace.fakturaVznikla && v.bezMigrace.celkem === v.mereni.cekanaCastka,
+   'bez spuštěné migrace se faktura vystaví dál, a na plnou částku (' + v.bezMigrace.celkem + ')')
 ok(!v.bezMigrace.zaloha, 'a nic se z ní neodečte (' + v.bezMigrace.zaloha + ')')
 ok(v.poZavreni.zIndex === '10000' && v.poZavreni.listaZaloha === 'none'
    && v.poZavreni.nadpis === '📄 Náhled faktury',
@@ -254,6 +364,22 @@ for (const [popis, f] of kontroly) {
   else console.log('  ❌ ' + popis + ' — POZOR, neodhalí')
 }
 if (umi !== kontroly.length) chyb++
+
+// Vzorky měřené v běžící appce. Dokazují, že zelená u odečtu není zelená vždycky:
+// kdyby zkouška hlásila 500 € i tam, kde žádná záloha není, neměřila by odečet.
+const ziveKontroly = [
+  ['faktura bez zálohy', v.bezZalohy.zaloha === 0 && !v.bezZalohy.vorschuss && !v.bezZalohy.hotovost
+     && v.bezZalohy.celkem === v.mereni.cekanaCastka,
+   'stejná faktura bez zálohy → odečet 0 a žádné „Vorschuss" (' + JSON.stringify(v.bezZalohy) + ')'],
+  ['faktura na 0 €', v.prazdnaFaktura === 0,
+   'z faktury na nulu se neodečte nic — proto se měří v uzavřeném týdnu (' + v.prazdnaFaktura + ')'],
+  ['otevřená vs. stornovaná', v.stejnaOtevrena === 400,
+   'táž záloha, jen otevřená, se odečte — nula výš je tedy zásluha storna (' + v.stejnaOtevrena + ')'],
+]
+for (const [popis, splneno, vysvetleni] of ziveKontroly) {
+  if (splneno) console.log('  ✅ ' + popis + ' — ' + vysvetleni)
+  else { chyb++; console.log('  ❌ ' + popis + ' — POZOR, neodhalí: ' + vysvetleni) }
+}
 
 console.log(chyb ? `\n❌ ${chyb} potíží` : '\n✅ ZÁLOHOVÉ FAKTURY FUNGUJÍ')
 process.exit(chyb ? 1 : 0)
