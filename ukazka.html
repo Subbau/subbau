@@ -5190,7 +5190,7 @@ async function submitAdminSignatureWithPlacement() {
 // Po nahrání nové verze se snadno pozná, jestli se opravdu nasadila: otevřete
 // appku, zmáčkněte F12 (na Macu ⌥⌘I) a v konzoli je vypsané tohle datum. Když
 // tam svítí starší, prohlížeč nebo GitHub drží starou verzi.
-const SUBBAU_VERZE = '2026-09-14 b — v Týmech jde odškrtnout, kdo nemá být ve výkazu'
+const SUBBAU_VERZE = '2026-09-14 c — přestávka jedním tlačítkem'
 console.log('StavKo docházka — verze ' + SUBBAU_VERZE)
 
 // ============ SUPABASE CONFIG ============
@@ -9668,6 +9668,68 @@ async function prepniVeVykazu(id, el) {
   renderTeams()
 }
 
+// Nastaví člověku, jak zapisuje přestávku. Mění to jen správce — v databázi
+// to hlídá trigger z migrace supabase-migrace-rezim-prestavky.sql.
+async function nastavRezimPrestavky(id, hodnota, el) {
+  if (!PRESTAVKA_REZIMY[hodnota]) { showToast('❌ Neznámý režim přestávky'); return }
+  const puvodni = ((_workersCache || []).find(x => x.id === id) || {}).rezim_prestavky
+  if (el) el.disabled = true
+  const { data, error } = await sb.from('profiles')
+    .update({ rezim_prestavky: hodnota }).eq('id', id).select('id, rezim_prestavky')
+  if (el) el.disabled = false
+  const vratZpet = () => { if (el && puvodni) el.value = puvodni }
+  if (error) {
+    vratZpet()
+    showToast(/rezim_prestavky|column|schema cache/i.test(error.message || '')
+      ? '❌ Chybí sloupec rezim_prestavky — spusťte migraci supabase-migrace-rezim-prestavky.sql'
+      : '❌ Chyba: ' + error.message)
+    return
+  }
+  if (!data || !data.length) { vratZpet(); showToast('❌ Změna se neuložila (zkontrolujte oprávnění)'); return }
+  // Databáze může zápis přijmout a hodnotu tiše vrátit zpátky — přesně to dělá
+  // zámek, když se o změnu pokusí někdo jiný než správce.
+  if (data[0].rezim_prestavky !== hodnota) {
+    vratZpet()
+    showToast('❌ Změnu zablokovala databáze — režim mění jen správce')
+    return
+  }
+  const w = (_workersCache || []).find(x => x.id === id)
+  if (w) w.rezim_prestavky = hodnota
+  showToast('✅ Přestávka: ' + PRESTAVKA_REZIMY[hodnota].kratce)
+  renderTeams()
+}
+
+// Nastaví režim všem členům skupiny najednou — u firmy se to stejně řeší
+// pro všechny stejně a proklikávat dvanáct lidí po jednom nemá smysl.
+async function nastavRezimSkupine(teamId, hodnota) {
+  if (!PRESTAVKA_REZIMY[hodnota]) { showToast('❌ Neznámý režim přestávky'); return }
+  const clenove = (_workersCache || []).filter(w => w.team_id === teamId)
+  if (!clenove.length) { showToast('⚠️ Ve skupině nikdo není'); return }
+  if (!confirm('Nastavit „' + PRESTAVKA_REZIMY[hodnota].kratce + '" všem ' + clenove.length
+      + ' lidem v téhle skupině?\n\nZmění se jim tlačítko přestávky v mobilu. '
+      + 'Už zapsaná docházka zůstane, jak je.')) return
+  showToast('⏳ Nastavuji…')
+  const { data, error } = await sb.from('profiles')
+    .update({ rezim_prestavky: hodnota }).in('id', clenove.map(w => w.id)).select('id, rezim_prestavky')
+  if (error) {
+    showToast(/rezim_prestavky|column|schema cache/i.test(error.message || '')
+      ? '❌ Chybí sloupec rezim_prestavky — spusťte migraci supabase-migrace-rezim-prestavky.sql'
+      : '❌ Chyba: ' + error.message)
+    return
+  }
+  const zmeneni = (data || []).filter(r => r.rezim_prestavky === hodnota)
+  if (zmeneni.length !== clenove.length) {
+    showToast('⚠️ Nastaveno jen u ' + zmeneni.length + ' z ' + clenove.length + ' — zkontrolujte oprávnění')
+  } else {
+    showToast('✅ Nastaveno všem (' + zmeneni.length + ')')
+  }
+  zmeneni.forEach(r => {
+    const w = (_workersCache || []).find(x => x.id === r.id)
+    if (w) w.rezim_prestavky = hodnota
+  })
+  renderTeams()
+}
+
 async function toggleTracking(id, currentlyCan) {
   const newVal = !currentlyCan
   const { data, error } = await sb.from('profiles').update({ can_track_hours: newVal }).eq('id', id).select('id,can_track_hours')
@@ -11830,8 +11892,8 @@ const tutorialSteps = [
       <div class="tut-flow-item" style="border-left-color:#e6a800">
         <div style="font-size:20px">☕</div>
         <div>
-          <div class="tut-flow-title" style="color:#e6a800">2. Pauza — Jdu na pauzu</div>
-          <div class="tut-flow-desc">Tlačítko se změní na žluté <b style="color:#fff">Jdu na pauzu</b>. Po pauze klepnete na <b style="color:#fff">Pokračovat v práci</b>.<br>Pauz může být za den víc, všechny se odečtou.</div>
+          <div class="tut-flow-title" style="color:#e6a800">2. Pauza</div>
+          <div class="tut-flow-desc">Máte jedno žluté tlačítko na pauzu. Podle toho, jak to má StavKo u vás nastavené, je na něm buď <b style="color:#fff">Přestávka 30 min</b> (nebo 1 hodina) — pak stačí <b style="color:#fff">jedno klepnutí</b> a pauza je zapsaná — nebo <b style="color:#fff">Jdu na pauzu</b>, a po pauze klepnete na <b style="color:#fff">Pokračovat v práci</b>.<br>Pauzy se vždycky odečtou od odpracované doby.</div>
         </div>
       </div>
 
@@ -11895,7 +11957,7 @@ const tutorialSteps = [
 
       <div style="background:#211D1A;border-radius:12px;padding:14px;margin-bottom:9px;border-left:3px solid #e6a800">
         <div style="color:#fff;font-size:15px;font-weight:800;margin-bottom:5px">Přestávka</div>
-        <div style="color:#aaa;font-size:14px;line-height:1.7">Každá pauza kratší než půl hodiny se počítá jako <b style="color:#fff">celých 30 minut</b> — a platí to pro každou zvlášť. Tři desetiminutové pauzy = 90 minut pryč. Vyplatí se dát si za den jednu pauzu místo několika krátkých.</div>
+        <div style="color:#aaa;font-size:14px;line-height:1.7">Každá pauza kratší než půl hodiny se počítá jako <b style="color:#fff">celých 30 minut</b> — a platí to pro každou zvlášť. Tři desetiminutové pauzy = 90 minut pryč. Vyplatí se dát si za den jednu pauzu místo několika krátkých.<br><br>Pokud máte tlačítko <b style="color:#fff">Přestávka 30 min</b> (nebo 1 hodina), tohle vás netrápí — pauza se zapíše rovnou na tu dobu, jedním klepnutím.</div>
       </div>
 
       <div style="background:#211D1A;border-radius:12px;padding:14px;margin-bottom:16px;border-left:3px solid #c0392b">
@@ -14363,7 +14425,7 @@ async function loadTeams() {
   // Týmy, lidi, podskupiny a firmy na sobě nezávisí — ptáme se na všechno naráz.
   // Dřív se čekalo na každý dotaz zvlášť; na pomalejším připojení, kde jedna cesta
   // na server trvá i vteřinu, se z toho nasčítalo přes deset vteřin čekání.
-  const SLOUPCE_LIDI = 'id, full_name, profession, role, team_id, subteam_id, is_active, can_track_hours, ve_vykazu'
+  const SLOUPCE_LIDI = 'id, full_name, profession, role, team_id, subteam_id, is_active, can_track_hours, ve_vykazu, rezim_prestavky'
   const [rTeams, rWorkers, rSubteams, rComps] = await Promise.all([
     sb.from('teams').select('*').eq('is_active', true).order('name'),
     sb.from('profiles').select(SLOUPCE_LIDI).in('role', ['osvec', 'partak']).order('full_name'),
@@ -14381,12 +14443,14 @@ async function loadTeams() {
   // Ústup jen když sloupec opravdu chybí (42703 = neproběhlá migrace). Při
   // výpadku sítě se ustupovat nesmí — načetl by se seznam bez ve_vykazu
   // a odškrtnutí lidé by se v Týmech tvářili jako zaškrtnutí.
-  const chybiSloupec = (e) => !!e && (e.code === '42703' || /ve_vykazu|column .* does not exist|schema cache/i.test(e.message || ''))
+  const chybiSloupec = (e) => !!e && (e.code === '42703' || /ve_vykazu|rezim_prestavky|column .* does not exist|schema cache/i.test(e.message || ''))
   if (!workers && !chybiSloupec(rWorkers.error)) {
     console.warn('[Týmy] lidi se nenačetli:', rWorkers.error?.message)
   }
   if (!workers && chybiSloupec(rWorkers.error)) {
     for (const cols of [
+      // Bez rezim_prestavky — když migrace supabase-migrace-rezim-prestavky.sql neproběhla.
+      'id, full_name, profession, role, team_id, subteam_id, is_active, can_track_hours, ve_vykazu',
       // Bez ve_vykazu — když migrace supabase-migrace-ve-vykazu.sql ještě neproběhla.
       'id, full_name, profession, role, team_id, subteam_id, is_active, can_track_hours',
       'id, full_name, profession, role, team_id, subteam_id, is_active',
@@ -14471,6 +14535,9 @@ function renderTeamMembers(t, members, qWorker, profLabels) {
           <input type="checkbox" ${vyk?'checked':''} onchange="event.stopPropagation();prepniVeVykazu('${m.id}', this)" style="width:15px;height:15px;cursor:pointer;accent-color:var(--blue)">
           ${vyk ? 've výkazu' : 'mimo výkaz'}
         </label>
+        <select onclick="event.stopPropagation()" onchange="event.stopPropagation();nastavRezimPrestavky('${m.id}', this.value, this)" title="Jak tenhle člověk zapisuje přestávku v mobilu. „30 min" = jedno tlačítko na půl hodiny. „1 hodina" = jedno tlačítko na hodinu. „30 min, i víckrát" = může si dát půlhodinových pauz víc. „začátek a konec" = původní způsob na dva kliky." style="font-size:11px;padding:2px 4px;border:1px solid var(--brd);border-radius:6px;background:var(--bg2);color:var(--text2);cursor:pointer;font-family:inherit;max-width:120px">
+          ${rezimOptions(rezimPrestavky(m))}
+        </select>
         ${mv}
         <button class="x-close" onclick="event.stopPropagation();removeFromTeam('${m.id}')" title="Odebrat z týmu" style="padding:2px 8px;font-size:11px;border:1px solid var(--brd);border-radius:6px;cursor:pointer;background:none;font-family:inherit;flex-shrink:0"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:20px;height:20px;display:block"><path d="M18 6L6 18M6 6l12 12"/></svg></button>
       </div>`
@@ -14689,6 +14756,13 @@ function renderTeams() {
           </div>`).join('')}
         </div>` : ''}
         <div style="font-size:11px;color:var(--text3);margin-top:8px;text-align:right">${members.length} ${members.length===1?'člen':'členů'}</div>
+        <div style="margin-top:10px;padding-top:10px;border-top:1px dashed var(--brd);display:flex;flex-wrap:wrap;gap:8px;align-items:center">
+          <span style="font-size:11px;color:var(--text3);font-weight:600" title="Nastaví způsob zapisování přestávky všem lidem v téhle skupině najednou. U jednotlivce se to dá kdykoliv změnit zpátky.">☕ Přestávka celé skupině:</span>
+          <select onchange="if(this.value){nastavRezimSkupine('${t.id}', this.value); this.selectedIndex=0}" style="font-size:12px;padding:5px 8px;border:1px solid var(--brd);border-radius:7px;background:var(--bg2);color:var(--text2);cursor:pointer;font-family:inherit">
+            <option value="">nastavit všem…</option>
+            ${rezimOptions('')}
+          </select>
+        </div>
         <div style="margin-top:10px;padding-top:10px;border-top:1px dashed var(--brd);display:flex;flex-wrap:wrap;gap:8px;align-items:center">
           <span style="font-size:11px;color:var(--text3);font-weight:600">📄 Docházka týmu:</span>
           <select id="team-pdf-week-${t.id}" class="team-pdf-week" data-team-id="${t.id}" style="font-size:12px;padding:5px 8px;border:1px solid var(--brd);border-radius:6px;font-family:inherit;flex:1;min-width:150px">
@@ -15988,16 +16062,41 @@ function updateMobStav(rec, allToday) {
 
   } else {
     // STAV: v práci
-    window._attState = 'break-start'  // hlavní akce = jít na pauzu
+    // Podle režimu se liší hlavní tlačítko: buď se pauza zapisuje na dva kliky
+    // (od-do), nebo jedním klikem na pevnou délku (fix30 / fix60 / fix30x).
+    const rez = rezimDne(rec, currentProfile)
+    const nast = PRESTAVKA_REZIMY[rez] || PRESTAVKA_REZIMY['od-do']
+    const pevna = nast.minut > 0
+    const hotovePauzy = attAllBreaks(rec).filter(b => b.bs && b.be).length
+    const jdeDalsi = !pevna || nast.vicKrat || hotovePauzy === 0
+
     card.style.background = '#e6f0e9'
     setIcon(icoCheck, '#cfe5d8', '#2f6b45')
     cardTitle.style.color = '#211D1A'
     cardTitle.textContent = 'V práci'
     cardSub.style.color = '#2f6b45'
     cardSub.textContent = 'Příchod v ' + rec.check_in.slice(0,5)
-    setMain('Jdu na pauzu', icoCoffee, '#e8a13a', '#211D1A')
-    // vedlejší: konec směny
+      + (pevna && hotovePauzy
+          ? ' · přestávka ' + (hotovePauzy > 1 ? hotovePauzy + '× ' : '') + nast.minut + ' min zapsaná'
+          : '')
+
+    if (pevna && !jdeDalsi) {
+      // Přestávku už má a další mu nepřísluší — hlavní tlačítko je rovnou konec
+      // směny, ať nemá co zbytečně mačkat. Nic se tím neskrývá, jen nenabízí.
+      window._attState = 'out'
+      setMain('Konec směny', icoDoor, '#9c3b22', '#fff')
+    } else if (pevna) {
+      window._attState = 'break-fix'
+      setMain((hotovePauzy ? 'Další přestávka ' : 'Přestávka ') + nast.minut + ' min',
+              icoCoffee, '#e8a13a', '#211D1A')
+    } else {
+      window._attState = 'break-start'  // hlavní akce = jít na pauzu
+      setMain('Jdu na pauzu', icoCoffee, '#e8a13a', '#211D1A')
+    }
+    // vedlejší: konec směny — jen když ho člověk nemá rovnou v hlavním tlačítku
+    if (window._attState !== 'out') {
     secondary.innerHTML = `<button onclick="mobCheckin('out')" style="flex:1;background:#fff;color:#9c3b22;border:2px solid #9c3b22;border-radius:14px;padding:14px;font-size:14px;font-weight:800;cursor:pointer;font-family:inherit;display:flex;align-items:center;justify-content:center;gap:8px">${icoDoor}<span>Konec směny</span></button>`
+    }
   }
 
   // Tlačítko "Zapsat co jsem dělal" — jen při aktivní směně
@@ -16060,9 +16159,16 @@ async function dochazkaInsert(radek, opts) {
   ])
   const spustit = (data) => (opts && opts.timeout) ? sLimitem(dotaz(data), opts.timeout) : dotaz(data)
   let r = await spustit(radek)
+  if (r && r.error && /rezim_prestavky/i.test(r.error.message || '')) {
+    const bezRezimu = { ...radek }
+    delete bezRezimu.rezim_prestavky
+    r = await spustit(bezRezimu)
+    console.warn('[docházka] sloupec rezim_prestavky v databázi není — zapsáno bez něj')
+  }
   if (r && r.error && /team_id/i.test(r.error.message || '')) {
     const bezSkupiny = { ...radek }
     delete bezSkupiny.team_id
+    delete bezSkupiny.rezim_prestavky
     r = await spustit(bezSkupiny)
     console.warn('[docházka] sloupec team_id v databázi není — zapsáno bez něj')
   }
@@ -16182,7 +16288,11 @@ async function mobCheckin(type) {
         kw: kw.week,
         kw_year: kw.year,
         is_saturday: now.getDay() === 6,
-        team_id: await skupinaPracovnika(currentUser.id)
+        team_id: await skupinaPracovnika(currentUser.id),
+        // Snapshot režimu přestávky. Drží se u dne schválně — kdyby se četl až
+        // zpětně z profilu, pozdější změna nastavení by přepsala výklad staré
+        // docházky a rozešly by se hodiny na už vystavených fakturách.
+        rezim_prestavky: rezimPrestavky(currentProfile)
       }, { vratit: true, timeout: 12000 })
 
       if (error) { showToast(chybaText(error, 'Příchod se nezapsal')); checkinInProgress = false; return }
@@ -16238,7 +16348,69 @@ async function mobCheckin(type) {
       // Pracovní kopie pro aktualizace
       const updated = { ...current }
 
-      if (type === 'break-start') {
+      if (type === 'break-fix') {
+        // PŘESTÁVKA JEDNÍM KLIKEM. Zapíší se OBA časy naráz — začátek i konec —
+        // a k tomu prvek do pole `breaks`. Díky tomu projde pauza beze změny
+        // vším ostatním v appce: výpočtem hodin, PDF výkazy i odkazem pro
+        // odběratele. Kdyby se uložila jen délka bez časů, půlhodina by se
+        // ztratila při prvním přepočtu dne a den by vyskočil o 0,5 h nahoru.
+        const rezT = rezimDne(current, currentProfile)
+        const nastT = PRESTAVKA_REZIMY[rezT] || PRESTAVKA_REZIMY['od-do']
+        if (!nastT.minut) {
+          showToast('⚠️ Tenhle způsob přestávky u vás není nastavený')
+          checkinInProgress = false
+          return
+        }
+        const dosavadni = attAllBreaks(current).filter(b => b.bs && b.be)
+        if (dosavadni.length && !nastT.vicKrat) {
+          showToast('⚠️ Přestávku už máte dnes zapsanou')
+          updateMobStav(current, [current])
+          checkinInProgress = false
+          return
+        }
+        if (current.break_start && !current.break_end) {
+          showToast('⚠️ Máte rozdělanou přestávku — nejdřív ji ukončete')
+          updateMobStav(current, [current])
+          checkinInProgress = false
+          return
+        }
+        // Konec pauzy nesmí přetéct za odchod — den by pak nešlo uložit
+        // (kontrola časů to odmítne). Odchod v tuhle chvíli ještě zapsaný
+        // není, tak hlídáme aspoň půlnoc.
+        const zacMin = timeToMin(timeStr)
+        // Přes půlnoc se pauza zapsat nedá — časy u dne nesou jen hodinu a minutu,
+        // takže „00:20" by vyšlo dřív než začátek a den by se rozsypal. Radši to
+        // rovnou řekneme, než abychom uložili nesmysl.
+        if (zacMin + nastT.minut > 23 * 60 + 59) {
+          showToast('⚠️ Přestávka by přesáhla půlnoc — zapište ji prosím ručně nebo se ozvěte do kanceláře')
+          checkinInProgress = false
+          return
+        }
+        const koncMin = zacMin + nastT.minut
+        const bsT = minToTime(zacMin)
+        const beT = minToTime(koncMin)
+        const poleT = dosavadni.map(b => ({ bs: b.bs, be: b.be }))
+        poleT.push({ bs: bsT, be: beT })
+        // První pauza jde i do break_start/break_end, druhá do break2_* —
+        // tyhle sloupce čte pár starších míst, která pole `breaks` neznají.
+        const zapisT = { breaks: poleT }
+        if (poleT.length === 1) { zapisT.break_start = bsT + ':00'; zapisT.break_end = beT + ':00' }
+        else if (poleT.length === 2) { zapisT.break2_start = bsT + ':00'; zapisT.break2_end = beT + ':00' }
+        let { error: chybaT } = await withTimeout(sb.from('attendance').update(zapisT).eq('id', todayAttId), 12000)
+        if (chybaT) {
+          // Starší databáze nemusí mít sloupec `breaks` — pauzu ulož aspoň do časů.
+          console.warn('[pauza] zápis s polem breaks selhal, zkouším bez něj:', chybaT.message)
+          const bezPole = { ...zapisT }; delete bezPole.breaks
+          const r2 = await withTimeout(sb.from('attendance').update(bezPole).eq('id', todayAttId), 12000)
+          chybaT = r2.error
+        }
+        if (chybaT) { showToast(chybaText(chybaT, 'Přestávka se nezapsala')); checkinInProgress = false; return }
+        Object.assign(updated, zapisT)
+        todayRecord = { ...updated }
+        showToast('☕ Přestávka ' + nastT.minut + ' min zapsaná — ' + bsT + '–' + beT)
+        askAddressIfNeeded(todayAttId, 'Přestávka')
+
+      } else if (type === 'break-start') {
         if (current.break_start && !current.break_end) {
           showToast('⚠️ Přestávka již probíhá')
           updateMobStav(current, [current])
@@ -16297,6 +16469,46 @@ async function mobCheckin(type) {
             }
           }
         }
+        // Pauza jedním klikem se zapisuje rovnou i s koncem. Když si ji někdo
+        // dá těsně před odchodem, mohl by konec pauzy přetéct za odchod — a den
+        // by pak nešlo uložit, kontrola časů to odmítá. Proto se celá pauza
+        // posune tak, aby končila nejpozději odchodem; její délka zůstává.
+        try {
+          const coM = timeToMin(timeStr)
+          const ciM = current.check_in ? timeToMin(current.check_in) : null
+          // Přes půlnoc se časy v minutách nedají porovnávat (odchod ve 2:00 je
+          // „menší" než příchod v 22:00). Takový den se nechává být — posun by
+          // z pauzy udělal nesmysl.
+          const presPulnoc = ciM !== null && coM !== null && coM < ciM
+          const puvodni = attAllBreaks(current).filter(b => b.bs && b.be)
+          let posunuto = false
+          let predchoziKonec = ciM === null ? 0 : ciM
+          const srovnane = puvodni.map(b => {
+            const zac = timeToMin(b.bs), kon = timeToMin(b.be)
+            if (presPulnoc || coM === null || kon === null || zac === null || kon <= coM) {
+              if (kon !== null) predchoziKonec = Math.max(predchoziKonec, kon)
+              return b
+            }
+            const delka = Math.max(0, kon - zac)
+            const novyKon = coM
+            // Posunutá pauza nesmí nalézt do té předchozí — dvě překrývající se
+            // pauzy by se odečetly obě celé a den by pak nešlo vůbec uložit.
+            const novyZac = Math.max(predchoziKonec, novyKon - delka)
+            if (novyZac >= novyKon) { return b }   // nevejde se, radši nesahat
+            predchoziKonec = novyKon
+            posunuto = true
+            return { bs: minToTime(novyZac), be: minToTime(novyKon) }
+          })
+          if (posunuto) {
+            const opr = { breaks: srovnane }
+            if (srovnane[0]) { opr.break_start = srovnane[0].bs + ':00'; opr.break_end = srovnane[0].be + ':00' }
+            if (srovnane[1]) { opr.break2_start = srovnane[1].bs + ':00'; opr.break2_end = srovnane[1].be + ':00' }
+            const { error: eOpr } = await sb.from('attendance').update(opr).eq('id', todayAttId)
+            if (!eOpr) { Object.assign(current, opr); Object.assign(updated, opr) }
+            else console.warn('[pauza] srovnání konce pauzy s odchodem selhalo:', eOpr.message)
+          }
+        } catch (e) { console.warn('[pauza] srovnání s odchodem:', e) }
+
         // Neukončená pauza? (pauza běží — má začátek, ale ne konec)
         const openBreak = (current.break_start && !current.break_end) ||
                           (current.break2_start && !current.break2_end)
@@ -19407,14 +19619,28 @@ function tmMin(t) {
 
 // Jednoduchý průběžný výpočet (pro BĚŽÍCÍ směnu — od příchodu do teď).
 // Pravidla zaokrouhlení směny (7:00 start, odchod po 30 min, min 16:00) řeší applyAttendanceRules při uzavření.
-function calcHours(ci, co, bs, be, bs2, be2) {
+// Poslední parametr `breaks` je nepovinný. Přibyl kvůli režimu, kde si člověk
+// může dát víc půlhodinových pauz — třetí a další se do sloupců break_start /
+// break2_start nevejdou a zůstávají jen v poli `breaks`. Bez něj by běžící
+// směna ukazovala o půl hodiny víc, než kolik večer vyjde. Volání bez něj
+// se chovají přesně jako dřív.
+function calcHours(ci, co, bs, be, bs2, be2, breaks) {
   if (!ci || !co) return 0
   let total = tmMin(co) - tmMin(ci)
   if (total < 0) total += 24 * 60  // přes půlnoc
   if (total <= 0) return 0
-  const brk = (bs && be) ? Math.max(0, tmMin(be) - tmMin(bs)) : 0
-  const brk2 = (bs2 && be2) ? Math.max(0, tmMin(be2) - tmMin(bs2)) : 0
-  const net = total - brk - brk2
+  let odecet
+  if (Array.isArray(breaks) && breaks.length) {
+    odecet = 0
+    breaks.forEach(b => {
+      if (b && b.bs && b.be) odecet += Math.max(0, tmMin(b.be) - tmMin(b.bs))
+    })
+  } else {
+    const brk = (bs && be) ? Math.max(0, tmMin(be) - tmMin(bs)) : 0
+    const brk2 = (bs2 && be2) ? Math.max(0, tmMin(be2) - tmMin(bs2)) : 0
+    odecet = brk + brk2
+  }
+  const net = total - odecet
   return Math.round(net / 60 * 100) / 100
 }
 
@@ -21934,6 +22160,7 @@ function editAttRecord(id, date, ci, co, bs, be) {
   setEditTime('be', be ? be.slice(0,5) : '')
   setEditTime('bs2', '')
   setEditTime('be2', '')
+  nactiDalsiPauzy(null)
   // Načti stavbu + popis + 2. přestávku z DB.
   // Dokud dotaz nedoběhne, drž tlačítko Uložit zamčené — jinak by správce uložil
   // prázdná políčka a z hotového dne by zmizela stavba, popis i druhá pauza
@@ -21951,6 +22178,7 @@ function editAttRecord(id, date, ci, co, bs, be) {
       nastavVyplatuDne(attData)
       setEditTime('bs2', attData.break2_start ? attData.break2_start.slice(0,5) : '')
       setEditTime('be2', attData.break2_end ? attData.break2_end.slice(0,5) : '')
+      nactiDalsiPauzy(attData)
       if (ulozBtn) { ulozBtn.disabled = false; ulozBtn.textContent = ulozBtn.dataset.puvodni || 'Uložit' }
       updateEditHoursPreview()
     })
@@ -22069,6 +22297,7 @@ function pickEditDay(ds, idx) {
     setEditTime('be', rec.break_end ? rec.break_end.slice(0,5) : '')
     setEditTime('bs2', rec.break2_start ? rec.break2_start.slice(0,5) : '')
     setEditTime('be2', rec.break2_end ? rec.break2_end.slice(0,5) : '')
+    nactiDalsiPauzy(rec)
     document.getElementById('edit-att-site').value = rec.construction_site || ''
     document.getElementById('edit-att-desc').value = rec.work_description || ''
     nastavVyplatuDne(rec)
@@ -22080,6 +22309,7 @@ function pickEditDay(ds, idx) {
     setEditTime('be', '')
     setEditTime('bs2', '')
     setEditTime('be2', '')
+    nactiDalsiPauzy(null)
     document.getElementById('edit-att-site').value = ''
     document.getElementById('edit-att-desc').value = ''
     nastavVyplatuDne(null)
@@ -22158,10 +22388,17 @@ function updateEditHoursPreview() {
   const preview = document.getElementById('edit-hours-preview')
   const val = document.getElementById('edit-hours-val')
   if (ci && co) {
+    // Pauzy nad rámec dvou dvojic se posílají taky — jinak by náhled ukazoval
+    // jiné číslo, než jaké se po stisku Uložit doopravdy zapíše.
+    const pauzyProNahled = []
+    if (bs && be) pauzyProNahled.push({ bs, be })
+    if (bs2 && be2) pauzyProNahled.push({ bs: bs2, be: be2 })
+    _editDalsiPauzy.forEach(b => { if (b && b.bs && b.be) pauzyProNahled.push({ bs: b.bs, be: b.be }) })
     const adj = applyAttendanceRules({
       check_in: ci+':00', check_out: co+':00',
       break_start: bs?bs+':00':null, break_end: be?be+':00':null,
-      break2_start: bs2?bs2+':00':null, break2_end: be2?be2+':00':null
+      break2_start: bs2?bs2+':00':null, break2_end: be2?be2+':00':null,
+      breaks: pauzyProNahled
     })
     const h = adj.hours
     if (preview) preview.style.display = 'block'
@@ -22184,6 +22421,32 @@ function nastavVyplatuDne(rec) {
   if (po) po.value = (rec && rec.vyplata_poznamka) || ''
 }
 
+// Přestávky toho dne, které se do okna úpravy nevešly (třetí a další).
+// Drží se stranou, ukážou se správci a při uložení se zase přidají zpátky.
+let _editDalsiPauzy = []
+
+function nactiDalsiPauzy(zaznam) {
+  const vse = zaznam ? attAllBreaks(zaznam).filter(b => b.bs && b.be) : []
+  _editDalsiPauzy = vse.slice(2)
+  vykresliDalsiPauzy()
+}
+
+function vykresliDalsiPauzy() {
+  const el = document.getElementById('edit-att-dalsi-pauzy')
+  if (!el) return
+  if (!_editDalsiPauzy.length) { el.style.display = 'none'; el.innerHTML = ''; return }
+  el.style.display = 'block'
+  el.innerHTML = '<div style="font-size:11px;color:var(--text3);margin-bottom:4px">'
+    + 'Další přestávky toho dne (v okně se nevejdou, ale počítají se):</div>'
+    + _editDalsiPauzy.map((b, i) => `<span style="display:inline-flex;align-items:center;gap:5px;font-size:12px;background:var(--bg);border:1px solid var(--brd);border-radius:8px;padding:2px 7px;margin:0 5px 5px 0">${b.bs}–${b.be}<button type="button" onclick="odeberDalsiPauzu(${i})" title="Odebrat tuhle přestávku" style="border:none;background:none;color:var(--red);cursor:pointer;font-size:13px;line-height:1;padding:0">✕</button></span>`).join('')
+}
+
+function odeberDalsiPauzu(i) {
+  _editDalsiPauzy.splice(i, 1)
+  vykresliDalsiPauzy()
+  updateEditHoursPreview()
+}
+
 async function saveEditAttRecord() {
   const id = document.getElementById('edit-att-id').value
   const ci = document.getElementById('edit-att-ci').value
@@ -22200,10 +22463,18 @@ async function saveEditAttRecord() {
   // by to admina otravovalo při každém uložení sobotní směny.
   if (!validateAttendanceTimes({ date: dateStr, ci, co, bs, be, bs2, be2, confirmWeekend: !id })) return
 
+  // Do výpočtu musí jít i pauzy, které se do okna nevešly — jinak by se uložilo
+  // jiné číslo, než jaké ukazuje náhled nad tlačítkem Uložit.
+  const pauzyProVypocet = []
+  if (bs && be) pauzyProVypocet.push({ bs, be })
+  if (bs2 && be2) pauzyProVypocet.push({ bs: bs2, be: be2 })
+  _editDalsiPauzy.forEach(b => { if (b && b.bs && b.be) pauzyProVypocet.push({ bs: b.bs, be: b.be }) })
+
   const hours = (ci && co) ? applyAttendanceRules({
     check_in: ci+':00', check_out: co+':00',
     break_start: bs?bs+':00':null, break_end: be?be+':00':null,
-    break2_start: bs2?bs2+':00':null, break2_end: be2?be2+':00':null
+    break2_start: bs2?bs2+':00':null, break2_end: be2?be2+':00':null,
+    breaks: pauzyProVypocet
   }).hours : null
 
   const site = document.getElementById('edit-att-site')?.value.trim() || null
@@ -22225,6 +22496,9 @@ async function saveEditAttRecord() {
   const breaksArr = []
   if (bs && be) breaksArr.push({ bs, be })
   if (bs2 && be2) breaksArr.push({ bs: bs2, be: be2 })
+  // Přestávky, které se do okna nevešly (třetí a další). Bez nich by den při
+  // pouhém otevření a uložení tiše vyskočil o jejich délku nahoru.
+  _editDalsiPauzy.forEach(b => { if (b && b.bs && b.be) breaksArr.push({ bs: b.bs, be: b.be }) })
 
   const payload = {
     check_in: ci + ':00',
@@ -28084,6 +28358,43 @@ function applyAttendanceRules(record) {
 // Vrátí VŠECHNY přestávky záznamu pro zobrazení (na rozdíl od break_start/break_end,
 // které po víc přestávkách za směnu drží jen tu poslední).
 // Přednost: pole breaks (mobilní appka), jinak break_start/end + break2_start/end (ruční zápis).
+// ============ REŽIM PŘESTÁVKY ============
+// Jak člověk v mobilu zapisuje pauzu. Výchozí (po spuštění migrace) je
+// „fix30" — jedno tlačítko, klik = půl hodiny. Správce může někomu nastavit
+// hodinu nebo víc půlhodinových pauz.
+const PRESTAVKA_REZIMY = {
+  'fix30':  { minut: 30, vicKrat: false, popis: 'Přestávka 30 min',  kratce: '30 min' },
+  'fix60':  { minut: 60, vicKrat: false, popis: 'Přestávka 1 hodina', kratce: '1 hodina' },
+  'fix30x': { minut: 30, vicKrat: true,  popis: 'Přestávka 30 min',  kratce: '30 min, i víckrát' },
+  'od-do':  { minut: 0,  vicKrat: true,  popis: 'Jdu na pauzu',      kratce: 'začátek a konec' }
+}
+
+// POZOR na pořadí nasazení: dokud neproběhne migrace, sloupec neexistuje
+// a hodnota je undefined. Tehdy se schválně drží PŮVODNÍ způsob (od-do),
+// ať se lidem na stavbě nezmění tlačítka dřív, než je na to databáze
+// připravená. Po migraci má sloupec default 'fix30', takže se to překlopí
+// všem najednou — přesně jak bylo zadané.
+// Nabídka režimů do rozbalovátka — jedno místo, ať se popisky nerozejdou.
+function rezimOptions(vybrany) {
+  return Object.keys(PRESTAVKA_REZIMY).map(k =>
+    `<option value="${k}"${k === vybrany ? ' selected' : ''}>${PRESTAVKA_REZIMY[k].kratce}</option>`).join('')
+}
+
+function rezimPrestavky(profil) {
+  const r = profil && profil.rezim_prestavky
+  if (r === undefined || r === null || r === '') return 'od-do'
+  return PRESTAVKA_REZIMY[r] ? r : 'od-do'
+}
+
+// Režim platný pro KONKRÉTNÍ DEN. U dne se ukládá snapshot, takže pozdější
+// změna nastavení nepřepíše výklad už zapsané docházky.
+function rezimDne(zaznam, profil) {
+  const z = zaznam && zaznam.rezim_prestavky
+  if (z && PRESTAVKA_REZIMY[z]) return z
+  if (z === undefined && zaznam) return 'od-do'   // starší den, ještě bez snapshotu
+  return rezimPrestavky(profil)
+}
+
 function attAllBreaks(r) {
   const out = []
   if (Array.isArray(r.breaks) && r.breaks.length) {
@@ -30085,6 +30396,7 @@ document.addEventListener('visibilitychange', () => {
         <input type="text" inputmode="numeric" maxlength="5" id="edit-att-be2-t" placeholder="12:30" oninput="syncTimeField('be2')" onblur="padMin('be2')" class="hm-in" style="width:140px;text-align:center;padding:13px 6px;border:1.5px solid var(--brd);border-radius:10px;font-size:22px;font-weight:700;font-family:inherit"><input type="hidden" id="edit-att-be2">
       </div>
     </div>
+    <div id="edit-att-dalsi-pauzy" style="display:none;margin-top:8px"></div>
     <div id="edit-hours-preview" style="background:var(--blue-l);border-radius:12px;padding:16px;text-align:center;margin:16px 0;display:none">
       <div style="font-size:12px;color:var(--blue);font-weight:600;margin-bottom:3px">Odpracováno (po zaokrouhlení)</div>
       <span style="font-size:26px;color:var(--blue);font-weight:800;font-family:'Archivo',-apple-system,sans-serif" id="edit-hours-val">0h</span>
