@@ -64,3 +64,7 @@ fi
 python3 "$KDE/handlery.py" "$SOUBOR" "$KDE/appka.js" || exit 1
 rm -f "$KDE/appka.js"
 echo "✅ Zkontrolováno ($VEL B kódu): syntaxe, odkazy i handlery z HTML v pořádku."
+
+# Soubory, bez kterých je web venku mrtvý (vercel.json a spol.).
+# Bez téhle kontroly prošlo nasazení, které smazalo vercel.json a shodilo appku na 404.
+bash "$(dirname "$0")/nechybi-soubory.sh" || exit 1
