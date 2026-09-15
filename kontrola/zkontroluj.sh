@@ -1,4 +1,7 @@
 #!/bin/bash
+# Kde leží samotná kontrola. Musí se zjistit HNED — skript si dál mění
+# pracovní složku a potom už by relativní cesta ukazovala jinam.
+KONTROLA_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # Kontrola appky před nasazením. Ověřuje DVĚ věci:
 #   1) syntaxi a odkazy na neexistující proměnné/funkce (ESLint)
 #   2) že funkce volané z HTML atributů (onclick=…) opravdu existují
@@ -67,4 +70,4 @@ echo "✅ Zkontrolováno ($VEL B kódu): syntaxe, odkazy i handlery z HTML v po�
 
 # Soubory, bez kterých je web venku mrtvý (vercel.json a spol.).
 # Bez téhle kontroly prošlo nasazení, které smazalo vercel.json a shodilo appku na 404.
-bash "$(dirname "$0")/nechybi-soubory.sh" || exit 1
+bash "$KONTROLA_DIR/nechybi-soubory.sh" || exit 1
