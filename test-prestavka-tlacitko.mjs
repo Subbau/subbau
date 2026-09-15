@@ -256,6 +256,71 @@ try {
   ok(/presPulnoc \|\| coM === null/.test(zdroj), 'a noční směně se pauza neposouvá')
   ok(/const novyZac = Math\.max\(predchoziKonec, novyKon - delka\)/.test(zdroj),
      'posunutá pauza nenalezne do té předchozí')
+  console.log('\n8) BEZ MIGRACE — appka musí fungovat dál')
+  const bm = await p.evaluate(async () => {
+    // Uměle shodíme každý dotaz, který se nového sloupce dotkne — přesně tak
+    // se chová databáze, dokud migrace neproběhla (chyba 42703). Náhrada musí
+    // umět celý řetězec (.in, .order, .eq…), jinak by se rozbil dotaz sám
+    // a měřili bychom vlastní chybu místo chování appky.
+    const puvodniFrom = sb.from
+    let shozeno = 0
+    const chyba = (co) => ({ code: '42703', message: 'column ' + co + ' does not exist' })
+    const mrtvyDotaz = (co) => {
+      const odpoved = { data: null, error: chyba(co) }
+      const stub = {}
+      ;['select','in','eq','neq','order','limit','not','gte','lte','is','filter','or','range']
+        .forEach(m => { stub[m] = () => stub })
+      stub.single = () => stub
+      stub.maybeSingle = () => stub
+      stub.then = (f) => Promise.resolve(f(odpoved))
+      stub.catch = () => stub
+      return stub
+    }
+    sb.from = function (t) {
+      const q = puvodniFrom.call(sb, t)
+      const psel = q.select, pins = q.insert, pupd = q.update
+      if (psel) q.select = function (c, ...r) {
+        if (typeof c === 'string' && c.includes('rezim_prestavky')) { shozeno++; return mrtvyDotaz('profiles.rezim_prestavky') }
+        return psel.call(q, c, ...r)
+      }
+      if (pins) q.insert = function (d) {
+        if (d && !Array.isArray(d) && 'rezim_prestavky' in d) { shozeno++; return mrtvyDotaz('attendance.rezim_prestavky') }
+        return pins.call(q, d)
+      }
+      if (pupd) q.update = function (d) {
+        if (d && 'rezim_prestavky' in d) { shozeno++; return mrtvyDotaz('profiles.rezim_prestavky') }
+        return pupd.call(q, d)
+      }
+      return q
+    }
+    const vysledek = {}
+    try {
+      // profil bez toho sloupce → musí zůstat původní způsob
+      vysledek.rezim = rezimPrestavky({ id: 'x' })
+      // Týmy se musí načíst
+      sv('tymy'); await new Promise(r => setTimeout(r, 2200))
+      const t = document.getElementById('teams-list')?.textContent || ''
+      vysledek.tymyNacteny = t.length > 50 && !/Načítám/.test(t)
+      vysledek.tymyMajiLidi = (document.querySelectorAll('input[onchange*="prepniVeVykazu"]') || []).length > 0
+      // docházka se musí dát zapsat
+      // Z předchozích sekcí zůstal rozjetý den — příchod by na něj narazil
+      // a nový záznam by nezaložil. Zavřeme ho, ať měříme opravdu zápis.
+      await puvodniFrom.call(sb, 'attendance').update({ check_out: '16:00:00' }).eq('id', window._testAttId)
+      sv('dochazka'); await new Promise(r => setTimeout(r, 900))
+      await getTodayRecord(); await new Promise(r => setTimeout(r, 700))
+      const idsPred = new Set(((await puvodniFrom.call(sb, 'attendance').select('id')).data || []).map(x => x.id))
+      await mobCheckin('in'); await new Promise(r => setTimeout(r, 1400))
+      const potom = ((await puvodniFrom.call(sb, 'attendance').select('id')).data || []).map(x => x.id)
+      vysledek.prichodZapsan = potom.some(id => !idsPred.has(id))
+      vysledek.shozeno = shozeno
+    } finally { sb.from = puvodniFrom }
+    return vysledek
+  })
+  ok(bm.shozeno > 0, `kontrolní měření: dotazy na chybějící sloupec opravdu spadly (${bm.shozeno}×)`)
+  ok(bm.rezim === 'od-do', 'bez migrace zůstává původní způsob zapisování pauzy')
+  ok(bm.tymyNacteny === true, 'Týmy se načtou i bez migrace')
+  ok(bm.tymyMajiLidi === true, 'a jsou v nich lidé, ne prázdno')
+  ok(bm.prichodZapsan === true, 'PŘÍCHOD SE ZAPÍŠE i bez migrace')
 } finally { await b.close() }
 
 console.log(chyby ? `\n❌ ${chyby} problémů` : '\n✅ Přestávka jedním tlačítkem')
