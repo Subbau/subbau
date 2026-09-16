@@ -19,16 +19,15 @@ const ok = (p, t) => { console.log((p ? '  ✅ ' : '  ❌ ') + t); if (!p) chyby
 stejnaVerze()
 
 console.log('\n1) Kód')
-ok(/function denJePlaceny\(r\) \{\s*\n\s*return !\(r && r\.bez_vyplaty\)/.test(zdroj),
-   'o placenosti dne rozhoduje jedno místo')
-ok(!/denSePocita|hodinyDoVykazu/.test(zdroj),
-   'hodiny se ze součtu ve výkazu neodečítají — podle nich se fakturuje odběrateli')
-ok(/tag: 'NEPLAC'/.test(zdroj), 'označení neplacených dnů jde před tiskem vypnout')
-ok(/není pro odběratele/.test(zdroj), 'a je u něj napsané, že je to jen pro nás')
-ok(!/NEPOCITA_SE_NIKDE/.test(zdroj), 'kontrolní měření: test umí i nenajít')
+ok(/function denJePlaceny\(r\) \{\s*\n\s*return !\(r && r\.bez_vyplaty\)/.test(zdroj), 'placenost dne řeší jedno místo')
+ok(/function denMaProvizi\(r\) \{\s*\n\s*return !\(r && r\.bez_provize_den\)/.test(zdroj), 'provize za den taky')
+ok(/function znackyVyjimekDne/.test(zdroj), 'a značky k dni se skládají na jednom místě')
+ok(!/denSePocita|hodinyDoVykazu/.test(zdroj), 'hodiny se ze součtu neodečítají — podle nich se fakturuje')
+ok(/tag: 'NEPLAC'/.test(zdroj), 'značky jdou před tiskem vypnout')
+ok(!/ZNACKA_KTERA_NEEXISTUJE/.test(zdroj), 'kontrolní měření: test umí i nenajít')
 
-console.log('\n2) Výkaz za tým')
-const b = await puppeteer.launch({ headless: 'new', args: ['--no-sandbox'], protocolTimeout: 40000 })
+console.log('\n2) Výkaz za tým — všechny kombinace')
+const b = await puppeteer.launch({ headless: 'new', args: ['--no-sandbox'], protocolTimeout: 60000 })
 try {
   const p = await b.newPage()
   const padky = []
@@ -45,8 +44,7 @@ try {
     sv('tymy'); await new Promise(r => setTimeout(r, 2000))
     const tlac = document.querySelector('[onclick*="generateTeamAttendancePdf"]')
     const tymId = (tlac?.getAttribute('onclick') || '').match(/generateTeamAttendancePdf\('([^']+)'/)?.[1]
-    const sel = document.getElementById('team-pdf-week-' + tymId)
-    const tyden = sel?.value
+    const tyden = document.getElementById('team-pdf-week-' + tymId)?.value
     if (!tyden) return { chyba: 'u týmu není žádný týden' }
     const [kw, rok] = tyden.split('/').map(Number)
 
@@ -59,42 +57,49 @@ try {
       return html
     }
 
-    const pred = await vykaz()
     const { data: clenove } = await sb.from('profiles').select('id').eq('team_id', tymId)
     const idsTymu = new Set((clenove || []).map(x => x.id))
     const { data: dny } = await sb.from('attendance').select('*')
       .eq('kw', kw).eq('kw_year', rok).not('total_hours', 'is', null).order('work_date')
     const den = (dny || []).find(d => Number(d.total_hours) > 0 && idsTymu.has(d.worker_id))
     if (!den) return { chyba: 'v tom týdnu není žádný den s hodinami' }
-    await sb.from('attendance').update({ bez_vyplaty: true }).eq('id', den.id)
-    const po = await vykaz()
-    await sb.from('attendance').update({ bez_vyplaty: false }).eq('id', den.id)
+
+    const nastav = async (bv, bp) => {
+      await sb.from('attendance').update({ bez_vyplaty: bv, bez_provize_den: bp }).eq('id', den.id)
+      const h = await vykaz()
+      return { neplaceno: /NEPLACENO/.test(h), bezProvize: /BEZ PROVIZE/.test(h),
+               textOn: /nedostane zaplaceno/.test(h), textMy: /nedostaneme provizi/.test(h),
+               soucet: soucet(h),
+               bezZnacek: h.replace(/<!--NEPLAC-START-->[\s\S]*?<!--NEPLAC-END-->/g, '') }
+    }
+
+    const nic = await nastav(false, false)
+    const jenOn = await nastav(true, false)
+    const jenMy = await nastav(false, true)
+    const oba = await nastav(true, true)
+    await sb.from('attendance').update({ bez_vyplaty: false, bez_provize_den: false }).eq('id', den.id)
     window.showPrintPreview = puvodni
-
-    // co zbude, když se značka v náhledu vypne
-    const bezZnacky = po.replace(/<!--NEPLAC-START-->[\s\S]*?<!--NEPLAC-END-->/g, '')
-
-    return { hodinyDne: Number(den.total_hours),
-             soucetPred: soucet(pred), soucetPo: soucet(po),
-             melZnackuPred: /NEPLACENO/.test(pred),
-             maZnacku: /NEPLACENO/.test(po),
-             maPoznamku: /nedostane zaplaceno/.test(po),
-             poVypnutiZnacka: /NEPLACENO/.test(bezZnacky),
-             poVypnutiPoznamka: /nedostane zaplaceno/.test(bezZnacky),
-             soucetPoVypnuti: soucet(bezZnacky) }
+    return { hodinyDne: Number(den.total_hours), nic, jenOn, jenMy, oba }
   })
 
   if (v.chyba) { ok(false, v.chyba) } else {
-    ok(v.soucetPred > 0, `kontrolní měření: výkaz se vygeneroval a má součet (${v.soucetPred} h)`)
-    ok(v.melZnackuPred === false, 'kontrolní měření: před označením tam žádné NEPLACENO není')
-    ok(v.maZnacku === true, 'označený den je ve výkazu vidět jako NEPLACENO')
-    ok(v.maPoznamku === true, 'a je u něj poznámka, že za ty hodiny pracovník nedostane')
-    ok(v.soucetPo === v.soucetPred,
-       `SOUČET SE NEZMĚNIL — fakturuje se podle odpracovaných hodin (${v.soucetPred} → ${v.soucetPo})`)
-    ok(v.poVypnutiZnacka === false, 'zaškrtávátkem v náhledu značka zmizí (kopie pro odběratele)')
-    ok(v.poVypnutiPoznamka === false, 'a zmizí i ta poznámka pro nás')
-    ok(v.soucetPoVypnuti === v.soucetPred,
-       `a součet je i bez značky pořád stejný (${v.soucetPoVypnuti})`)
+    ok(v.nic.soucet > 0, `kontrolní měření: výkaz se vygeneroval (${v.nic.soucet} h)`)
+    ok(!v.nic.neplaceno && !v.nic.bezProvize, 'kontrolní měření: bez výjimek tam žádná značka není')
+
+    ok(v.jenOn.neplaceno && !v.jenOn.bezProvize, 'ON nedostane zaplaceno → jen NEPLACENO')
+    ok(v.jenOn.textOn && !v.jenOn.textMy, 'a poznámka mluví jen o něm')
+
+    ok(!v.jenMy.neplaceno && v.jenMy.bezProvize, 'MY nedostaneme provizi → jen BEZ PROVIZE')
+    ok(v.jenMy.textMy && !v.jenMy.textOn, 'a poznámka mluví jen o nás')
+
+    ok(v.oba.neplaceno && v.oba.bezProvize, 'NEDOSTANE NIKDO → jsou vidět obě značky')
+    ok(v.oba.textOn && v.oba.textMy, 'a poznámka vypisuje obě')
+
+    const stejne = [v.nic, v.jenOn, v.jenMy, v.oba].map(x => x.soucet)
+    ok(new Set(stejne).size === 1,
+       `součet se u žádné kombinace nezměnil (${stejne.join(' / ')} h) — fakturuje se podle odpracovaných`)
+    ok(!/NEPLACENO|BEZ PROVIZE|nedostane zaplaceno|nedostaneme provizi/.test(v.oba.bezZnacek),
+       'zaškrtávátkem v náhledu všechny značky i poznámka zmizí (kopie pro odběratele)')
   }
   ok(padky.length === 0, 'stránka nevyhodila chybu' + (padky.length ? ': ' + padky[0] : ''))
 } finally { await b.close() }

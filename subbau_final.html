@@ -4507,7 +4507,7 @@ async function submitAdminSignatureWithPlacement() {
 // Po nahrání nové verze se snadno pozná, jestli se opravdu nasadila: otevřete
 // appku, zmáčkněte F12 (na Macu ⌥⌘I) a v konzoli je vypsané tohle datum. Když
 // tam svítí starší, prohlížeč nebo GitHub drží starou verzi.
-const SUBBAU_VERZE = '2026-09-16 b — neplacené dny jsou ve výkazu označené, hodiny v součtu zůstávají'
+const SUBBAU_VERZE = '2026-09-16 c — ve výkazu je vidět, kdo za den nedostane: on, my, nebo ani jeden'
 console.log('SubBau docházka — verze ' + SUBBAU_VERZE)
 
 // ============ SUPABASE CONFIG ============
@@ -14218,6 +14218,7 @@ async function generateTeamAttendancePdf(teamId, teamName) {
     byWorker[wid].rows.push(r)
     byWorker[wid].total += (Number(r.total_hours) || 0)
     if (!denJePlaceny(r)) byWorker[wid].neplaceno = (byWorker[wid].neplaceno || 0) + (Number(r.total_hours) || 0)
+    if (!denMaProvizi(r)) byWorker[wid].bezProvize = (byWorker[wid].bezProvize || 0) + (Number(r.total_hours) || 0)
   })
 
   let grandTotal = 0
@@ -14269,7 +14270,7 @@ async function generateTeamAttendancePdf(teamId, teamName) {
       // Neplacený den ve výkazu ZŮSTÁVÁ — pracovník tam ten den byl a vedoucí
       // to má vidět. Jen se jeho hodiny nesčítají, a musí to být na první
       // pohled jasné, aby to nikdo nepřehlédl při podpisu.
-      const neplaceno = !denJePlaceny(r)
+      const vyjimky = znackyVyjimekDne(r)
       return `<tr style="page-break-inside:avoid">
         <td style="padding:6px 7px;border:1px solid #999;vertical-align:top;width:88px">
           <div style="font-weight:700;font-size:11px">${dayEN[wd]}</div>
@@ -14282,7 +14283,7 @@ async function generateTeamAttendancePdf(teamId, teamName) {
           ${allBreaks.length ? allBreaks.map(b => `<div>${b.bs}–${b.be||'?'}</div>`).join('') : '<div>—</div>'}
           ${brkLabel ? `<div style="color:#888;font-size:9px">${brkLabel}</div>` : ''}
         </td>
-        <td style="padding:6px 5px;border:1px solid #999;vertical-align:top;width:52px;text-align:center;font-size:13px;font-weight:800">${hh}${neplaceno ? '<!--NEPLAC-START--><div style="font-size:7px;font-weight:700;line-height:1.2;margin-top:2px;color:#b02a2a">NEPLACENO</div><!--NEPLAC-END-->' : ''}</td>
+        <td style="padding:6px 5px;border:1px solid #999;vertical-align:top;width:52px;text-align:center;font-size:13px;font-weight:800">${hh}${vyjimky.length ? '<!--NEPLAC-START-->' + vyjimky.map(z => `<div style="font-size:6.5px;font-weight:700;line-height:1.25;margin-top:2px;color:${z.barva}">${z.text}</div>`).join('') + '<!--NEPLAC-END-->' : ''}</td>
         <td style="padding:6px 7px;border:1px solid #999;vertical-align:top">
           <div style="font-size:10px;font-weight:600;color:#333">📍 ${escAttr(site)}</div>
           <div style="line-height:1.35;margin-top:2px">${descHtml}</div>
@@ -14311,11 +14312,11 @@ async function generateTeamAttendancePdf(teamId, teamName) {
             <td style="border:1px solid #999"></td>
           </tr></tfoot>
         </table>
-        ${w.neplaceno ? `<!--NEPLAC-START--><div style="margin-top:6px;padding:6px 9px;border:1px solid #e3bcbc;background:#fdf2f2;border-radius:6px;font-size:10px;line-height:1.45;color:#7a1f1f;page-break-inside:avoid">
-          <b>Poznámka pro SubBau (není pro odběratele):</b>
-          za ${w.neplaceno.toFixed(2)} h z těchto hodin pracovník <b>nedostane zaplaceno</b>.
-          Odpracované hodiny v součtu <b>zůstávají</b> — podle nich se odběrateli fakturuje.
-          Na jeho vlastní faktuře se tyhle dny nepočítají.
+        ${(w.neplaceno || w.bezProvize) ? `<!--NEPLAC-START--><div style="margin-top:6px;padding:6px 9px;border:1px solid #e3bcbc;background:#fdf2f2;border-radius:6px;font-size:10px;line-height:1.5;color:#7a1f1f;page-break-inside:avoid">
+          <b>Poznámka pro SubBau (není pro odběratele):</b><br>
+          ${w.neplaceno ? `• za <b>${w.neplaceno.toFixed(2)} h</b> pracovník <b>nedostane zaplaceno</b> — na jeho faktuře tyhle dny nejsou<br>` : ''}
+          ${w.bezProvize ? `• za <b>${w.bezProvize.toFixed(2)} h</b> <b>nedostaneme provizi</b> — v Provizích se tyhle dny nepočítají<br>` : ''}
+          Odpracované hodiny v součtu nahoře <b>zůstávají</b> — podle nich se odběrateli fakturuje.
         </div><!--NEPLAC-END-->` : ''}
         <div style="margin-top:12px;display:flex;gap:30px;align-items:flex-end;page-break-inside:avoid">
           <div style="width:240px">
@@ -19986,6 +19987,7 @@ async function generateAttendanceExport() {
     byWorker[wid].rows.push(r)
     byWorker[wid].total += (Number(r.total_hours) || 0)
     if (!denJePlaceny(r)) byWorker[wid].neplaceno = (byWorker[wid].neplaceno || 0) + (Number(r.total_hours) || 0)
+    if (!denMaProvizi(r)) byWorker[wid].bezProvize = (byWorker[wid].bezProvize || 0) + (Number(r.total_hours) || 0)
   })
 
   // Načti podpisy vedoucího (z výkazů OSVČ) — jen u týdenního exportu (máme KW)
@@ -20056,7 +20058,7 @@ async function generateAttendanceExport() {
       const descHtml = (descRaw && descRaw !== '—' && _descToTrans[descRaw]) ? renderWork3(_descToTrans[descRaw]) : '—'
       const hh = (r.total_hours||0).toFixed(2)
       // Stejně jako ve výkazu za tým: neplacený den je vidět, ale nesčítá se.
-      const neplaceno = !denJePlaceny(r)
+      const vyjimky = znackyVyjimekDne(r)
       return `<tr style="page-break-inside:avoid">
         <td style="padding:6px 7px;border:1px solid #999;vertical-align:top;width:88px">
           <div style="font-weight:700;font-size:11px">${dayEN[wd]}</div>
@@ -20069,7 +20071,7 @@ async function generateAttendanceExport() {
           ${allBreaks.length ? allBreaks.map(b => `<div>${b.bs}–${b.be||'?'}</div>`).join('') : '<div>—</div>'}
           ${brkLabel ? `<div style="color:#888;font-size:9px">${brkLabel}</div>` : ''}
         </td>
-        <td style="padding:6px 5px;border:1px solid #999;vertical-align:top;width:52px;text-align:center;font-size:13px;font-weight:800">${hh}${neplaceno ? '<!--NEPLAC-START--><div style="font-size:7px;font-weight:700;line-height:1.2;margin-top:2px;color:#b02a2a">NEPLACENO</div><!--NEPLAC-END-->' : ''}</td>
+        <td style="padding:6px 5px;border:1px solid #999;vertical-align:top;width:52px;text-align:center;font-size:13px;font-weight:800">${hh}${vyjimky.length ? '<!--NEPLAC-START-->' + vyjimky.map(z => `<div style="font-size:6.5px;font-weight:700;line-height:1.25;margin-top:2px;color:${z.barva}">${z.text}</div>`).join('') + '<!--NEPLAC-END-->' : ''}</td>
         <td style="padding:6px 7px;border:1px solid #999;vertical-align:top">
           <div style="font-size:10px;font-weight:600;color:#333">📍 ${escAttr(site)}</div>
           <div style="line-height:1.35;margin-top:2px">${descHtml}</div>
@@ -20098,11 +20100,11 @@ async function generateAttendanceExport() {
             <td style="border:1px solid #999"></td>
           </tr></tfoot>
         </table>
-        ${w.neplaceno ? `<!--NEPLAC-START--><div style="margin-top:6px;padding:6px 9px;border:1px solid #e3bcbc;background:#fdf2f2;border-radius:6px;font-size:10px;line-height:1.45;color:#7a1f1f;page-break-inside:avoid">
-          <b>Poznámka pro SubBau (není pro odběratele):</b>
-          za ${w.neplaceno.toFixed(2)} h z těchto hodin pracovník <b>nedostane zaplaceno</b>.
-          Odpracované hodiny v součtu <b>zůstávají</b> — podle nich se odběrateli fakturuje.
-          Na jeho vlastní faktuře se tyhle dny nepočítají.
+        ${(w.neplaceno || w.bezProvize) ? `<!--NEPLAC-START--><div style="margin-top:6px;padding:6px 9px;border:1px solid #e3bcbc;background:#fdf2f2;border-radius:6px;font-size:10px;line-height:1.5;color:#7a1f1f;page-break-inside:avoid">
+          <b>Poznámka pro SubBau (není pro odběratele):</b><br>
+          ${w.neplaceno ? `• za <b>${w.neplaceno.toFixed(2)} h</b> pracovník <b>nedostane zaplaceno</b> — na jeho faktuře tyhle dny nejsou<br>` : ''}
+          ${w.bezProvize ? `• za <b>${w.bezProvize.toFixed(2)} h</b> <b>nedostaneme provizi</b> — v Provizích se tyhle dny nepočítají<br>` : ''}
+          Odpracované hodiny v součtu nahoře <b>zůstávají</b> — podle nich se odběrateli fakturuje.
         </div><!--NEPLAC-END-->` : ''}
         <div style="margin-top:12px;display:flex;gap:30px;align-items:flex-end;page-break-inside:avoid">
           <div style="width:240px">
@@ -27753,6 +27755,25 @@ function rezimDne(zaznam, profil) {
 // Bauleiter, s tím, co mu za ten týden vyfakturujeme.
 function denJePlaceny(r) {
   return !(r && r.bez_vyplaty)
+}
+
+// Dostaneme za ten den provizi my? Druhá půlka téhož: pracovník může mít
+// zaplaceno a provize nám přesto nemusí běžet — a naopak. Ve výkazu má být
+// vidět obojí, ať správce pozná, co u toho dne nastavil.
+function denMaProvizi(r) {
+  return !(r && r.bez_provize_den)
+}
+
+// Značky k jednomu dni. Jsou to naše vnitřní poznámky, ne věc odběratele,
+// proto se v náhledu před tiskem dají vypnout (NEPLAC-START/END).
+function znackyVyjimekDne(r) {
+  const z = []
+  if (!denJePlaceny(r)) z.push({ text: 'NEPLACENO', barva: '#b02a2a' })
+  if (!denMaProvizi(r)) z.push({ text: 'BEZ PROVIZE', barva: '#8a5a00' })
+  if (r && r.vyplata_castka != null && r.vyplata_castka !== '') {
+    z.push({ text: 'PEVNÁ ČÁSTKA', barva: '#2f6b45' })
+  }
+  return z
 }
 
 function attAllBreaks(r) {
