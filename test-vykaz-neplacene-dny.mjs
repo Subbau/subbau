@@ -72,11 +72,11 @@ try {
     const nastav = async (bv, bp) => {
       await sb.from('attendance').update({ bez_vyplaty: bv, bez_provize_den: bp }).eq('id', den.id)
       const h = await vykaz()
-      return { neplaceno: /NEPLACENO/.test(h), bezProvize: /BEZ PROVIZE/.test(h),
-               textOn: /nedostane zaplaceno/.test(h), textMy: /nedostaneme provizi/.test(h),
+      return { neplaceno: /NICHT BEZAHLT/.test(h), bezProvize: /OHNE PROVISION/.test(h),
+               textOn: /keine Vergütung/.test(h), textMy: /ohne Provision/i.test(h),
                soucet: soucet(h),
                provize: provizeCelkem(h),
-               nulovaProvize: /Bez provize: [\d.,]+ h → 0,00 €/.test(h),
+               nulovaProvize: /Ohne Provision · Bez provize: [\d.,]+ h → 0,00 €/.test(h),
                // Kopie pro odběratele = vypnuté OBA vnitřní bloky (značky u dnů
                // i přehled provizí). Každý má v liště náhledu své zaškrtávátko.
                bezZnacek: h.replace(/<!--NEPLAC-START-->[\s\S]*?<!--NEPLAC-END-->/g, '')
@@ -108,7 +108,7 @@ try {
     const stejne = [v.nic, v.jenOn, v.jenMy, v.oba].map(x => x.soucet)
     ok(new Set(stejne).size === 1,
        `součet se u žádné kombinace nezměnil (${stejne.join(' / ')} h) — fakturuje se podle odpracovaných`)
-    ok(!/NEPLACENO|BEZ PROVIZE|nedostane zaplaceno|nedostaneme provizi/.test(v.oba.bezZnacek),
+    ok(!/NICHT BEZAHLT|OHNE PROVISION|keine Vergütung|Anmerkung · Poznámka/.test(v.oba.bezZnacek),
        'zaškrtávátkem v náhledu všechny značky i poznámka zmizí (kopie pro odběratele)')
 
     console.log('\n3) Přehled provizí ve výkazu')
@@ -117,13 +117,60 @@ try {
     ok(!v.nic.nulovaProvize, 'kontrolní měření: bez výjimek se o nulové provizi nic nepíše')
     ok(v.jenMy.provize < v.nic.provize,
        `PROVIZE KLESLA, když za ten den neběží (${v.nic.provize} € → ${v.jenMy.provize} €)`)
-    ok(v.jenMy.nulovaProvize, 'a je napsané „Bez provize: X h → 0,00 €"')
+    ok(v.jenMy.nulovaProvize, 'a je napsané „Ohne Provision · Bez provize: X h → 0,00 €"')
     ok(v.jenOn.provize === v.nic.provize,
        `když nedostane jen ON, naše provize se nemění (${v.jenOn.provize} €)`)
     ok(v.oba.provize === v.jenMy.provize,
        `a když nedostane nikdo, provize je stejná jako u „jen my" (${v.oba.provize} €)`)
   }
   ok(padky.length === 0, 'stránka nevyhodila chybu' + (padky.length ? ': ' + padky[0] : ''))
+  console.log('\n4) Co se opravdu uloží do PDF pro Němce')
+  // Každá varianta si zaslouží čistou stránku — lišta náhledu si jinak nese
+  // stav z předchozího průchodu a měřili bychom vlastní nepořádek.
+  const varianta = async (zapnuto) => await p.evaluate(async (zap) => {
+    window.showToast = () => {}
+    ;['sb_pdf_neplac', 'sb_pdf_comm', 'sb_pdf_rates'].forEach(k => {
+      try { localStorage.setItem(k, zap ? '1' : '0') } catch (e) {}
+    })
+    const tlac = document.querySelector('[onclick*="generateTeamAttendancePdf"]')
+    const tymId = (tlac?.getAttribute('onclick') || '').match(/generateTeamAttendancePdf\('([^']+)'/)?.[1]
+    // den s oběma výjimkami, ať je co schovávat
+    const { data: clenove } = await sb.from('profiles').select('id').eq('team_id', tymId)
+    const idsTymu = new Set((clenove || []).map(x => x.id))
+    const tyden = document.getElementById('team-pdf-week-' + tymId)?.value
+    const [kw, rok] = String(tyden).split('/').map(Number)
+    const { data: dny } = await sb.from('attendance').select('*').eq('kw', kw).eq('kw_year', rok)
+      .not('total_hours', 'is', null)
+    const den = (dny || []).find(d => Number(d.total_hours) > 0 && idsTymu.has(d.worker_id))
+    if (!den) return { chyba: 'není den k označení' }
+    await sb.from('attendance').update({ bez_vyplaty: true, bez_provize_den: true }).eq('id', den.id)
+
+    await generateTeamAttendancePdf(tymId, 'Test')
+    await new Promise(r => setTimeout(r, 1600))
+    const h = window._lastPrintHtml || ''
+    const hodin = [...h.matchAll(/font-size:14px;text-align:center">([\d.]+)<\/td>/g)]
+      .map(x => Number(x[1])).reduce((a, c) => a + c, 0)
+    const vnitrniVzory = ['NICHT BEZAHLT', 'OHNE PROVISION', 'keine Vergütung', 'Anmerkung · Poznámka', 'Přehled provizí', 'CELKEM PROVIZE', 'Přehled sazeb']
+    const nalezeno = vnitrniVzory.filter(v => h.includes(v))
+    const pocetBoxu = [...document.querySelectorAll('label')]
+      .filter(l => /jen pro nás/.test(l.textContent || '') && l.querySelector('input[type=checkbox]')).length
+    return { nalezeno, hodin, pocetBoxu, maDochazku: /Site &amp; Work done|Stavba/.test(h) && h.length > 3000 }
+  }, zapnuto)
+
+  const proNas = await varianta(true)
+  await p.reload({ waitUntil: 'networkidle0' })
+  await p.waitForFunction(() => typeof window.generateTeamAttendancePdf === 'function', { timeout: 20000 })
+  await p.evaluate(async () => { sv('tymy'); await new Promise(r => setTimeout(r, 2000)) })
+  const proNemce = await varianta(false)
+
+  ok(proNas.pocetBoxu >= 3, `v liště náhledu jsou zaškrtávátka „jen pro nás" (${proNas.pocetBoxu})`)
+  ok(proNas.nalezeno.length >= 3,
+     `kontrolní měření: naše kopie ty vnitřní části opravdu má (${proNas.nalezeno.join(', ')})`)
+  ok(proNemce.nalezeno.length === 0,
+     'KOPIE PRO NĚMCE je bez nich' + (proNemce.nalezeno.length ? ' — zbylo: ' + proNemce.nalezeno.join(', ') : ''))
+  ok(proNemce.maDochazku === true, 'ale docházka v ní zůstává celá')
+  ok(proNemce.hodin === proNas.hodin,
+     `a hodiny jsou v obou stejné (${proNas.hodin} / ${proNemce.hodin} h)`)
 } finally { await b.close() }
 
 console.log(chyby ? `\n❌ ${chyby} problémů` : '\n✅ Neplacené dny jsou ve výkazu označené, ale hodiny v součtu zůstávají')
