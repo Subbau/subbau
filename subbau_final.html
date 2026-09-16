@@ -4507,7 +4507,7 @@ async function submitAdminSignatureWithPlacement() {
 // Po nahrání nové verze se snadno pozná, jestli se opravdu nasadila: otevřete
 // appku, zmáčkněte F12 (na Macu ⌥⌘I) a v konzoli je vypsané tohle datum. Když
 // tam svítí starší, prohlížeč nebo GitHub drží starou verzi.
-const SUBBAU_VERZE = '2026-09-16 c — ve výkazu je vidět, kdo za den nedostane: on, my, nebo ani jeden'
+const SUBBAU_VERZE = '2026-09-16 d — přehled provizí počítá jen hodiny, za které nám provize běží'
 console.log('SubBau docházka — verze ' + SUBBAU_VERZE)
 
 // ============ SUPABASE CONFIG ============
@@ -14219,6 +14219,9 @@ async function generateTeamAttendancePdf(teamId, teamName) {
     byWorker[wid].total += (Number(r.total_hours) || 0)
     if (!denJePlaceny(r)) byWorker[wid].neplaceno = (byWorker[wid].neplaceno || 0) + (Number(r.total_hours) || 0)
     if (!denMaProvizi(r)) byWorker[wid].bezProvize = (byWorker[wid].bezProvize || 0) + (Number(r.total_hours) || 0)
+    // Hodiny, ze kterých nám provize OPRAVDU běží. Přehled provizí je dřív
+    // počítal ze všech odpracovaných a ukazoval nám tak víc, než dostaneme.
+    if (denMaProvizi(r)) byWorker[wid].hodinyProvize = (byWorker[wid].hodinyProvize || 0) + (Number(r.total_hours) || 0)
   })
 
   let grandTotal = 0
@@ -14392,7 +14395,9 @@ async function generateTeamAttendancePdf(teamId, teamName) {
       if (!_commMap.has(key)) _commMap.set(key, { provize: pv, people: 0, hours: 0, profs: {} })
       const g = _commMap.get(key)
       g.people++
-      g.hours += (w.total || 0)
+      // Jen hodiny, ze kterých provize běží — ne všechny odpracované.
+      g.hours += (w.hodinyProvize || 0)
+      g.bezProvize = (g.bezProvize || 0) + (w.bezProvize || 0)
       const pl = profLabel(w.prof) || 'Bez zařazení'
       g.profs[pl] = (g.profs[pl] || 0) + 1
     })
@@ -14400,6 +14405,7 @@ async function generateTeamAttendancePdf(teamId, teamName) {
     const _commTotal = _commGroups.reduce((s, g) => s + g.provize * (g.hours || 0), 0)
     const _commHours = _commGroups.reduce((s, g) => s + (g.hours || 0), 0)
     const _commPeople = _commGroups.reduce((s, g) => s + g.people, 0)
+    const _bezProvizeHodin = _commGroups.reduce((s, g) => s + (g.bezProvize || 0), 0)
     const _commRows = _commGroups.map(g => `<tr>
         <td style="padding:5px 8px;border:1px solid #ddd;font-weight:800;color:#1d6b3f;white-space:nowrap">${g.provize ? _eur(g.provize) + ' / h' : 'Provize neuvedena'}</td>
         <td style="padding:5px 8px;border:1px solid #ddd;text-align:center;font-weight:800;font-size:14px">${g.people}</td>
@@ -14428,7 +14434,12 @@ async function generateTeamAttendancePdf(teamId, teamName) {
           <td style="padding:6px 8px;border:1px solid #ddd;text-align:right;font-weight:800;font-size:13px;color:#1d6b3f;white-space:nowrap">${_eur(_commTotal)}</td>
         </tr></tfoot>
       </table>
-      <div style="font-size:9px;color:#aaa;margin-top:4px;text-align:right">Interní údaj — provize × odpracované hodiny</div>
+      ${_bezProvizeHodin ? `<div style="margin-top:6px;padding:6px 9px;border:1px solid #e0cfa8;background:#fdf8ec;border-radius:6px;font-size:11px;color:#7a5a12">
+        <b>Bez provize: ${_bezProvizeHodin.toFixed(2)} h → 0,00 €.</b>
+        Za tyhle hodiny nám provize neběží, proto nejsou v součtu výše.
+        U dne jsou označené <b>BEZ PROVIZE</b>.
+      </div>` : ''}
+      <div style="font-size:9px;color:#aaa;margin-top:4px;text-align:right">Interní údaj — provize × hodiny, za které nám provize běží</div>
     </div><!--COMM-END-->`
   }
 

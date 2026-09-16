@@ -64,13 +64,23 @@ try {
     const den = (dny || []).find(d => Number(d.total_hours) > 0 && idsTymu.has(d.worker_id))
     if (!den) return { chyba: 'v tom týdnu není žádný den s hodinami' }
 
+    // Kolik provize výkaz spočítá (řádek CELKEM PROVIZE)
+    const provizeCelkem = (h) => {
+      const m = h.match(/CELKEM PROVIZE[\s\S]*?color:#1d6b3f[^>]*>([\d\s.,]+)\s*€/)
+      return m ? Number(m[1].replace(/\s/g, '').replace(',', '.')) : null
+    }
     const nastav = async (bv, bp) => {
       await sb.from('attendance').update({ bez_vyplaty: bv, bez_provize_den: bp }).eq('id', den.id)
       const h = await vykaz()
       return { neplaceno: /NEPLACENO/.test(h), bezProvize: /BEZ PROVIZE/.test(h),
                textOn: /nedostane zaplaceno/.test(h), textMy: /nedostaneme provizi/.test(h),
                soucet: soucet(h),
-               bezZnacek: h.replace(/<!--NEPLAC-START-->[\s\S]*?<!--NEPLAC-END-->/g, '') }
+               provize: provizeCelkem(h),
+               nulovaProvize: /Bez provize: [\d.,]+ h → 0,00 €/.test(h),
+               // Kopie pro odběratele = vypnuté OBA vnitřní bloky (značky u dnů
+               // i přehled provizí). Každý má v liště náhledu své zaškrtávátko.
+               bezZnacek: h.replace(/<!--NEPLAC-START-->[\s\S]*?<!--NEPLAC-END-->/g, '')
+                           .replace(/<!--COMM-START-->[\s\S]*?<!--COMM-END-->/g, '') }
     }
 
     const nic = await nastav(false, false)
@@ -100,6 +110,18 @@ try {
        `součet se u žádné kombinace nezměnil (${stejne.join(' / ')} h) — fakturuje se podle odpracovaných`)
     ok(!/NEPLACENO|BEZ PROVIZE|nedostane zaplaceno|nedostaneme provizi/.test(v.oba.bezZnacek),
        'zaškrtávátkem v náhledu všechny značky i poznámka zmizí (kopie pro odběratele)')
+
+    console.log('\n3) Přehled provizí ve výkazu')
+    ok(v.nic.provize !== null && v.nic.provize > 0,
+       `kontrolní měření: přehled provizí se spočítal (${v.nic.provize} €)`)
+    ok(!v.nic.nulovaProvize, 'kontrolní měření: bez výjimek se o nulové provizi nic nepíše')
+    ok(v.jenMy.provize < v.nic.provize,
+       `PROVIZE KLESLA, když za ten den neběží (${v.nic.provize} € → ${v.jenMy.provize} €)`)
+    ok(v.jenMy.nulovaProvize, 'a je napsané „Bez provize: X h → 0,00 €"')
+    ok(v.jenOn.provize === v.nic.provize,
+       `když nedostane jen ON, naše provize se nemění (${v.jenOn.provize} €)`)
+    ok(v.oba.provize === v.jenMy.provize,
+       `a když nedostane nikdo, provize je stejná jako u „jen my" (${v.oba.provize} €)`)
   }
   ok(padky.length === 0, 'stránka nevyhodila chybu' + (padky.length ? ': ' + padky[0] : ''))
 } finally { await b.close() }
