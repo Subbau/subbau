@@ -4507,7 +4507,7 @@ async function submitAdminSignatureWithPlacement() {
 // Po nahrání nové verze se snadno pozná, jestli se opravdu nasadila: otevřete
 // appku, zmáčkněte F12 (na Macu ⌥⌘I) a v konzoli je vypsané tohle datum. Když
 // tam svítí starší, prohlížeč nebo GitHub drží starou verzi.
-const SUBBAU_VERZE = '2026-09-16 h — opravy v úpravě dne a v Provizích'
+const SUBBAU_VERZE = '2026-09-17 a — poloha i při odchodu, vidí ji jen kancelář'
 console.log('SubBau docházka — verze ' + SUBBAU_VERZE)
 
 // ============ SUPABASE CONFIG ============
@@ -15023,6 +15023,9 @@ async function confirmCheckout() {
     showToast('❌ Odchod se neuložil — zkuste to prosím znovu. Když to nepůjde, ozvěte se SubBau.')
     return
   }
+  // Poloha při odchodu — až po jistém zápisu a jen na pozadí. Odchod na ni
+  // nečeká. Vidí ji pouze správce v docházce, do dokladů nejde.
+  zachytPolohuOdchodu(attId)
   if (keptByAdmin) showToast('ℹ️ Stavbu a popis u tohoto dne vyplnil SubBau — jeho zápis zůstává')
 
   // Nepovinné fotky ze stavby
@@ -15994,6 +15997,9 @@ async function mobCheckin(type) {
           }
           updated.check_out = timeStr
           updated.total_hours = h
+          // Poloha při odchodu — na pozadí, nic se tím nezdržuje. Vidí ji
+          // jen správce v docházce, do dokladů se nedostane.
+          zachytPolohuOdchodu(todayAttId)
           todayAttId = null
           todayRecord = null
           showToast('🚪 Odchod zaznamenán — ' + timeStr + ' (' + h + 'h)')
@@ -19347,6 +19353,83 @@ async function startLocationForCheckIn(attId) {
 // posílal naslepo: chyba skončila jen v konzoli telefonu a update, který prošel
 // bez chyby, ale netrefil ani jeden řádek, se tvářil jako úspěch. Na displeji
 // adresa naskočila, do adminu nedorazilo nic.
+// Přeloží souřadnice na adresu. Stejné dva zdroje jako u příchodu; když
+// oba selžou, vrátí aspoň souřadnice — ať se neztratí úplně nic.
+async function adresaZeSouradnic(lat, lng) {
+  try {
+    const r = await fetch(
+      `https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${lat}&lon=${lng}&addressdetails=1&accept-language=cs`,
+      { headers: { 'Accept': 'application/json' } })
+    if (r.ok) {
+      const a = (await r.json()).address || {}
+      const casti = []
+      const ulice = a.road || a.pedestrian || a.footway || a.path || ''
+      if (ulice) casti.push(ulice + (a.house_number ? ' ' + a.house_number : ''))
+      const mesto = a.city || a.town || a.village || a.municipality || a.suburb || ''
+      if (mesto) casti.push((a.postcode ? a.postcode + ' ' : '') + mesto)
+      if (casti.length) return casti.join(', ')
+    }
+  } catch (e) { /* zkusíme druhý zdroj */ }
+  try {
+    const r2 = await fetch(`https://api.bigdatacloud.net/data/reverse-geocode-client?latitude=${lat}&longitude=${lng}&localityLanguage=cs`)
+    if (r2.ok) {
+      const j = await r2.json()
+      const casti = [j.locality || j.city || '', j.principalSubdivision || ''].filter(Boolean)
+      if (casti.length) return casti.join(', ')
+    }
+  } catch (e) { /* padáme na souřadnice */ }
+  return Number(lat).toFixed(5) + ', ' + Number(lng).toFixed(5)
+}
+
+// Zachytí polohu ve chvíli, kdy pracovník mačká konec směny. Ukládá se
+// ZVLÁŠŤ, do sloupců odchod_*, a vidí to POUZE správce v docházce — do PDF
+// výkazů ani do odkazu pro odběrateli se nikdy nedostane; tam platí adresa
+// z příchodu. Smysl: poznat, když někdo odejde ze stavby dřív a odchod
+// odklikne až jinde.
+//
+// Nikdy nic neblokuje a pracovníkovi se kvůli tomu nic neukazuje. Odchod
+// se zapíše tak jako tak — poloha je bonus navíc, ne podmínka.
+function zachytPolohuOdchodu(attId) {
+  if (!attId || !navigator.geolocation) return
+  try {
+    navigator.geolocation.getCurrentPosition(async (poz) => {
+      try {
+        const la = poz.coords.latitude, ln = poz.coords.longitude
+        const adr = await adresaZeSouradnic(la, ln)
+        const zapis = { odchod_lat: la, odchod_lng: ln, odchod_adresa: adr,
+                        odchod_gps_cas: new Date().toISOString() }
+        const { error } = await sb.from('attendance').update(zapis).eq('id', attId)
+        if (error && /odchod_|column|schema cache/i.test(error.message || '')) {
+          console.warn('[odchod GPS] chybí sloupce — spusťte supabase-migrace-gps-pri-odchodu.sql')
+        } else if (error) {
+          console.warn('[odchod GPS] uložení selhalo:', error.message)
+        }
+      } catch (e) { console.warn('[odchod GPS]', e) }
+    }, (err) => { console.warn('[odchod GPS] poloha nedostupná:', err && err.message) },
+    { enableHighAccuracy: true, timeout: 12000, maximumAge: 60000 })
+  } catch (e) { console.warn('[odchod GPS]', e) }
+}
+
+// Ukáže polohu, kde pracovník zmáčkl konec směny — a to JEN tady, v kartě
+// pracovníka pro správce. Do PDF výkazů ani do odkazu pro odběratele se
+// tahle funkce nikde nevolá; tam se dál používá adresa z příchodu.
+// Když se odchod klikal jinde než příchod, je to hned vidět.
+function odchodPolohaHtml(r) {
+  const adr = r && r.odchod_adresa
+  if (!adr) return ''
+  const prichod = (r.location_address || r.manual_address || '').trim().toLowerCase()
+  const jinde = prichod && String(adr).trim().toLowerCase() !== prichod
+  const mapa = (r.odchod_lat && r.odchod_lng)
+    ? `https://www.google.com/maps?q=${r.odchod_lat},${r.odchod_lng}` : ''
+  const text = escAttr(String(adr))
+  const vnitrek = mapa
+    ? `<a href="${mapa}" target="_blank" rel="noopener" style="color:inherit;text-decoration:underline">${text}</a>`
+    : text
+  return `<div title="Kde pracovník zmáčkl konec směny. Vidí to jen SubBau — do výkazů ani odběrateli se to nedostane." style="font-size:10.5px;font-weight:${jinde ? '700' : '400'};color:${jinde ? 'var(--red)' : 'var(--text3)'};margin-top:2px;display:flex;align-items:center;gap:3px">
+    <span>${jinde ? '⚠️' : '🏁'}</span><span>odchod: ${vnitrek}</span>
+  </div>`
+}
+
 async function ulozAdresuDne(attId, adresa, zdroj, lat, lng) {
   if (!attId || !adresa) return { ok: false, duvod: 'chybí den nebo adresa' }
   const zaklad = { location_address: adresa, address_source: zdroj || 'gps' }
@@ -28092,7 +28175,7 @@ async function loadWdAttendance() {
           ? `<div style="font-size:10px;color:var(--text3);margin-top:1px">zaznamenáno ${r.check_out.slice(0,5)}</div>` : ''}
       </td>
       <td>${hoursDisplay}${adj.flags.overtime > 0 ? `<span style="font-size:10px;color:var(--green);margin-left:3px">+${Math.round(adj.flags.overtime/60*100)/100}h přesčas</span>` : ''}${adj.flags.incomplete ? `<div style="font-size:10px;color:#842029;font-weight:700;margin-top:2px">Nesplněná směna</div>` : ''}</td>
-      <td style="font-size:12px;font-weight:600;color:var(--blue)">${attDisplaySite(r)}${attOriginBadge(r)}</td>
+      <td style="font-size:12px;font-weight:600;color:var(--blue)">${attDisplaySite(r)}${attOriginBadge(r)}${odchodPolohaHtml(r)}</td>
       <td style="font-size:11px;color:var(--text2)">${escAttr(r.work_description||'—')}</td>
       <td style="white-space:nowrap"><button class="att-edit-btn" data-id="${r.id}" data-date="${r.work_date}" data-ci="${r.check_in||''}" data-co="${r.check_out||''}" data-bs="${r.break_start||''}" data-be="${r.break_end||''}" style="padding:3px 8px;font-size:11px;border:1px solid var(--brd);border-radius:6px;cursor:pointer;background:var(--bg);font-family:inherit"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:1em;height:1em;flex-shrink:0;vertical-align:-2px"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/></svg> </button>
         <button onclick="deleteWorkerDay('${r.id}','${r.work_date}')" title="Smazat tento den" style="padding:3px 8px;font-size:11px;border:1px solid var(--red);border-radius:6px;cursor:pointer;background:none;color:var(--red);font-family:inherit;margin-left:4px"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:1em;height:1em;flex-shrink:0;vertical-align:-2px"><path d="M3 6h18M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6M14 11v6"/></svg> </button></td>
