@@ -4507,7 +4507,7 @@ async function submitAdminSignatureWithPlacement() {
 // Po nahrání nové verze se snadno pozná, jestli se opravdu nasadila: otevřete
 // appku, zmáčkněte F12 (na Macu ⌥⌘I) a v konzoli je vypsané tohle datum. Když
 // tam svítí starší, prohlížeč nebo GitHub drží starou verzi.
-const SUBBAU_VERZE = '2026-09-16 f — záloha jde zadat i jako uhrazená na účet'
+const SUBBAU_VERZE = '2026-09-16 h — opravy v úpravě dne a v Provizích'
 console.log('SubBau docházka — verze ' + SUBBAU_VERZE)
 
 // ============ SUPABASE CONFIG ============
@@ -7103,7 +7103,12 @@ async function saveProvizeRate(input, workerId) {
   const puvodni = p ? p.hourly_rate_worker : null
   if (String(puvodni ?? '') === String(rate ?? '')) return   // nic se nezměnilo
 
-  const odKdy = await zeptejSeOdKdy('Hodinová sazba pracovníka', puvodni, rate, p && p.full_name)
+  // Novému člověku se sazba zadává poprvé — není co zachovávat, takže se
+  // neptáme „od kdy" a platí na všechno. Kdyby platila až ode dneška, dny,
+  // které už stihl odpracovat, by zůstaly za nulu.
+  const poprve = (puvodni == null || puvodni === '') && rate != null
+  const odKdy = poprve ? 'zpetne'
+    : await zeptejSeOdKdy('Hodinová sazba pracovníka', puvodni, rate, p && p.full_name)
   if (!odKdy) { input.value = puvodni == null ? '' : puvodni; return }
   if (!await ulozSazbuSHistorii(workerId, 'sazba', puvodni, rate, odKdy)) {
     input.value = puvodni == null ? '' : puvodni
@@ -7111,9 +7116,10 @@ async function saveProvizeRate(input, workerId) {
   }
   const { error } = await sb.from('profiles').update({ hourly_rate_worker: rate }).eq('id', workerId)
   if (error) { showToast('❌ Chyba: ' + error.message); return }
-  showToast(odKdy === 'zpetne'
-    ? '✅ Sazba uložena a přepočítána zpětně'
-    : '✅ Sazba uložena — platí od ' + new Date(odKdy + 'T00:00:00').toLocaleDateString('cs-CZ'))
+  showToast(poprve ? '✅ Sazba nastavena'
+    : odKdy === 'zpetne'
+      ? '✅ Sazba uložena a přepočítána zpětně'
+      : '✅ Sazba uložena — platí od ' + new Date(odKdy + 'T00:00:00').toLocaleDateString('cs-CZ'))
   prekresliProvize()
 }
 async function saveProvizeCommission(input, workerId) {
@@ -7126,7 +7132,10 @@ async function saveProvizeCommission(input, workerId) {
   const puvodni = wc ? wc.provize : null
   if (String(puvodni ?? '') === String(provize ?? '')) return   // nic se nezměnilo
 
-  const odKdy = await zeptejSeOdKdy('Provize SubBau na hodinu', puvodni, provize, pr && pr.full_name)
+  // Stejně jako u sazby: poprvé se neptáme, platí na všechno.
+  const poprve = (puvodni == null || puvodni === '') && provize != null
+  const odKdy = poprve ? 'zpetne'
+    : await zeptejSeOdKdy('Provize SubBau na hodinu', puvodni, provize, pr && pr.full_name)
   if (!odKdy) { input.value = puvodni == null ? '' : puvodni; return }
   if (!await ulozSazbuSHistorii(workerId, 'provize', puvodni, provize, odKdy)) {
     input.value = puvodni == null ? '' : puvodni
@@ -7140,6 +7149,33 @@ async function saveProvizeCommission(input, workerId) {
     : '✅ Provize uložena — platí od ' + new Date(odKdy + 'T00:00:00').toLocaleDateString('cs-CZ'))
   prekresliProvize()
 }
+// Označí jako uhrazené (nebo odznačí) všechny lidi v jedné firmě naráz.
+// Při padesáti lidech je proklikávání po jednom nesmysl.
+async function oznacVsechnyUhrazeno(checkbox, firmIdx) {
+  const f = (window._provizeFirmy || {})[firmIdx]
+  const ids = (f && f.ids) || []
+  if (!ids.length) { showToast('⚠️ V téhle firmě nikdo není'); return }
+  const paid = checkbox.checked
+  checkbox.disabled = true
+  const ted = new Date().toISOString()
+  const { error } = await sb.from('provize_payments').upsert(
+    ids.map(id => ({
+      worker_id: id, period_type: 'week', period_key: f.weekKey,
+      paid, paid_at: paid ? ted : null, updated_at: ted
+    })), { onConflict: 'worker_id,period_type,period_key' })
+  checkbox.disabled = false
+  if (error) {
+    checkbox.checked = !paid
+    showToast(/provize_payments|relation|does not exist/i.test(error.message || '')
+      ? '❌ Nejdřív spusťte migraci supabase-migrace-provize-platby.sql'
+      : '❌ Chyba: ' + error.message)
+    return
+  }
+  showToast(paid ? '✅ Označeno jako uhrazené všem (' + ids.length + ')'
+                 : '✅ Zrušeno u všech (' + ids.length + ')')
+  prekresliProvize()
+}
+
 async function toggleProvizePaid(checkbox, workerId, mode, periodKey) {
   const tr = checkbox.closest('tr')
   const paid = checkbox.checked
@@ -7693,18 +7729,16 @@ async function renderProvizeContent() {
     souhrn.earnWeek += r.earnWeek; souhrn.earnDay += r.earnDay
   })
 
-  // Kdo se v seznamu ukáže:
-  //   a) kdo je ve skupině přiřazené k firmě — i když ještě neodpracoval ani
-  //      hodinu. Bez toho by nešlo nastavit sazbu nově přidanému člověku,
-  //      protože by v přehledu vůbec nebyl.
-  //   b) kdo v zobrazeném období pracoval — sem patří i lidé bez skupiny
-  //      a bývalí pracovníci, aby jim za odvedenou práci provize nepropadla.
-  // Ostatní se skryjí, ať přehled nezaplní řádky se samými nulami.
+  // V přehledu je ten, kdo v zobrazeném období OPRAVDU pracoval. Nikdo jiný.
+  // Dřív se ukazoval každý, kdo je ve skupině, i když ten týden neodpracoval
+  // ani hodinu — a zůstávali tam i lidé, kterým se mezitím zakázala docházka
+  // nebo přístup. Seznam se tím zbytečně plnil řádky se samými nulami.
+  // Zpětně se nikdo neztratí: kdo pracoval, ten se v tom svém týdnu ukáže dál.
   // Období se řídí přepínačem Den / Týden / Měsíc nad tabulkou.
   const odpracoval = r => provizeMode === 'day' ? r.hoursDay > 0
     : provizeMode === 'month' ? r.hoursMonth > 0
     : r.hoursWeek > 0
-  const patriDoPrehledu = r => (r.maFirmu && !r.byvaly) || odpracoval(r)
+  const patriDoPrehledu = r => odpracoval(r)
   const rowsZobrazit = rows.filter(patriDoPrehledu)
   const skrytoLidi = rows.length - rowsZobrazit.length
 
@@ -7760,8 +7794,8 @@ async function renderProvizeContent() {
         : `<div style="font-size:10px;margin-top:3px;font-weight:${r.overdue ? '700' : '400'};color:${r.overdue ? 'var(--red)' : 'var(--text3)'}">${r.overdue ? '⚠️ po splatnosti ' : 'splatnost '}${r.dueDate.toLocaleDateString('cs-CZ')}</div>`
       return `<tr style="${rowBg}">
         <td style="font-size:${isNoFirm ? '16px' : '14.5px'};font-weight:600">${r.name}${r.overdue ? ' <span style="font-size:11px;color:var(--red);font-weight:700">⚠️ nezaplaceno</span>' : ''}</td>
-        <td style="text-align:right"><input id="pv-rate-${r.id}" type="number" step="0.01" value="${r.rate || ''}" placeholder="0" onchange="saveProvizeRate(this,'${r.id}')" style="width:80px;padding:6px 8px;border:1.5px solid var(--brd);border-radius:7px;font-size:14px;text-align:right;font-family:inherit"> €/h</td>
-        <td style="text-align:right"><input id="pv-prov-${r.id}" type="number" step="0.01" value="${r.provUlozena || ''}" placeholder="0" onchange="saveProvizeCommission(this,'${r.id}')" title="${r.bezProvize ? 'Sazba zůstává uložená, ale nepočítá se — pracovník je označený „bez provize“' : ''}" style="width:80px;padding:6px 8px;border:1.5px solid var(--amber);border-radius:7px;font-size:14px;text-align:right;font-family:inherit;background:#faf6ee"> €/h</td>
+        <td style="text-align:right"><input id="pv-rate-${r.id}" type="number" step="0.01" value="${r.rate || ''}" placeholder="chybí" title="${r.rate ? '' : 'Chybí hodinová sazba — dokud ji nezadáte, počítá se pracovníkovi nula'}" onchange="saveProvizeRate(this,'${r.id}')" style="width:80px;padding:6px 8px;border:${r.rate ? '1.5px solid var(--brd)' : '2px solid var(--red)'};background:${r.rate ? '' : 'var(--red-l)'};border-radius:7px;font-size:14px;text-align:right;font-family:inherit"> €/h</td>
+        <td style="text-align:right"><input id="pv-prov-${r.id}" type="number" step="0.01" value="${r.provUlozena || ''}" placeholder="chybí" title="${r.provUlozena ? (r.bezProvize ? 'Sazba zůstává uložená, ale nepočítá se — pracovník je označený „bez provize“' : '') : 'Chybí provize — dokud ji nezadáte, počítá se nula'}" onchange="saveProvizeCommission(this,'${r.id}')" style="width:80px;padding:6px 8px;border:${r.provUlozena ? '1.5px solid var(--amber)' : '2px solid var(--red)'};background:${r.provUlozena ? '' : 'var(--red-l)'};border-radius:7px;font-size:14px;text-align:right;font-family:inherit;background:#faf6ee"> €/h</td>
         <td style="text-align:center;padding:0"><label title="Pracovník odešel dřív, než za něj přijdou peníze — nepočítat mu provizi" style="display:flex;align-items:center;justify-content:center;width:100%;height:100%;min-height:44px;padding:8px;cursor:pointer"><input type="checkbox" ${r.bezProvize ? 'checked' : ''} onchange="toggleBezProvize(this,'${r.id}')" style="width:20px;height:20px;cursor:pointer;accent-color:var(--red)"></label></td>
         <td style="text-align:right;background:#f2f8f4"><b id="pv-e-${r.id}" style="font-size:14px;color:var(--green)">${eur(r.earnWeek)}</b><div style="font-size:11px;color:var(--text3)">${r.hoursWeek.toFixed(2)} h</div></td>
         <td style="text-align:right"><b id="pv-d-${r.id}" style="font-size:14px">${eur(r.commDay)}</b><div style="font-size:11px;color:var(--text3)">${r.hoursDay.toFixed(2)} h</div></td>
@@ -7774,7 +7808,7 @@ async function renderProvizeContent() {
     // Do firemního součtu jde jen to, co je v tabulce vidět. Celkové souhrny
     // nahoře se berou ze `souhrn`, tedy ze všech lidí.
     window._provizeFirmTotals[firmIdx] = { day: fDay, week: fWeek, month: fMonth, year: fYear, earn: fEarn }
-    window._provizeFirmy[firmIdx] = { nazev: firm, weekKey }
+    window._provizeFirmy[firmIdx] = { nazev: firm, weekKey, ids: members.map(m => m.id) }
     return `
     <div class="card" style="border-left:6px solid ${firmaUhrazena ? 'var(--green)' : (firmaPoSplatnosti ? 'var(--red)' : gc.border)};margin-bottom:16px">
       <div class="card-h" style="flex-wrap:wrap;gap:10px;${firmaUhrazena ? 'background:var(--green-l)' : (firmaPoSplatnosti ? 'background:var(--red-l)' : '')}">
@@ -7804,7 +7838,11 @@ async function renderProvizeContent() {
           <th style="font-size:14px">Jméno</th><th style="text-align:right;font-size:14px">Sazba</th><th style="text-align:right;font-size:14px">Provize</th><th style="text-align:center;font-size:13px">Bez provize<div style="font-weight:400;font-size:10.5px;color:var(--text3)">nepočítat</div></th>
           <th style="text-align:right;font-size:13px;color:var(--green);background:#f2f8f4">Výdělek pracovníka<div style="font-weight:400;font-size:11px">za týden</div></th>
           <th style="text-align:right;font-size:13px">Odměna den</th><th style="text-align:right;font-size:13px">Odměna týden</th><th style="text-align:right;font-size:13px">Odměna měsíc</th>
-          <th style="text-align:center;font-size:14px">Uhrazeno</th><th style="font-size:14px">Splatnost</th>
+          <th style="text-align:center;font-size:14px">Uhrazeno
+            ${paymentsTableMissing ? '' : `<label title="Zaškrtnutím označíte jako uhrazené všechny lidi v téhle firmě najednou — ať se nemusí proklikávat po jednom" style="display:flex;align-items:center;justify-content:center;gap:5px;font-weight:400;font-size:10.5px;color:var(--text3);margin-top:3px;cursor:pointer">
+              <input type="checkbox" ${fPaidCount === members.length && members.length ? 'checked' : ''} onchange="oznacVsechnyUhrazeno(this,${firmIdx})" style="width:17px;height:17px;cursor:pointer;accent-color:var(--green)">všem
+            </label>`}
+          </th><th style="font-size:14px">Splatnost</th>
         </tr></thead>
         <tbody>${memberRows}</tbody>
         <tfoot><tr style="font-weight:800;background:var(--bg)">
@@ -21554,6 +21592,12 @@ function editAttRecord(id, date, ci, co, bs, be) {
   setEditTime('bs2', '')
   setEditTime('be2', '')
   nactiDalsiPauzy(null)
+  ;['edit-att-site', 'edit-att-desc'].forEach(idPole => {
+    const el = document.getElementById(idPole)
+    if (!el) return
+    el.dataset.dotknuto = ''
+    el.oninput = () => { el.dataset.dotknuto = '1' }
+  })
   // Načti stavbu + popis + 2. přestávku z DB.
   // Dokud dotaz nedoběhne, drž tlačítko Uložit zamčené — jinak by správce uložil
   // prázdná políčka a z hotového dne by zmizela stavba, popis i druhá pauza
@@ -21566,8 +21610,12 @@ function editAttRecord(id, date, ci, co, bs, be) {
         showToast('❌ Záznam se nepodařilo načíst — zavřete okno a zkuste to znovu')
         return   // tlačítko zůstane zamčené, ať se nepřepíše, co se nenačetlo
       }
-      document.getElementById('edit-att-site').value = attData.construction_site || ''
-      document.getElementById('edit-att-desc').value = attData.work_description || ''
+      // Dotaz doběhne až za chvíli. Co správce mezitím stihl napsat, se
+      // nepřepisuje — jinak mu psaní pod rukama zmizelo.
+      const siteEl = document.getElementById('edit-att-site')
+      const descEl = document.getElementById('edit-att-desc')
+      if (siteEl && siteEl.dataset.dotknuto !== '1') siteEl.value = attData.construction_site || ''
+      if (descEl && descEl.dataset.dotknuto !== '1') descEl.value = attData.work_description || ''
       nastavVyplatuDne(attData)
       setEditTime('bs2', attData.break2_start ? attData.break2_start.slice(0,5) : '')
       setEditTime('be2', attData.break2_end ? attData.break2_end.slice(0,5) : '')
@@ -21737,21 +21785,21 @@ async function fillGpsHint(ds, rec) {
   }
 
   const hasGps = !!addr
-  // Přepni layout: s GPS = jeden sloupec (GPS), bez GPS = jeden sloupec (ruční zápis)
-  if (grid) grid.style.gridTemplateColumns = '1fr'
+  // Pole „Stavba" je vidět VŽDYCKY. Dřív se při GPS schovávalo a adresa tím
+  // nešla přepsat — odkaz „upravit ručně" se snadno přehlédl a navíc se pole
+  // umělo schovat znovu, když tenhle dotaz doběhl až po začátku psaní.
+  if (siteWrap) siteWrap.style.display = 'block'
+  if (grid) grid.style.gridTemplateColumns = hasGps ? '1fr 1fr' : '1fr'
 
   if (hasGps) {
-    // Pracovník povolil GPS → ukaž GPS, schovej ruční pole (lze přepnout odkazem)
     if (gpsWrap) gpsWrap.style.display = 'block'
-    if (siteWrap) siteWrap.style.display = 'none'
     box.innerHTML = `<span style="cursor:pointer" title="Klepnutím zkopírovat do pole Stavba" onclick="document.getElementById('edit-att-site').value=this.dataset.addr" data-addr="${addr.replace(/"/g,'&quot;')}">📍 ${addr}</span>
       <a href="#" onclick="event.preventDefault();showManualSiteField()" style="margin-left:auto;font-size:11px;color:var(--blue);text-decoration:underline;white-space:nowrap">Zadat ručně</a>`
     box.style.justifyContent = 'space-between'
     box.style.gap = '8px'
   } else {
-    // GPS není (pracovník ji nepovolil) → ukaž jen ruční zápis stavby
+    // GPS není (pracovník ji nepovolil) → zůstane jen ruční zápis stavby
     if (gpsWrap) gpsWrap.style.display = 'none'
-    if (siteWrap) siteWrap.style.display = 'block'
   }
 }
 
@@ -29874,7 +29922,10 @@ document.addEventListener('visibilitychange', () => {
       </div>
     </div>
 
-    <div style="display:flex;gap:10px;margin-top:8px">
+    <!-- Lišta s tlačítky je přilepená ke spodku okna. Dřív byla na konci
+         dlouhého obsahu: na nižších displejích z „Uložit změny" koukal jen
+         proužek a vypadalo to, že tlačítko funguje jen v jednom bodě. -->
+    <div style="display:flex;gap:10px;margin-top:8px;position:sticky;bottom:-28px;background:#fff;padding:12px 0 28px;z-index:3;box-shadow:0 -10px 14px -10px rgba(0,0,0,.2)">
       <button onclick="deleteAttRecord()" style="padding:14px 18px;background:var(--red-l);color:var(--red);border:none;border-radius:10px;cursor:pointer;font-family:inherit;font-size:14px;font-weight:600">Smazat</button>
       <button onclick="saveEditAttRecord()" class="btn-pri" style="flex:1;padding:14px;font-size:15px;font-weight:700">Uložit změny</button>
     </div>
