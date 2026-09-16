@@ -5190,7 +5190,7 @@ async function submitAdminSignatureWithPlacement() {
 // Po nahrání nové verze se snadno pozná, jestli se opravdu nasadila: otevřete
 // appku, zmáčkněte F12 (na Macu ⌥⌘I) a v konzoli je vypsané tohle datum. Když
 // tam svítí starší, prohlížeč nebo GitHub drží starou verzi.
-const SUBBAU_VERZE = '2026-09-16 e — poznámky ve výkazu dvojjazyčně, jde je před odesláním vypnout'
+const SUBBAU_VERZE = '2026-09-16 f — záloha jde zadat i jako uhrazená na účet'
 console.log('StavKo docházka — verze ' + SUBBAU_VERZE)
 
 // ============ SUPABASE CONFIG ============
@@ -13583,6 +13583,8 @@ function invoiceDataFromRow(r, extra) {
     },
     cashPaid: Number(r.cash_paid) || 0,
     cashPaidNote: r.cash_paid_note || '',
+    // Prázdno = hotovost, tak se chovaly všechny faktury před touhle změnou.
+    cashPaidTyp: r.cash_paid_typ === 'ucet' ? 'ucet' : 'hotovost',
     // Aby přepsané PDF u zálohy ze zálohové faktury nenapsalo „v hotovosti".
     zalohaZeZalohoveFaktury: (Array.isArray(r.zalohy_pouzite) && r.zalohy_pouzite.length > 0)
       || /Anzahlungsrechnung/i.test(String(r.cash_paid_note || '')),
@@ -13609,6 +13611,10 @@ function openInvoiceEdit(id) {
   amt.value = cash > 0 ? String(cash) : ''
   amt.max = String(total)
   document.getElementById('invedit-note').value = r.cash_paid_note || ''
+  const typUlozeny = r.cash_paid_typ === 'ucet' ? 'ucet' : 'hotovost'
+  document.querySelectorAll('input[name="invedit-cash-typ"]').forEach(el => {
+    el.checked = (el.value === typUlozeny)
+  })
   document.getElementById('invedit-iban').value = r.iban || ''
   document.getElementById('invedit-swift').value = r.swift || ''
   document.getElementById('invedit-iban-do-profilu').checked = false
@@ -13767,8 +13773,11 @@ async function saveInvoiceEdit() {
     || Number(r.design_idx) || extra.designIdx || 1))
 
   // 1) Vykresli fakturu znovu — už se zálohou
+  const cashTyp = (document.querySelector('input[name="invedit-cash-typ"]:checked') || {}).value === 'ucet'
+    ? 'ucet' : 'hotovost'
   const dataForRender = invoiceDataFromRow({ ...r, items: polozky, total_amount: total,
-    cash_paid: cash, cash_paid_note: note, iban: ibanNovy, swift: swiftNovy,
+    cash_paid: cash, cash_paid_note: note, cash_paid_typ: cashTyp,
+    iban: ibanNovy, swift: swiftNovy,
     design_idx: vzhledZvoleny, invoice_number: cisloNove }, extra)
   try {
     renderInvoice(dataForRender, 'en')
@@ -13793,7 +13802,8 @@ async function saveInvoiceEdit() {
 
   // 3) Zápis do databáze
   const upd = {
-    cash_paid: cash, cash_paid_note: note || null, edited_at: new Date().toISOString(),
+    cash_paid: cash, cash_paid_note: note || null, cash_paid_typ: cashTyp,
+    edited_at: new Date().toISOString(),
     items: polozky, total_amount: total,
     iban: ibanNovy, swift: swiftNovy || null,
     design_idx: vzhledZvoleny,
@@ -13838,6 +13848,15 @@ async function saveInvoiceEdit() {
   if (error && /zalohy_pouzite/i.test(error.message || '')) {
     // Nespuštěná migrace — fakturu kvůli tomu neblokuj.
     delete upd.zalohy_pouzite
+    ;({ error } = await sb.from('worker_invoices').update(upd).eq('id', r.id))
+  }
+  // Sloupec cash_paid_typ nemusí být v databázi (nespuštěná migrace). PDF je
+  // přepsané správně, jen si appka nezapamatuje, že šlo o zálohu na účet —
+  // a při příštím otevření okna nabídne hotovost. Fakturu kvůli tomu neblokuj.
+  let bezTypuZalohy = false
+  if (error && /cash_paid_typ/i.test(error.message || '')) {
+    bezTypuZalohy = true
+    delete upd.cash_paid_typ
     ;({ error } = await sb.from('worker_invoices').update(upd).eq('id', r.id))
   }
   if (error && /design_idx/i.test(error.message || '')) {
@@ -13915,6 +13934,10 @@ async function saveInvoiceEdit() {
     finish('⚠️ Záloha zapsána, ale původní verzi neuchovám — spusťte v Supabase soubor supabase-migrace-faktura-original.sql')
     return
   }
+  if (bezTypuZalohy) {
+    finish('⚠️ Na PDF věta o záloze na účet je, ale u faktury se způsob úhrady neuloží — spusťte v Supabase soubor supabase-migrace-zaloha-na-ucet.sql')
+    return
+  }
   if (bezVzhledu) {
     finish('⚠️ PDF přepsáno ve zvoleném vzhledu, ale u faktury se vzhled neuloží — spusťte v Supabase soubor supabase-migrace-vzhled-na-fakture.sql')
     return
@@ -13925,7 +13948,8 @@ async function saveInvoiceEdit() {
   }
   const dovetek = r.original_pdf_url ? ' — původní verze zůstala uložená' : ''
   finish(cash > 0
-    ? '✅ Záloha ' + cash.toFixed(2) + ' € zapsána, PDF přepsáno' + dovetek
+    ? '✅ ' + (cashTyp === 'ucet' ? 'Záloha na účet ' : 'Záloha v hotovosti ')
+      + cash.toFixed(2) + ' € zapsána, PDF přepsáno' + dovetek
     : '✅ Záloha zrušena, PDF přepsáno' + dovetek)
 }
 
@@ -24685,7 +24709,9 @@ function renderInvoice(d, lang = 'en') {
     // zaplacená předem převodem — na daňovém dokladu to musí sedět.
     cashPaid: d.zalohaZeZalohoveFaktury
       ? 'Zálohou předem · Vorschuss · Advance payment'
-      : 'Uhrazeno v hotovosti · Bar erhalten · Paid in cash',
+      : (d.cashPaidTyp === 'ucet'
+          ? 'Po odečtení již uhrazené zálohy · Abzüglich bereits geleisteter Anzahlung · Less advance payment received'
+          : 'Uhrazeno v hotovosti · Bar erhalten · Paid in cash'),
     alreadyPaid: 'Zálohou předem · Vorschuss · Advance payment',
     exchangeRate: 'Kurz · Kurs · Rate',
     dueDays: `Splatnost · Fällig · Due: ${d.dueDays||14} dní/Tage/days`,
@@ -30858,10 +30884,20 @@ document.addEventListener('visibilitychange', () => {
     <div id="invedit-items-total" style="text-align:right;font-size:14px;font-weight:800;margin-top:8px">Celkem: 0.00 €</div>
     <div style="font-size:11.5px;color:#9a9a9a;margin-top:5px;line-height:1.5">Změna položek přepíše i celkovou částku faktury. Číslo faktury se neupravuje — když je potřeba jiné, vystavte novou.</div>
 
-    <label style="display:block;font-size:12px;color:#7a7168;font-weight:700;margin:16px 0 5px">Uhrazená část v hotovosti (€)</label>
+    <label style="display:block;font-size:12px;color:#7a7168;font-weight:700;margin:16px 0 5px">Už uhrazená část (€)</label>
     <input type="text" inputmode="decimal" id="invedit-cash" placeholder="např. 250" oninput="invEditRecalc()"
            style="width:100%;padding:12px;border:1.5px solid #d8cfc0;border-radius:10px;font-size:16px;font-family:inherit;box-sizing:border-box">
-    <div style="font-size:11.5px;color:#9a9a9a;margin-top:5px;line-height:1.5">Kolik jste pracovníkovi vyplatil předem v hotovosti. Na faktuře se to odečte od částky k úhradě. Prázdné pole nebo 0 = žádná záloha.</div>
+    <div style="display:flex;gap:8px;margin-top:8px">
+      <label style="flex:1;display:flex;align-items:center;gap:7px;padding:10px;border:1.5px solid #d8cfc0;border-radius:10px;font-size:13px;cursor:pointer">
+        <input type="radio" name="invedit-cash-typ" value="hotovost" checked onchange="invEditRecalc()" style="accent-color:#E8A13A;width:16px;height:16px;margin:0">
+        <span>v hotovosti</span>
+      </label>
+      <label style="flex:1;display:flex;align-items:center;gap:7px;padding:10px;border:1.5px solid #d8cfc0;border-radius:10px;font-size:13px;cursor:pointer">
+        <input type="radio" name="invedit-cash-typ" value="ucet" onchange="invEditRecalc()" style="accent-color:#E8A13A;width:16px;height:16px;margin:0">
+        <span>zálohou na účet</span>
+      </label>
+    </div>
+    <div style="font-size:11.5px;color:#9a9a9a;margin-top:5px;line-height:1.5">Kolik už pracovník dostal předem. Na faktuře se to odečte od částky k úhradě a podle zvolené možnosti se u toho objeví buď <b>Bar erhalten</b> (hotovost), nebo <b>Abzüglich bereits geleisteter Anzahlung</b> (záloha na účet). Prázdné pole nebo 0 = žádná záloha.</div>
     <div id="invedit-warn" style="display:none;font-size:12px;color:#9c3b22;font-weight:600;margin-top:6px"></div>
 
     <!-- Účet pro platbu. Když ho pracovník napsal špatně, Němci mu peníze
