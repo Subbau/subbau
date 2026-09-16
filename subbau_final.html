@@ -924,16 +924,14 @@ setTimeout(function () {
           <!-- Čekající registrace -->
           <div id="dash-pending-registrations" style="display:none;margin-bottom:16px"></div>
           <div id="dash-unclosed-shifts" style="display:none;margin-bottom:16px"></div>
-          <div class="stats" id="admin-stats">
-            <div class="sc b"><div class="sc-lbl">Aktivní pracovníci</div><div class="sc-val" style="color:var(--blue)" id="stat-workers">—</div><div class="sc-sub">z databáze</div></div>
-            <div class="sc g"><div class="sc-lbl">Hodiny tento týden</div><div class="sc-val" style="color:var(--green)" id="stat-hours">—</div><div class="sc-sub">z evidence</div></div>
-            <div class="sc p"><div class="sc-lbl">Hodiny dnes</div><div class="sc-val" style="color:var(--blue-m)" id="stat-hours-today">—</div><div class="sc-sub">za dnešní den</div></div>
-            <div class="sc a"><div class="sc-lbl">Týmy aktivní</div><div class="sc-val" style="color:var(--amber)" id="stat-teams">—</div><div class="sc-sub">z databáze</div></div>
-            <div class="sc r"><div class="sc-lbl">Chybí dokumenty</div><div class="sc-val" style="color:var(--red)" id="stat-docs">—</div><div class="sc-sub">vyžaduje akci</div></div>
-          </div>
+          <!-- Dlaždice s hodinami, aktivními pracovníky a týmy se přesunuly do
+               Provizí (druhý řádek pod částkami). „Aktivní pracovníci" zmizeli
+               úplně — počítali každého, kdo je v databázi, ne kdo doopravdy
+               pracuje. „Chybí dokumenty" je nově číslovkou přímo v nadpisu
+               karty pod tím, ať tu nezůstane osamocená dlaždice. -->
           <!-- UPOZORNĚNÍ NA DOKUMENTY -->
           <div class="card" id="doc-alerts-card" style="display:none;border-left:4px solid var(--red)">
-            <div class="card-h" style="display:flex;align-items:center;justify-content:space-between"><h4 style="color:var(--red)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:18px;height:18px;flex-shrink:0;vertical-align:-3px;margin-right:7px"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><path d="M12 9v4M12 17h.01"/></svg>Dokumenty vyžadující akci</h4><button onclick="resetDocAlerts()" title="Zobrazit i skryté položky" style="font-size:11px;padding:4px 10px;border:1px solid var(--brd);border-radius:7px;background:#fff;color:var(--text3);cursor:pointer;font-family:inherit;font-weight:600">Obnovit skryté</button></div>
+            <div class="card-h" style="display:flex;align-items:center;justify-content:space-between"><h4 style="color:var(--red)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:18px;height:18px;flex-shrink:0;vertical-align:-3px;margin-right:7px"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><path d="M12 9v4M12 17h.01"/></svg>Dokumenty vyžadující akci<span id="doc-alerts-count" style="font-weight:400"></span></h4><button onclick="resetDocAlerts()" title="Zobrazit i skryté položky" style="font-size:11px;padding:4px 10px;border:1px solid var(--brd);border-radius:7px;background:#fff;color:var(--text3);cursor:pointer;font-family:inherit;font-weight:600">Obnovit skryté</button></div>
             <div id="doc-alerts-list" style="padding:0 16px 8px"></div>
           </div>
 
@@ -4507,7 +4505,7 @@ async function submitAdminSignatureWithPlacement() {
 // Po nahrání nové verze se snadno pozná, jestli se opravdu nasadila: otevřete
 // appku, zmáčkněte F12 (na Macu ⌥⌘I) a v konzoli je vypsané tohle datum. Když
 // tam svítí starší, prohlížeč nebo GitHub drží starou verzi.
-const SUBBAU_VERZE = '2026-09-17 a — poloha i při odchodu, vidí ji jen kancelář'
+const SUBBAU_VERZE = '2026-09-17 b — hodiny se přesunuly z nástěnky do Provizí'
 console.log('SubBau docházka — verze ' + SUBBAU_VERZE)
 
 // ============ SUPABASE CONFIG ============
@@ -7458,7 +7456,7 @@ async function renderProvizeContent() {
   const [{ data: workers }, provResult, { data: teams }, { data: companies }] = await Promise.all([
     sb.from('profiles').select('id, full_name, hourly_rate_worker, team_id').in('role', ['osvec', 'partak']).eq('is_active', true).order('full_name'),
     sb.from('worker_commissions').select('worker_id, provize, payment_terms, bez_provize'),
-    sb.from('teams').select('id, name, company_id'),
+    sb.from('teams').select('id, name, company_id, is_active'),
     sb.from('companies').select('id, name')
   ])
 
@@ -7651,9 +7649,16 @@ async function renderProvizeContent() {
 
   // Kolik za dnešek přibylo zatím — u načatých směn se počítá čas do teď.
   let dnesProvize = 0
+  let dnesHodin = 0
+  const dnesPoFirmach = new Map()
   workersAll.forEach(w => {
     const b = byWorker[w.id]
-    if (b && b.dnes > 0) dnesProvize += b.pDnes
+    if (b && b.dnes > 0) {
+      dnesProvize += b.pDnes
+      dnesHodin += b.dnes
+      const f = firmOf(w)
+      dnesPoFirmach.set(f, (dnesPoFirmach.get(f) || 0) + b.dnes)
+    }
   })
 
   // Uhrazeno je vždy vázané na týden (kolem vybraného data), bez ohledu na zvolený režim navigace — best-effort, tabulka nemusí ještě existovat
@@ -7722,11 +7727,14 @@ async function renderProvizeContent() {
   // Souhrny v dlaždicích nahoře se počítají ze VŠECH lidí, i z těch, kdo se
   // v seznamu neukážou. Jinak by roční provize spadla pokaždé, když se zrovna
   // díváte na klidný týden.
-  const souhrn = { day: 0, week: 0, month: 0, year: 0, earnWeek: 0, earnDay: 0 }
+  const souhrn = { day: 0, week: 0, month: 0, year: 0, earnWeek: 0, earnDay: 0,
+                   hDay: 0, hWeek: 0, hMonth: 0 }
   rows.forEach(r => {
     souhrn.day += r.commDay; souhrn.week += r.commWeek
     souhrn.month += r.commMonth; souhrn.year += r.commYear
     souhrn.earnWeek += r.earnWeek; souhrn.earnDay += r.earnDay
+    // Hodiny se dosud nikde nesčítaly — sčítaly se jen peníze.
+    souhrn.hDay += r.hoursDay; souhrn.hWeek += r.hoursWeek; souhrn.hMonth += r.hoursMonth
   })
 
   // V přehledu je ten, kdo v zobrazeném období OPRAVDU pracoval. Nikdo jiný.
@@ -7889,6 +7897,15 @@ async function renderProvizeContent() {
           <div class="sc g"><div class="sc-lbl" style="font-size:12px">Výdělek pracovníků (den)<div style="font-weight:400;font-size:10.5px;color:var(--text3)">${dayLabel}</div></div><div class="sc-val" id="pv-ged" style="color:var(--green);font-size:24px">${eur(earnDayGrandTotal)}</div></div>
           <div class="sc g"><div class="sc-lbl" style="font-size:12px">Výdělek pracovníků (týden)</div><div class="sc-val" id="pv-ge" style="color:var(--green);font-size:24px">${eur(earnGrandTotal)}</div></div>
           <div class="sc g"><div class="sc-lbl" style="font-size:12px">Pracovníků<div style="font-weight:400;font-size:10.5px;color:var(--text3)">${skrytoLidi ? skrytoLidi + ' bez skupiny a bez hodin skryto' : 'nikdo neskrytý'}</div></div><div class="sc-val" style="color:var(--green);font-size:24px">${rowsZobrazit.length}</div></div>
+        </div>
+        <div class="stats" style="grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;margin:12px 0 0">
+          <div class="sc p"><div class="sc-lbl" style="font-size:12px">Hodiny dnes<div style="font-weight:400;font-size:11px;color:var(--text3)">${dnesTedLidi} ${dnesTedLidi === 1 ? 'člověk' : (dnesTedLidi < 5 ? 'lidé' : 'lidí')} v práci</div></div><div class="sc-val">${dnesHodin.toFixed(1)}h</div><div class="sc-sub" style="line-height:1.5">${
+            [...dnesPoFirmach.entries()].sort((a, b) => b[1] - a[1])
+              .map(([f, h]) => escAttr(f) + ' ' + h.toFixed(1) + 'h').join('<br>') || 'zatím nikdo'
+          }</div></div>
+          <div class="sc g"><div class="sc-lbl" style="font-size:12px">Hodiny tento týden</div><div class="sc-val">${souhrn.hWeek.toFixed(1)}h</div><div class="sc-sub">za zobrazený týden</div></div>
+          <div class="sc g"><div class="sc-lbl" style="font-size:12px">Hodiny tento měsíc</div><div class="sc-val">${souhrn.hMonth.toFixed(1)}h</div><div class="sc-sub">za zobrazený měsíc</div></div>
+          <div class="sc a"><div class="sc-lbl" style="font-size:12px">Týmy aktivní</div><div class="sc-val">${Object.values(teamById).filter(t => t && t.is_active !== false).length}</div><div class="sc-sub">z databáze</div></div>
         </div>
         ${(paymentsTableMissing || paymentTermsColumnMissing) ? `<div style="margin-top:10px;font-size:13px;color:var(--amber);line-height:1.6">${[
           paymentsTableMissing ? '⚠️ Sledování plateb (uhrazeno) zatím není zapnuté — spusťte migraci <code>supabase-migrace-provize-platby.sql</code>' : '',
@@ -8415,8 +8432,6 @@ async function loadDashboard() {
   const teams = rTeams.data
   const att = rAtt.data
 
-  document.getElementById('stat-workers').textContent = workers?.length || 0
-  document.getElementById('stat-teams').textContent = teams?.length || 0
 
   await pDismissals   // co odložili ostatní admini — bez toho by blok blikl a přerovnal se
   updatePendingRegBadge(unseenPendingCount(pendingWorkersRaw))
@@ -8424,25 +8439,10 @@ async function loadDashboard() {
 
   // 💬 zprávy, ☀️ dovolené a ⚠️ dlouhé směny už běží — počkáme, až dokreslí
   await Promise.all([pChat, pVac, pLong])
-  const nowStrDash = new Date().toTimeString().slice(0,8)
-  const dnesStrDash = localDateStr()
-  const totalH = att?.reduce((s,a) => {
-    if (a.total_hours) return s + a.total_hours
-    // Běžící hodiny jen u dneška — starý zapomenutý odchod se nepočítá
-    if (a.check_in && !a.check_out && a.work_date === dnesStrDash) return s + calcHours(a.check_in, nowStrDash, a.break_start, a.break_end)
-    return s
-  }, 0) || 0
-  document.getElementById('stat-hours').textContent = totalH.toFixed(1)+'h'
-
+  // Hodiny za týden i za dnešek se teď ukazují v Provizích, ne tady.
+  // Dnešní datum ale pořád potřebuje tabulka „Poslední záznamy docházky" —
+  // podle něj pozná běžící směnu a dopočítá hodiny do teď.
   const todayStrDash = localDateStr()
-  const todayH = att?.reduce((s,a) => {
-    if (a.work_date !== todayStrDash) return s
-    if (a.total_hours) return s + a.total_hours
-    if (a.check_in && !a.check_out) return s + calcHours(a.check_in, nowStrDash, a.break_start, a.break_end)
-    return s
-  }, 0) || 0
-  const statHoursTodayEl = document.getElementById('stat-hours-today')
-  if (statHoursTodayEl) statHoursTodayEl.textContent = todayH.toFixed(1)+'h'
 
   // Pracovníci kteří nemají všechny dokumenty schválené
   await loadDocumentAlertsStat()
@@ -22370,8 +22370,10 @@ async function loadDocumentAlertsStat() {
     .order('full_name')
 
   if (!workers?.length) {
-    const el = document.getElementById('stat-docs')
-    if (el) el.textContent = '0'
+    // Dlaždice s počtem už na nástěnce není — číslovka je v nadpisu karty
+    // a ta se při nule stejně celá schová.
+    const card0 = document.getElementById('doc-alerts-card')
+    if (card0) card0.style.display = 'none'
     return
   }
 
@@ -22451,12 +22453,7 @@ async function loadDocumentAlertsStat() {
     }
   })
 
-  // Aktualizuj stat counter
-  const statEl = document.getElementById('stat-docs')
-  if (statEl) {
-    statEl.textContent = alerts.length
-    statEl.style.color = alerts.length > 0 ? 'var(--red)' : 'var(--green)'
-  }
+  // Počet se píše do nadpisu karty (níž), dlaždice na nástěnce už není.
 
   // Zobraz kartu s upozorněními
   const card = document.getElementById('doc-alerts-card')
@@ -22469,6 +22466,17 @@ async function loadDocumentAlertsStat() {
   }
 
   card.style.display = 'block'
+  // Číslovka do nadpisu — dřív na to byla zvláštní dlaždice nahoře. Počítáme
+  // POLOŽKY k akci (ne lidi), protože jeden člověk jich může mít víc.
+  const polozek = alerts.reduce((s2, a) => s2 + a.issues.length, 0)
+  const chybi = alerts.reduce((s2, a) => s2 + a.issues.filter(i => String(i.key || '').includes('|missing|')).length, 0)
+  const pocetEl = document.getElementById('doc-alerts-count')
+  if (pocetEl) {
+    const slovo = (n, a, b, c) => n === 1 ? a : (n < 5 ? b : c)
+    pocetEl.textContent = ' — ' + polozek + ' ' + slovo(polozek, 'položka', 'položky', 'položek')
+      + ' u ' + alerts.length + ' ' + (alerts.length === 1 ? 'člověka' : 'lidí')
+      + (chybi ? ', z toho chybí ' + chybi + ' ' + slovo(chybi, 'doklad', 'doklady', 'dokladů') : '')
+  }
   list.innerHTML = alerts.map(({ worker, issues }) => `
     <div style="padding:10px 0;border-bottom:1px solid var(--brd)">
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:5px">
