@@ -1,6 +1,7 @@
-// Den označený „nedostane zaplaceno" má ve výkazu ZŮSTAT vidět (pracovník tam
-// ten den byl), ale jeho hodiny se nesmí počítat do součtu. A musí být napsané,
-// že se nepočítají — jinak si toho vedoucí při podpisu nevšimne.
+// Den označený „nedostane zaplaceno" má být ve výkazu vidět, ALE jeho hodiny
+// musí v součtu zůstat — podle nich se fakturuje odběrateli. Kdyby se
+// odečítaly, nesedělo by to, co podepsal Bauleiter, s naší fakturou.
+// Označení je naše vnitřní věc, proto jde před odesláním ven vypnout.
 import puppeteer from 'puppeteer'
 import fs from 'fs'
 import path from 'path'
@@ -18,9 +19,12 @@ const ok = (p, t) => { console.log((p ? '  ✅ ' : '  ❌ ') + t); if (!p) chyby
 stejnaVerze()
 
 console.log('\n1) Kód')
-ok(/function denSePocita\(r\) \{\s*\n\s*return !\(r && r\.bez_vyplaty\)/.test(zdroj),
-   'o započítání dne rozhoduje jedno místo')
-ok((zdroj.match(/denSePocita\(/g) || []).length >= 6, 'a ptají se ho všechny výkazy')
+ok(/function denJePlaceny\(r\) \{\s*\n\s*return !\(r && r\.bez_vyplaty\)/.test(zdroj),
+   'o placenosti dne rozhoduje jedno místo')
+ok(!/denSePocita|hodinyDoVykazu/.test(zdroj),
+   'hodiny se ze součtu ve výkazu neodečítají — podle nich se fakturuje odběrateli')
+ok(/tag: 'NEPLAC'/.test(zdroj), 'označení neplacených dnů jde před tiskem vypnout')
+ok(/není pro odběratele/.test(zdroj), 'a je u něj napsané, že je to jen pro nás')
 ok(!/NEPOCITA_SE_NIKDE/.test(zdroj), 'kontrolní měření: test umí i nenajít')
 
 console.log('\n2) Výkaz za tým')
@@ -46,10 +50,8 @@ try {
     if (!tyden) return { chyba: 'u týmu není žádný týden' }
     const [kw, rok] = tyden.split('/').map(Number)
 
-    const soucet = (h) => {
-      const m = [...h.matchAll(/font-size:14px;text-align:center">([\d.]+)<\/td>/g)].map(x => Number(x[1]))
-      return m.reduce((a, c) => a + c, 0)
-    }
+    const soucet = (h) => [...h.matchAll(/font-size:14px;text-align:center">([\d.]+)<\/td>/g)]
+      .map(x => Number(x[1])).reduce((a, c) => a + c, 0)
     const vykaz = async () => {
       html = ''
       try { await generateTeamAttendancePdf(tymId, 'Test') } catch (e) {}
@@ -58,8 +60,6 @@ try {
     }
 
     const pred = await vykaz()
-    // označ jeden odpracovaný den jako neplacený
-    // Musí to být den NĚKOHO Z TOHO TÝMU, jinak se ve výkazu vůbec neobjeví.
     const { data: clenove } = await sb.from('profiles').select('id').eq('team_id', tymId)
     const idsTymu = new Set((clenove || []).map(x => x.id))
     const { data: dny } = await sb.from('attendance').select('*')
@@ -69,28 +69,35 @@ try {
     await sb.from('attendance').update({ bez_vyplaty: true }).eq('id', den.id)
     const po = await vykaz()
     await sb.from('attendance').update({ bez_vyplaty: false }).eq('id', den.id)
-    const zpet = await vykaz()
     window.showPrintPreview = puvodni
 
+    // co zbude, když se značka v náhledu vypne
+    const bezZnacky = po.replace(/<!--NEPLAC-START-->[\s\S]*?<!--NEPLAC-END-->/g, '')
+
     return { hodinyDne: Number(den.total_hours),
-             soucetPred: soucet(pred), soucetPo: soucet(po), soucetZpet: soucet(zpet),
-             maNeplaceno: /NEPLACENO/.test(po), melNeplacenoPred: /NEPLACENO/.test(pred),
-             maVetu: /do součtu se nepočítají/.test(po),
-             denJeVidet: po.length > 500 }
+             soucetPred: soucet(pred), soucetPo: soucet(po),
+             melZnackuPred: /NEPLACENO/.test(pred),
+             maZnacku: /NEPLACENO/.test(po),
+             maPoznamku: /nedostane zaplaceno/.test(po),
+             poVypnutiZnacka: /NEPLACENO/.test(bezZnacky),
+             poVypnutiPoznamka: /nedostane zaplaceno/.test(bezZnacky),
+             soucetPoVypnuti: soucet(bezZnacky) }
   })
 
   if (v.chyba) { ok(false, v.chyba) } else {
     ok(v.soucetPred > 0, `kontrolní měření: výkaz se vygeneroval a má součet (${v.soucetPred} h)`)
-    ok(v.melNeplacenoPred === false, 'kontrolní měření: před označením tam žádné NEPLACENO není')
-    ok(v.maNeplaceno === true, 'označený den je ve výkazu vidět a je u něj NEPLACENO')
-    ok(v.maVetu === true, 'a je napsané, že se tyhle dny do součtu nepočítají')
-    const rozdil = Math.round((v.soucetPred - v.soucetPo) * 100) / 100
-    ok(rozdil === Math.round(v.hodinyDne * 100) / 100,
-       `součet klesl přesně o hodiny toho dne (${v.soucetPred} → ${v.soucetPo}, den měl ${v.hodinyDne} h)`)
-    ok(v.soucetZpet === v.soucetPred, `po odškrtnutí se součet vrátí (${v.soucetZpet})`)
+    ok(v.melZnackuPred === false, 'kontrolní měření: před označením tam žádné NEPLACENO není')
+    ok(v.maZnacku === true, 'označený den je ve výkazu vidět jako NEPLACENO')
+    ok(v.maPoznamku === true, 'a je u něj poznámka, že za ty hodiny pracovník nedostane')
+    ok(v.soucetPo === v.soucetPred,
+       `SOUČET SE NEZMĚNIL — fakturuje se podle odpracovaných hodin (${v.soucetPred} → ${v.soucetPo})`)
+    ok(v.poVypnutiZnacka === false, 'zaškrtávátkem v náhledu značka zmizí (kopie pro odběratele)')
+    ok(v.poVypnutiPoznamka === false, 'a zmizí i ta poznámka pro nás')
+    ok(v.soucetPoVypnuti === v.soucetPred,
+       `a součet je i bez značky pořád stejný (${v.soucetPoVypnuti})`)
   }
   ok(padky.length === 0, 'stránka nevyhodila chybu' + (padky.length ? ': ' + padky[0] : ''))
 } finally { await b.close() }
 
-console.log(chyby ? `\n❌ ${chyby} problémů` : '\n✅ Neplacené dny se ve výkazu nepočítají, ale jsou vidět')
+console.log(chyby ? `\n❌ ${chyby} problémů` : '\n✅ Neplacené dny jsou ve výkazu označené, ale hodiny v součtu zůstávají')
 process.exit(chyby ? 1 : 0)
