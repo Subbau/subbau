@@ -87,7 +87,7 @@ const list = await prohlizec.newPage()
 await list.setViewport({ width: A4_S, height: A4_V })
 
 let chyb = 0
-for (const n of [2,3,4,5,6,7,8,9,10]) {
+for (const n of [2,3,4,5,6,7,8,9,10, 11,12,13,14,15,16,17,18,19,20]) {
   const potize = []
   for (const [jmeno, syrove] of Object.entries(VARIANTY)) {
     const V = sHustotou(syrove)
@@ -102,19 +102,25 @@ for (const n of [2,3,4,5,6,7,8,9,10]) {
       const p = document.getElementById('invoice-page')
       const r = p.getBoundingClientRect()
       let dno = 0, prava = 0, pretekle = 0
+      const kdo = []
       p.querySelectorAll('*').forEach(el => {
         const b = el.getBoundingClientRect()
         if (b.bottom > dno) dno = b.bottom
         if (b.right > prava) prava = b.right
-        if (el.children.length === 0 && el.scrollWidth > el.clientWidth + 1) pretekle++
+        if (el.children.length === 0 && el.scrollWidth > el.clientWidth + 1) {
+          pretekle++
+          // Ať je rovnou vidět CO přetéká — bez toho se to hledá naslepo.
+          if (kdo.length < 3) kdo.push((el.textContent || '').trim().slice(0, 40)
+            + ' [' + el.scrollWidth + '>' + el.clientWidth + ']')
+        }
       })
       return { vyska: Math.round(Math.max(r.height, dno)), sirka: Math.round(r.width),
-               prava: Math.round(prava), pretekle }
+               prava: Math.round(prava), pretekle, kdo }
     })
     if (m.sirka !== A4_S) potize.push(`${jmeno}: šířka ${m.sirka} místo ${A4_S}`)
     if (m.vyska > A4_V) potize.push(`${jmeno}: vysoké ${m.vyska} px — do PDF se zmenší na ${Math.round(A4_V/m.vyska*100)} %`)
     if (m.prava > A4_S + 1) potize.push(`${jmeno}: přetéká vpravo o ${m.prava - A4_S} px`)
-    if (m.pretekle) potize.push(`${jmeno}: ${m.pretekle}× text nevejde do svého rámečku`)
+    if (m.pretekle) potize.push(`${jmeno}: ${m.pretekle}× text nevejde do svého rámečku — ${(m.kdo || []).join(' / ')}`)
   }
   if (potize.length) { chyb++; console.log(`  ❌ vzhled ${n}: ${potize.slice(0,2).join(' | ')}`) }
   else console.log(`  ✅ vzhled ${n}`)

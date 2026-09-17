@@ -109,9 +109,12 @@ ok(prvek('invoice-actions').style.display === 'none', 'lišta s odesláním je v
 ok(prvek('invoice-design-bar').style.display === 'block', 'místo ní je přepínač vzhledů')
 ok(prvek('invoice-title').textContent.includes('Ukázka'), 'nadpis říká, že jde o ukázku')
 M.vzhledOJedenVpred(); ok(vykresleno.at(-1).designIdx === 4, 'šipka vpřed přepne na 4')
-M.ukazVzhled(10); M.vzhledOJedenVpred(); ok(vykresleno.at(-1).designIdx === 1, 'z desítky se přetočí na jedničku')
-M.ukazVzhled(1); M.vzhledOJedenZpet(); ok(vykresleno.at(-1).designIdx === 10, 'z jedničky zpět na desítku')
-M.ukazVzhled(99); ok(vykresleno.at(-1).designIdx === 10, 'mimo rozsah se ořízne na 10')
+// Vzhledů je dvacet; test se řídí tím, co appka opravdu nabízí, ať se
+// nemusí přepisovat po každém přidání dalšího.
+const POSLEDNI = Math.max(...Object.keys(M.NAZVY_VZHLEDU).map(Number))
+M.ukazVzhled(POSLEDNI); M.vzhledOJedenVpred(); ok(vykresleno.at(-1).designIdx === 1, 'z posledního se přetočí na jedničku')
+M.ukazVzhled(1); M.vzhledOJedenZpet(); ok(vykresleno.at(-1).designIdx === POSLEDNI, `z jedničky zpět na poslední (${POSLEDNI})`)
+M.ukazVzhled(999); ok(vykresleno.at(-1).designIdx === POSLEDNI, `mimo rozsah se ořízne na ${POSLEDNI}`)
 M.ukazVzhled(-5); ok(vykresleno.at(-1).designIdx === 1, 'mimo rozsah se ořízne na 1')
 M.nastavRezimUkazky(false)
 ok(prvek('invoice-actions').style.display === '' && prvek('invoice-design-bar').style.display === 'none',
@@ -119,7 +122,8 @@ ok(prvek('invoice-actions').style.display === '' && prvek('invoice-design-bar').
 
 console.log('\n── nabídka vzhledů ──')
 const sel = prvek('test-sel'); M.naplnVyberVzhledu(sel, 6)
-ok((sel.innerHTML.match(/<option/g) || []).length === 10, 'v nabídce je všech deset vzhledů')
+ok((sel.innerHTML.match(/<option/g) || []).length === Object.keys(M.NAZVY_VZHLEDU).length,
+   `v nabídce jsou všechny vzhledy (${Object.keys(M.NAZVY_VZHLEDU).length})`)
 ok(sel.value === '6', 'předvybraný je ten uložený')
 ok(Object.keys(M.NAZVY_VZHLEDU).length === 10, 'názvů vzhledů je deset')
 
