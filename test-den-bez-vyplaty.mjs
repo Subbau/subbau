@@ -57,7 +57,10 @@ ok(/rozpis\.skupiny\.length > 1 \|\| jePevna/.test(src),
 
 // ── 2. provize a odkaz pro odběratele (čtení kódu) ──
 console.log('\n── provize a odkaz pro odběratele ──')
-ok(/bezProvize\.has\(a\.worker_id\) \|\| a\.bez_provize_den/.test(src), 'provize se u označeného dne nepočítá')
+// Pozn.: od zavedení firem se.r.o. se v té podmínce testuje komuProvize
+// (u zaměstnance firmy je to firma), ale příznak u dne platí dál stejně.
+ok(/bezProvize\.has\((a\.worker_id|komuProvize)\) \|\| a\.bez_provize_den/.test(src),
+   'provize se u označeného dne nepočítá')
 ok(/a\.bez_vyplaty\s*\n?\s*\?\s*0/.test(src) || /a\.bez_vyplaty[\s\S]{0,40}\?\s*0/.test(src),
    'výdělek pracovníka je u dne „bez výplaty" nulový')
 ok(/bez_vyplaty,bez_provize_den,vyplata_castka/.test(api),

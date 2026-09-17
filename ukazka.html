@@ -5226,7 +5226,7 @@ async function submitAdminSignatureWithPlacement() {
 // Po nahrání nové verze se snadno pozná, jestli se opravdu nasadila: otevřete
 // appku, zmáčkněte F12 (na Macu ⌥⌘I) a v konzoli je vypsané tohle datum. Když
 // tam svítí starší, prohlížeč nebo GitHub drží starou verzi.
-const SUBBAU_VERZE = '2026-09-17 n — zaměstnanec firmy neřeší fakturaci'
+const SUBBAU_VERZE = '2026-09-17 o — provize za zaměstnance se počítá u firmy'
 console.log('StavKo docházka — verze ' + SUBBAU_VERZE)
 
 // ============ SUPABASE CONFIG ============
@@ -8350,7 +8350,7 @@ async function renderProvizeContent() {
   const yEnd = new Date(anchor.getFullYear(), 11, 31)
 
   const [{ data: workers }, provResult, { data: teams }, { data: companies }, { data: subteams }] = await Promise.all([
-    sb.from('profiles').select('id, full_name, hourly_rate_worker, team_id, subteam_id').in('role', ['osvec', 'partak']).eq('is_active', true).order('full_name'),
+    sb.from('profiles').select('id, full_name, hourly_rate_worker, team_id, subteam_id, zamestnavatel_id, supplier_type, company_name').in('role', ['osvec', 'partak']).eq('is_active', true).order('full_name'),
     sb.from('worker_commissions').select('worker_id, provize, payment_terms, bez_provize'),
     sb.from('teams').select('id, name, company_id, is_active'),
     sb.from('companies').select('id, name'),
@@ -8508,6 +8508,17 @@ async function renderProvizeContent() {
                        pDnes: 0, pDay: 0, pWeek: 0, pMonth: 0, pYear: 0,
                        vDay: 0, vWeek: 0 }
   })
+
+  // Zaměstnanci firem (s.r.o.). Hodiny si zapisují sami, ale peníze se u nich
+  // nepočítají — sazbu nemají, za jejich práci fakturuje firma. Naše provize
+  // se počítá sazbou TÉ FIRMY a připisuje se jí, za všechny její lidi dohromady.
+  // Prázdný sloupec (neproběhlá migrace) znamená, že nikdo pod firmou není —
+  // tedy přesně dnešní stav.
+  const firmaZamestnance = {}
+  workersAll.forEach(w => {
+    const f = w.zamestnavatel_id
+    if (f && byWorker[f]) firmaZamestnance[w.id] = f
+  })
   ;(att || []).forEach(a => {
     const bucket = byWorker[a.worker_id]
     if (!bucket) return
@@ -8516,22 +8527,29 @@ async function renderProvizeContent() {
     const den = a.work_date
     // Výjimky u jednoho dne. Jsou nezávislé: „bez výplaty" se týká jen
     // pracovníka, „bez provize" jen StavKo.
-    const provDen = (bezProvize.has(a.worker_id) || a.bez_provize_den)
-      ? 0 : Number(hodnotaKDni('provize', a.worker_id, den, provMap[a.worker_id] || 0)) || 0
+    // U zaměstnance firmy se provize počítá sazbou firmy a připisuje se jí.
+    const firmaId = firmaZamestnance[a.worker_id] || null
+    const komuProvize = firmaId || a.worker_id
+    const provDen = (bezProvize.has(komuProvize) || a.bez_provize_den)
+      ? 0 : Number(hodnotaKDni('provize', komuProvize, den, provMap[komuProvize] || 0)) || 0
     // Kolik za ten den dostane pracovník. Ručně přepsaná částka platí celá za
     // den, ne za hodinu — proto se dělí hodinami, ať sedí i násobení níž.
-    const sazbaDen = a.bez_vyplaty
+    // Zaměstnanec firmy nemá sazbu — nic mu nevyplácíme, platí ho jeho firma.
+    const sazbaDen = (firmaId || a.bez_vyplaty)
       ? 0
       : ((a.vyplata_castka != null && a.vyplata_castka !== '')
           ? (Math.max(0, Number(a.vyplata_castka) || 0) / h)
           : (Number(hodnotaKDni('sazba', a.worker_id, den, sazbaAktualni[a.worker_id] || 0)) || 0))
     // `dnes` je opravdu dnešek, ne vybraný den — dlaždice nahoře se nesmí měnit,
     // když se šipkami listuje po minulých dnech.
-    if (den === dnesStrStat) { bucket.dnes += h; bucket.pDnes += h * provDen }
-    if (den >= dStartStr && den <= dEndStr) { bucket.day += h; bucket.pDay += h * provDen; bucket.vDay += h * sazbaDen }
-    if (den >= wStartStr && den <= wEndStr) { bucket.week += h; bucket.pWeek += h * provDen; bucket.vWeek += h * sazbaDen }
-    if (den >= mStartStr && den <= mEndStr) { bucket.month += h; bucket.pMonth += h * provDen }
-    if (den >= yStartStr && den <= yEndStr) { bucket.year += h; bucket.pYear += h * provDen }
+    // Hodiny zůstávají u toho, kdo je odpracoval. Peníze jdou firmě, když
+    // pod nějakou patří — jinak jemu samotnému, jako dosud.
+    const penize = firmaId ? byWorker[firmaId] : bucket
+    if (den === dnesStrStat) { bucket.dnes += h; penize.pDnes += h * provDen }
+    if (den >= dStartStr && den <= dEndStr) { bucket.day += h; penize.pDay += h * provDen; bucket.vDay += h * sazbaDen }
+    if (den >= wStartStr && den <= wEndStr) { bucket.week += h; penize.pWeek += h * provDen; bucket.vWeek += h * sazbaDen }
+    if (den >= mStartStr && den <= mEndStr) { bucket.month += h; penize.pMonth += h * provDen }
+    if (den >= yStartStr && den <= yEndStr) { bucket.year += h; penize.pYear += h * provDen }
   })
 
   // DNEŠNÍ PROVIZE — kolik StavKo vydělá za každou odpracovanou hodinu dnešního dne.
@@ -8610,6 +8628,12 @@ async function renderProvizeContent() {
     return {
       id: w.id, name: w.full_name + (w._byvaly ? ' (bývalý)' : ''), firm: firmOf(w), rate,
       podskupina: w.subteam_id ? (subteamById[w.subteam_id] || '') : '',
+      // Zaměstnanec firmy — sazbu ani výdělek nemá, provize jde firmě.
+      zamestnavatel: w.zamestnavatel_id
+        ? ((workersAll.find(x => x.id === w.zamestnavatel_id) || {}).company_name
+           || (workersAll.find(x => x.id === w.zamestnavatel_id) || {}).full_name || 'firma')
+        : '',
+      jeFirma: w.supplier_type === 'sro',
       prov, provUlozena, bezProvize: bezProvize.has(w.id), byvaly: !!w._byvaly,
       // Do přehledu patří jen ten, jehož skupina je přiřazená k nějaké firmě.
       // Samotná skupina bez firmy nestačí — za takového člověka není komu
@@ -8652,7 +8676,9 @@ async function renderProvizeContent() {
   // Bez něj by nešlo nastavit, za kolik dělá — v přehledu by vůbec nebyl,
   // dokud si nezapíše první hodiny. Jakmile má obojí vyplněné a nepracuje,
   // ze seznamu zmizí jako ostatní.
-  const cekaNaNastaveni = r => r.maFirmu && !r.byvaly
+  // Zaměstnanec firmy sazbu nikdy mít nebude, takže na nastavení nečeká —
+  // jinak by v přehledu svítil pořád, i když ten týden nepracoval.
+  const cekaNaNastaveni = r => r.maFirmu && !r.byvaly && !r.zamestnavatel
     && (r.rate == null || r.rate === '' || r.provUlozena == null || r.provUlozena === '')
   const patriDoPrehledu = r => odpracoval(r) || cekaNaNastaveni(r)
   const rowsZobrazit = rows.filter(patriDoPrehledu)
@@ -8712,9 +8738,19 @@ async function renderProvizeContent() {
         <td style="font-size:${isNoFirm ? '16px' : '14.5px'};font-weight:600">${r.name}${r.overdue ? ' <span style="font-size:11px;color:var(--red);font-weight:700">⚠️ nezaplaceno</span>' : ''}${
           // Podskupina pod jménem — stejná barva jako v Týmech, ať se to dá
           // spárovat pohledem. U větších firem je bez toho nepoznat, kdo kde dělá.
-          r.podskupina ? (() => {
-            const c = groupColor(r.podskupina, 'sub')
-            return `<div style="margin-top:3px"><span class="pill" style="background:#fff;color:${c.text};border:1.5px solid ${c.border};white-space:nowrap;font-size:10.5px;font-weight:700">👥 ${escAttr(r.podskupina)}</span></div>`
+          (r.podskupina || r.zamestnavatel || r.jeFirma) ? (() => {
+            let out = '<div style="margin-top:3px;display:flex;gap:4px;flex-wrap:wrap">'
+            if (r.podskupina) {
+              const c = groupColor(r.podskupina, 'sub')
+              out += `<span class="pill" style="background:#fff;color:${c.text};border:1.5px solid ${c.border};white-space:nowrap;font-size:10.5px;font-weight:700">👥 ${escAttr(r.podskupina)}</span>`
+            }
+            if (r.jeFirma) {
+              out += `<span class="pill" title="Firma (s.r.o.) — fakturuje za své lidi a provizi počítáme u ní" style="background:var(--blue-l);color:var(--blue);border:1.5px solid var(--blue);white-space:nowrap;font-size:10.5px;font-weight:700">🏢 firma</span>`
+            }
+            if (r.zamestnavatel) {
+              out += `<span class="pill" title="Zaměstnanec firmy — sazbu ani výdělek nemá, za jeho hodiny fakturuje firma a provize se počítá u ní" style="background:#eef3f8;color:#2c4257;border:1.5px solid #c7d6e4;white-space:nowrap;font-size:10.5px;font-weight:700">🏢 pod ${escAttr(r.zamestnavatel)}</span>`
+            }
+            return out + '</div>'
           })() : ''
         }</td>
         <td style="text-align:right"><input id="pv-rate-${r.id}" type="number" step="0.01" value="${r.rate || ''}" placeholder="chybí" title="${r.rate ? '' : 'Chybí hodinová sazba — dokud ji nezadáte, počítá se pracovníkovi nula'}" onchange="saveProvizeRate(this,'${r.id}')" style="width:80px;padding:6px 8px;border:${r.rate ? '1.5px solid var(--brd)' : '2px solid var(--red)'};background:${r.rate ? '' : 'var(--red-l)'};border-radius:7px;font-size:14px;text-align:right;font-family:inherit"> €/h</td>
