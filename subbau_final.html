@@ -106,6 +106,7 @@ input:focus,select:focus{border-color:var(--blue-m);background:#fff}
 input[type=checkbox],input[type=radio]{width:auto;padding:0;border-radius:4px;-webkit-appearance:checkbox;appearance:auto}
 .btn-login{width:100%;padding:15px;background:#9C3B22;color:#fff;border:none;border-radius:12px;font-size:16px;font-weight:800;cursor:pointer;font-family:inherit;transition:background .15s;letter-spacing:-0.2px}
 .btn-login:hover{background:#e6b800}
+@keyframes vykazBlik{0%,100%{box-shadow:0 0 0 0 rgba(192,40,28,.55)}50%{box-shadow:0 0 0 7px rgba(192,40,28,0)}}
 .btn-pri{padding:9px 16px;background:#9C3B22;color:#fff;border:none;border-radius:8px;font-size:13px;font-weight:600;cursor:pointer;font-family:inherit}
 /* Zavírací křížky (×) – vždy vystředěné, jednotná velikost */
 .x-close{display:inline-flex!important;align-items:center;justify-content:center;line-height:0;padding:0}
@@ -1927,6 +1928,12 @@ setTimeout(function () {
     </div>
     <!-- SEKCE: Výkaz hodin -->
     <div class="mob-view" id="mob-v-vykaz">
+      <!-- Páteční připomenutí. V pátek se výkaz nechává podepsat vedoucím;
+           kdo to zapomene, nemá doklad k faktuře. -->
+      <div id="mob-vykaz-pripominka" style="display:none;margin:0 0 14px;padding:15px 16px;background:#c0281c;color:#fff;border-radius:14px;box-shadow:0 3px 14px rgba(192,40,28,.35)">
+        <div style="font-size:16px;font-weight:800;line-height:1.3;margin-bottom:5px">⚠️ Nezapomeňte si podepsat výkaz hodin!</div>
+        <div style="font-size:13px;line-height:1.55;opacity:.95">Dnes je pátek — stáhněte si výkaz a nechte ho podepsat vedoucím na stavbě. Bez podpisu nemáte doklad k faktuře.</div>
+      </div>
       <!-- Export hodin -->
       <div class="mob-card" style="margin-top:0">
         <div style="display:flex;align-items:center;gap:9px;margin-bottom:6px">
@@ -2627,7 +2634,7 @@ setTimeout(function () {
       <div class="mob-nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="13" r="8"/><path d="M12 9v4l2.5 1.5"/><path d="M9 2h6"/><path d="M12 2v3"/></svg></div>
       <div class="mob-nav-label" style="font-weight:800">Docházka</div>
     </button>
-    <button class="mob-nav-btn" onclick="mobSv('vykaz',this)">
+    <button class="mob-nav-btn" id="mob-nav-vykaz" onclick="mobSv('vykaz',this)">
       <div class="mob-nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/><path d="M16 13H8"/><path d="M16 17H8"/><path d="M10 9H8"/></svg></div>
       <div class="mob-nav-label">Výkaz hodin</div>
     </button>
@@ -4543,7 +4550,7 @@ async function submitAdminSignatureWithPlacement() {
 // Po nahrání nové verze se snadno pozná, jestli se opravdu nasadila: otevřete
 // appku, zmáčkněte F12 (na Macu ⌥⌘I) a v konzoli je vypsané tohle datum. Když
 // tam svítí starší, prohlížeč nebo GitHub drží starou verzi.
-const SUBBAU_VERZE = '2026-09-17 p — firma vystaví fakturu za všechny své lidi'
+const SUBBAU_VERZE = '2026-09-17 q — pátek: podepsat výkaz + dva nové vzhledy faktur'
 console.log('SubBau docházka — verze ' + SUBBAU_VERZE)
 
 // ============ SUPABASE CONFIG ============
@@ -5285,6 +5292,8 @@ async function _initAppInner(user) {
     setTimeout(() => { try { checkMissingDocsAlert() } catch(e) { console.warn(e) } }, 1200)
     // Zaměstnanec firmy neřeší fakturaci ani nic kolem živnosti — schovej mu to.
     try { upravMobilProZamestnance(profile) } catch(e) { console.warn('[zaměstnanec firmy]', e) }
+    // V pátek připomeň podpis výkazu hodin — bez podpisu není doklad k faktuře.
+    try { pripomenVykazVPatek(profile) } catch(e) { console.warn('[páteční výkaz]', e) }
   }
 
   // Nemá přístup do aplikace — buď registrace ještě není schválená,
@@ -19287,6 +19296,9 @@ function mobSv(name, btn) {
   }
   if (name === 'tymy') { loadTeams() }
   if (name === 'fotky') { loadSitePhotos() }
+  // Páteční připomenutí podpisu výkazu — ať to vidí i ten, kdo má appku
+  // otevřenou od čtvrtka a nepřihlašuje se znovu.
+  try { pripomenVykazVPatek(typeof currentProfile !== 'undefined' ? currentProfile : null) } catch (e) {}
   if (name === 'turnus') { loadTurnus(currentProfile) }
   // Fakturační údaje, sazbu i splatnost mohl SubBau mezitím změnit — plň při každém otevření
   if (name === 'faktury' && typeof loadInvoiceForm === 'function') loadInvoiceForm()
@@ -25486,363 +25498,409 @@ ${soucet(V.L.toPay, V.kUhrade + ' EUR', true)}
 // Soupis prací — Tabulka položek je jediný velký prvek dokladu — číslovaná, orámovaná silnými linkami a posazená doprostřed listu, zatímco strany, termíny, platba i da
 // VZHLED 17 — SOUPIS PRACÍ. Těžiště dokladu je tabulka položek: velká, číslovaná,
 // posazená doprostřed listu. Všechno ostatní — strany, termíny, platba, daňová
-// poznámka — je drobným písmem nad ní a pod ní, aby tabulku nepřebilo.
+// Souhrn napřed — Obrácené pořadí proti všem ostatním vzhledům: číslo dokladu a částka k úhradě stojí jako dvojice na prvním řádku, pod nimi rekapitulace a bankovní spoj
+// VZHLED 17 — SOUHRN NAPŘED. Obrácené pořadí proti všem ostatním vzhledům:
+// doklad začíná tím, kolik se má zaplatit. Nahoře stojí vedle sebe dvojice
+// číslo dokladu / částka k úhradě, hned pod ní rekapitulace částek a bankovní
+// spojení — tedy „kolik, kam a dokdy" na první třetině listu. Strany a soupis
+// položek jsou až pod tím, drobněji, jako podklad k té částce. Barva svítí jen
+// na svislé lince mezi dvojicí, na samotné částce, na nadpiscích stran a na
+// lince pod záhlavím soupisu — žádné barevné plochy.
 window.SABLONY_FAKTUR[17] = function (V) {
-  const SEDA = '#6E675F'        // popisky a doprovodný text
-  const INKOUST = '#1C1A18'     // hlavní text
-  // Drobný popisek nad údajem — používá se nahoře i dole, ať to drží jeden rytmus.
-  const stitek = 'font-size:6.5px;letter-spacing:1.5px;text-transform:uppercase;color:' + SEDA + ';line-height:1.35'
-  // Hlavička sloupce v tabulce položek. Trojjazyčné popisky se v úzkých sloupcích
-  // zalomí, proto zarovnání na spodní hranu.
-  const hlavicka = stitek + ';padding:0 10px 7px;vertical-align:bottom'
-  // Řádek položky. Výška i velikost písma jdou z hustoty, kterou spočítala appka —
-  // u dlouhé faktury se tabulka sama stáhne, aby doklad zůstal na jedné A4.
+  const INKOUST = '#1A1714'    // hodnoty a nadpisy
+  const SEDA = '#68615A'       // adresy a doprovodné texty
+  const SVETLA = '#9A938B'     // popisky
+
+  // Hustota sazby, kterou spočítala appka podle počtu položek (26 = volno,
+  // 5 = nabito). Šablona nic nepočítá, jen čte, jak nahusto se má sázet.
+  const hustota = parseInt(V.mezera, 10) || 26
+  // U nabité faktury se stáhne i to, co V.mezera neřídí — okraje listu a obě
+  // velká čísla v hlavičce. Jinak by dlouhý soupis přetekl z jedné A4.
+  const tesno = hustota <= 7
+  const OKRAJ = tesno ? '32px 44px 26px' : '42px 46px 32px'
+  const CISLO = tesno ? '22px' : '26px'
+  const CASTKA = tesno ? '24px' : '29px'
+
+  // Drobné prostrkané verzálky — jediný druh popisku na celém dokladu.
+  const stitek = 'font-size:6.5px;letter-spacing:1.5px;text-transform:uppercase;color:' + SVETLA + ';line-height:1.5'
+  // Řádek soupisu položek. Výška řádku i velikost písma jdou z hustoty, kterou
+  // spočítala appka — u dlouhé faktury se soupis sám stáhne.
   const bunka = 'padding:' + V.radekY + ' 10px;font-size:' + V.pismoPolozky
-    + ';border-bottom:1px solid ' + V.linka + ';vertical-align:top;line-height:1.45'
-  // Částka z položky. V datech je pod názvem castka, jméno celkem je tu jen pro jistotu.
-  const castkaRadku = p => (p.castka != null ? p.castka : p.celkem)
-  // Dvojice popisek + hodnota v drobném pásu nad tabulkou.
-  const udaj = (l, h) => `<div style="margin-bottom:7px"><div style="${stitek}">${l}</div>
-<div style="font-size:9.5px;font-weight:600;margin-top:2px">${h}</div></div>`
-  // Jedno políčko platebního pásu pod tabulkou.
-  const platba = (l, h, sirka, prvni) => `<td style="width:${sirka};padding:7px 12px;vertical-align:top;${prvni ? '' : 'border-left:1px solid ' + V.linka + ';'}">
-<div style="${stitek}">${l}</div>
-<div style="font-size:10px;font-weight:700;letter-spacing:0.5px;margin-top:3px;word-break:break-all">${h}</div></td>`
+    + ';border-bottom:1px solid ' + V.linka + ';vertical-align:top;line-height:1.4'
+  // Záhlaví sloupce soupisu. Trojjazyčné popisky se v úzkém sloupci zalomí,
+  // proto dosedají na spodní hranu buňky.
+  const zahlavi = stitek + ';padding:0 10px 6px;vertical-align:bottom;border-bottom:1.5px solid ' + V.barva
+  // Starší faktury nesou částku řádku pod jiným jménem — jen se přečte.
+  const castkaRadku = (p) => (p.castka != null ? p.castka : p.celkem)
+  const zalom = (t) => String(t == null ? '' : t).split('\n').join('<br>')
+  // Svislý předěl mezi buňkami pásu; první buňka jde na levý okraj listu.
+  const predel = (prvni) => prvni ? 'padding-left:0;' : 'border-left:1px solid ' + V.linka + ';'
 
-  return `<div id="invoice-page" style="width:794px;min-height:1123px;background:#fff;font-family:-apple-system,'Segoe UI',Arial,sans-serif;color:${INKOUST};box-sizing:border-box">
-<div id="invoice-body" style="width:794px;min-height:1123px;box-sizing:border-box;padding:38px 44px 32px;display:flex;flex-direction:column">
+  // Buňka rekapitulačního pásu: popisek, hodnota, případně drobná poznámka.
+  const souhrn = (l, h, pod, sirka, prvni) => `<td style="width:${sirka};padding:9px 12px;vertical-align:top;${predel(prvni)}">
+      <div style="${stitek}">${l}</div>
+      <div style="font-size:12.5px;font-weight:700;margin-top:4px;white-space:nowrap">${h}</div>
+      ${pod ? `<div style="font-size:7.5px;color:${SEDA};line-height:1.45;margin-top:3px">${pod}</div>` : ''}
+    </td>`
 
-  <!-- NAD TABULKOU: nadpis a číslo dokladu, drobně -->
-  <div style="display:flex;justify-content:space-between;align-items:flex-end;padding-bottom:6px;border-bottom:1px solid ${V.linka}">
-    <div style="font-size:11px;font-weight:700;letter-spacing:2.6px;text-transform:uppercase">${V.L.title}</div>
-    <div style="text-align:right">
-      <span style="${stitek}">${V.L.number}</span>
-      <span style="font-size:14px;font-weight:700;letter-spacing:0.8px;color:${V.barva};margin-left:8px">${V.cislo}</span>
-    </div>
-  </div>
+  // Buňka pásu s bankovním spojením. IBAN se láme kdekoli, ať nevyleze z buňky.
+  const platba = (l, h, sirka, prvni) => `<td style="width:${sirka};padding:9px 12px;vertical-align:top;${predel(prvni)}">
+      <div style="${stitek}">${l}</div>
+      <div style="font-size:10.5px;font-weight:600;letter-spacing:0.4px;margin-top:4px;word-break:break-all">${h}</div>
+    </td>`
 
-  <!-- NAD TABULKOU: strany a termíny ve třech drobných sloupcích -->
-  <table style="width:100%;border-collapse:collapse;table-layout:fixed;margin-top:14px">
-    <tr>
-      <td style="width:35%;padding:0 16px 0 0;vertical-align:top">
-        <div style="${stitek};color:${V.barva};font-weight:700">${V.L.supplier}</div>
-        <div style="font-size:11px;font-weight:700;margin-top:5px">${V.dodavatel.jmeno}</div>
-        <div style="font-size:8.5px;color:${SEDA};line-height:1.55;margin-top:2px">${(V.dodavatel.adresa || '').split('\n').join('<br>')}</div>
-        <div style="font-size:8.5px;margin-top:5px"><span style="color:${SEDA}">${V.L.ico}</span>&nbsp; <span style="font-weight:600">${V.dodavatel.ic}</span></div>
-        ${V.dodavatel.platceDph ? `<div style="font-size:8.5px;margin-top:2px"><span style="color:${SEDA}">${V.L.dic}</span>&nbsp; <span style="font-weight:600">${V.dodavatel.dic}</span></div>` : ''}
-      </td>
-      <td style="width:35%;padding:0 16px;vertical-align:top;border-left:1px solid ${V.linka}">
-        <div style="${stitek};color:${V.barva};font-weight:700">${V.L.customer}</div>
-        <div style="font-size:11px;font-weight:700;margin-top:5px">${V.odberatel.jmeno}</div>
-        <div style="font-size:8.5px;color:${SEDA};line-height:1.55;margin-top:2px">${(V.odberatel.adresa || '').split('\n').join('<br>')}</div>
-        <div style="font-size:8.5px;margin-top:5px"><span style="color:${SEDA}">${V.L.ico}</span>&nbsp; <span style="font-weight:600">${V.odberatel.ic}</span></div>
-        <div style="font-size:8.5px;margin-top:2px"><span style="color:${SEDA}">${V.L.dic}</span>&nbsp; <span style="font-weight:600">${V.odberatel.dic}</span></div>
-      </td>
-      <td style="width:30%;padding:0 0 0 16px;vertical-align:top;border-left:1px solid ${V.linka}">
-        ${udaj(V.L.issued, V.datumVystaveni)}
-        ${udaj(V.L.due, V.datumSplatnosti)}
-        ${udaj(V.L.dueDays, V.splatnostDni)}
-        ${udaj(V.L.period, V.obdobiOd + ' — ' + V.obdobiDo)}
-      </td>
-    </tr>
-  </table>
+  // Buňka pásu termínů nad soupisem.
+  const udaj = (l, h, sirka, prvni) => `<td style="width:${sirka};padding:8px 12px 0;vertical-align:top;${predel(prvni)}">
+      <div style="${stitek}">${l}</div>
+      <div style="font-size:10px;font-weight:600;margin-top:3px">${h}</div>
+    </td>`
 
-  <!-- TABULKA POLOŽEK — hlavní prvek dokladu, posazený doprostřed listu -->
-  <div style="flex:1;display:flex;flex-direction:column;padding:${V.mezera} 0">
-    <!-- Volné místo nad a pod tabulkou se dělí v poměru 4:5, takže u krátké faktury
-         sedí tabulka lehce nad geometrickým středem — opticky to je střed listu.
-         U dlouhé faktury se obě mezery samy vytratí. -->
-    <div style="flex:4 1 0"></div>
-    <table style="width:100%;border-collapse:collapse;table-layout:fixed;border-top:2.5px solid ${V.barva};border-bottom:2.5px solid ${V.barva}">
+  // Jedna strana dokladu. Dodavatel i odběratel vypadají stejně, jen dodavateli
+  // se DIČ vypisuje pouze když je plátce.
+  const strana = (popisek, s, dic) => `<div style="${stitek};color:${V.barva};font-weight:700">${popisek}</div>
+      <div style="font-size:12px;font-weight:700;line-height:1.3;margin-top:6px">${s.jmeno}</div>
+      <div style="font-size:9px;color:${SEDA};line-height:1.55;margin-top:4px">${zalom(s.adresa)}</div>
+      <table style="width:100%;border-collapse:collapse;table-layout:fixed;margin-top:7px">
       <tr>
-        <td style="${hlavicka};width:34px;padding-left:0"></td>
-        <td style="${hlavicka};padding-left:0">${V.L.desc}</td>
-        <td style="${hlavicka};width:78px;text-align:right">${V.L.qty}</td>
-        <td style="${hlavicka};width:88px;text-align:right">${V.L.price}</td>
-        <td style="${hlavicka};width:130px;text-align:right;padding-right:0">${V.L.amount}</td>
-      </tr>
-      <tr><td colspan="5" style="padding:0;border-bottom:1px solid ${V.linka};font-size:0;line-height:0">&nbsp;</td></tr>
-      ${V.jePolozkova
-        ? (V.polozky || []).map(function (p, i) {
-            return `<tr>
-        <td style="${bunka};padding-left:0;color:${V.barva};font-weight:700;text-align:left">${String(i + 1).padStart(2, '0')}</td>
-        <td style="${bunka};padding-left:0">${p.popis}</td>
-        <td style="${bunka};text-align:right;white-space:nowrap">${p.mnozstvi}</td>
-        <td style="${bunka};text-align:right;white-space:nowrap">${p.cena}</td>
-        <td style="${bunka};padding-right:0;text-align:right;font-weight:700;white-space:nowrap">${castkaRadku(p)}</td>
-      </tr>`
-          }).join('')
-        : `<tr>
-        <td style="${bunka};padding-left:0;color:${V.barva};font-weight:700">01</td>
-        <td style="${bunka};padding-left:0">
-          <div style="font-size:${V.popisFont}${typeof V.popisFont === 'number' ? 'px' : ''};font-weight:600;line-height:1.4">${V.popisPlneni}</div>
-          ${V.popisPrekl ? `<div style="font-size:9px;color:${SEDA};margin-top:3px;line-height:1.4">${V.popisPrekl}</div>` : ''}
-          ${V.popisPod ? `<div style="font-size:8.5px;color:#8A837C;margin-top:3px;line-height:1.4">${V.popisPod}</div>` : ''}
+        <td style="width:50%;vertical-align:top;padding:0 10px 0 0">
+          <div style="${stitek}">${V.L.ico}</div>
+          <div style="font-size:9.5px;font-weight:600;margin-top:2px">${s.ic}</div>
         </td>
-        <td style="${bunka};text-align:right;white-space:nowrap">${V.hodiny}</td>
-        <td style="${bunka};text-align:right;white-space:nowrap">${V.sazba}</td>
-        <td style="${bunka};padding-right:0;text-align:right;font-weight:700;white-space:nowrap">${V.celkem}</td>
-      </tr>`}
-
-      <!-- rekapitulace je patou téže tabulky, ať doklad drží pohromadě jako jeden celek -->
-      <tr>
-        <td colspan="2" style="border:0"></td>
-        <td colspan="2" style="padding:9px 10px 0 0;text-align:right;${stitek}">${V.L.total}</td>
-        <td style="padding:9px 0 0;text-align:right;font-size:12px;font-weight:600;white-space:nowrap">${V.celkem} EUR</td>
+        ${dic ? `<td style="vertical-align:top">
+          <div style="${stitek}">${V.L.dic}</div>
+          <div style="font-size:9.5px;font-weight:600;margin-top:2px">${s.dic}</div>
+        </td>` : '<td></td>'}
       </tr>
-      ${V.zalohaJe ? `<tr>
-        <td colspan="2" style="border:0"></td>
-        <td colspan="2" style="padding:5px 10px 0 0;text-align:right;${stitek}">${V.L.cashPaid}${V.zalohaPozn ? `<div style="font-size:7.5px;letter-spacing:0;text-transform:none;color:#8A837C;margin-top:2px">${V.zalohaPozn}</div>` : ''}</td>
-        <td style="padding:5px 0 0;text-align:right;font-size:12px;font-weight:600;white-space:nowrap;vertical-align:top">&minus; ${V.zaloha} EUR</td>
-      </tr>` : ''}
-      <tr>
-        <td colspan="2" style="border:0"></td>
-        <td colspan="2" style="padding:8px 10px 10px 0;text-align:right;border-top:1.5px solid ${V.barva};font-size:7.5px;letter-spacing:1.5px;text-transform:uppercase;font-weight:700;vertical-align:middle">${V.L.toPay}</td>
-        <td style="padding:8px 0 10px;text-align:right;border-top:1.5px solid ${V.barva};font-size:21px;font-weight:800;letter-spacing:0.3px;color:${V.barva};white-space:nowrap;vertical-align:middle">${V.kUhrade} EUR</td>
-      </tr>
-    </table>
-    <div style="text-align:right;margin-top:6px;font-size:8.5px;color:${SEDA}">
-      <span style="${stitek}">${V.L.czk}</span>&nbsp; <span style="font-weight:600;color:${INKOUST}">${V.czk}</span>
-      &nbsp;&nbsp;·&nbsp;&nbsp;<span style="${stitek}">${V.L.rate}</span>&nbsp; <span style="font-weight:600;color:${INKOUST}">${V.kurz}</span>
-    </div>
-    <div style="flex:5 1 0"></div>
-  </div>
+      </table>`
 
-  <!-- POD TABULKOU: platební údaje v jednom drobném pásu -->
-  <table style="width:100%;border-collapse:collapse;table-layout:fixed;border-top:1px solid ${V.linka};border-bottom:1px solid ${V.linka}">
-    <tr>
-      ${platba(V.L.iban, V.iban, '36%', true)}
-      ${platba(V.L.swift, V.swift, '18%', false)}
-      ${platba(V.L.vs, V.vs, '23%', false)}
-      ${platba(V.L.ks, V.ks, '23%', false)}
-    </tr>
+  // Rekapitulační pás. Odečet zálohy je vlastní buňka, a když záloha není,
+  // zbylé buňky se o šířku rozdělí — jinak by v pásu zůstalo prázdné pole.
+  const bunky = [[V.L.total, V.celkem + ' EUR', '']]
+  if (V.zalohaJe) bunky.push([V.L.cashPaid, '&minus; ' + V.zaloha + ' EUR', V.zalohaPozn || ''])
+  bunky.push([V.L.due, V.datumSplatnosti, ''])
+  bunky.push([V.L.czk, V.czk, V.L.rate + ' ' + V.kurz])
+  const sirkaSouhrnu = (100 / bunky.length).toFixed(2) + '%'
+
+  return `<div id="invoice-page" style="width:794px;min-height:1123px;background:#fff;font-family:-apple-system,'Segoe UI',Helvetica,Arial,sans-serif;color:${INKOUST};box-sizing:border-box">
+<div id="invoice-body" style="width:794px;min-height:1123px;box-sizing:border-box;padding:${OKRAJ};display:flex;flex-direction:column">
+
+  <!-- 1. NÁZEV DOKLADU jen jako tenký řádek — hlavní slovo dostane částka -->
+  <table style="width:100%;border-collapse:collapse;table-layout:fixed;border-bottom:1px solid ${V.linka}">
+  <tr>
+    <td style="padding:0 12px 6px 0;vertical-align:bottom;font-size:10px;font-weight:700;letter-spacing:2.6px;text-transform:uppercase">${V.L.title}</td>
+    <td style="width:262px;padding:0 0 6px;vertical-align:bottom;text-align:right;${stitek}">${V.L.vatNote}</td>
+  </tr>
   </table>
 
-  <!-- POD TABULKOU: přenesená daňová povinnost -->
-  <div style="display:flex;align-items:flex-start;gap:12px;margin-top:12px;border-left:2.5px solid ${V.barva};padding-left:10px">
-    <div style="font-size:9.5px;font-weight:700;letter-spacing:1.4px;text-transform:uppercase;white-space:nowrap;padding-top:1px">${V.L.vatReason}</div>
-    <div style="font-size:8.5px;color:${SEDA};line-height:1.5">${V.L.vatReasonSub}</div>
-  </div>
+  <!-- 2. DVOJICE ČÍSLO / K ÚHRADĚ — celá myšlenka vzhledu. Doklad začíná tím,
+       kolik se má zaplatit, a obě čísla stojí vedle sebe jako pár. -->
+  <table style="width:100%;border-collapse:collapse;table-layout:fixed;margin-top:${tesno ? '14px' : '20px'}">
+  <tr>
+    <td style="width:46%;padding:0 24px 0 0;vertical-align:top">
+      <div style="${stitek}">${V.L.number}</div>
+      <div style="font-size:${CISLO};font-weight:700;letter-spacing:0.6px;line-height:1.2;margin-top:6px;word-break:break-word">${V.cislo}</div>
+    </td>
+    <td style="padding:0 0 0 24px;vertical-align:top;text-align:right;border-left:2px solid ${V.barva}">
+      <div style="${stitek};color:${V.barva};font-weight:700">${V.L.toPay}</div>
+      <div style="font-size:${CASTKA};font-weight:800;letter-spacing:-0.3px;line-height:1.2;margin-top:6px;white-space:nowrap;color:${V.barva}">${V.kUhrade} EUR</div>
+    </td>
+  </tr>
+  </table>
 
-  <!-- pata: kdo a co, aby list obstál i samostatně -->
-  <div style="display:flex;justify-content:space-between;margin-top:12px;padding-top:6px;border-top:1px solid ${V.linka};font-size:7px;letter-spacing:1.2px;text-transform:uppercase;color:#8A837C">
-    <div>${V.dodavatel.jmeno}</div>
-    <div>${V.L.vatNote}</div>
-    <div>${V.cislo}</div>
-  </div>
+  <!-- 3. REKAPITULACE hned pod dvojicí — u ostatních vzhledů je až za položkami -->
+  <table style="width:100%;border-collapse:collapse;table-layout:fixed;margin-top:${tesno ? '12px' : '16px'};border-top:1px solid ${V.linka};border-bottom:1px solid ${V.linka}">
+  <tr>
+    ${bunky.map(function (b, i) { return souhrn(b[0], b[1], b[2], sirkaSouhrnu, i === 0) }).join('')}
+  </tr>
+  </table>
+
+  <!-- 4. BANKOVNÍ SPOJENÍ taky nahoru — „kam" patří k „kolik" -->
+  <table style="width:100%;border-collapse:collapse;table-layout:fixed;border-bottom:1px solid ${V.linka}">
+  <tr>
+    ${platba(V.L.iban, V.iban, '40%', true)}
+    ${platba(V.L.swift, V.swift, '18%', false)}
+    ${platba(V.L.vs, V.vs, '21%', false)}
+    ${platba(V.L.ks, V.ks, '21%', false)}
+  </tr>
+  </table>
+
+  <!-- 5. STRANY DOKLADU — drobněji, hlavní věc už byla řečena nahoře -->
+  <table style="width:100%;border-collapse:collapse;table-layout:fixed;margin-top:${V.mezera}">
+  <tr>
+    <td style="width:50%;padding:0 26px 0 0;vertical-align:top">${strana(V.L.supplier, V.dodavatel, V.dodavatel.platceDph)}</td>
+    <td style="padding:0 0 0 26px;vertical-align:top;border-left:1px solid ${V.linka}">${strana(V.L.customer, V.odberatel, true)}</td>
+  </tr>
+  </table>
+
+  <!-- 6. TERMÍNY A SOUPIS až na konci — je to podklad k částce z hlavičky -->
+  <table style="width:100%;border-collapse:collapse;table-layout:fixed;margin-top:${V.mezera};border-top:1px solid ${V.linka}">
+  <tr>
+    ${udaj(V.L.period, V.obdobiOd + ' &mdash; ' + V.obdobiDo, '38%', true)}
+    ${udaj(V.L.issued, V.datumVystaveni, '32%', false)}
+    ${udaj(V.L.dueDays, V.splatnostDni, '30%', false)}
+  </tr>
+  </table>
+
+  <table style="width:100%;border-collapse:collapse;table-layout:fixed;margin-top:${tesno ? '10px' : '14px'}">
+  <tr>
+    <td style="${zahlavi};padding-left:0">${V.L.desc}</td>
+    <td style="${zahlavi};width:78px;text-align:right">${V.L.qty}</td>
+    <td style="${zahlavi};width:90px;text-align:right">${V.L.price}</td>
+    <td style="${zahlavi};width:104px;text-align:right;padding-right:0">${V.L.amount}</td>
+  </tr>
+  ${V.jePolozkova
+    ? (V.polozky || []).map(function (p) {
+        return `<tr>
+    <td style="${bunka};padding-left:0">${p.popis}</td>
+    <td style="${bunka};text-align:right;white-space:nowrap">${p.mnozstvi}</td>
+    <td style="${bunka};text-align:right;white-space:nowrap">${p.cena}</td>
+    <td style="${bunka};padding-right:0;text-align:right;font-weight:700;white-space:nowrap">${castkaRadku(p)}</td>
+  </tr>`
+      }).join('')
+    : `<tr>
+    <td style="${bunka};padding-left:0">
+      <div style="font-size:${V.popisFont}${typeof V.popisFont === 'number' ? 'px' : ''};font-weight:600;line-height:1.4">${V.popisPlneni}</div>
+      ${V.popisPrekl ? `<div style="font-size:9.5px;color:${SEDA};line-height:1.4;margin-top:3px">${V.popisPrekl}</div>` : ''}
+      ${V.popisPod ? `<div style="font-size:9px;color:${SVETLA};line-height:1.4;margin-top:3px">${V.popisPod}</div>` : ''}
+    </td>
+    <td style="${bunka};text-align:right;white-space:nowrap">${V.hodiny}</td>
+    <td style="${bunka};text-align:right;white-space:nowrap">${V.sazba}</td>
+    <td style="${bunka};padding-right:0;text-align:right;font-weight:700;white-space:nowrap">${V.celkem}</td>
+  </tr>`}
+  <!-- Součet soupisu — váže položky na částku, která už stojí v hlavičce. -->
+  <tr>
+    <td colspan="3" style="padding:8px 10px 0 0;text-align:right;${stitek}">${V.L.total}</td>
+    <td style="padding:8px 0 0;text-align:right;font-size:12px;font-weight:700;white-space:nowrap">${V.celkem} EUR</td>
+  </tr>
+  </table>
+
+  <!-- 7. PŘENESENÁ DAŇOVÁ POVINNOST. Patří hned pod soupis, ne na dno listu —
+       jinak zůstane uprostřed dokladu prázdné pole přes půl stránky. -->
+  <table style="width:100%;border-collapse:collapse;table-layout:fixed;margin-top:${V.mezera};border-top:1px solid ${V.linka};border-bottom:1px solid ${V.linka}">
+  <tr>
+    <td style="width:132px;padding:9px 14px 9px 0;vertical-align:top;font-size:9.5px;font-weight:700;letter-spacing:1.3px;text-transform:uppercase;color:${V.barva};line-height:1.35">${V.L.vatReason}</td>
+    <td style="padding:9px 0;vertical-align:top;font-size:8.5px;color:${SEDA};line-height:1.5">${V.L.vatReasonSub}</td>
+  </tr>
+  </table>
+
+  <div style="flex:1;min-height:14px"></div>
+
+
+  <!-- pata: aby list obstál i vytržený ze složky -->
+  <table style="width:100%;border-collapse:collapse;table-layout:fixed;margin-top:10px">
+  <tr>
+    <td style="${stitek};color:${SVETLA}">${V.dodavatel.jmeno}</td>
+    <td style="${stitek};color:${SVETLA};text-align:center">${V.L.title}</td>
+    <td style="${stitek};color:${SVETLA};text-align:right">${V.cislo}</td>
+  </tr>
+  </table>
 
 </div></div>`
 }
 
-// Dělicí linka — Dodavatel a odběratel stojí nahoře vedle sebe, oddělené svislou vlasovou linkou, a součty sedí vpravo dole v jediném orámovaném bloku — jinak žádné ba
 window.SABLONY_FAKTUR[18] = function (V) {
-  // VZHLED 18 — DĚLICÍ LINKA. Dodavatel a odběratel stojí nahoře vedle sebe ve
-  // dvou sloupcích a mezi nimi vede svislá vlasová linka přes celou jejich výšku.
-  // Žádné barevné plochy — jen vlasové linky, hodně bílého místa a typografie,
-  // jak to má obyčejná firemní faktura. Součty sedí vpravo dole v jediném
-  // orámovaném bloku, platební údaje vlevo vedle nich.
-  // Adresy chodí se zalomením řádků, do HTML je musíme přelomit.
+  // VZHLED 18 — ČÍSLOVANÝ PROTOKOL. Doklad se nečte jako tabulka, ale jako
+  // očíslovaný protokol. Vlevo běží úzký sloupec (osa), ve kterém NENÍ nic než
+  // velké pořadové číslo oddílu a jeho trojjazyčný nadpisek; vpravo od osy leží
+  // obsah oddílu přes celou zbývající šířku listu. Oddíly nejsou orámované ani
+  // podbarvené — dělí je jen vzduch, který appka sama stáhne u dlouhé faktury.
+  // Vlevo tak zůstává souvislý bílý pruh s pěti čísly pod sebou, což žádný jiný
+  // vzhled nemá.
+  //
+  // Všechny peníze na dokladu (položky, součty i částka k úhradě) dosedají na
+  // jednu pravou osu, takže se sloupec částek čte svisle jako v soupisu.
+  //
+  // Barva pracovníka je jen na pěti číslicích oddílů, na lince nad částkou
+  // k úhradě a na samotné částce. Žádná barevná plocha.
+
+  // Adresy chodí se zalomením řádků, do HTML se musí přelomit.
   const br = s => String(s == null ? '' : s).split('\n').join('<br>')
-  const stitek = 'font-size:6.5px;letter-spacing:.2em;text-transform:uppercase;color:#8b847c;line-height:1.5'
-  const hodnota = 'font-size:11px;font-weight:600;color:#211d1a;margin-top:3px;line-height:1.35'
-  // Hustotu sazby počítá appka podle počtu položek — šablona ji jen dosadí,
-  // aby se i desetipoložková faktura vešla na jednu A4.
-  const bunkaP = 'padding:' + V.radekY + ' 0;font-size:' + V.pismoPolozky
-    + ';border-bottom:1px solid ' + V.linka + ';vertical-align:top;line-height:1.4'
-  const zahlavi = 'padding:0 0 5px;border-bottom:1.5px solid ' + V.barva + ';' + stitek + ';color:#6f6860'
-  // Malý údaj ve svislé mřížce nahoře (popisek nad hodnotou).
-  const meta = (l, h) => `<td style="vertical-align:top;padding:0 14px;border-left:1px solid ${V.linka}">
-      <div style="${stitek}">${l}</div>
-      <div style="${hodnota}">${h}</div>
-    </td>`
-  // Řádek v orámovaném bloku součtů.
-  const soucet = (l, h, pozn) => `<tr>
-      <td style="padding:6px 12px 7px;border-top:1px solid ${V.linka};vertical-align:top">
-        <div style="${stitek}">${l}</div>
-        ${pozn ? `<div style="font-size:8px;color:#8b847c;line-height:1.35;margin-top:2px">${pozn}</div>` : ''}
+
+  // Hustota sazby, kterou appka spočítala podle množství položek (26 = volno,
+  // 5 = nabito). Šablona nic nedopočítává — jen se podle ní stáhne, ať se
+  // i desetipoložková faktura vejde na JEDNU A4.
+  const hustota = parseInt(V.mezera, 10) || 26
+  const tesno = hustota <= 7
+  const OKRAJ = tesno ? '34px 50px 26px' : '46px 52px 32px'
+  const OSA = '132px'                     // šířka levého sloupce s číslem oddílu
+  const CIS = tesno ? '22px' : '26px'     // velikost pořadového čísla oddílu
+  const JMENO = tesno ? '13px' : '14px'   // jméno firmy
+  const CASTKA = tesno ? '21px' : '25px'  // částka k úhradě
+  const SHORA = tesno ? '9px' : '13px'    // odsazení pod vodorovnou linkou
+
+  const SEDA = '#8b847c'    // popisky
+  const STRED = '#57514a'   // adresy a doprovodné texty
+  const INK = '#1b1815'     // hodnoty
+
+  // Trojjazyčné popisky jsou dlouhé, proto drobné prostrkané verzálky, které se
+  // SMĚJÍ zalomit — v úzké ose by jinak vylezly z listu.
+  const stitek = 'font-size:6.5px;letter-spacing:.14em;text-transform:uppercase;color:' + SEDA
+    + ';line-height:1.5;word-break:break-word'
+  const hodnota = 'font-size:11px;font-weight:600;color:' + INK
+    + ';line-height:1.35;margin-top:3px;word-break:break-word'
+
+  // Jeden údaj: drobný popisek nad hodnotou. Vedle hodnoty by se nevešel.
+  const udaj = (l, h) => `<div style="${stitek}">${l}</div><div style="${hodnota}">${h}</div>`
+
+  // Jedna strana dokladu — dodavatel i odběratel vypadají stejně.
+  const strana = (s, dic) => `<div style="font-size:${JMENO};font-weight:700;letter-spacing:.01em;line-height:1.3;word-break:break-word">${s.jmeno}</div>
+      <div style="font-size:10.5px;color:${STRED};line-height:1.55;margin-top:4px">${br(s.adresa)}</div>
+      <table style="width:100%;border-collapse:collapse;table-layout:fixed;margin-top:${tesno ? '7px' : '10px'}">
+        <tr>
+          <td style="width:40%;padding:0 16px 0 0;vertical-align:top">${udaj(V.L.ico, s.ic)}</td>
+          <td style="padding:0;vertical-align:top">${dic ? udaj(V.L.dic, s.dic) : ''}</td>
+        </tr>
+      </table>`
+
+  // Oddíl protokolu: číslo a nadpisek na ose, obsah vpravo od ní.
+  const oddil = (cislo, nazev, obsah) => `<table style="width:100%;border-collapse:collapse;table-layout:fixed;margin-top:${V.mezera}">
+    <tr>
+      <td style="width:${OSA};padding:0 18px 0 0;vertical-align:top">
+        <div style="font-size:${CIS};font-weight:300;letter-spacing:.02em;line-height:1;color:${V.barva}">${cislo}</div>
+        <div style="${stitek};margin-top:5px">${nazev}</div>
       </td>
-      <td style="padding:6px 12px 7px;border-top:1px solid ${V.linka};text-align:right;white-space:nowrap;vertical-align:top;font-size:12px;font-weight:600">${h}</td>
-    </tr>`
+      <td style="padding:0;vertical-align:top">${obsah}</td>
+    </tr>
+  </table>`
+
+  // Hlavička sloupce v soupisu prací.
+  const zahlavi = (text, sirka, vpravo) => `<td style="${stitek};vertical-align:bottom;border-bottom:1.2px solid ${INK}`
+    + `;padding:0 ${vpravo ? '0' : '10px'} 5px ${vpravo ? '10px' : '0'}`
+    + `${sirka ? ';width:' + sirka : ''}${vpravo ? ';text-align:right' : ''}">${text}</td>`
+
+  // Buňka soupisu prací. Výšku řádku i písmo řídí hustota z appky. Čísla se
+  // nelámou a stojí na pravé ose; sloupce jsou schválně široké, ať se do nich
+  // vejde i „1368.50".
+  const bunka = (vpravo, tucne) => 'padding:' + V.radekY + ' ' + (vpravo ? '0' : '10px')
+    + ' ' + V.radekY + ' ' + (vpravo ? '10px' : '0')
+    + ';border-bottom:1px solid ' + V.linka + ';vertical-align:top;font-size:' + V.pismoPolozky
+    + ';line-height:1.4' + (vpravo ? ';text-align:right;white-space:nowrap' : '')
+    + (tucne ? ';font-weight:700' : '')
+
   // Částku řádku posílá appka spočítanou — tady se nic nepřepočítává.
   const castkaRadku = p => (p.castka != null ? p.castka : (p.celkem != null ? p.celkem : ''))
 
-  return `<div id="invoice-page" style="width:794px;min-height:1123px;background:#fff;font-family:-apple-system,'Segoe UI',Arial,sans-serif;color:#211d1a;box-sizing:border-box">
-<div id="invoice-body" style="width:794px;min-height:1123px;box-sizing:border-box;padding:46px 52px 34px;display:flex;flex-direction:column">
+  // Řádek rekapitulace: popisek vlevo, částka na pravé ose.
+  const soucet = (l, h, pozn) => `<tr>
+      <td style="${stitek};padding:5px 16px 5px 0;vertical-align:top">${l}${pozn ? `<div style="font-size:8px;letter-spacing:0;text-transform:none;color:${SEDA};line-height:1.4;margin-top:2px">${pozn}</div>` : ''}</td>
+      <td style="width:150px;padding:5px 0;text-align:right;vertical-align:top;white-space:nowrap;font-size:12px;font-weight:600">${h}</td>
+    </tr>`
 
-  <!-- hlavička: název dokladu vlevo, číslo vpravo, pod tím dvojitá linka -->
+  return `<div id="invoice-page" style="width:794px;min-height:1123px;background:#fff;font-family:-apple-system,'Segoe UI',Helvetica,Arial,sans-serif;color:${INK};box-sizing:border-box">
+<div id="invoice-body" style="width:794px;min-height:1123px;box-sizing:border-box;padding:${OKRAJ};display:flex;flex-direction:column">
+
+  <!-- ZÁHLAVÍ — na ose stojí číslo dokladu, vpravo od ní nadpis a termíny -->
   <table style="width:100%;border-collapse:collapse;table-layout:fixed">
     <tr>
-      <td style="vertical-align:bottom;padding:0 0 9px">
-        <div style="font-size:14px;font-weight:700;letter-spacing:.26em;text-transform:uppercase;line-height:1.35">${V.L.title}</div>
-      </td>
-      <td style="vertical-align:bottom;text-align:right;padding:0 0 7px;width:40%">
+      <td style="width:${OSA};padding:0 18px 0 0;vertical-align:top">
         <div style="${stitek}">${V.L.number}</div>
-        <div style="font-size:22px;font-weight:700;letter-spacing:.04em;color:${V.barva};margin-top:2px;line-height:1.1">${V.cislo}</div>
+        <div style="font-size:${tesno ? '17px' : '19px'};font-weight:700;letter-spacing:.03em;line-height:1.2;margin-top:3px;color:${V.barva};word-break:break-word">${V.cislo}</div>
       </td>
-    </tr>
-  </table>
-  <div style="height:2px;background:${V.barva}"></div>
-  <div style="height:1px;background:${V.linka};margin-top:2px"></div>
-
-  <!-- termíny: tři údaje oddělené vlasovými svislicemi -->
-  <table style="width:100%;border-collapse:collapse;table-layout:fixed;margin:14px 0 0">
-    <tr>
-      <td style="vertical-align:top;padding:0 14px 0 0">
-        <div style="${stitek}">${V.L.issued}</div>
-        <div style="${hodnota}">${V.datumVystaveni}</div>
-      </td>
-      <td style="vertical-align:top;padding:0 14px;border-left:1px solid ${V.linka}">
-        <div style="${stitek}">${V.L.due}</div>
-        <div style="${hodnota}">${V.datumSplatnosti}</div>
-        <div style="font-size:8px;color:#8b847c;line-height:1.4;margin-top:3px">${V.L.dueDays}</div>
-      </td>
-      ${meta(V.L.period, V.obdobiOd + ' &ndash; ' + V.obdobiDo)}
-    </tr>
-  </table>
-
-  <div style="height:1px;background:${V.linka};margin:14px 0 0"></div>
-
-  <!-- dvě strany vedle sebe, mezi nimi svislá dělicí linka -->
-  <table style="width:100%;border-collapse:collapse;table-layout:fixed;margin:0">
-    <tr>
-      <td style="width:50%;vertical-align:top;padding:16px 26px 16px 0;border-right:1px solid ${V.linka}">
-        <div style="${stitek};color:${V.barva};font-weight:700">${V.L.supplier}</div>
-        <div style="width:26px;height:2px;background:${V.barva};margin:6px 0 8px"></div>
-        <div style="font-size:13px;font-weight:700;letter-spacing:.01em;line-height:1.3">${V.dodavatel.jmeno}</div>
-        <div style="font-size:10.5px;color:#57514a;margin-top:4px;line-height:1.55">${br(V.dodavatel.adresa)}</div>
-        <table style="width:100%;border-collapse:collapse;margin-top:10px">
+      <td style="padding:0;vertical-align:top">
+        <div style="font-size:13px;font-weight:700;letter-spacing:.22em;text-transform:uppercase;line-height:1.35">${V.L.title}</div>
+        <table style="width:100%;border-collapse:collapse;table-layout:fixed;margin-top:${tesno ? '10px' : '14px'}">
           <tr>
-            <td style="vertical-align:top;padding:0 10px 0 0;width:50%">
-              <div style="${stitek}">${V.L.ico}</div>
-              <div style="${hodnota};font-size:10.5px">${V.dodavatel.ic}</div>
+            <td style="width:36%;padding:0 14px 0 0;vertical-align:top">${udaj(V.L.issued, V.datumVystaveni)}</td>
+            <td style="width:32%;padding:0 14px 0 0;vertical-align:top">
+              ${udaj(V.L.due, V.datumSplatnosti)}
+              <div style="font-size:8px;color:${SEDA};line-height:1.45;margin-top:3px;word-break:break-word">${V.L.dueDays}</div>
             </td>
-            <td style="vertical-align:top;padding:0">
-              ${V.dodavatel.platceDph ? `<div style="${stitek}">${V.L.dic}</div>
-              <div style="${hodnota};font-size:10.5px">${V.dodavatel.dic}</div>` : `<div style="${stitek}">&nbsp;</div>`}
-            </td>
-          </tr>
-        </table>
-      </td>
-      <td style="width:50%;vertical-align:top;padding:16px 0 16px 26px">
-        <div style="${stitek};color:${V.barva};font-weight:700">${V.L.customer}</div>
-        <div style="width:26px;height:2px;background:${V.barva};margin:6px 0 8px"></div>
-        <div style="font-size:13px;font-weight:700;letter-spacing:.01em;line-height:1.3">${V.odberatel.jmeno}</div>
-        <div style="font-size:10.5px;color:#57514a;margin-top:4px;line-height:1.55">${br(V.odberatel.adresa)}</div>
-        <table style="width:100%;border-collapse:collapse;margin-top:10px">
-          <tr>
-            <td style="vertical-align:top;padding:0 10px 0 0;width:50%">
-              <div style="${stitek}">${V.L.ico}</div>
-              <div style="${hodnota};font-size:10.5px">${V.odberatel.ic}</div>
-            </td>
-            <td style="vertical-align:top;padding:0">
-              <div style="${stitek}">${V.L.dic}</div>
-              <div style="${hodnota};font-size:10.5px">${V.odberatel.dic}</div>
-            </td>
+            <td style="padding:0;vertical-align:top">${udaj(V.L.period, V.obdobiOd + ' &ndash; ' + V.obdobiDo)}</td>
           </tr>
         </table>
       </td>
     </tr>
   </table>
 
-  <div style="height:1px;background:${V.linka}"></div>
+  <!-- jediná linka přes celý list: nad ní doklad, pod ní očíslovaný protokol -->
+  <div style="height:1.5px;background:${INK};margin-top:${SHORA}"></div>
 
-  <!-- položky: bez rámečku, jen vlasové linky pod řádky -->
-  <table style="width:100%;border-collapse:collapse;table-layout:fixed;margin:${V.mezera} 0 0">
-    <tr>
-      <td style="${zahlavi}">${V.L.desc}</td>
-      <td style="${zahlavi};text-align:right;width:74px">${V.L.qty}</td>
-      <td style="${zahlavi};text-align:right;width:96px">${V.L.price}</td>
-      <td style="${zahlavi};text-align:right;width:106px">${V.L.amount}</td>
-    </tr>
-    ${V.jePolozkova
-      ? (V.polozky || []).map(p => `<tr>
-      <td style="${bunkaP};padding-right:10px">${p.popis}</td>
-      <td style="${bunkaP};text-align:right;white-space:nowrap">${p.mnozstvi}</td>
-      <td style="${bunkaP};text-align:right;white-space:nowrap">${p.cena}</td>
-      <td style="${bunkaP};text-align:right;white-space:nowrap;font-weight:700">${castkaRadku(p)}</td>
-    </tr>`).join('')
-      : `<tr>
-      <td style="${bunkaP};padding-right:10px">
-        <div style="font-size:${V.popisFont}${typeof V.popisFont === 'number' ? 'px' : ''};font-weight:600;line-height:1.4">${V.popisPlneni}</div>
-        ${V.popisPrekl ? `<div style="font-size:9.5px;color:#57514a;margin-top:3px;line-height:1.4">${V.popisPrekl}</div>` : ''}
-        ${V.popisPod ? `<div style="font-size:9px;color:#8b847c;margin-top:3px;line-height:1.4">${V.popisPod}</div>` : ''}
-      </td>
-      <td style="${bunkaP};text-align:right;white-space:nowrap">${V.hodiny}</td>
-      <td style="${bunkaP};text-align:right;white-space:nowrap">${V.sazba}</td>
-      <td style="${bunkaP};text-align:right;white-space:nowrap;font-weight:700">${V.celkem}</td>
-    </tr>`}
-  </table>
+  <!-- 01 DODAVATEL -->
+  ${oddil('01', V.L.supplier, strana(V.dodavatel, V.dodavatel.platceDph))}
 
-  <!-- platební údaje vlevo, orámovaný blok součtů vpravo dole -->
-  <table style="width:100%;border-collapse:collapse;table-layout:fixed;margin:${V.mezera} 0 0;padding-top:12px">
-    <tr>
-      <td style="vertical-align:top;padding:0 26px 0 0">
-        <div style="${stitek};color:${V.barva};font-weight:700">${V.L.payment || V.L.iban}</div>
-        <div style="width:26px;height:2px;background:${V.barva};margin:6px 0 9px"></div>
-        <table style="width:100%;border-collapse:collapse">
-          <tr>
-            <td colspan="2" style="padding:0 0 7px;border-bottom:1px solid ${V.linka};vertical-align:top">
-              <div style="${stitek}">${V.L.iban}</div>
-              <div style="font-size:12px;font-weight:700;letter-spacing:.06em;margin-top:3px">${V.iban}</div>
-            </td>
-          </tr>
-          <tr>
-            <td style="padding:7px 10px 7px 0;border-bottom:1px solid ${V.linka};vertical-align:top;width:50%">
-              <div style="${stitek}">${V.L.swift}</div>
-              <div style="${hodnota}">${V.swift}</div>
-            </td>
-            <td style="padding:7px 0;border-bottom:1px solid ${V.linka};vertical-align:top">
-              <div style="${stitek}">${V.L.ks}</div>
-              <div style="${hodnota}">${V.ks}</div>
-            </td>
-          </tr>
-          <tr>
-            <td colspan="2" style="padding:7px 0 0;vertical-align:top">
-              <div style="${stitek}">${V.L.vs}</div>
-              <div style="font-size:13px;font-weight:700;letter-spacing:.06em;margin-top:3px;color:${V.barva}">${V.vs}</div>
-            </td>
-          </tr>
-        </table>
-      </td>
-      <td style="width:300px;vertical-align:top">
-        <table style="width:100%;border-collapse:collapse;border:1.5px solid ${V.linka}">
-          <tr>
-            <td style="padding:6px 12px 7px;vertical-align:top">
-              <div style="${stitek}">${V.L.total}</div>
-            </td>
-            <td style="padding:6px 12px 7px;text-align:right;white-space:nowrap;vertical-align:top;font-size:12px;font-weight:600">${V.celkem} EUR</td>
-          </tr>
-          ${V.zalohaJe ? soucet(V.L.cashPaid, '&minus; ' + V.zaloha + ' EUR', V.zalohaPozn) : ''}
-          <tr>
-            <td style="padding:10px 12px 11px;border-top:1.5px solid ${V.barva};vertical-align:middle">
-              <div style="font-size:7px;letter-spacing:.2em;text-transform:uppercase;color:#3c3733;font-weight:700;line-height:1.5">${V.L.toPay}</div>
-            </td>
-            <td style="padding:10px 12px 11px;border-top:1.5px solid ${V.barva};text-align:right;white-space:nowrap;vertical-align:middle;font-size:21px;font-weight:800;letter-spacing:.01em;color:${V.barva}">${V.kUhrade} EUR</td>
-          </tr>
-          <tr>
-            <td colspan="2" style="padding:6px 12px 7px;border-top:1px solid ${V.linka};text-align:right;font-size:9px;color:#57514a;line-height:1.5">
-              <span style="${stitek}">${V.L.czk}</span>&nbsp; <span style="font-weight:600;color:#211d1a">${V.czk}</span><br>
-              <span style="${stitek}">${V.L.rate}</span>&nbsp; <span style="font-weight:600;color:#211d1a">${V.kurz}</span>
-            </td>
-          </tr>
-        </table>
-      </td>
-    </tr>
-  </table>
+  <!-- 02 ODBĚRATEL -->
+  ${oddil('02', V.L.customer, strana(V.odberatel, true))}
 
-  <!-- volné místo se sráží nad daňovou poznámkou, ať spodek listu drží pohromadě -->
+  <!-- 03 PROVEDENÉ PRÁCE — soupis bez mřížky, řádky dělí jen vlasová linka -->
+  ${oddil('03', V.L.desc, `<table style="width:100%;border-collapse:collapse;table-layout:fixed">
+        <tr>
+          <!-- popis plnění nadepisuje už nadpisek oddílu na ose, tady by stál
+               podruhé — proto zůstane jen linka nad soupisem -->
+          ${zahlavi('', '', false)}
+          ${zahlavi(V.L.qty, '58px', true)}
+          ${zahlavi(V.L.price, '76px', true)}
+          ${zahlavi(V.L.amount, '98px', true)}
+        </tr>
+        ${V.jePolozkova
+          ? (V.polozky || []).map(p => `<tr>
+          <td style="${bunka(false)}">${p.popis}</td>
+          <td style="${bunka(true)}">${p.mnozstvi}</td>
+          <td style="${bunka(true)}">${p.cena}</td>
+          <td style="${bunka(true, true)}">${castkaRadku(p)}</td>
+        </tr>`).join('')
+          : `<tr>
+          <td style="${bunka(false)}">
+            <div style="font-size:${V.popisFont}${typeof V.popisFont === 'number' ? 'px' : ''};font-weight:600;line-height:1.4">${V.popisPlneni}</div>
+            ${V.popisPrekl ? `<div style="font-size:9.5px;color:${STRED};line-height:1.4;margin-top:3px">${V.popisPrekl}</div>` : ''}
+            ${V.popisPod ? `<div style="font-size:9px;color:${SEDA};line-height:1.4;margin-top:3px">${V.popisPod}</div>` : ''}
+          </td>
+          <td style="${bunka(true)}">${V.hodiny}</td>
+          <td style="${bunka(true)}">${V.sazba}</td>
+          <td style="${bunka(true, true)}">${V.celkem}</td>
+        </tr>`}
+      </table>`)}
+
+  <!-- 04 K ÚHRADĚ — součty na téže pravé ose jako částky v soupisu -->
+  ${oddil('04', V.L.toPay, `<table style="width:100%;border-collapse:collapse;table-layout:fixed">
+        ${soucet(V.L.total, V.celkem + ' EUR', '')}
+        ${V.zalohaJe ? soucet(V.L.cashPaid, '&minus; ' + V.zaloha + ' EUR', V.zalohaPozn) : ''}
+      </table>
+      <div style="border-top:2px solid ${V.barva};margin-top:${tesno ? '5px' : '8px'};padding-top:${tesno ? '6px' : '9px'};text-align:right">
+        <div style="font-size:${CASTKA};font-weight:800;letter-spacing:.01em;line-height:1.1;color:${V.barva};white-space:nowrap">${V.kUhrade} EUR</div>
+      </div>
+      <table style="width:100%;border-collapse:collapse;table-layout:fixed;margin-top:${tesno ? '5px' : '8px'}">
+        <tr>
+          <td style="${stitek};padding:0 16px 0 0;vertical-align:top">${V.L.czk}</td>
+          <td style="width:150px;padding:0;text-align:right;vertical-align:top;font-size:10.5px;font-weight:600;white-space:nowrap">${V.czk}</td>
+        </tr>
+        <tr>
+          <td style="${stitek};padding:4px 16px 0 0;vertical-align:top">${V.L.rate}</td>
+          <td style="width:150px;padding:4px 0 0;text-align:right;vertical-align:top;font-size:10.5px;font-weight:600">${V.kurz}</td>
+        </tr>
+      </table>`)}
+
+  <!-- 05 PLATEBNÍ ÚDAJE -->
+  ${oddil('05', V.L.payment, `<div style="${stitek}">${V.L.iban}</div>
+      <div style="font-size:12.5px;font-weight:700;letter-spacing:.05em;line-height:1.35;margin-top:3px;word-break:break-word">${V.iban}</div>
+      <table style="width:100%;border-collapse:collapse;table-layout:fixed;margin-top:${tesno ? '8px' : '11px'}">
+        <tr>
+          <td style="width:32%;padding:0 14px 0 0;vertical-align:top">${udaj(V.L.swift, V.swift)}</td>
+          <td style="width:34%;padding:0 14px 0 0;vertical-align:top">${udaj(V.L.vs, V.vs)}</td>
+          <td style="padding:0;vertical-align:top">${udaj(V.L.ks, V.ks)}</td>
+        </tr>
+      </table>`)}
+
+  <!-- volné místo se sráží nad patou, ať protokol drží pohromadě nahoře -->
   <div style="flex:1;min-height:${V.mezera}"></div>
 
-  <!-- přenesená daňová povinnost -->
-  <div style="border-left:3px solid ${V.barva};padding:2px 0 2px 12px;margin:0">
-    <div style="font-size:11px;font-weight:700;letter-spacing:.16em;text-transform:uppercase">${V.L.vatReason}</div>
-    <div style="font-size:9.5px;color:#57514a;margin-top:4px;line-height:1.5">${V.L.vatReasonSub}</div>
-  </div>
-
-  <table style="width:100%;border-collapse:collapse;table-layout:fixed;border-top:1px solid ${V.linka};margin:18px 0 0">
+  <!-- PŘENESENÁ DAŇOVÁ POVINNOST — na dokladu být musí, ale stačí jí řádek -->
+  <table style="width:100%;border-collapse:collapse;table-layout:fixed;border-top:1px solid ${V.linka}">
     <tr>
-      <td style="padding:7px 10px 0 0;font-size:8.5px;letter-spacing:.14em;text-transform:uppercase;color:#8b847c;vertical-align:top">${V.L.vatNote}</td>
-      <td style="padding:7px 0 0;text-align:right;font-size:8.5px;letter-spacing:.14em;text-transform:uppercase;color:#8b847c;vertical-align:top">${V.dodavatel.jmeno} &nbsp;·&nbsp; ${V.cislo}</td>
+      <td style="width:${OSA};padding:${SHORA} 18px 0 0;vertical-align:top">
+        <div style="font-size:10px;font-weight:700;letter-spacing:.12em;text-transform:uppercase;line-height:1.35;word-break:break-word">${V.L.vatReason}</div>
+      </td>
+      <td style="padding:${SHORA} 0 0;vertical-align:top">
+        <div style="font-size:9px;color:${STRED};line-height:1.5">${V.L.vatReasonSub}</div>
+      </td>
+    </tr>
+  </table>
+
+  <!-- pata: ať list obstojí i sám za sebe -->
+  <table style="width:100%;border-collapse:collapse;table-layout:fixed;border-top:1px solid ${V.linka};margin-top:${tesno ? '9px' : '13px'}">
+    <tr>
+      <td style="padding:6px 10px 0 0;vertical-align:top;font-size:7.5px;letter-spacing:.07em;text-transform:uppercase;color:${SEDA};word-break:break-word">${V.dodavatel.jmeno}</td>
+      <td style="padding:6px 10px 0;vertical-align:top;text-align:center;font-size:7.5px;letter-spacing:.07em;text-transform:uppercase;color:${SEDA}">${V.cislo}</td>
+      <td style="padding:6px 0 0;vertical-align:top;text-align:right;font-size:7.5px;letter-spacing:.07em;text-transform:uppercase;color:${SEDA};word-break:break-word">${V.L.vatNote}</td>
     </tr>
   </table>
 
@@ -29831,6 +29889,121 @@ function jeZamestnanecFirmy(profil) {
 // k podpisu, doklady, zprávy a profil.
 // Volá se po přihlášení a po každé změně profilu; když se zařazení pod firmu
 // zruší, všechno se zase vrátí.
+// ============ PÁTEČNÍ PŘIPOMENUTÍ VÝKAZU ============
+// V pátek se výkaz hodin musí nechat podepsat vedoucím. Kdo to zapomene,
+// nemá doklad k faktuře. Proto v pátek svítí tlačítko Výkaz hodin červeně,
+// v appce se ukáže upozornění a jednou za den to i pípne.
+
+// Pípnutí pro pracovníka. Prohlížeč zvuk nepustí, dokud člověk do stránky
+// aspoň raz neklikne — proto se to zkusí a když to nevyjde, nic se nestane
+// (upozornění na obrazovce je hlavní, zvuk je jen navíc).
+let _pipnutiCeka = false
+function pipniPracovnikovi() {
+  // Telefon v kapse člověk neslyší, ale cítí. Vibrace zkusíme vždycky,
+  // prohlížeč ji beze slova ignoruje, když ji neumí.
+  try { if (navigator.vibrate) navigator.vibrate([120, 80, 120]) } catch (e) {}
+  try {
+    const Ctx = window.AudioContext || window.webkitAudioContext
+    if (!Ctx) return
+    const ctx = new Ctx()
+    const zahraj = () => {
+      const ton = (kdy, hz) => {
+        const osc = ctx.createOscillator(), g = ctx.createGain()
+        osc.type = 'sine'; osc.frequency.value = hz
+        g.gain.setValueAtTime(0.0001, kdy)
+        g.gain.exponentialRampToValueAtTime(0.3, kdy + 0.02)
+        g.gain.exponentialRampToValueAtTime(0.0001, kdy + 0.22)
+        osc.connect(g); g.connect(ctx.destination)
+        osc.start(kdy); osc.stop(kdy + 0.26)
+      }
+      const t = ctx.currentTime + 0.02
+      ton(t, 784); ton(t + 0.28, 988); ton(t + 0.56, 784)
+      setTimeout(() => { try { ctx.close() } catch (e) {} }, 1500)
+    }
+    if (ctx.state === 'suspended' || ctx.state === 'interrupted') {
+      const p = ctx.resume()
+      // Prohlížeč zvuk nepustí, dokud člověk do stránky nesáhne. Když appka
+      // naskočí z uložené přihlášky (bez jediného kliknutí), odložíme pípnutí
+      // na první dotek — ať o to lidi nepřijdou.
+      if (p && p.then) p.then(zahraj).catch(() => { _odlozPipnuti() }); else zahraj()
+    } else zahraj()
+  } catch (e) { _odlozPipnuti() }
+}
+
+// Počká na první dotek obrazovky a teprve pak pípne. Nachystá se jen jednou.
+function _odlozPipnuti() {
+  if (_pipnutiCeka) return
+  _pipnutiCeka = true
+  const zkus = () => {
+    document.removeEventListener('pointerdown', zkus, true)
+    document.removeEventListener('touchstart', zkus, true)
+    document.removeEventListener('keydown', zkus, true)
+    _pipnutiCeka = false
+    pipniPracovnikovi()
+  }
+  document.addEventListener('pointerdown', zkus, true)
+  document.addEventListener('touchstart', zkus, true)
+  document.addEventListener('keydown', zkus, true)
+}
+
+// Je dneska pátek? Vytažené zvlášť, ať to jde ve zkoušce podstrčit.
+function jePatek(datum) {
+  return (datum || new Date()).getDay() === 5
+}
+
+// Postará se o celé páteční připomenutí. Volá se po přihlášení pracovníka
+// a při každém přepnutí sekce, takže se to objeví i tomu, kdo má appku
+// otevřenou od rána.
+function pripomenVykazVPatek(profil, datumProZkousku) {
+  // Připomínka je pro pracovníky, ne pro správce — ten výkaz nepodepisuje.
+  const p = profil || (typeof currentProfile !== 'undefined' ? currentProfile : null)
+  if (p && p.role === 'admin') return
+  const je = jePatek(datumProZkousku)
+  const navEl = document.getElementById('mob-nav-vykaz')
+  const banner = document.getElementById('mob-vykaz-pripominka')
+
+  // Tlačítko v liště — v pátek křiklavě červené, jinak jako ostatní.
+  if (navEl) {
+    if (je) {
+      navEl.style.background = '#c0281c'
+      navEl.style.color = '#fff'
+      navEl.style.borderRadius = '14px'
+      navEl.style.animation = 'vykazBlik 1.4s ease-in-out infinite'
+      // Popisek si jinak přepínání sekcí obarví do tmavě červené a na červeném
+      // pozadí by nebyl čitelný — na bílé ho tady držíme natvrdo.
+      const lbl = navEl.querySelector('.mob-nav-label')
+      if (lbl) { lbl.style.color = '#fff'; lbl.style.fontWeight = '800' }
+    } else {
+      navEl.style.background = ''
+      navEl.style.color = ''
+      navEl.style.animation = ''
+      // Vrať popisek do stavu, jaký mu dává přepínání sekcí — otevřená sekce
+      // má nápis tmavě červený, ostatní beze změny.
+      const lbl = navEl.querySelector('.mob-nav-label')
+      if (lbl) {
+        const otevrena = navEl.classList.contains('active-nav')
+        lbl.style.color = otevrena ? '#9c3b22' : ''
+        lbl.style.fontWeight = otevrena ? '800' : ''
+      }
+    }
+  }
+
+  if (banner) {
+    banner.style.display = je ? 'block' : 'none'
+  }
+
+  if (!je) return
+
+  // Pípne jednou za den, ne při každém přepnutí sekce.
+  const klic = 'vykaz_pipnuto_' + new Date().toISOString().slice(0, 10)
+  let uzPipnuto = false
+  try { uzPipnuto = !!localStorage.getItem(klic) } catch (e) {}
+  if (!uzPipnuto) {
+    pipniPracovnikovi()
+    try { localStorage.setItem(klic, '1') } catch (e) {}
+  }
+}
+
 function upravMobilProZamestnance(profil) {
   const jeZam = jeZamestnanecFirmy(profil)
 
@@ -31159,8 +31332,8 @@ const NAZVY_VZHLEDU = {
   14: 'Kompaktní údajový list',
   15: 'Hlavičkový papír',
   16: 'Formulářový arch',
-  17: 'Soupis prací',
-  18: 'Dělicí linka',
+  17: 'Souhrn napřed',
+  18: 'Číslovaný protokol',
   19: 'Úřední list',
   20: 'Tichá moderna',
 }
