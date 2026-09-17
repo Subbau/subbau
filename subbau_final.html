@@ -4505,7 +4505,7 @@ async function submitAdminSignatureWithPlacement() {
 // Po nahrání nové verze se snadno pozná, jestli se opravdu nasadila: otevřete
 // appku, zmáčkněte F12 (na Macu ⌥⌘I) a v konzoli je vypsané tohle datum. Když
 // tam svítí starší, prohlížeč nebo GitHub drží starou verzi.
-const SUBBAU_VERZE = '2026-09-17 e — chat odešle vždy, zápis sazby neuskočí obrazem'
+const SUBBAU_VERZE = '2026-09-17 f — změny se propisují do otevřené sekce samy'
 console.log('SubBau docházka — verze ' + SUBBAU_VERZE)
 
 // ============ SUPABASE CONFIG ============
@@ -5551,6 +5551,22 @@ function _onAdminDbChange(table, payload) {
       if (view === 'dashboard') _debouncedRefresh('chat-alert-dis', loadChatAlerts)
       break
   }
+  // Záchytná síť: výše je vyjmenovaná jen část dvojic tabulka × sekce. Kdo byl
+  // zrovna v kalendáři nebo v Provizích, změnu docházky neviděl a musel načíst
+  // stránku ručně. Tohle dorovná otevřenou sekci ať se změní cokoliv.
+  obnovOtevrenouSekci()
+}
+
+// Načte znovu data té sekce, kterou má správce právě otevřenou. Nic nepřepisuje
+// naslepo — když zrovna něco píše do políčka nebo má otevřené okno úpravy,
+// obnovu o kolo odloží, ať mu text nezmizí pod rukama.
+function obnovOtevrenouSekci() {
+  const sekce = _activeAdminView()
+  if (!sekce) return
+  _debouncedRefresh('sekce:' + sekce, () => {
+    if (_adminEditInProgress()) { setTimeout(obnovOtevrenouSekci, 4000); return }
+    try { loadAdminViewData(sekce) } catch (e) { console.warn('[obnova sekce]', sekce, e?.message) }
+  })
 }
 
 // Po ruční úpravě/smazání/přidání docházky adminem: propíše se hned všude, kde
@@ -5567,6 +5583,9 @@ async function refreshAttendanceEverywhere(workerId) {
       loadWdAttendance()
     }
   } catch(e) { console.warn('[refresh] wd-att', e?.message) }
+  // Sekce, kterou má správce zrovna otevřenou (kalendář, Provize, výkazy…).
+  // Realtime na to nespoléháme — na pomalém připojení dorazí pozdě, nebo vůbec.
+  try { obnovOtevrenouSekci() } catch(e) { console.warn('[refresh] sekce', e?.message) }
 }
 // ============ ADMIN ZVUKOVÉ UPOZORNĚNÍ ============
 // Dvojité pípnutí přes Web Audio (žádný externí soubor). Přehraje se jen u admina
