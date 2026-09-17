@@ -4505,7 +4505,7 @@ async function submitAdminSignatureWithPlacement() {
 // Po nahrání nové verze se snadno pozná, jestli se opravdu nasadila: otevřete
 // appku, zmáčkněte F12 (na Macu ⌥⌘I) a v konzoli je vypsané tohle datum. Když
 // tam svítí starší, prohlížeč nebo GitHub drží starou verzi.
-const SUBBAU_VERZE = '2026-09-17 d — Přístupy se načtou vždy, obnovení nechá otevřenou sekci'
+const SUBBAU_VERZE = '2026-09-17 e — chat odešle vždy, zápis sazby neuskočí obrazem'
 console.log('SubBau docházka — verze ' + SUBBAU_VERZE)
 
 // ============ SUPABASE CONFIG ============
@@ -7091,13 +7091,44 @@ async function prekresliProvize() {
   const id = akt && akt.id && /^pv-(rate|prov)-/.test(akt.id) ? akt.id : null
   const hodnota = id ? akt.value : null
   const kurzor = id ? akt.selectionStart : null
+  // Kam byla stránka odrolovaná. Po překreslení se to vrátí — dřív obraz
+  // uskočil nahoru nebo dolů a člověk ztratil řádek, na kterém pracoval.
+  const posunOkna = window.scrollY || document.documentElement.scrollTop || 0
+  const obal = document.getElementById('provize-content')
+  const posunObalu = obal ? obal.scrollTop : 0
+
   await renderProvizeContent()
+
+  // Vrátit obraz tam, kde byl. Dvakrát: hned a ještě po vykreslení, protože
+  // prohlížeč si po výměně obsahu posun občas srovná po svém.
+  const vratPosun = () => {
+    try { window.scrollTo({ top: posunOkna, behavior: 'instant' }) } catch (e) { window.scrollTo(0, posunOkna) }
+    const o2 = document.getElementById('provize-content')
+    if (o2 && posunObalu) o2.scrollTop = posunObalu
+  }
+  vratPosun()
+  requestAnimationFrame(vratPosun)
+
   if (!id) return
   const nove = document.getElementById(id)
   if (!nove) return
   if (hodnota != null && hodnota !== nove.value) nove.value = hodnota
-  nove.focus()
+  // preventScroll: samotné zaostření políčka umí stránkou taky trhnout.
+  try { nove.focus({ preventScroll: true }) } catch (e) { nove.focus() }
   try { if (kurzor != null) nove.setSelectionRange(kurzor, kurzor) } catch (e) { /* number input to nemusí umět */ }
+  // Krátké probliknutí, ať je vidět, že se to uložilo.
+  potvrdUlozeni(nove)
+}
+
+// Zelené probliknutí políčka — tiché „uloženo" bez vyskakovacích hlášek.
+function potvrdUlozeni(el) {
+  if (!el) return
+  try {
+    const puvodni = el.style.boxShadow
+    el.style.transition = 'box-shadow .25s'
+    el.style.boxShadow = '0 0 0 3px var(--green)'
+    setTimeout(() => { el.style.boxShadow = puvodni || '' }, 650)
+  } catch (e) { /* na vzhledu nezáleží tolik, aby kvůli němu něco spadlo */ }
 }
 
 async function saveProvizeRate(input, workerId) {
@@ -10689,11 +10720,35 @@ async function renderMobChatMessages(messages) {
   }).join('')
 }
 
+// Prohlížeč (hlavně Chrome) občas ztratí proměnnou s přihlášeným uživatelem,
+// i když relace dál platí. Než něco odmítneme, zkusíme si ho dotáhnout zpátky.
+// Dřív se kvůli tomu tiše neodeslala zpráva a muselo se načíst celá stránka.
+async function zajistiPrihlaseni() {
+  if (currentUser) return true
+  try {
+    const { data: sess } = await sb.auth.getSession()
+    if (sess?.session?.user) currentUser = sess.session.user
+  } catch (e) { console.warn('[přihlášení] getSession:', e) }
+  if (!currentUser) {
+    try {
+      const { data } = await sb.auth.getUser()
+      if (data?.user) currentUser = data.user
+    } catch (e) { console.warn('[přihlášení] getUser:', e) }
+  }
+  if (!currentUser) {
+    try {
+      const { data: ref } = await sb.auth.refreshSession()
+      if (ref?.session?.user) currentUser = ref.session.user
+    } catch (e) { console.warn('[přihlášení] refreshSession:', e) }
+  }
+  return !!currentUser
+}
+
 async function sendChatMessage() {
   const input = document.getElementById('mob-chat-input')
   const msg = input?.value?.trim()
   if (!msg) return
-  if (!currentUser) { showToast('❌ Nejste přihlášeni'); return }
+  if (!await zajistiPrihlaseni()) { showToast('⚠️ Přihlášení vypršelo — načtěte stránku a zkuste to znovu'); return }
 
   const btn = document.querySelector('#mob-v-chat button')
   if (btn) btn.disabled = true
@@ -11143,7 +11198,16 @@ async function openAdminChat(workerId, workerName) {
 async function sendAdminChatMessage() {
   const input = document.getElementById('admin-chat-input')
   const msg = input?.value?.trim()
-  if (!msg || !activeChatWorkerId || !currentUser) return
+  if (!msg) return
+
+  // Dřív se tu jen tiše skončilo, když appka na chvíli ztratila přihlášeného
+  // uživatele (Chrome to občas udělá). Zpráva zmizela z políčka, nikam se
+  // neodeslala a nic to neřeklo — muselo se znovu načíst celá stránka.
+  // Teď se přihlášení zkusí dotáhnout ze session a když ani to nepomůže,
+  // aspoň se to řekne nahlas a text v políčku zůstane.
+  if (!await zajistiPrihlaseni()) { showToast('⚠️ Přihlášení vypršelo — načtěte stránku a zkuste to znovu'); return }
+  if (!activeChatWorkerId) { showToast('⚠️ Není vybraný pracovník — otevřete konverzaci znovu'); return }
+
   input.value = ''
   input.style.height = 'auto'
 

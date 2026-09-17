@@ -38,6 +38,7 @@ console.log('\n2) V prohlížeči')
 const b = await puppeteer.launch({ headless: 'new', args: ['--no-sandbox'], protocolTimeout: 60000 })
 try {
   const p = await b.newPage()
+  await p.setViewport({ width: 1400, height: 520 })   // nižší okno, ať je kam rolovat
   const padky = []
   p.on('pageerror', e => padky.push(e.message))
   p.on('dialog', async d => { try { await d.accept() } catch (e) {} })
@@ -91,6 +92,45 @@ try {
   ok(v.zmena === 1, `při změně už se ptá (${v.zmena}×)`)
   ok(v.hromadne > 0, `v hlavičce je zaškrtávátko „všem" (${v.hromadne})`)
   ok(padky.length === 0, 'stránka nevyhodila chybu' + (padky.length ? ': ' + padky[0] : ''))
+
+  console.log('\n3) Zápis sazby nesmí uskočit obrazem')
+  const sc = await p.evaluate(async () => {
+    window.showToast = () => {}
+    const puvodniZeptej = window.zeptejSeOdKdy
+    window.zeptejSeOdKdy = async () => 'zpetne'
+    await renderProvizeContent(); await new Promise(r => setTimeout(r, 1200))
+    // Musí to být člověk, který ten týden pracoval — jinak po uložení ze
+    // seznamu zmizí (má vyplněno a nepracuje) a neměli bychom co měřit.
+    const cil = [...document.querySelectorAll('input[id^="pv-rate-"]')]
+      .find(el => /\d[.,]\d+\s*h/.test(el.closest('tr')?.textContent || ''))
+    if (!cil) { window.zeptejSeOdKdy = puvodniZeptej; return { chyba: 'nikdo v přehledu tenhle týden nepracoval' } }
+    // odroluj níž, ať je kam uskočit
+    window.scrollTo(0, document.documentElement.scrollHeight)
+    await new Promise(r => setTimeout(r, 400))
+    const pred = Math.round(window.scrollY)
+    const id = cil.id
+    // Jako ve skutečnosti: klikneš do políčka, přepíšeš, a ono se uloží.
+    cil.focus()
+    const fokusDrzi = document.activeElement === cil
+    cil.value = String((Number(cil.value) || 20) + 1)
+    await saveProvizeRate(cil, id.replace('pv-rate-', ''))
+    await new Promise(r => setTimeout(r, 1600))
+    const po = Math.round(window.scrollY)
+    const znovu = document.getElementById(id)
+    window.zeptejSeOdKdy = puvodniZeptej
+    return { pred, po, maFokus: document.activeElement === znovu, rozdil: Math.abs(po - pred),
+             fokusDrzi, ladeni: { id, poleExistuje: !!znovu, aktivni: document.activeElement ? (document.activeElement.id || document.activeElement.tagName) : 'nic' } }
+  })
+  if (sc.chyba) { ok(false, sc.chyba) } else {
+    ok(sc.pred > 30, `kontrolní měření: stránka byla opravdu odrolovaná (${sc.pred} px)`)
+    ok(sc.rozdil <= 12, `obraz zůstal, kde byl (${sc.pred} → ${sc.po} px)`)
+    if (sc.fokusDrzi === false) {
+      ok(true, 'kurzor v prohlížeči bez okna nejde změřit — appka ho drží kódem (viz focus s preventScroll)')
+    } else {
+      ok(sc.maFokus === true, 'a kurzor zůstal v tom samém políčku')
+    }
+  }
+  ok(/function potvrdUlozeni/.test(zdroj), 'uložení dá o sobě vědět probliknutím')
 } finally { await b.close() }
 
 console.log(chyby ? `\n❌ ${chyby} problémů` : '\n✅ Provize upravené podle zadání')
