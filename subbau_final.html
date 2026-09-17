@@ -4505,7 +4505,7 @@ async function submitAdminSignatureWithPlacement() {
 // Po nahrání nové verze se snadno pozná, jestli se opravdu nasadila: otevřete
 // appku, zmáčkněte F12 (na Macu ⌥⌘I) a v konzoli je vypsané tohle datum. Když
 // tam svítí starší, prohlížeč nebo GitHub drží starou verzi.
-const SUBBAU_VERZE = '2026-09-17 c — nově přidaný člověk je v Provizích vidět hned'
+const SUBBAU_VERZE = '2026-09-17 d — Přístupy se načtou vždy, obnovení nechá otevřenou sekci'
 console.log('SubBau docházka — verze ' + SUBBAU_VERZE)
 
 // ============ SUPABASE CONFIG ============
@@ -5368,6 +5368,8 @@ function showAdmin(profile) {
   document.getElementById('sb-role').textContent = roleLabels[profile.role] || profile.role
   document.getElementById('sb-av').textContent = profile.full_name.split(' ').map(n=>n[0]).join('').slice(0,2)
   loadDashboard()
+  // Vrátit správce tam, kde skončil. Až po načtení nástěnky, ať se nepřepíše.
+  setTimeout(obnovPosledniSekci, 0)
   loadWorkers()
   loadAttendanceWorkers()
   loadTeams()
@@ -6580,6 +6582,12 @@ async function loadAccess() {
   const tbody = document.getElementById('access-table')
   if (!tbody) return
   tbody.innerHTML = '<tr><td colspan="6" style="text-align:center;padding:20px;color:var(--text3)">Načítám...</td></tr>'
+  // Tabulka se níž přepisuje jen tehdy, když se obsah liší od toho, co do ní
+  // appka zapsala naposledy (ať zbytečně nebliká při tichém obnovování).
+  // Tuhle poznámku je NUTNÉ zahodit spolu s „Načítám…" — jinak při druhém
+  // otevření sekce dorazí stejná data jako minule, appka usoudí, že není co
+  // měnit, a „Načítám…" tam zůstane napořád.
+  delete tbody.dataset.accessHtml
 
   const { data } = await sb.from('profiles')
     .select('id, full_name, email, role, is_active, last_login_at, login_count, last_seen_at')
@@ -18714,7 +18722,23 @@ function _startAdminFallbackPolling() {
   }, 45000)
 }
 
+// Kam se má appka vrátit po znovunačtení stránky. Dřív po obnovení vždycky
+// skočila na nástěnku, i když správce pracoval třeba v Týmech.
+const POSLEDNI_SEKCE = 'sb_admin_posledni_sekce'
+
+function obnovPosledniSekci() {
+  let name = ''
+  try { name = localStorage.getItem(POSLEDNI_SEKCE) || '' } catch (e) {}
+  if (!name || name === 'dashboard') return
+  if (!document.getElementById('v-' + name)) return
+  // Najdi v nabídce tlačítko té sekce, ať se podbarví to správné.
+  const navEl = [...document.querySelectorAll('.sb-a')]
+    .find(a => (a.getAttribute('onclick') || '').includes(`sv('${name}'`))
+  try { sv(name, navEl || null) } catch (e) { console.warn('[sekce] obnovení selhalo:', e) }
+}
+
 function sv(name, navEl) {
+  try { localStorage.setItem(POSLEDNI_SEKCE, name) } catch (e) {}
   // Při každém přepnutí stránky znovu rozmaž dlaždice na dashboardu (soukromí)
   if (typeof reblurStats === 'function') reblurStats()
   document.querySelectorAll('.view').forEach(v=>v.classList.remove('on'))
