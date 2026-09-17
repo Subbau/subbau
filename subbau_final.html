@@ -2917,6 +2917,23 @@ setTimeout(function () {
           🔒 Tato sekce je viditelná pouze adminům SubBau
         </div>
 
+        <!-- Zaměstnanec firmy (s.r.o.). Firma má pod sebou vlastní lidi:
+             ti si zapisují docházku, ale nemají sazbu ani fakturaci — za
+             všechny fakturuje firma a provizi máme napsanou u ní. -->
+        <div style="border:1.5px solid var(--brd);border-radius:10px;padding:14px;margin-bottom:16px">
+          <div style="font-size:13px;font-weight:700;margin-bottom:4px">🏢 Zaměstnanec firmy</div>
+          <div style="font-size:11.5px;color:var(--text3);margin-bottom:10px;line-height:1.5">
+            Když tenhle člověk pracuje pod nějakou firmou (s.r.o.), vyberte ji.
+            Zapisuje si pak jen docházku — sazbu, fakturaci ani nic kolem živnosti
+            mít nebude. Za jeho hodiny fakturuje ta firma a provizi počítáme u ní.
+          </div>
+          <select id="wd-zamestnavatel" onchange="ulozZamestnavatele(this)"
+                  style="width:100%;padding:9px;border:1.5px solid var(--brd);border-radius:8px;font-size:14px;font-family:inherit">
+            <option value="">— není zaměstnanec, pracuje sám na sebe (OSVČ) —</option>
+          </select>
+          <div id="wd-zamestnavatel-info" style="font-size:11.5px;margin-top:7px;line-height:1.5"></div>
+        </div>
+
         <!-- Nastavení zákazníka faktury pro tohoto pracovníka -->
         <div style="border:1.5px solid var(--brd);border-radius:10px;padding:14px;margin-bottom:16px">
           <div style="font-size:13px;font-weight:700;margin-bottom:10px">📄 Fakturace — odběratel</div>
@@ -4526,7 +4543,7 @@ async function submitAdminSignatureWithPlacement() {
 // Po nahrání nové verze se snadno pozná, jestli se opravdu nasadila: otevřete
 // appku, zmáčkněte F12 (na Macu ⌥⌘I) a v konzoli je vypsané tohle datum. Když
 // tam svítí starší, prohlížeč nebo GitHub drží starou verzi.
-const SUBBAU_VERZE = '2026-09-17 l — šipkami se dolistuje na všech dvacet vzhledů'
+const SUBBAU_VERZE = '2026-09-17 m — zaměstnance jde zařadit pod firmu (s.r.o.)'
 console.log('SubBau docházka — verze ' + SUBBAU_VERZE)
 
 // ============ SUPABASE CONFIG ============
@@ -29753,6 +29770,86 @@ function closeWorkerModal() {
   currentWorkerId = null
 }
 
+// ============ FIRMY (s.r.o.) SE ZAMĚSTNANCI ============
+// Někdy zprostředkujeme práci firmě, která má pod sebou vlastní lidi. Ti si
+// zapisují docházku, ale nemají sazbu ani fakturaci — za všechny fakturuje
+// firma a provizi máme napsanou u ní, za všechny její lidi dohromady.
+
+// Je tenhle člověk zaměstnanec nějaké firmy?
+function jeZamestnanecFirmy(profil) {
+  return !!(profil && profil.zamestnavatel_id)
+}
+
+// Je tenhle člověk firma, která má pod sebou zaměstnance?
+function jeFirmaSeZamestnanci(profil) {
+  return !!(profil && profil.supplier_type === 'sro')
+}
+
+// Naplní nabídku firem v kartě pracovníka.
+async function naplnVyberZamestnavatele(profil) {
+  const sel = document.getElementById('wd-zamestnavatel')
+  const info = document.getElementById('wd-zamestnavatel-info')
+  if (!sel) return
+  const vybrany = (profil && profil.zamestnavatel_id) || ''
+  let { data: firmy, error } = await sb.from('profiles')
+    .select('id, full_name, company_name')
+    .eq('supplier_type', 'sro').eq('is_active', true).order('full_name')
+  if (error) {
+    sel.innerHTML = '<option value="">— nepodařilo se načíst firmy —</option>'
+    if (info) info.innerHTML = '<span style="color:var(--amber)">⚠️ ' + escAttr(error.message) + '</span>'
+    return
+  }
+  // Sám sebe si za zaměstnavatele nastavit nemůže.
+  firmy = (firmy || []).filter(f => !profil || f.id !== profil.id)
+  sel.innerHTML = '<option value="">— není zaměstnanec, pracuje sám na sebe (OSVČ) —</option>'
+    + firmy.map(f => `<option value="${f.id}"${f.id === vybrany ? ' selected' : ''}>${escAttr(f.company_name || f.full_name)}</option>`).join('')
+  sel.value = vybrany ? String(vybrany) : ''
+  vykresliInfoZamestnavatele(profil, firmy)
+}
+
+function vykresliInfoZamestnavatele(profil, firmy) {
+  const info = document.getElementById('wd-zamestnavatel-info')
+  if (!info) return
+  if (jeFirmaSeZamestnanci(profil)) {
+    info.innerHTML = '<span style="color:var(--blue);font-weight:700">🏢 Tenhle profil je firma (s.r.o.)</span>'
+      + '<br>Fakturuje za své lidi dohromady a provizi počítáme u ní.'
+    return
+  }
+  if (!firmy || !firmy.length) {
+    info.innerHTML = '<span style="color:var(--text3)">Zatím žádná firma — označte ji v jejím profilu jako s.r.o. v části „Fakturace — dodavatel".</span>'
+    return
+  }
+  info.innerHTML = jeZamestnanecFirmy(profil)
+    ? '<span style="color:var(--amber);font-weight:700">Zapisuje si jen docházku.</span> Sazbu ani fakturaci nemá — za jeho hodiny fakturuje firma.'
+    : '<span style="color:var(--text3)">Pracuje sám na sebe — sazba i fakturace jako dosud.</span>'
+}
+
+async function ulozZamestnavatele(el) {
+  const id = currentWorkerId
+  if (!id) return
+  const firmaId = (el && el.value) || null
+  el.disabled = true
+  const { data, error } = await sb.from('profiles')
+    .update({ zamestnavatel_id: firmaId }).eq('id', id).select('id, zamestnavatel_id')
+  el.disabled = false
+  if (error) {
+    showToast(/zamestnavatel_id|column|schema cache/i.test(error.message || '')
+      ? '❌ Chybí sloupec zamestnavatel_id — spusťte migraci supabase-migrace-firma-zamestnanci.sql'
+      : '❌ Chyba: ' + error.message)
+    if (currentWorkerProfile) el.value = currentWorkerProfile.zamestnavatel_id || ''
+    return
+  }
+  // Zápis, který kvůli právům netrefí ani jeden řádek, vrací úspěch bez chyby.
+  if (!data || !data.length || (data[0].zamestnavatel_id || null) !== (firmaId || null)) {
+    showToast('❌ Změna se neuložila — zařazení pod firmu mění jen správce')
+    if (currentWorkerProfile) el.value = currentWorkerProfile.zamestnavatel_id || ''
+    return
+  }
+  if (currentWorkerProfile) currentWorkerProfile.zamestnavatel_id = firmaId
+  showToast(firmaId ? '✅ Zařazen pod firmu' : '✅ Pracuje sám na sebe')
+  naplnVyberZamestnavatele(currentWorkerProfile)
+}
+
 function wdTab(name, btn) {
   document.querySelectorAll('.wdt').forEach(t=>t.classList.remove('on'))
   document.getElementById('wdt-'+name)?.classList.add('on')
@@ -29760,7 +29857,7 @@ function wdTab(name, btn) {
   if(btn) btn.classList.add('on')
   if(name==='dochazka') loadWdAttendance()
   if(name==='smlouvy') loadWdContracts(currentWorkerId)
-  if(name==='finance') { loadWdFinance(); if(currentWorkerProfile) { loadWorkerInvoiceCustomer(currentWorkerProfile); loadWdInvoiceForm(currentWorkerProfile) } }
+  if(name==='finance') { naplnVyberZamestnavatele(currentWorkerProfile); loadWdFinance(); if(currentWorkerProfile) { loadWorkerInvoiceCustomer(currentWorkerProfile); loadWdInvoiceForm(currentWorkerProfile) } }
   if(name==='dovolena') loadWdVacations()
 }
 
