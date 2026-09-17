@@ -1729,6 +1729,27 @@ setTimeout(function () {
               </tbody>
             </table>
           </div>
+
+          <!-- Generování PDF výkazů má vlastní heslo. Do appky může mít přístup
+               víc lidí (třeba asistentka na doklady) a ta nemá vidět, kdo kolik
+               odpracoval. Zbytek Týmů zůstává bez hesla. -->
+          <div class="card" style="margin-top:16px">
+            <div class="card-h">
+              <h4>📄 Přístup / generování PDF</h4>
+              <span style="font-size:12px;color:var(--text3)">Kdo smí v Týmech vygenerovat PDF docházky (email + vlastní heslo, nesouvisí s přihlášením do appky)</span>
+            </div>
+            <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px">
+              <input type="email" id="ea-new-email" placeholder="email@example.com" style="flex:1;min-width:180px;padding:9px 12px;border:1.5px solid var(--brd);border-radius:8px;font-size:14px;font-family:inherit">
+              <input type="text" id="ea-new-pwd" placeholder="Heslo" style="flex:1;min-width:140px;padding:9px 12px;border:1.5px solid var(--brd);border-radius:8px;font-size:14px;font-family:inherit">
+              <button onclick="addExportAccess()" style="padding:9px 16px;background:#211D1A;color:#E8A13A;border:none;border-radius:8px;font-size:13px;font-weight:700;cursor:pointer;font-family:inherit">+ Přidat</button>
+            </div>
+            <table>
+              <thead><tr><th>Email</th><th>Přidáno</th><th style="text-align:right">Akce</th></tr></thead>
+              <tbody id="export-access-table">
+                <tr><td colspan="3" style="text-align:center;color:var(--text3);padding:20px">Načítám...</td></tr>
+              </tbody>
+            </table>
+          </div>
         </div>
 
         <div id="v-provize" class="view">
@@ -4505,7 +4526,7 @@ async function submitAdminSignatureWithPlacement() {
 // Po nahrání nové verze se snadno pozná, jestli se opravdu nasadila: otevřete
 // appku, zmáčkněte F12 (na Macu ⌥⌘I) a v konzoli je vypsané tohle datum. Když
 // tam svítí starší, prohlížeč nebo GitHub drží starou verzi.
-const SUBBAU_VERZE = '2026-09-17 h — řidičský průkaz mezi doklady, německé názvy stahovaných souborů'
+const SUBBAU_VERZE = '2026-09-17 i — generování PDF výkazů má vlastní heslo'
 console.log('SubBau docházka — verze ' + SUBBAU_VERZE)
 
 // ============ SUPABASE CONFIG ============
@@ -6769,6 +6790,89 @@ async function deleteProvizeAccess(id, email) {
 // Odemčení Odkazů. Ověřuje se proti témuž seznamu hesel jako Provize
 // (tabulka provize_access), ať SubBau nespravuje dvě hesla. Kdo odemkne
 // jedno, má i druhé — obojí ukazuje ta samá citlivá čísla.
+// ============ PŘÍSTUP KE GENEROVÁNÍ PDF VÝKAZŮ ============
+// Vlastní heslo, nezávislé na přihlášení do appky. Do appky může mít přístup
+// víc lidí (třeba asistentka na doklady) a ta nemá vidět odpracované hodiny.
+// Zamyká se JEN generování PDF, zbytek Týmů zůstává přístupný.
+
+async function loadExportAccessList() {
+  const tbody = document.getElementById('export-access-table')
+  if (!tbody) return
+  if (!smiVidetProvize()) { tbody.innerHTML = '<tr><td colspan="3" style="text-align:center;color:var(--text3);padding:20px">Přístupy může spravovat jen správce.</td></tr>'; return }
+  tbody.innerHTML = '<tr><td colspan="3" style="text-align:center;color:var(--text3);padding:20px">Načítám...</td></tr>'
+  const { data, error } = await sb.from('export_access').select('id, email, created_at').order('created_at')
+  if (error) {
+    tbody.innerHTML = '<tr><td colspan="3" style="text-align:center;color:var(--amber);padding:20px">Tabulka export_access zatím neexistuje — spusťte migraci supabase-migrace-pristup-export-pdf.sql</td></tr>'
+    return
+  }
+  if (!data || !data.length) {
+    tbody.innerHTML = '<tr><td colspan="3" style="text-align:center;color:var(--text3);padding:20px">Zatím nikdo — dokud tu nikdo není, generování PDF se heslem nezamyká</td></tr>'
+    return
+  }
+  tbody.innerHTML = data.map(r => `<tr>
+    <td style="font-weight:600">${escAttr(r.email)}</td>
+    <td style="color:var(--text3);font-size:12px">${r.created_at ? new Date(r.created_at).toLocaleDateString('cs-CZ') : '—'}</td>
+    <td style="text-align:right"><button onclick="removeExportAccess('${r.id}','${escAttr(r.email)}')" style="padding:5px 10px;font-size:11px;background:var(--red-l);color:var(--red);border:1px solid var(--red);border-radius:6px;cursor:pointer;font-family:inherit">Odebrat</button></td>
+  </tr>`).join('')
+}
+
+async function addExportAccess() {
+  const emailEl = document.getElementById('ea-new-email')
+  const pwdEl = document.getElementById('ea-new-pwd')
+  const email = (emailEl?.value || '').trim().toLowerCase()
+  const pwd = pwdEl?.value || ''
+  if (!email || !pwd) { showToast('⚠️ Vyplňte email i heslo'); return }
+  if (pwd.length < 4) { showToast('⚠️ Heslo musí mít aspoň 4 znaky'); return }
+  const password_hash = await sha256Hex(pwd)
+  const { error } = await sb.from('export_access').upsert({ email, password_hash }, { onConflict: 'email' })
+  if (error) {
+    showToast(/export_access|relation|does not exist/i.test(error.message || '')
+      ? '❌ Nejdřív spusťte migraci supabase-migrace-pristup-export-pdf.sql'
+      : '❌ Chyba: ' + error.message)
+    return
+  }
+  emailEl.value = ''; pwdEl.value = ''
+  showToast('✅ Přístup ke generování PDF přidán')
+  loadExportAccessList()
+}
+
+async function removeExportAccess(id, email) {
+  if (!confirm('Opravdu odebrat přístup ke generování PDF pro ' + (email || 'tento email') + '?')) return
+  const { error } = await sb.from('export_access').delete().eq('id', id)
+  if (error) { showToast('❌ Chyba: ' + error.message); return }
+  showToast('🗑 Přístup odebrán')
+  loadExportAccessList()
+}
+
+// Odemkne generování PDF. Vrací true, když se smí generovat.
+// Dokud v tabulce nikdo není, nezamyká se nic — ať si to SubBau může zapnout,
+// až bude chtít, a do té doby jim to nepřekáží.
+async function odemkniExportPdf() {
+  try { if (sessionStorage.getItem('exportPdfUnlocked')) return true } catch (e) {}
+  let seznam = null
+  const { data, error } = await sb.from('export_access').select('email')
+  if (error) {
+    console.warn('[export PDF] tabulka export_access nenačtena:', error.message)
+    return true          // migrace ještě neproběhla → nezamykáme
+  }
+  seznam = data || []
+  if (!seznam.length) return true
+
+  const email = (prompt('Generování PDF je chráněné heslem.\n\nZadejte e-mail:') || '').trim().toLowerCase()
+  if (!email) return false
+  const pwd = prompt('Zadejte heslo pro ' + email + ':') || ''
+  if (!pwd) return false
+  const hash = await sha256Hex(pwd)
+  const { data: radek } = await sb.from('export_access')
+    .select('password_hash').eq('email', email).maybeSingle()
+  if (!radek || radek.password_hash !== hash) {
+    showToast('❌ Nesprávný e-mail nebo heslo')
+    return false
+  }
+  try { sessionStorage.setItem('exportPdfUnlocked', email) } catch (e) {}
+  return true
+}
+
 async function unlockOdkazy() {
   const emailEl = document.getElementById('odkazy-lock-email')
   const pwdEl = document.getElementById('odkazy-lock-pwd')
@@ -14380,6 +14484,11 @@ async function generateTeamAttendancePdf(teamId, teamName) {
   if (!val) { showToast('⚠️ Vyberte týden'); return }
   const [week, year] = val.split('/').map(Number)
 
+  // Generování PDF je chráněné vlastním heslem (Přístupy → Přístup /
+  // generování PDF). Do appky může mít přístup víc lidí a ne každý má vidět,
+  // kdo kolik odpracoval. Dokud tam žádný přístup není, nezamyká se nic.
+  if (!await odemkniExportPdf()) { showToast('🔒 Generování PDF zrušeno'); return }
+
   const workers = _workersCache || []
   // Kdo je v Týmech odškrtnutý, ve výkazu není — i když hodiny odpracoval.
   const members = workers.filter(w => w.team_id === teamId && patriDoVykazu(w))
@@ -18783,7 +18892,7 @@ function loadAdminViewData(name) {
   if(name === 'zpravy') { loadNotifWorkers(); loadNotifHistory() }
   if(name === 'pristupy') { loadAccess() }
   if(name === 'provize') { loadProvize() }
-  if(name === 'provize-pristup') { loadProvizeAccessList() }
+  if(name === 'provize-pristup') { loadProvizeAccessList(); loadExportAccessList() }
   if(name === 'smlouvy') { loadAdminContracts(); loadContractWorkers() }
   if(name === 'faktury') { loadCompanies() }
   if(name === 'faktury-archiv') { loadWorkerInvoices() }
