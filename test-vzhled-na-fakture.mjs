@@ -125,7 +125,7 @@ const sel = prvek('test-sel'); M.naplnVyberVzhledu(sel, 6)
 ok((sel.innerHTML.match(/<option/g) || []).length === Object.keys(M.NAZVY_VZHLEDU).length,
    `v nabídce jsou všechny vzhledy (${Object.keys(M.NAZVY_VZHLEDU).length})`)
 ok(sel.value === '6', 'předvybraný je ten uložený')
-ok(Object.keys(M.NAZVY_VZHLEDU).length === 10, 'názvů vzhledů je deset')
+ok(Object.keys(M.NAZVY_VZHLEDU).length === 20, 'názvů vzhledů je dvacet')
 
 console.log('\n── barvy si jde vybrat ──')
 const kodBarev = src.slice(src.indexOf('async function ulozBarvuFaktury'), src.indexOf('async function ulozVzhledFaktury'))
