@@ -4505,7 +4505,7 @@ async function submitAdminSignatureWithPlacement() {
 // Po nahrání nové verze se snadno pozná, jestli se opravdu nasadila: otevřete
 // appku, zmáčkněte F12 (na Macu ⌥⌘I) a v konzoli je vypsané tohle datum. Když
 // tam svítí starší, prohlížeč nebo GitHub drží starou verzi.
-const SUBBAU_VERZE = '2026-09-17 f — změny se propisují do otevřené sekce samy'
+const SUBBAU_VERZE = '2026-09-17 g — podskupiny v Provizích, vzhled a záloha v přehledu faktur'
 console.log('SubBau docházka — verze ' + SUBBAU_VERZE)
 
 // ============ SUPABASE CONFIG ============
@@ -7511,12 +7511,17 @@ async function renderProvizeContent() {
   const yStart = new Date(anchor.getFullYear(), 0, 1)
   const yEnd = new Date(anchor.getFullYear(), 11, 31)
 
-  const [{ data: workers }, provResult, { data: teams }, { data: companies }] = await Promise.all([
-    sb.from('profiles').select('id, full_name, hourly_rate_worker, team_id').in('role', ['osvec', 'partak']).eq('is_active', true).order('full_name'),
+  const [{ data: workers }, provResult, { data: teams }, { data: companies }, { data: subteams }] = await Promise.all([
+    sb.from('profiles').select('id, full_name, hourly_rate_worker, team_id, subteam_id').in('role', ['osvec', 'partak']).eq('is_active', true).order('full_name'),
     sb.from('worker_commissions').select('worker_id, provize, payment_terms, bez_provize'),
     sb.from('teams').select('id, name, company_id, is_active'),
-    sb.from('companies').select('id, name')
+    sb.from('companies').select('id, name'),
+    // Podskupiny — v Provizích má být u jména vidět, do které patří, stejně
+    // jako v Týmech. Bez toho se u větších firem nedá poznat, kdo kde dělá.
+    sb.from('subteams').select('id, name').eq('is_active', true)
   ])
+  const subteamById = {}
+  ;(subteams || []).forEach(st => { subteamById[st.id] = st.name })
 
   // Když ještě neproběhla migrace supabase-migrace-provize-splatnost.sql, sloupec payment_terms
   // v tabulce neexistuje a celý select výše skončí chybou — BEZ retry by to smazalo i provize
@@ -7766,6 +7771,7 @@ async function renderProvizeContent() {
     const dueInfo = provizeDueInfo(terms)
     return {
       id: w.id, name: w.full_name + (w._byvaly ? ' (bývalý)' : ''), firm: firmOf(w), rate,
+      podskupina: w.subteam_id ? (subteamById[w.subteam_id] || '') : '',
       prov, provUlozena, bezProvize: bezProvize.has(w.id), byvaly: !!w._byvaly,
       // Do přehledu patří jen ten, jehož skupina je přiřazená k nějaké firmě.
       // Samotná skupina bez firmy nestačí — za takového člověka není komu
@@ -7865,7 +7871,14 @@ async function renderProvizeContent() {
         ? '<div style="font-size:10px;margin-top:3px;color:var(--amber)">⚠️ neukládá se (chybí migrace)</div>'
         : `<div style="font-size:10px;margin-top:3px;font-weight:${r.overdue ? '700' : '400'};color:${r.overdue ? 'var(--red)' : 'var(--text3)'}">${r.overdue ? '⚠️ po splatnosti ' : 'splatnost '}${r.dueDate.toLocaleDateString('cs-CZ')}</div>`
       return `<tr style="${rowBg}">
-        <td style="font-size:${isNoFirm ? '16px' : '14.5px'};font-weight:600">${r.name}${r.overdue ? ' <span style="font-size:11px;color:var(--red);font-weight:700">⚠️ nezaplaceno</span>' : ''}</td>
+        <td style="font-size:${isNoFirm ? '16px' : '14.5px'};font-weight:600">${r.name}${r.overdue ? ' <span style="font-size:11px;color:var(--red);font-weight:700">⚠️ nezaplaceno</span>' : ''}${
+          // Podskupina pod jménem — stejná barva jako v Týmech, ať se to dá
+          // spárovat pohledem. U větších firem je bez toho nepoznat, kdo kde dělá.
+          r.podskupina ? (() => {
+            const c = groupColor(r.podskupina, 'sub')
+            return `<div style="margin-top:3px"><span class="pill" style="background:#fff;color:${c.text};border:1.5px solid ${c.border};white-space:nowrap;font-size:10.5px;font-weight:700">👥 ${escAttr(r.podskupina)}</span></div>`
+          })() : ''
+        }</td>
         <td style="text-align:right"><input id="pv-rate-${r.id}" type="number" step="0.01" value="${r.rate || ''}" placeholder="chybí" title="${r.rate ? '' : 'Chybí hodinová sazba — dokud ji nezadáte, počítá se pracovníkovi nula'}" onchange="saveProvizeRate(this,'${r.id}')" style="width:80px;padding:6px 8px;border:${r.rate ? '1.5px solid var(--brd)' : '2px solid var(--red)'};background:${r.rate ? '' : 'var(--red-l)'};border-radius:7px;font-size:14px;text-align:right;font-family:inherit"> €/h</td>
         <td style="text-align:right"><input id="pv-prov-${r.id}" type="number" step="0.01" value="${r.provUlozena || ''}" placeholder="chybí" title="${r.provUlozena ? (r.bezProvize ? 'Sazba zůstává uložená, ale nepočítá se — pracovník je označený „bez provize“' : '') : 'Chybí provize — dokud ji nezadáte, počítá se nula'}" onchange="saveProvizeCommission(this,'${r.id}')" style="width:80px;padding:6px 8px;border:${r.provUlozena ? '1.5px solid var(--amber)' : '2px solid var(--red)'};background:${r.provUlozena ? '' : 'var(--red-l)'};border-radius:7px;font-size:14px;text-align:right;font-family:inherit;background:#faf6ee"> €/h</td>
         <td style="text-align:center;padding:0"><label title="Pracovník odešel dřív, než za něj přijdou peníze — nepočítat mu provizi" style="display:flex;align-items:center;justify-content:center;width:100%;height:100%;min-height:44px;padding:8px;cursor:pointer"><input type="checkbox" ${r.bezProvize ? 'checked' : ''} onchange="toggleBezProvize(this,'${r.id}')" style="width:20px;height:20px;cursor:pointer;accent-color:var(--red)"></label></td>
@@ -12799,7 +12812,19 @@ function renderWorkerInvoices() {
     return oddelovac + `
     <tr>
       <td style="border-left:5px solid ${barva || 'transparent'}"><b>${escAttr(r.worker?.full_name || r.supplier_name || '—')}</b>${r.supplier_name && r.worker?.full_name && r.supplier_name !== r.worker.full_name ? `<div style="font-size:11px;color:var(--text3)">${escAttr(r.supplier_name)}</div>` : ''}</td>
-      <td style="font-weight:700;white-space:nowrap">${escAttr(r.invoice_number || '—')}${kod ? `<div style="font-size:11.5px;font-weight:800;letter-spacing:.03em;color:${barva || 'var(--text3)'}">${escAttr(kod)}</div>` : ''}</td>
+      <td style="font-weight:700;white-space:nowrap">${escAttr(r.invoice_number || '—')}${kod ? `<div style="font-size:11.5px;font-weight:800;letter-spacing:.03em;color:${barva || 'var(--text3)'}">${escAttr(kod)}</div>` : ''}${
+        // Ve kterém vzhledu je faktura vystavená. Bez toho se v přehledu nedalo
+        // poznat, který člověk fakturuje v jakém — a přitom se to nastavuje
+        // dopředu u pracovníka.
+        `<div style="font-size:10.5px;font-weight:600;color:var(--text3);margin-top:2px" title="Vzhled faktury — nastavuje se u pracovníka">🎨 vzhled ${Number(r.design_idx) || 1}</div>`
+      }${
+        // Záloha, která se z faktury odečetla. Ať je v přehledu vidět, že
+        // částka není celá — a jestli šla na účet, nebo v hotovosti.
+        (Number(r.cash_paid) || 0) > 0 ? `<div style="font-size:10.5px;font-weight:700;color:#8a5a00;margin-top:2px" title="Z faktury se odečetla už uhrazená část">💰 záloha ${(Number(r.cash_paid)).toFixed(2).replace('.', ',')} € · ${
+          (Array.isArray(r.zalohy_pouzite) && r.zalohy_pouzite.length) ? 'zálohová faktura'
+          : (r.cash_paid_typ === 'ucet' ? 'na účet' : 'hotově')
+        }</div>` : ''
+      }</td>
       <td style="white-space:nowrap">${r.kw ? 'KW ' + r.kw + '/' + r.kw_year : '—'}${r.period_from ? `<div style="font-size:11px;color:var(--text3)">${_invDmy(r.period_from)} – ${_invDmy(r.period_to)}</div>` : ''}</td>
       <td style="font-size:12px">${escAttr(r.customer_name || '—')}</td>
       <td style="text-align:right;white-space:nowrap">${(Number(r.total_hours) || 0).toFixed(2)} h</td>
