@@ -82,7 +82,57 @@ try {
   const podruhe = await p.evaluate(async () => await odemkniExportPdf())
   ok(podruhe === true, 'a podruhé už se neptá (pamatuje si to do zavření appky)')
 
-  await p.evaluate(async () => { await sb.from('export_access').delete().eq('id', 'ea-zk-1') })
+  console.log('\n3) Změna e-mailu a hesla')
+  // změna hesla
+  odpovedi = ['sef@ukazka.cz', 'noveheslo9']
+  const zmena = await p.evaluate(async () => {
+    const toasty = []; window.showToast = m => toasty.push(String(m))
+    await upravExportAccess('ea-zk-1', 'sef@ukazka.cz')
+    await new Promise(r => setTimeout(r, 800))
+    const { data } = await sb.from('export_access').select('email, password_hash').eq('id', 'ea-zk-1')
+    const noveHash = await sha256Hex('noveheslo9')
+    let odemceno = null
+    try { odemceno = sessionStorage.getItem('exportPdfUnlocked') } catch (e) {}
+    return { hashSedi: data?.[0]?.password_hash === noveHash, odemceno, toasty }
+  })
+  ok(zmena.hashSedi === true, 'heslo se dá změnit')
+  ok(zmena.odemceno === null, 'a kdo si ho změnil, musí ho zadat znovu')
+
+  // staré heslo už nesmí projít
+  odpovedi = ['sef@ukazka.cz', 'tajne123']
+  const stareNeprojde = await p.evaluate(async () => {
+    window.showToast = () => {}
+    try { sessionStorage.removeItem('exportPdfUnlocked') } catch (e) {}
+    return await odemkniExportPdf()
+  })
+  ok(stareNeprojde === false, 'staré heslo už neprojde')
+
+  // změna e-mailu
+  odpovedi = ['asistentka@ukazka.cz', '']
+  const zmenaMailu = await p.evaluate(async () => {
+    window.showToast = () => {}
+    await upravExportAccess('ea-zk-1', 'sef@ukazka.cz')
+    await new Promise(r => setTimeout(r, 800))
+    const { data } = await sb.from('export_access').select('email').eq('id', 'ea-zk-1')
+    return data?.[0]?.email
+  })
+  ok(zmenaMailu === 'asistentka@ukazka.cz', `e-mail se dá změnit (${zmenaMailu})`)
+
+  // a odebrání zavře i probíhající odemčení
+  const poOdebrani = await p.evaluate(async () => {
+    window.showToast = () => {}
+    window.confirm = () => true
+    try { sessionStorage.setItem('exportPdfUnlocked', 'asistentka@ukazka.cz') } catch (e) {}
+    await removeExportAccess('ea-zk-1', 'asistentka@ukazka.cz')
+    await new Promise(r => setTimeout(r, 800))
+    const { data } = await sb.from('export_access').select('id').eq('id', 'ea-zk-1')
+    let odemceno = null
+    try { odemceno = sessionStorage.getItem('exportPdfUnlocked') } catch (e) {}
+    return { zbylo: (data || []).length, odemceno }
+  })
+  ok(poOdebrani.zbylo === 0, 'přístup jde odebrat')
+  ok(poOdebrani.odemceno === null, 'a odebranému se zavře i probíhající odemčení')
+
   ok(padky.length === 0, 'stránka nevyhodila chybu' + (padky.length ? ': ' + padky[0] : ''))
 } finally { await b.close() }
 

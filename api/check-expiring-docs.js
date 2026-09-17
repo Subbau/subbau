@@ -152,6 +152,81 @@ function workerEmailHtml({ name, docLabel, validUntil, daysLeft }) {
 </body></html>`;
 }
 
+// Povinné doklady. Občanka a pas jsou zaměnitelné — stačí jeden z nich.
+// Musí odpovídat DOC_TYPES v subbau_final.html (required: true).
+const POVINNE_DOKLADY = ['op', 'zivnost', 'a1', 'ridicak'];
+
+// Nadpis upomínky. Podle něj se pozná, co už dneska odešlo — proto musí být
+// pokaždé stejný a nesmí se do něj cpát jméno ani seznam dokladů.
+const UPOMINKA_NADPIS = '📄 Chybí nám od vás doklady';
+
+// Upomínky za CHYBĚJÍCÍ doklady — ty, které nikdo nikdy nenahrál.
+// Chodí jen v pondělí a ve čtvrtek, a jen jako zpráva v aplikaci (bez e-mailu).
+// Dokud člověk doklad nedodá, připomene se mu to dvakrát týdně.
+async function upomenChybejiciDoklady(serviceKey, dnesIso) {
+  const den = new Date(dnesIso + 'T00:00:00').getDay();   // 0 = neděle
+  if (den !== 1 && den !== 4) return { preskoceno: 'není pondělí ani čtvrtek' };
+
+  const lide = await sb(
+    `profiles?select=id,full_name,bez_ridicaku&role=in.(osvec,partak)&is_active=eq.true`,
+    serviceKey
+  ).catch(async () => await sb(
+    // Bez migrace sloupec bez_ridicaku není — načti to aspoň bez něj.
+    `profiles?select=id,full_name&role=in.(osvec,partak)&is_active=eq.true`,
+    serviceKey
+  ));
+  if (!lide?.length) return { poslano: 0 };
+
+  const ids = lide.map((w) => w.id);
+  const doklady = await sb(
+    `documents?select=worker_id,doc_type,status&worker_id=in.(${ids.join(',')})`,
+    serviceKey
+  );
+
+  // Co už dneska odešlo — ať se při dvojím spuštění neposílá dvakrát.
+  // Poznáváme to podle nadpisu, ne podle vlastního typu: sloupec `type` může
+  // mít v databázi omezený výčet hodnot a nová hodnota by zápis tiše shodila.
+  const jizPoslano = await sb(
+    `notifications?select=worker_id&title=eq.${encodeURIComponent(UPOMINKA_NADPIS)}&created_at=gte.${dnesIso}T00:00:00`,
+    serviceKey
+  ).catch(() => []);
+  const dnesUz = new Set((jizPoslano || []).map((n) => n.worker_id));
+
+  let poslano = 0;
+  const chyby = [];
+  for (const w of lide) {
+    if (dnesUz.has(w.id)) continue;
+    const moje = (doklady || []).filter((d) => d.worker_id === w.id);
+    const chceme = w.bez_ridicaku === true
+      ? POVINNE_DOKLADY.filter((t) => t !== 'ridicak')
+      : POVINNE_DOKLADY;
+    const chybi = chceme.filter((typ) => !moje.some((d) => {
+      const sedi = typ === 'op' ? (d.doc_type === 'op' || d.doc_type === 'pas') : d.doc_type === typ;
+      return sedi && d.status !== 'rejected' && d.status !== 'unreadable';
+    }));
+    if (!chybi.length) continue;
+
+    const seznam = chybi.map((t) => DOC_LABELS[t] || t).join(', ');
+    try {
+      await sb('notifications', serviceKey, {
+        method: 'POST',
+        body: JSON.stringify({
+          worker_id: w.id,
+          title: UPOMINKA_NADPIS,
+          message: 'Zatím nemáme: ' + seznam
+            + '. Nahrajte je prosím v aplikaci v sekci Dokumenty. Bez nich vám nemůžeme proplácet práci.',
+          type: 'obecna',
+          is_read: false,
+        }),
+      });
+      poslano++;
+    } catch (e) {
+      chyby.push(String(e?.message || e));
+    }
+  }
+  return { poslano, chyby };
+}
+
 module.exports = async function handler(req, res) {
   // Endpoint smí spustit jen ten, kdo zná CRON_SECRET.
   //
@@ -196,8 +271,13 @@ module.exports = async function handler(req, res) {
       serviceKey
     );
 
+    // Upomínky za CHYBĚJÍCÍ doklady běží nezávisle na tom, jestli zrovna
+    // někomu končí platnost — proto se pouštějí dřív než případný odchod níž.
+    const upominky = await upomenChybejiciDoklady(serviceKey, toIso(today))
+      .catch((e) => ({ chyba: String(e?.message || e) }));
+
     if (!docs?.length) {
-      res.status(200).json({ ok: true, checked: 0, notified: 0, message: 'Žádné končící doklady' });
+      res.status(200).json({ ok: true, checked: 0, notified: 0, upominky, message: 'Žádné končící doklady' });
       return;
     }
 
@@ -317,7 +397,7 @@ module.exports = async function handler(req, res) {
     // heslo někdy dostalo ven, ať s ním neunikne rovnou seznam lidí ve firmě.
     // Podrobnosti zůstávají v logu nasazení ve Vercelu.
     const problemy = results.filter((r) => r.error).map((r) => r.error);
-    res.status(200).json({ ok: true, checked: docs.length, notified: results.length, problemy });
+    res.status(200).json({ ok: true, checked: docs.length, notified: results.length, upominky, problemy });
   } catch (e) {
     res.status(500).json({ ok: false, error: String(e?.message || e) });
   }

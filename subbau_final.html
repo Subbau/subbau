@@ -4526,7 +4526,7 @@ async function submitAdminSignatureWithPlacement() {
 // Po nahrání nové verze se snadno pozná, jestli se opravdu nasadila: otevřete
 // appku, zmáčkněte F12 (na Macu ⌥⌘I) a v konzoli je vypsané tohle datum. Když
 // tam svítí starší, prohlížeč nebo GitHub drží starou verzi.
-const SUBBAU_VERZE = '2026-09-17 i — generování PDF výkazů má vlastní heslo'
+const SUBBAU_VERZE = '2026-09-17 j — upomínky na chybějící doklady, správa přístupů k PDF'
 console.log('SubBau docházka — verze ' + SUBBAU_VERZE)
 
 // ============ SUPABASE CONFIG ============
@@ -6812,7 +6812,10 @@ async function loadExportAccessList() {
   tbody.innerHTML = data.map(r => `<tr>
     <td style="font-weight:600">${escAttr(r.email)}</td>
     <td style="color:var(--text3);font-size:12px">${r.created_at ? new Date(r.created_at).toLocaleDateString('cs-CZ') : '—'}</td>
-    <td style="text-align:right"><button onclick="removeExportAccess('${r.id}','${escAttr(r.email)}')" style="padding:5px 10px;font-size:11px;background:var(--red-l);color:var(--red);border:1px solid var(--red);border-radius:6px;cursor:pointer;font-family:inherit">Odebrat</button></td>
+    <td style="text-align:right;white-space:nowrap">
+      <button onclick="upravExportAccess('${r.id}','${escAttr(r.email)}')" style="padding:5px 10px;font-size:11px;background:var(--amber-l);color:#9a6b15;border:1px solid var(--amber);border-radius:6px;cursor:pointer;font-family:inherit;margin-right:6px">Změnit</button>
+      <button onclick="removeExportAccess('${r.id}','${escAttr(r.email)}')" style="padding:5px 10px;font-size:11px;background:var(--red-l);color:var(--red);border:1px solid var(--red);border-radius:6px;cursor:pointer;font-family:inherit">Odebrat</button>
+    </td>
   </tr>`).join('')
 }
 
@@ -6836,10 +6839,45 @@ async function addExportAccess() {
   loadExportAccessList()
 }
 
+// Změna e-mailu nebo hesla u existujícího přístupu. Heslo se nechá prázdné,
+// když se má nechat to staré — nikde se nedá přečíst, ukládá se jen otisk.
+async function upravExportAccess(id, puvodniEmail) {
+  const email = (prompt('E-mail:', puvodniEmail || '') || '').trim().toLowerCase()
+  if (!email) return
+  const pwd = prompt('Nové heslo pro ' + email + ':\n\n(nechte prázdné, když se heslo měnit nemá)') || ''
+  if (pwd && pwd.length < 4) { showToast('⚠️ Heslo musí mít aspoň 4 znaky'); return }
+
+  const zmena = { email }
+  if (pwd) zmena.password_hash = await sha256Hex(pwd)
+  const { data, error } = await sb.from('export_access').update(zmena).eq('id', id).select('id, email')
+  if (error) {
+    showToast(/duplicate key|already exists|23505|unique/i.test(error.message || '')
+      ? '❌ Tenhle e-mail už v seznamu je'
+      : '❌ Chyba: ' + error.message)
+    return
+  }
+  // Update, který kvůli právům netrefí ani jeden řádek, vrací úspěch bez chyby.
+  if (!data || !data.length) { showToast('❌ Změna se neuložila (zkontrolujte oprávnění)'); return }
+
+  // Kdo si právě změnil vlastní přístup, musí heslo zadat znovu — jinak by se
+  // jelo dál na starém odemčení a změna by se projevila až po zavření appky.
+  try {
+    if (pwd || sessionStorage.getItem('exportPdfUnlocked') === puvodniEmail) {
+      sessionStorage.removeItem('exportPdfUnlocked')
+    }
+  } catch (e) {}
+  showToast(pwd ? '✅ E-mail i heslo změněny' : '✅ E-mail změněn')
+  loadExportAccessList()
+}
+
 async function removeExportAccess(id, email) {
   if (!confirm('Opravdu odebrat přístup ke generování PDF pro ' + (email || 'tento email') + '?')) return
   const { error } = await sb.from('export_access').delete().eq('id', id)
   if (error) { showToast('❌ Chyba: ' + error.message); return }
+  // Odebranému se musí zavřít i probíhající odemčení, jinak by generoval dál.
+  try {
+    if (sessionStorage.getItem('exportPdfUnlocked') === email) sessionStorage.removeItem('exportPdfUnlocked')
+  } catch (e) {}
   showToast('🗑 Přístup odebrán')
   loadExportAccessList()
 }
