@@ -103,5 +103,61 @@ try {
   ok(padky.length === 0, 'stránka nevyhodila chybu' + (padky.length ? ': ' + padky[0] : ''))
 } finally { await b.close() }
 
-console.log(chyby ? `\n❌ ${chyby} problémů` : '\n✅ Zaměstnanci nemají peníze, provize jde firmě')
+console.log('\n3) Firma fakturuje za všechny své lidi')
+{
+  const b3 = await puppeteer.launch({ headless: 'new', args: ['--no-sandbox'], protocolTimeout: 60000 })
+  try {
+    const p3 = await b3.newPage()
+    const padky3 = []
+    p3.on('pageerror', e => padky3.push(e.message))
+    p3.on('dialog', async d => { try { await d.accept() } catch (e) {} })
+    await p3.goto('file://' + UKAZKA, { waitUntil: 'networkidle0' })
+    await p3.waitForFunction(() => typeof window.openWorkerModal === 'function', { timeout: 20000 })
+
+    const f = await p3.evaluate(async () => {
+      window.showToast = () => {}
+      const kw = getKW()
+      const { data: dny } = await sb.from('attendance').select('worker_id, total_hours')
+        .eq('kw', kw.week).eq('kw_year', kw.year).not('total_hours', 'is', null)
+      const kdo = [...new Set((dny || []).map(d => d.worker_id))]
+      if (kdo.length < 2) return { chyba: 'málo lidí s hodinami' }
+      const firmaId = kdo[0], zamId = kdo[1]
+      const soucet = id2 => (dny || []).filter(d => d.worker_id === id2)
+        .reduce((s2, d) => s2 + Number(d.total_hours || 0), 0)
+      const hFirmy = soucet(firmaId), hZam = soucet(zamId)
+
+      const tydnyText = async () => {
+        await openWorkerModal(firmaId); await new Promise(r => setTimeout(r, 1200))
+        wdTab('finance', document.querySelector('.wd-tab[onclick*="finance"]'))
+        await new Promise(r => setTimeout(r, 1800))
+        const sel = document.getElementById('wd-inv-week')
+        const opt = [...(sel?.options || [])].find(o => o.value === kw.week + '/' + kw.year)
+        return opt ? opt.textContent : ''
+      }
+
+      await sb.from('profiles').update({ supplier_type: null, company_name: null }).eq('id', firmaId)
+      await sb.from('profiles').update({ zamestnavatel_id: null }).eq('id', zamId)
+      const pred = await tydnyText()
+
+      await sb.from('profiles').update({ supplier_type: 'sro', company_name: 'Stavby Novák s.r.o.' }).eq('id', firmaId)
+      await sb.from('profiles').update({ zamestnavatel_id: firmaId }).eq('id', zamId)
+      const po = await tydnyText()
+
+      await sb.from('profiles').update({ supplier_type: null, company_name: null }).eq('id', firmaId)
+      await sb.from('profiles').update({ zamestnavatel_id: null }).eq('id', zamId)
+      return { pred, po, hFirmy, hZam }
+    })
+
+    if (f.chyba) { ok(false, f.chyba) } else {
+      const cislo = t => { const m = String(t).match(/([\d.]+)h/); return m ? Number(m[1]) : null }
+      ok(cislo(f.pred) !== null, `kontrolní měření: u firmy je vidět počet hodin (${f.pred.trim()})`)
+      ok(Math.abs(cislo(f.pred) - f.hFirmy) < 0.2, 'před zařazením jsou to jen její vlastní hodiny')
+      ok(Math.abs(cislo(f.po) - (f.hFirmy + f.hZam)) < 0.2,
+         `po zařazení se přičtou i hodiny zaměstnance (${cislo(f.pred)} → ${cislo(f.po)} h)`)
+    }
+    ok(padky3.length === 0, 'stránka nevyhodila chybu' + (padky3.length ? ': ' + padky3[0] : ''))
+  } finally { await b3.close() }
+}
+
+console.log(chyby ? `\n❌ ${chyby} problémů` : '\n✅ Zaměstnanci nemají peníze, provize i faktura jdou přes firmu')
 process.exit(chyby ? 1 : 0)

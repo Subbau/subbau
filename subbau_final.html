@@ -4543,7 +4543,7 @@ async function submitAdminSignatureWithPlacement() {
 // Po nahrání nové verze se snadno pozná, jestli se opravdu nasadila: otevřete
 // appku, zmáčkněte F12 (na Macu ⌥⌘I) a v konzoli je vypsané tohle datum. Když
 // tam svítí starší, prohlížeč nebo GitHub drží starou verzi.
-const SUBBAU_VERZE = '2026-09-17 o — provize za zaměstnance se počítá u firmy'
+const SUBBAU_VERZE = '2026-09-17 p — firma vystaví fakturu za všechny své lidi'
 console.log('SubBau docházka — verze ' + SUBBAU_VERZE)
 
 // ============ SUPABASE CONFIG ============
@@ -23019,10 +23019,18 @@ async function generateInvoiceMob(lang = 'en', override = null) {
 
   showToast('⏳ Načítám docházku...')
 
-  // Načti hodiny za vybraný týden
+  // Načti hodiny za vybraný týden. U firmy (s.r.o.) se berou i hodiny jejích
+  // zaměstnanců — firma fakturuje za všechny své lidi dohromady, sami za sebe
+  // nefakturují a sazbu nemají.
+  let kohoFakturovat = [workerId]
+  if (prof && prof.supplier_type === 'sro') {
+    const { data: lide } = await sb.from('profiles').select('id').eq('zamestnavatel_id', workerId)
+    const ids = (lide || []).map(x => x.id).filter(Boolean)
+    if (ids.length) kohoFakturovat = kohoFakturovat.concat(ids)
+  }
   const { data: att, error: attErr } = await sb.from('attendance')
     .select('*')
-    .eq('worker_id', workerId)
+    .in('worker_id', kohoFakturovat)
     .eq('kw', parseInt(week))
     .eq('kw_year', parseInt(year))
 
@@ -31441,9 +31449,18 @@ async function loadWdInvoiceForm(profile) {
   // Ukaž odběratele včetně IČO a DIČ — chybějící údaje dotáhni z databáze firem
   renderWdInvoiceCustomerInfo(profile)
 
+  // U firmy (s.r.o.) se v nabídce týdnů počítají i hodiny jejích zaměstnanců —
+  // fakturuje za všechny dohromady, takže by jinak viděla „bez docházky"
+  // i v týdnu, kdy jí lidé odpracovali stovky hodin.
+  let kohoPocitat = [currentWorkerId]
+  if (profile && profile.supplier_type === 'sro') {
+    const { data: lide } = await sb.from('profiles').select('id').eq('zamestnavatel_id', currentWorkerId)
+    const ids = (lide || []).map(x => x.id).filter(Boolean)
+    if (ids.length) kohoPocitat = kohoPocitat.concat(ids)
+  }
   const { data } = await sb.from('attendance')
     .select('kw, kw_year, total_hours')
-    .eq('worker_id', currentWorkerId)
+    .in('worker_id', kohoPocitat)
 
   const weeks = new Map()
   ;(data || []).forEach(r => {
