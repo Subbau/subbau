@@ -2632,7 +2632,7 @@ setTimeout(function () {
       <div class="mob-nav-label">Výkaz hodin</div>
     </button>
     <div class="mob-nav-spacer"></div>
-    <button class="mob-nav-btn" onclick="mobSv('faktury',this)">
+    <button class="mob-nav-btn" id="mob-nav-faktury" onclick="mobSv('faktury',this)">
       <div class="mob-nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16l3-2 2 2 2-2 2 2 3-2V8z"/><path d="M14 2v6h6"/><path d="M9 13h6"/><path d="M9 17h4"/></svg></div>
       <div class="mob-nav-label">Faktury</div>
     </button>
@@ -4543,7 +4543,7 @@ async function submitAdminSignatureWithPlacement() {
 // Po nahrání nové verze se snadno pozná, jestli se opravdu nasadila: otevřete
 // appku, zmáčkněte F12 (na Macu ⌥⌘I) a v konzoli je vypsané tohle datum. Když
 // tam svítí starší, prohlížeč nebo GitHub drží starou verzi.
-const SUBBAU_VERZE = '2026-09-17 m — zaměstnance jde zařadit pod firmu (s.r.o.)'
+const SUBBAU_VERZE = '2026-09-17 n — zaměstnanec firmy neřeší fakturaci'
 console.log('SubBau docházka — verze ' + SUBBAU_VERZE)
 
 // ============ SUPABASE CONFIG ============
@@ -5283,6 +5283,8 @@ async function _initAppInner(user) {
     startHeartbeat(user.id)
     // Chybí povinné dokumenty? Vyskočí okno, které jde zavřít jen křížkem.
     setTimeout(() => { try { checkMissingDocsAlert() } catch(e) { console.warn(e) } }, 1200)
+    // Zaměstnanec firmy neřeší fakturaci ani nic kolem živnosti — schovej mu to.
+    try { upravMobilProZamestnance(profile) } catch(e) { console.warn('[zaměstnanec firmy]', e) }
   }
 
   // Nemá přístup do aplikace — buď registrace ještě není schválená,
@@ -29778,6 +29780,48 @@ function closeWorkerModal() {
 // Je tenhle člověk zaměstnanec nějaké firmy?
 function jeZamestnanecFirmy(profil) {
   return !!(profil && profil.zamestnavatel_id)
+}
+
+// Zaměstnanci firmy schová všechno kolem živnosti a fakturace. Nic z toho
+// neřeší — za jeho hodiny fakturuje firma. Zůstane mu docházka, výkaz hodin
+// k podpisu, doklady, zprávy a profil.
+// Volá se po přihlášení a po každé změně profilu; když se zařazení pod firmu
+// zruší, všechno se zase vrátí.
+function upravMobilProZamestnance(profil) {
+  const jeZam = jeZamestnanecFirmy(profil)
+
+  // Spodní lišta — Faktury
+  const navFaktury = document.getElementById('mob-nav-faktury')
+  if (navFaktury) navFaktury.style.display = jeZam ? 'none' : ''
+
+  // Kdyby zrovna v té sekci stál, přepneme ho na docházku, ať nezůstane
+  // koukat na prázdno.
+  if (jeZam) {
+    const fakturyView = document.getElementById('mob-v-faktury')
+    if (fakturyView && fakturyView.classList.contains('on')) {
+      try { mobSv('dochazka', null) } catch (e) {}
+    }
+  }
+
+  // Vysvětlení v profilu, ať neřeší, kam mu fakturace zmizela.
+  let info = document.getElementById('mob-zamestnanec-info')
+  if (jeZam && !info) {
+    const profilView = document.getElementById('mob-v-profil')
+    if (profilView) {
+      info = document.createElement('div')
+      info.id = 'mob-zamestnanec-info'
+      info.style.cssText = 'margin:0 0 14px;padding:11px 13px;background:#eef3f8;border:1px solid #c7d6e4;border-radius:12px;font-size:12.5px;line-height:1.55;color:#2c4257'
+      profilView.insertBefore(info, profilView.firstChild)
+    }
+  }
+  if (info) {
+    info.style.display = jeZam ? 'block' : 'none'
+    if (jeZam) {
+      info.innerHTML = '<b>Pracujete pod firmou.</b><br>'
+        + 'Zapisujete si docházku a na konci týdne výkaz hodin. '
+        + 'Faktury ani nic kolem živnosti neřešíte — to za vás dělá firma.'
+    }
+  }
 }
 
 // Je tenhle člověk firma, která má pod sebou zaměstnance?

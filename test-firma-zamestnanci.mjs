@@ -104,5 +104,46 @@ try {
   ok(padky.length === 0, 'stránka nevyhodila chybu' + (padky.length ? ': ' + padky[0] : ''))
 } finally { await b.close() }
 
-console.log(chyby ? `\n❌ ${chyby} problémů` : '\n✅ Zaměstnance jde zařadit pod firmu')
+console.log('\n4) Co zaměstnanec firmy v mobilu vidí a nevidí')
+const b2 = await puppeteer.launch({ headless: 'new', args: ['--no-sandbox'], protocolTimeout: 60000 })
+try {
+  const p2 = await b2.newPage()
+  const padky2 = []
+  p2.on('pageerror', e => padky2.push(e.message))
+  p2.on('dialog', async d => { try { await d.accept() } catch (e) {} })
+  await p2.goto('file://' + UKAZKA, { waitUntil: 'networkidle0' })
+  await p2.waitForFunction(() => typeof window.upravMobilProZamestnance === 'function', { timeout: 20000 })
+
+  const m = await p2.evaluate(async () => {
+    window.showToast = () => {}
+    const vidiFaktury = () => {
+      const el = document.getElementById('mob-nav-faktury')
+      return !!el && el.style.display !== 'none'
+    }
+    const info = () => {
+      const el = document.getElementById('mob-zamestnanec-info')
+      return el && el.style.display !== 'none' ? (el.textContent || '').trim() : ''
+    }
+    // běžný OSVČ
+    upravMobilProZamestnance({ id: 'x' })
+    const osvc = { faktury: vidiFaktury(), info: info() }
+    // zaměstnanec firmy
+    upravMobilProZamestnance({ id: 'x', zamestnavatel_id: 'firma-1' })
+    const zam = { faktury: vidiFaktury(), info: info() }
+    // a když ho z firmy vyřadíme, vrátí se mu to
+    upravMobilProZamestnance({ id: 'x' })
+    const zpet = { faktury: vidiFaktury(), info: info() }
+    return { osvc, zam, zpet }
+  })
+
+  ok(m.osvc.faktury === true, 'kontrolní měření: OSVČ Faktury v liště vidí')
+  ok(m.osvc.info === '', 'a žádnou hlášku o firmě nemá')
+  ok(m.zam.faktury === false, 'zaměstnanci firmy Faktury z lišty zmizí')
+  ok(/Pracujete pod firmou/.test(m.zam.info), 'a v profilu se mu vysvětlí proč')
+  ok(m.zpet.faktury === true, 'po vyřazení z firmy se mu Faktury zase vrátí')
+  ok(m.zpet.info === '', 'a hláška zmizí')
+  ok(padky2.length === 0, 'stránka nevyhodila chybu' + (padky2.length ? ': ' + padky2[0] : ''))
+} finally { await b2.close() }
+
+console.log(chyby ? `\n❌ ${chyby} problémů` : '\n✅ Zaměstnanec firmy má jen docházku, fakturaci neřeší')
 process.exit(chyby ? 1 : 0)
