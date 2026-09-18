@@ -38,8 +38,12 @@ ok(/invoice_design_check\|violates check constraint/.test(zdroj),
    'když databáze vzhled odmítne, appka řekne kterou migraci spustit — ne „něco se nepovedlo"')
 
 console.log('\n3) Vzhled se pamatuje a jde měnit z přehledu')
-ok(/designIdx: prof\.invoice_design \|\| 1/.test(zdroj),
+ok(/async function vzhledProNovouFakturu/.test(zdroj) && /designIdx: vzhledFaktury/.test(zdroj),
    'nová faktura se vystaví ve vzhledu uloženém u člověka — platí tedy i další týdny')
+ok(/order\('created_at', \{ ascending: false \}\)\.limit\(1\)/.test(zdroj),
+   'když v profilu nic není, zkopíruje se vzhled z POSLEDNÍ faktury')
+ok(/\.not\('design_idx', 'is', null\)/.test(zdroj),
+   'a to jen z faktury, která nějaký vzhled opravdu má')
 ok(/invoice_color, can_track_hours, is_active, invoice_design\)/.test(zdroj),
    'přehled faktur si natáhne i vzhled nastavený u člověka')
 ok(/onchange="event\.stopPropagation\(\);ulozVzhledZPrehledu\(this,'\$\{r\.worker_id\}'\)"/.test(zdroj),
@@ -47,8 +51,8 @@ ok(/onchange="event\.stopPropagation\(\);ulozVzhledZPrehledu\(this,'\$\{r\.worke
 ok(/async function ulozVzhledZPrehledu/.test(zdroj), 'a ukládá se rovnou')
 ok(/select\('invoice_design'\)\.eq\('id', workerId\)\.maybeSingle\(\)/.test(zdroj),
    'po uložení se ověří, že to databáze opravdu vzala (PostgREST hlásí úspěch i když nic nezapsal)')
-ok(/tahle faktura: vzhled/.test(zdroj),
-   'když je už vystavená faktura v jiném vzhledu, je to vidět — PDF se totiž nepřepisuje')
+ok(/platí od příští faktury/.test(zdroj),
+   'když se nastavený vzhled liší od toho na faktuře, je napsané že platí až příště')
 
 console.log('\n4) Nový člověk dostane nejméně používaný vzhled')
 ok(/async function prideliNejmenePouzivanyVzhled/.test(zdroj), 'funkce existuje')
