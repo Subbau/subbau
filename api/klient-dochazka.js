@@ -332,6 +332,21 @@ module.exports = async (req, res) => {
         const h = parseInt(String(telo.hodnoceni), 10);
         zmena.hodnoceni = (Number.isInteger(h) && h >= 1 && h <= 6) ? h : null;
       }
+      // Ukončená spolupráce. Zaškrtnutí a datum jdou zvlášť — odběratel může
+      // zaškrtnout hned a datum doplnit až potom, až si ho dohledá.
+      if ('spoluprace_ukoncena' in telo) {
+        zmena.spoluprace_ukoncena = !!telo.spoluprace_ukoncena;
+      }
+      if ('spoluprace_do' in telo) {
+        const d = String(telo.spoluprace_do || '').trim();
+        if (!d) {
+          zmena.spoluprace_do = null;
+        } else if (/^\d{4}-\d{2}-\d{2}$/.test(d) && !Number.isNaN(Date.parse(d))) {
+          zmena.spoluprace_do = d;
+        } else {
+          res.status(400).json({ ok: false, chyba: 'spatne_datum' }); return;
+        }
+      }
 
       try {
         const r = await fetch(`${SUPABASE_URL}/rest/v1/client_link_workers` +
@@ -550,11 +565,26 @@ module.exports = async (req, res) => {
     // Co si odběratel u lidí poznamenal — fotka, poznámka, známka.
     let poznamky = {};
     try {
-      const pz = await db(
-        `client_link_workers?select=worker_id,foto,poznamka,hodnoceni&link_id=eq.${odkaz.id}`, klic);
+      // Dokud neproběhne migrace, sloupce o ukončené spolupráci neexistují.
+      // Kdyby na tom celý dotaz spadl, odběratel by přišel i o fotky a poznámky —
+      // proto se to zkusí znovu bez nich.
+      let pz;
+      try {
+        pz = await db(
+          `client_link_workers?select=worker_id,foto,poznamka,hodnoceni,spoluprace_ukoncena,spoluprace_do&link_id=eq.${odkaz.id}`, klic);
+      } catch (e) {
+        // POZOR: db() hlásí jen „db 400", podrobnosti jsou v e.kod.
+        // Ústup pouštíme jen u chybějícího sloupce (42703), ne při výpadku.
+        if (e.kod !== '42703' && e.stav !== 400) throw e;
+        console.warn('[klient] chybí sloupce o ukončené spolupráci — spusťte supabase-migrace-ukoncena-spoluprace.sql');
+        pz = await db(
+          `client_link_workers?select=worker_id,foto,poznamka,hodnoceni&link_id=eq.${odkaz.id}`, klic);
+      }
       for (const p of (pz || [])) {
         poznamky[p.worker_id] = { foto: p.foto || null, poznamka: p.poznamka || '',
-                                  hodnoceni: p.hodnoceni || null };
+                                  hodnoceni: p.hodnoceni || null,
+                                  spoluprace_ukoncena: !!p.spoluprace_ukoncena,
+                                  spoluprace_do: p.spoluprace_do || '' };
       }
     } catch (e) { console.warn('[klient] poznámky se nenačetly:', e.message); }
 

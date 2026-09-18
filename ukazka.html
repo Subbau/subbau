@@ -5233,7 +5233,7 @@ async function submitAdminSignatureWithPlacement() {
 // Po nahrání nové verze se snadno pozná, jestli se opravdu nasadila: otevřete
 // appku, zmáčkněte F12 (na Macu ⌥⌘I) a v konzoli je vypsané tohle datum. Když
 // tam svítí starší, prohlížeč nebo GitHub drží starou verzi.
-const SUBBAU_VERZE = '2026-09-18 r — filtr firem v provizích, kalendář na 3 týdny, vzhledy 11-20'
+const SUBBAU_VERZE = '2026-09-18 s — odběratel označí ukončenou spolupráci a datum'
 console.log('StavKo docházka — verze ' + SUBBAU_VERZE)
 
 // ============ SUPABASE CONFIG ============
@@ -14819,9 +14819,17 @@ async function ukazPoznamkyOdberatele(linkId) {
   box.style.display = ''
   box.innerHTML = '<div style="color:var(--text3);font-size:12.5px;padding:6px 0">Načítám…</div>'
 
-  const { data, error } = await sb.from('client_link_workers')
-    .select('worker_id, foto, poznamka, hodnoceni, upraveno, worker:profiles!worker_id(full_name)')
+  // Ukončenou spolupráci si odběratel označuje sám v odkazu. Dokud neproběhne
+  // migrace, ty sloupce neexistují — pak se ptáme bez nich, ať StavKo nepřijde
+  // ani o fotky a poznámky.
+  let { data, error } = await sb.from('client_link_workers')
+    .select('worker_id, foto, poznamka, hodnoceni, spoluprace_ukoncena, spoluprace_do, upraveno, worker:profiles!worker_id(full_name)')
     .eq('link_id', linkId).order('upraveno', { ascending: false })
+  if (error && /spoluprace|42703|column/i.test(error.message || '')) {
+    ;({ data, error } = await sb.from('client_link_workers')
+      .select('worker_id, foto, poznamka, hodnoceni, upraveno, worker:profiles!worker_id(full_name)')
+      .eq('link_id', linkId).order('upraveno', { ascending: false }))
+  }
   if (error) {
     box.innerHTML = /client_link_workers|does not exist|schema cache/i.test(error.message || '')
       ? '<div style="font-size:12.5px;color:var(--amber)">Chybí tabulka — spusťte migraci <b>supabase-migrace-poznamky-odberatele.sql</b></div>'
@@ -14844,7 +14852,7 @@ async function ukazPoznamkyOdberatele(linkId) {
     }
   } catch (e) { console.warn('[odkazy] odškrtnuté týdny:', e?.message) }
 
-  const zapsane = (data || []).filter(r => r.foto || r.poznamka || r.hodnoceni)
+  const zapsane = (data || []).filter(r => r.foto || r.poznamka || r.hodnoceni || r.spoluprace_ukoncena)
   if (!zapsane.length) {
     box.innerHTML = tydnyHtml
       + '<div style="color:var(--text3);font-size:12.5px">Odběratel si u lidí zatím nic nezapsal.</div>'
@@ -14852,6 +14860,12 @@ async function ukazPoznamkyOdberatele(linkId) {
   }
   box.innerHTML = tydnyHtml + zapsane.map(r => {
     const jmeno = escAttr(r.worker?.full_name || '—')
+    // Ukončenou spolupráci dej nahoru a červeně — je to ta nejpodstatnější
+    // věc, co se u člověka může objevit.
+    const konec = r.spoluprace_ukoncena
+      ? `<div style="display:inline-block;background:var(--red-l,#f3e2e0);color:var(--red,#9c3b22);font-weight:800;font-size:11.5px;padding:2px 9px;border-radius:6px;margin-bottom:4px">`
+        + `🚫 Odběratel ukončil spolupráci${r.spoluprace_do ? ' · ' + new Date(r.spoluprace_do + 'T00:00:00').toLocaleDateString('cs-CZ') : ' · datum neuvedl'}</div>`
+      : ''
     const zn = r.hodnoceni
       ? `<span style="font-weight:800;color:${r.hodnoceni <= 2 ? 'var(--green)' : r.hodnoceni >= 5 ? 'var(--red)' : 'var(--amber)'}">${r.hodnoceni}</span>`
         + `<span style="font-size:11px;color:var(--text3)"> · ${ZNAMKY[r.hodnoceni] || ''}</span>`
@@ -14861,6 +14875,7 @@ async function ukazPoznamkyOdberatele(linkId) {
         ? `<img src="${escAttr(r.foto)}" alt="" title="Fotka od odběratele" style="width:48px;height:64px;border-radius:6px;object-fit:cover;flex:none;border:1.5px solid var(--brd)">`
         : '<div style="width:48px;height:64px;border-radius:6px;background:var(--bg);flex:none"></div>'}
       <div style="min-width:0;flex:1">
+        ${konec}
         <div style="display:flex;gap:8px;align-items:baseline;flex-wrap:wrap">
           <b style="font-size:13.5px">${jmeno}</b>${zn}
         </div>

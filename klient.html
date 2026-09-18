@@ -36,6 +36,21 @@
               font-size:19px;font-weight:800;color:var(--zelena);white-space:nowrap}
   .soucet-rok small{display:block;font-size:10px;color:var(--seda);font-weight:600}
   .pozn-obal{padding:10px 16px 0}
+  /* Ukončená spolupráce. Když je zaškrtnutá, karta člověka zešedne a nahoře
+     je to napsané — ať se to na vytištěném výkazu nedá přehlédnout. */
+  .konec-obal{display:flex;align-items:center;gap:9px;flex-wrap:wrap;
+    padding:9px 16px 2px;font-size:12.5px;color:var(--seda)}
+  .konec-obal input[type=checkbox]{width:16px;height:16px;cursor:pointer;flex:none}
+  .konec-obal input[type=date]{font-family:inherit;font-size:12.5px;padding:4px 7px;
+    border:1.5px solid var(--ram);border-radius:7px;color:var(--tmava)}
+  .konec-obal label{display:flex;align-items:center;gap:7px;cursor:pointer}
+  .clovek.skoncil{opacity:.72;border-left-color:var(--seda)}
+  .konec-stitek{display:inline-block;background:#f3e2e0;color:#9c3b22;font-weight:800;
+    font-size:11px;padding:2px 8px;border-radius:6px;margin-left:8px;white-space:nowrap}
+  @media print{
+    .konec-obal input,.konec-obal label{display:none}
+    .clovek.skoncil{opacity:1}
+  }
   .znamka-popis{align-self:center;font-size:11.5px;color:var(--seda);margin-right:4px}
   .znamka-popis div{font-size:10.5px}
   .znamka-x{width:auto!important;padding:0 9px!important;font-weight:600!important}
@@ -135,6 +150,14 @@ function datumDe(iso){
 function datumCs(iso){
   var d = new Date(iso + 'T00:00:00');
   return isNaN(d) ? iso : DNY_CS[d.getDay()];
+}
+// Celé datum i s rokem — u ukončené spolupráce musí být jasné, kterého roku.
+// Tvar 15.09.2026 čtou Němci i Češi stejně.
+function datumPlne(iso){
+  var d = new Date(iso + 'T00:00:00');
+  if (isNaN(d)) return iso;
+  return String(d.getDate()).padStart(2,'0') + '.' +
+         String(d.getMonth()+1).padStart(2,'0') + '.' + d.getFullYear();
 }
 function hod(n){ return (Number(n)||0).toFixed(2).replace('.', ','); }
 
@@ -254,7 +277,9 @@ function vykreslit(d, preklady){
     var pz = (DATA.poznamky && DATA.poznamky[wid]) || { foto:null, poznamka:'', hodnoceni:null }
     poradi++
 
-    html += '<div class="clovek">'
+    var skoncil = !!pz.spoluprace_ukoncena
+    var datumKonce = pz.spoluprace_do || ''
+    html += '<div class="clovek' + (skoncil ? ' skoncil' : '') + '">'
       // ---- hlavička: číslo, fotka, jméno a peníze vlevo, hodiny vpravo v rohu
       + '<div class="hlava">'
       + '<div class="cislo">' + poradi + '</div>'
@@ -265,7 +290,12 @@ function vykreslit(d, preklady){
             + '</div>'
           : '<div class="foto foto-prazdna" onclick="vyberFoto(\'' + esc(wid) + '\')" title="Foto hinzufügen · přidat fotku">＋</div>')
       + '<div style="min-width:0;flex:1">'
-      +   '<div class="jmeno">' + esc(jm) + '</div>'
+      +   '<div class="jmeno">' + esc(jm)
+      +     (skoncil
+            ? '<span class="konec-stitek">Zusammenarbeit beendet · spolupráce ukončena'
+              + (datumKonce ? ' ' + datumPlne(datumKonce) : '') + '</span>'
+            : '')
+      +   '</div>'
       +   '<div class="penize">' + rozpis(podleSazby, 'Std.')
       +     '<div style="margin-top:2px">Provision ' + rozpis(podleProvize, 'Std.') + '</div>'
       +     '<div style="font-size:11px;color:var(--seda)">hodinovka · provize</div></div>'
@@ -290,6 +320,21 @@ function vykreslit(d, preklady){
       + '<div class="pozn-obal">'
       +   '<textarea class="pozn" rows="2" placeholder="Hier können Sie sich eine Notiz machen · zde si můžete napsat poznámku"'
       +   ' data-w="' + esc(wid) + '" onchange="ulozPoznamku(this)">' + esc(pz.poznamka || '') + '</textarea>'
+      + '</div>'
+      // ---- ukončená spolupráce: zaškrtnutí a datum
+      + '<div class="konec-obal">'
+      +   '<label title="Markieren Sie, wenn Sie mit dieser Person nicht mehr zusammenarbeiten · '
+      +     'zaškrtněte, pokud s tímto člověkem už nespolupracujete">'
+      +     '<input type="checkbox" data-w="' + esc(wid) + '"' + (skoncil ? ' checked' : '')
+      +     ' onchange="ulozUkonceni(this)">'
+      +     '<span>Zusammenarbeit beendet · ukončena spolupráce</span>'
+      +   '</label>'
+      +   '<span' + (skoncil ? '' : ' style="display:none"') + ' data-konec-datum="' + esc(wid) + '">'
+      +     'am · dne '
+      +     '<input type="date" data-w="' + esc(wid) + '" value="' + esc(datumKonce) + '"'
+      +     ' title="Datum, an dem die Zusammenarbeit endete · datum, kdy spolupráce skončila"'
+      +     ' onchange="ulozDatumUkonceni(this)">'
+      +   '</span>'
       + '</div>'
       // ---- peníze
       + '<div style="padding:0 16px 10px"><div class="souhrn">'
@@ -456,6 +501,65 @@ function ulozPoznamku(pole){
     if (!DATA.poznamky) DATA.poznamky = {};
     DATA.poznamky[wid] = DATA.poznamky[wid] || {};
     DATA.poznamky[wid].poznamka = text;   // ať se po obnovení nevrátí staré
+  });
+}
+
+function oznacKartu(wid){
+  var pole = document.querySelector('input[type=checkbox][data-w="' + wid + '"]');
+  var karta = pole && pole.closest ? pole.closest('.clovek') : null;
+  if (!karta) return;
+  var pz = (DATA.poznamky && DATA.poznamky[wid]) || {};
+  var skoncil = !!pz.spoluprace_ukoncena;
+  if (skoncil) karta.className = karta.className.indexOf('skoncil') < 0 ? karta.className + ' skoncil' : karta.className;
+  else karta.className = karta.className.replace(/\s*skoncil/g, '');
+  var jmeno = karta.querySelector('.jmeno');
+  if (!jmeno) return;
+  var stitek = jmeno.querySelector('.konec-stitek');
+  if (!skoncil) { if (stitek) stitek.remove(); return; }
+  if (!stitek) {
+    stitek = document.createElement('span');
+    stitek.className = 'konec-stitek';
+    jmeno.appendChild(stitek);
+  }
+  stitek.textContent = 'Zusammenarbeit beendet · spolupráce ukončena'
+    + (pz.spoluprace_do ? ' ' + datumPlne(pz.spoluprace_do) : '');
+}
+
+// Ukončená spolupráce. Zaškrtnutí a datum se ukládají zvlášť — odběratel může
+// zaškrtnout hned a datum doplnit, až si ho dohledá.
+function ulozUkonceni(pole){
+  var wid = pole.getAttribute('data-w');
+  if (!wid) return;
+  var zapnuto = !!pole.checked;
+  // Políčko na datum ukaž/schovej hned, ať je jasné, co se čeká.
+  var obal = document.querySelector('[data-konec-datum="' + wid + '"]');
+  if (obal) obal.style.display = zapnuto ? '' : 'none';
+  var telo = { worker_id: wid, spoluprace_ukoncena: zapnuto };
+  // Odškrtnutím se datum zahodí — jinak by u nezaškrtnutého člověka zůstalo
+  // viset staré datum a při příštím zaškrtnutí by se tvářilo jako platné.
+  if (!zapnuto) {
+    telo.spoluprace_do = '';
+    var vstup = document.querySelector('input[type=date][data-w="' + wid + '"]');
+    if (vstup) vstup.value = '';
+  }
+  ulozPoznamkuNaServer(telo, function(){
+    if (!DATA.poznamky) DATA.poznamky = {};
+    DATA.poznamky[wid] = DATA.poznamky[wid] || {};
+    DATA.poznamky[wid].spoluprace_ukoncena = zapnuto;
+    if (!zapnuto) DATA.poznamky[wid].spoluprace_do = '';
+    oznacKartu(wid);
+  });
+}
+
+function ulozDatumUkonceni(pole){
+  var wid = pole.getAttribute('data-w');
+  if (!wid) return;
+  var d = String(pole.value || '');
+  ulozPoznamkuNaServer({ worker_id: wid, spoluprace_do: d }, function(){
+    if (!DATA.poznamky) DATA.poznamky = {};
+    DATA.poznamky[wid] = DATA.poznamky[wid] || {};
+    DATA.poznamky[wid].spoluprace_do = d;
+    oznacKartu(wid);
   });
 }
 
