@@ -71,7 +71,10 @@ const v = await p.evaluate(async () => {
       je: !!zask, zaskrtnuto: !!zask?.checked,
       pozadiHlavicky: k?.querySelector('.card-h')?.getAttribute('style') || '',
       okraj: k?.getAttribute('style') || '',
-      popisek: (k?.querySelector('label[title]')?.textContent || '').replace(/\s+/g, ' ').trim(),
+      // U nadpisu firmy jsou dvě zaškrtávátka — filtr „počítat" a „Uhrazená
+      // provize". Ber popisek toho, které opravdu zkoušíme, ne první v pořadí.
+      popisek: (zask?.closest('label')?.textContent || '').replace(/\s+/g, ' ').trim(),
+      popisekFiltru: (k?.querySelector('input[onchange*="prepniFirmuVProvizich"]')?.closest('label')?.textContent || '').replace(/\s+/g, ' ').trim(),
       lidiZaskrtnuto: [...sekce.querySelectorAll('input[onchange*="toggleProvizePaid"]')].map(x => x.checked).join(','),
     }
   }
@@ -98,6 +101,8 @@ await b.close()
 if (v.chyba) { chyb++; console.log('  ❌ ' + v.chyba) }
 else {
   ok(v.pred.je, 'u nadpisu firmy je zaškrtávátko')
+  ok(/počítat/.test(v.pred.popisekFiltru),
+     'vedle něj je filtr firmy a je u něj napsáno, co dělá — ať se ta dvě nepletou')
   ok(/Uhrazená provize/.test(v.pred.popisek), 'je u něj napsáno „Uhrazená provize"')
   ok(!v.pred.zaskrtnuto, 'napoprvé není zaškrtnuté')
   ok(v.po.zaskrtnuto, 'po kliknutí zůstane zaškrtnuté')

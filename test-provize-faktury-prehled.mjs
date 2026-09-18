@@ -21,7 +21,13 @@ stejnaVerze()
 console.log('\n1) Kód')
 ok(/sb\.from\('subteams'\)\.select\('id, name'\)/.test(zdroj), 'Provize si načtou podskupiny')
 ok(/podskupina: w\.subteam_id/.test(zdroj), 'a přiřadí je k lidem')
-ok(/🎨 vzhled \$\{Number\(r\.design_idx\) \|\| 1\}/.test(zdroj), 've Fakturách je číslo vzhledu')
+// Číslo vzhledu se z textového odznaku změnilo na rolovací výběr — jde
+// přehodit rovnou v přehledu, bez otvírání faktury.
+ok(/ulozVzhledZPrehledu\(this,'\$\{r\.worker_id\}'\)/.test(zdroj),
+   've Fakturách jde vzhled vybrat rovnou v přehledu')
+ok(/🎨 \$\{i\} — \$\{NAZVY_VZHLEDU\[i\]\}/.test(zdroj), 'a je u něj číslo i název vzhledu')
+ok(/tahle faktura: vzhled \$\{Number\(r\.design_idx\) \|\| 1\}/.test(zdroj),
+   'u už vystavené faktury je pořád vidět, v jakém vzhledu je')
 ok(/💰 záloha/.test(zdroj), 'a upozornění na zálohu')
 ok(/'zálohová faktura'/.test(zdroj) && /'na účet' : 'hotově'/.test(zdroj),
    'u zálohy je i odkud přišla')

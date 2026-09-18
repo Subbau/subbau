@@ -3682,7 +3682,7 @@ setTimeout(function () {
               <label style="font-size:11px">Vzhled faktury</label>
               <select id="wd-inv-design" onchange="ulozVzhledFaktury(this.value)" title="Každý pracovník může mít fakturu v jiné podobě. Vzhled si u něj appka zapamatuje a příště fakturu vystaví stejně." style="width:100%;font-size:12px;padding:8px;border:1.5px solid var(--brd);border-radius:8px;font-family:inherit;box-sizing:border-box"><option value="1">1 — Původní</option><option value="2">2 — Úřední, v rámečcích</option><option value="3">3 — Dopisní, patkové písmo</option><option value="4">4 — Barevný sloupec vlevo</option><option value="5">5 — Účetní sešit</option><option value="6">6 — Barevná hlavička</option><option value="7">7 — Kompaktní</option><option value="8">8 — Velké číslo a rámeček</option><option value="9">9 — Karty</option><option value="10">10 — Spodní pruh</option></select>
               <div id="wd-inv-colors" style="display:flex;flex-wrap:wrap;gap:6px;margin-top:7px"></div>
-              <button onclick="ukazVzhledyPracovnika()" style="width:100%;margin-top:7px;padding:8px;background:var(--bg2);color:var(--blue);border:1px solid var(--blue);border-radius:8px;cursor:pointer;font-family:inherit;font-size:12px;font-weight:700"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:1em;height:1em;flex-shrink:0;vertical-align:-2px"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg> Náhled — projít všech 10 vzhledů</button>
+              <button onclick="ukazVzhledyPracovnika()" style="width:100%;margin-top:7px;padding:8px;background:var(--bg2);color:var(--blue);border:1px solid var(--blue);border-radius:8px;cursor:pointer;font-family:inherit;font-size:12px;font-weight:700"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:1em;height:1em;flex-shrink:0;vertical-align:-2px"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg> Náhled — projít všechny vzhledy</button>
               <div style="font-size:10.5px;color:var(--text3);margin-top:3px">Zapamatuje se u pracovníka. Barvu má každý svou, takže i stejný vzhled vypadá jinak.</div>
             </div>
             <div class="fg" style="margin-bottom:8px">
@@ -5233,7 +5233,7 @@ async function submitAdminSignatureWithPlacement() {
 // Po nahrání nové verze se snadno pozná, jestli se opravdu nasadila: otevřete
 // appku, zmáčkněte F12 (na Macu ⌥⌘I) a v konzoli je vypsané tohle datum. Když
 // tam svítí starší, prohlížeč nebo GitHub drží starou verzi.
-const SUBBAU_VERZE = '2026-09-17 q — pátek: podepsat výkaz + dva nové vzhledy faktur'
+const SUBBAU_VERZE = '2026-09-18 r — filtr firem v provizích, kalendář na 3 týdny, vzhledy 11-20'
 console.log('StavKo docházka — verze ' + SUBBAU_VERZE)
 
 // ============ SUPABASE CONFIG ============
@@ -7334,10 +7334,47 @@ async function loadAccess() {
   // měnit, a „Načítám…" tam zůstane napořád.
   delete tbody.dataset.accessHtml
 
-  const { data } = await sb.from('profiles')
-    .select('id, full_name, email, role, is_active, last_login_at, login_count, last_seen_at')
-    .in('role', ['osvec', 'partak'])
-    .order('full_name')
+  // Firmu a podskupinu potřebujeme, ať se lidi řadí stejně jako v docházce —
+  // ne podle abecedy křížem přes firmy. Číselníky jdou naráz s profily.
+  const [rProf, rTeams, rSubs, rComp] = await Promise.all([
+    sb.from('profiles')
+      .select('id, full_name, email, role, is_active, last_login_at, login_count, last_seen_at, team_id, subteam_id')
+      .in('role', ['osvec', 'partak']).order('full_name'),
+    sb.from('teams').select('id, name, company_id'),
+    sb.from('subteams').select('id, name'),
+    sb.from('companies').select('id, name')
+  ])
+  let data = rProf.data
+  if (!data) {
+    // Starší databáze nemusí mít subteam_id — ať sekce funguje i bez něj.
+    ;({ data } = await sb.from('profiles')
+      .select('id, full_name, email, role, is_active, last_login_at, login_count, last_seen_at, team_id')
+      .in('role', ['osvec', 'partak']).order('full_name'))
+  }
+
+  // Název firmy bereme stejně jako docházka: přes company_id týmu, jinak
+  // očištěné jméno týmu. Kdo nikam nepatří, jde nakonec.
+  const pTeamById = {}; (rTeams.data || []).forEach(t => { pTeamById[t.id] = t })
+  const pSubById = {}; (rSubs.data || []).forEach(x => { pSubById[x.id] = x })
+  const pCompName = {}; (rComp.data || []).forEach(c => { pCompName[c.id] = c.name })
+  const firmaPristupu = w => {
+    const t = w.team_id ? pTeamById[w.team_id] : null
+    if (!t) return ''
+    if (t.company_id && pCompName[t.company_id]) return pCompName[t.company_id]
+    return (typeof cleanTeamName === 'function' ? cleanTeamName(t.name) : t.name) || ''
+  }
+  const podskupinaPristupu = w => (w.subteam_id && pSubById[w.subteam_id]) ? pSubById[w.subteam_id].name : ''
+
+  if (data) {
+    data = [...data].sort((a, b) => {
+      const fa = firmaPristupu(a), fb = firmaPristupu(b)
+      if (!fa && fb) return 1
+      if (fa && !fb) return -1
+      const fc = fa.localeCompare(fb, 'cs'); if (fc) return fc
+      const sc = podskupinaPristupu(a).localeCompare(podskupinaPristupu(b), 'cs'); if (sc) return sc
+      return (a.full_name || '').localeCompare(b.full_name || '', 'cs')
+    })
+  }
 
   if (!data?.length) {
     tbody.innerHTML = '<tr><td colspan="6" style="text-align:center;padding:20px;color:var(--text3)">Žádní pracovníci</td></tr>'
@@ -7371,14 +7408,30 @@ async function loadAccess() {
     return d.toLocaleDateString('cs-CZ') + ' ' + d.toLocaleTimeString('cs-CZ', {hour:'2-digit',minute:'2-digit'})
   }
 
+  let posledniFirma = null
   const accessHtml = data.map(w => {
+    // Hlavička firmy — stejný vzor jako v docházce, ať to vypadá stejně.
+    // Hledání si ji umí schovat samo (filterTableRows zná třídu tbl-group).
+    let hlavickaFirmy = ''
+    const firmaW = firmaPristupu(w) || 'Bez firmy'
+    if (firmaW !== posledniFirma) {
+      posledniFirma = firmaW
+      const gc = groupColor(firmaW, 'company')
+      const pocet = data.filter(x => (firmaPristupu(x) || 'Bez firmy') === firmaW).length
+      hlavickaFirmy = `<tr class="tbl-group"><td colspan="6" style="padding:7px 10px;background:${gc.bg};border-top:2px solid ${gc.border}"><span style="font-size:12px;font-weight:800;color:${gc.text}">🏢 ${escAttr(firmaW)}</span><span style="font-size:11px;color:var(--text3);margin-left:8px">${pocet} lidí</span></td></tr>`
+    }
+    const podsk = podskupinaPristupu(w)
+    const subC = podsk ? groupColor(podsk, 'sub') : null
+    const radekSkupiny = (firmaPristupu(w) || podsk)
+      ? `<div style="font-size:10.5px;line-height:1.35;margin-top:2px;margin-left:16px;color:var(--text3)">${firmaPristupu(w) ? '🏢 ' + escAttr(firmaPristupu(w)) : ''}${(firmaPristupu(w) && podsk) ? ' · ' : ''}${podsk ? `<span style="color:${subC.text};font-weight:700">👥 ${escAttr(podsk)}</span>` : ''}</div>`
+      : ''
     const logins = loginHistMap[w.id] || []
     const lastLogin = logins.length ? fmtLogin(logins[0]) : 'Nikdy'
     const online = isOnline(w.last_seen_at)
     const dot = `<span title="${online ? 'Online' : 'Offline'}" style="display:inline-block;width:9px;height:9px;border-radius:50%;background:${online ? '#1d9e75' : '#c0392b'};margin-right:7px;flex-shrink:0;box-shadow:0 0 0 2px ${online ? 'rgba(29,158,117,.2)' : 'rgba(192,57,43,.15)'}"></span>`
-    return `
-    <tr class="access-row" data-name="${escAttr(((w.full_name||'') + ' ' + (w.email||'')).replace(/"/g,'&quot;'))}">
-      <td><span style="display:flex;align-items:center">${dot}<b onclick="openWorkerModal('${w.id}')" title="Otevřít profil — jde i u zablokovaného, nemusíte ho kvůli tomu odblokovat" style="cursor:pointer;text-decoration:underline;text-decoration-style:dotted;text-underline-offset:3px">${escAttr(w.full_name)}</b></span><span style="font-size:11px;color:var(--text2);margin-left:16px">${escAttr(w.email)}</span></td>
+    return hlavickaFirmy + `
+    <tr class="access-row" data-name="${escAttr(((w.full_name||'') + ' ' + (w.email||'') + ' ' + firmaPristupu(w) + ' ' + podsk).replace(/"/g,'&quot;'))}">
+      <td><span style="display:flex;align-items:center">${dot}<b onclick="openWorkerModal('${w.id}')" title="Otevřít profil — jde i u zablokovaného, nemusíte ho kvůli tomu odblokovat" style="cursor:pointer;text-decoration:underline;text-decoration-style:dotted;text-underline-offset:3px">${escAttr(w.full_name)}</b></span><span style="display:block;font-size:11.5px;color:var(--text2);margin-left:16px">${escAttr(w.email)}</span>${radekSkupiny}</td>
       <td><span class="pill pb">${roleLabels[w.role] || w.role}</span></td>
       <td>
         <span class="pill ${w.is_active ? 'pg' : 'pr'}">${w.is_active ? 'Může se přihlásit' : 'Přihlášení zablokováno'}</span>
@@ -7952,6 +8005,41 @@ function hodinyPodleSazeb(radky, sazbaKDni) {
 // jedno pole už nestačí přepsat). Admin ale často vyplňuje pole za polem — kdyby
 // překreslení spolklo to, co má rozepsané ve vedlejším políčku, přišel by o to.
 // Proto si zapamatujeme, kde stál kurzor a co v poli bylo, a po překreslení to vrátíme.
+// ====== FILTR FIREM V PROVIZÍCH ======
+// U každé firmy je zaškrtávátko. Automaticky jsou zaškrtnuté všechny;
+// když správce firmu odškrtne, vypadne ze součtů nahoře (hodiny i peníze).
+// Ukládá se to jen do prohlížeče — je to pohled jednoho člověka, ne účetní
+// fakt, a nemá cenu kvůli tomu měnit databázi ani čísla ostatním.
+// Ukládáme ODŠKRTNUTÉ, ne zaškrtnuté — nová firma tak je zaškrtnutá sama.
+const PROVIZE_FILTR_KLIC = 'sb_provize_odskrtnute_firmy'
+
+function odskrtnuteFirmy() {
+  try {
+    const raw = lsGet(PROVIZE_FILTR_KLIC)
+    if (!raw) return new Set()
+    const pole = JSON.parse(raw)
+    return new Set(Array.isArray(pole) ? pole : [])
+  } catch (e) { return new Set() }
+}
+
+// Jediné místo, které rozhoduje, jestli firma patří do součtů.
+function firmaVProvizich(nazev) {
+  return !odskrtnuteFirmy().has(nazev || 'Bez firmy')
+}
+
+async function prepniFirmuVProvizich(el, nazev) {
+  const jmeno = nazev || 'Bez firmy'
+  const set = odskrtnuteFirmy()
+  if (el && el.checked) set.delete(jmeno); else set.add(jmeno)
+  lsSet(PROVIZE_FILTR_KLIC, JSON.stringify([...set]))
+  await prekresliProvize()
+}
+
+async function zapniVsechnyFirmy() {
+  lsRemove(PROVIZE_FILTR_KLIC)
+  await prekresliProvize()
+}
+
 async function prekresliProvize() {
   const akt = document.activeElement
   const id = akt && akt.id && /^pv-(rate|prov)-/.test(akt.id) ? akt.id : null
@@ -8565,10 +8653,17 @@ async function renderProvizeContent() {
   // Sečtou se hodinové provize všech, kdo si dnes dali příchod — i těch, kteří už
   // směnu ukončili a odešli. Ten den v práci byli, takže do sazby patří.
   // Na rozdíl od dlaždice „Denní provize" se tohle nemění listováním po dnech.
+  // Firma u každého člověka — potřebujeme ji i tady, ať dnešní dlaždice
+  // počítají ze stejných firem jako zbytek. Jinak by po odškrtnutí firmy
+  // seděl roční součet, ale „dnešní provize" ne.
+  const firmaPodleId = {}
+  workersAll.forEach(w => { firmaPodleId[w.id] = firmOf(w) })
+
   const dnesVPraci = new Set()
   ;(att || []).forEach(a => {
     if (a.work_date !== dnesStrStat) return
     if (!a.check_in) return
+    if (!firmaVProvizich(firmaPodleId[a.worker_id])) return
     dnesVPraci.add(a.worker_id)
   })
   let dnesNaHodinu = 0
@@ -8580,6 +8675,7 @@ async function renderProvizeContent() {
   let dnesHodin = 0
   const dnesPoFirmach = new Map()
   workersAll.forEach(w => {
+    if (!firmaVProvizich(firmOf(w))) return
     const b = byWorker[w.id]
     if (b && b.dnes > 0) {
       dnesProvize += b.pDnes
@@ -8665,6 +8761,8 @@ async function renderProvizeContent() {
   const souhrn = { day: 0, week: 0, month: 0, year: 0, earnWeek: 0, earnDay: 0,
                    hDay: 0, hWeek: 0, hMonth: 0 }
   rows.forEach(r => {
+    // Odškrtnutá firma do součtů nahoře nevstupuje.
+    if (!firmaVProvizich(r.firm)) return
     souhrn.day += r.commDay; souhrn.week += r.commWeek
     souhrn.month += r.commMonth; souhrn.year += r.commYear
     souhrn.earnWeek += r.earnWeek; souhrn.earnDay += r.earnDay
@@ -8780,7 +8878,16 @@ async function renderProvizeContent() {
     return `
     <div class="card" style="border-left:6px solid ${firmaUhrazena ? 'var(--green)' : (firmaPoSplatnosti ? 'var(--red)' : gc.border)};margin-bottom:16px">
       <div class="card-h" style="flex-wrap:wrap;gap:10px;${firmaUhrazena ? 'background:var(--green-l)' : (firmaPoSplatnosti ? 'background:var(--red-l)' : '')}">
-        <h4 style="color:${gc.text};font-size:${isNoFirm ? '18px' : '16px'}">🏢 ${firm}</h4>
+        <h4 style="color:${gc.text};font-size:${isNoFirm ? '18px' : '16px'};display:flex;align-items:center;gap:9px">
+          <label title="Zaškrtnuto = firma se počítá do součtů nahoře. Odškrtnutím ji ze součtů vyndáte — na data ani na fakturaci to nemá vliv."
+                 onclick="event.stopPropagation()" style="display:flex;align-items:center;cursor:pointer">
+            <input type="checkbox" ${firmaVProvizich(firm) ? 'checked' : ''}
+                   onchange="event.stopPropagation();prepniFirmuVProvizich(this,${JSON.stringify(firm)})"
+                   style="width:17px;height:17px;cursor:pointer;accent-color:var(--blue)">
+            <span style="font-size:10.5px;font-weight:700;color:var(--text3);margin-left:5px;letter-spacing:.02em">počítat</span>
+          </label>
+          <span>🏢 ${firm}</span>
+        </h4>
         <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
           ${kUhrade.length ? `<label title="${firmaPayTableMissing ? 'Nejdřív spusťte migraci supabase-migrace-provize-uhrazeno-firmou.sql' : (firmaUhrazena ? 'Provize za tenhle týden od firmy dorazila' : (firmaPoSplatnosti ? 'Provize je po splatnosti a od firmy zatím nedorazila' : 'Zaškrtněte, až od firmy provize dorazí'))}"
             style="display:flex;align-items:center;gap:9px;padding:9px 14px;border-radius:10px;cursor:${firmaPayTableMissing ? 'not-allowed' : 'pointer'};font-size:14px;font-weight:800;
@@ -8847,6 +8954,18 @@ async function renderProvizeContent() {
       </div>
       <div style="padding:4px 16px 16px">
         <div style="font-size:14px;color:var(--text2);margin-bottom:10px;font-weight:600">Zobrazené období: ${periodLabel}</div>
+        ${(() => {
+          // Když je nějaká firma odškrtnutá, musí to být vidět nad čísly —
+          // jinak se správce diví, proč mu roční provize nesedí.
+          const vsechny = firmNames.length
+          const zapnute = firmNames.filter(f => firmaVProvizich(f)).length
+          if (!vsechny || zapnute === vsechny) return ''
+          return `<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin:0 0 12px;padding:9px 13px;background:var(--amber-l,#faf0dc);border:1px solid var(--amber,#E8A13A);border-radius:10px">
+            <span style="font-size:13px;font-weight:800;color:#211D1A">⚠️ Čísla jsou jen za ${zapnute} z ${vsechny} firem</span>
+            <span style="font-size:12px;color:var(--text2)">Odškrtnuté firmy se do součtů nepočítají.</span>
+            <button onclick="zapniVsechnyFirmy()" style="margin-left:auto;padding:6px 12px;background:#fff;border:1px solid var(--brd);border-radius:8px;cursor:pointer;font-family:inherit;font-size:12px;font-weight:700">Zapnout všechny</button>
+          </div>`
+        })()}
         <div class="stats" style="grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;margin-bottom:0">
           <div class="sc b"><div class="sc-lbl" style="font-size:12px">Dnešní provize<div style="font-weight:400;font-size:10.5px;color:var(--text3)">${dnesTedLidi ? dnesTedLidi + (dnesTedLidi === 1 ? ' pracovník' : (dnesTedLidi < 5 ? ' pracovníci' : ' pracovníků')) + ' dnes v práci · zatím ' + eur(dnesProvize) : 'teď nikdo v práci'}</div></div><div class="sc-val" style="color:var(--blue);font-size:24px">${eur(dnesNaHodinu)}/h</div></div>
           <div class="sc a"><div class="sc-lbl" style="font-size:12px">Denní provize<div style="font-weight:400;font-size:10.5px;color:var(--text3)">${dayLabel} — všechny firmy</div></div><div class="sc-val" id="pv-gd" style="color:var(--amber);font-size:24px">${eur(dayGrandTotal)}</div></div>
@@ -10620,11 +10739,27 @@ function attHasProblem(rec) {
   return false
 }
 
-async function renderCalendar() {
+// Zapíše do kalendáře nový obsah, ale JEN když se opravdu liší od toho, co už
+// tam je. Bez téhle pojistky se kalendář každou minutu překreslil celý znovu
+// a viditelně bliknul, i když se nic nezměnilo (přesně to hlásil Patrik).
+// Zároveň si pamatuje, kam byl odrolovaný, ať člověku neuteče místo, kam kouká.
+function zapisKalendar(el, html) {
+  if (!el) return
+  if (el.__kalHtml === html) return   // nic nového — nesahej na DOM
+  const rodic = el.closest('.view') || el.parentElement
+  const posun = rodic ? rodic.scrollTop : 0
+  el.__kalHtml = html
+  el.innerHTML = html
+  if (rodic && posun) rodic.scrollTop = posun
+}
+
+// `tichy` = obnova na pozadí (každou minutu). V tichém režimu se neukazuje
+// „Načítám…" a když jsou data stejná, nepřekreslí se vůbec nic.
+async function renderCalendar(tichy) {
   const content = document.getElementById('cal-content')
   const titleEl = document.getElementById('cal-title')
   if (!content) return
-  content.innerHTML = '<div style="text-align:center;color:var(--text3);padding:20px">Načítám…</div>'
+  if (!tichy) content.innerHTML = '<div style="text-align:center;color:var(--text3);padding:20px">Načítám…</div>'
   // Pracovníci, skupiny, firmy a podskupiny se navzájem nepotřebují, takže se
   // ptáme na všechno naráz. Dřív se čekalo na každý dotaz zvlášť — čtyři cesty
   // na server za sebou, každá čtvrt vteřiny, a kalendář se rozjížděl přes vteřinu
@@ -10689,8 +10824,8 @@ async function renderCalendar() {
   let start, end
   if (calView === 'week') {
     start = mondayOf(calAnchor)
-    // Načítáme rovnou DVA týdny (tento + následující), ať je můžeme zobrazit pod sebou
-    end = new Date(start); end.setDate(start.getDate()+13)
+    // Načítáme rovnou TŘI týdny (tento + dva následující), ať je vidí pod sebou
+    end = new Date(start); end.setDate(start.getDate()+20)
   } else {
     start = new Date(calAnchor.getFullYear(), calAnchor.getMonth(), 1)
     end = new Date(calAnchor.getFullYear(), calAnchor.getMonth()+1, 0)
@@ -10738,7 +10873,7 @@ async function renderCalendar() {
     }
   }
 
-  if (!workers?.length) { content.innerHTML = '<div style="text-align:center;color:var(--text3);padding:20px">Žádní pracovníci</div>'; return }
+  if (!workers?.length) { zapisKalendar(content, '<div style="text-align:center;color:var(--text3);padding:20px">Žádní pracovníci</div>'); return }
 
   // Ulož data pro detail dne (klik na den v měsíčním pohledu)
   calData = { workers, attSet, vacList }
@@ -10801,7 +10936,7 @@ async function renderCalendar() {
     const buildWeekTable = (weekStart) => {
       const days = []
       for (let i=0;i<7;i++){ const d=new Date(weekStart); d.setDate(weekStart.getDate()+i); days.push(d) }
-      let html = '<table style="width:100%;table-layout:fixed;border-collapse:separate;border-spacing:3px;font-size:12px;min-width:900px">'
+      let html = '<table style="width:100%;table-layout:fixed;border-collapse:separate;border-spacing:2px;font-size:12px;min-width:900px">'
       html += '<colgroup><col style="width:260px">' + days.map(()=>'<col style="width:auto">').join('') + '</colgroup>'
       html += '<thead><tr><th style="text-align:left;padding:6px 10px;font-size:12px;color:var(--text2)">Pracovník</th>'
       days.forEach((d,i)=>{ const ds=localDateStr(d); const isT = ds===todayStr; html += `<th style="padding:6px 2px;text-align:center;${isT?'background:var(--amber-l);border-radius:8px':''}"><div style="font-weight:700">${dayShort[i]}</div><div style="font-weight:400;color:var(--text3);font-size:11px">${d.getDate()}.${d.getMonth()+1}.</div></th>` })
@@ -10809,7 +10944,7 @@ async function renderCalendar() {
       const colCount = days.length
       calRows.forEach(item => {
         if (item.type === 'firm') {
-          html += `<tr><td colspan="${colCount+1}" style="padding:10px 10px 4px"><div style="font-size:13px;font-weight:800;color:#211D1A;border-bottom:2px solid var(--amber,#E8A13A);padding-bottom:4px;display:flex;align-items:center;gap:6px">🏢 ${item.label} <span style="font-size:11px;font-weight:600;color:var(--text3)">(${item.count})</span></div></td></tr>`
+          html += `<tr><td colspan="${colCount+1}" style="padding:8px 10px 3px"><div style="font-size:13px;font-weight:800;color:#211D1A;border-bottom:3px solid var(--amber,#E8A13A);padding-bottom:3px;display:flex;align-items:center;gap:6px">🏢 ${item.label} <span style="font-size:11px;font-weight:600;color:var(--text3)">(${item.count})</span></div></td></tr>`
           return
         }
         if (item.type === 'sub') {
@@ -10818,7 +10953,7 @@ async function renderCalendar() {
         }
         const w = item.w
         const indent = item.sub ? 'padding-left:22px;' : ''
-        html += `<tr style="cursor:pointer" onclick="openWorkerModal('${w.id}')"><td style="padding:8px 10px;${indent}background:var(--bg);border-radius:8px"><b style="font-size:12px">${escAttr(w.full_name)}</b><div style="font-size:10px;color:var(--text3);margin-top:1px">${escAttr(profLabel(w.profession)||'')}</div></td>`
+        html += `<tr style="cursor:pointer" onclick="openWorkerModal('${w.id}')"><td style="padding:5px 10px;${indent}background:var(--bg);border-radius:8px"><b style="font-size:12px">${escAttr(w.full_name)}</b><div style="font-size:10px;color:var(--text3);margin-top:0">${escAttr(profLabel(w.profession)||'')}</div></td>`
         days.forEach((d,di)=>{
           const ds = localDateStr(d)
           const isT = ds===todayStr
@@ -10827,7 +10962,7 @@ async function renderCalendar() {
           const darkText = (st==='plan' || st==='bad' || st==='rest')
           const txtCol = !st ? 'var(--text3)' : (darkText ? '#211D1A' : '#fff')
           const label = stLabel(st)
-          html += `<td style="padding:0;text-align:center;${isT?'background:var(--amber-l);border-radius:6px':''}"><div style="background:${c};color:${txtCol};border-radius:6px;padding:9px 1px;font-size:10px;font-weight:700;min-height:18px;overflow:hidden">${label||'·'}</div></td>`
+          html += `<td style="padding:0;text-align:center;${isT?'background:var(--amber-l);border-radius:6px':''}"><div style="background:${c};color:${txtCol};border-radius:6px;padding:6px 1px;font-size:10px;font-weight:700;min-height:15px;overflow:hidden">${label||'·'}</div></td>`
         })
         html += '</tr>'
       })
@@ -10837,14 +10972,25 @@ async function renderCalendar() {
 
     const week1Start = new Date(start)
     const week2Start = new Date(start); week2Start.setDate(start.getDate()+7)
+    const week3Start = new Date(start); week3Start.setDate(start.getDate()+14)
     const wk = (s) => { const e=new Date(s); e.setDate(s.getDate()+6); return `${s.toLocaleDateString('cs-CZ',{day:'2-digit',month:'2-digit'})} – ${e.toLocaleDateString('cs-CZ',{day:'2-digit',month:'2-digit'})}` }
 
-    content.innerHTML =
-      `<div style="font-size:13px;font-weight:800;color:#211D1A;margin:0 0 8px;padding:6px 10px;background:var(--amber-l,#faf0dc);border-radius:8px;display:inline-block">Tento týden · ${wk(week1Start)}</div>` +
+    // Nadpis týdne — ať všechny tři vypadají stejně a liší se jen barvou.
+    const nadpisTydne = (text, s2, hlavni) =>
+      `<div style="font-size:13px;font-weight:800;color:#211D1A;margin:${hlavni ? '0' : '18px'} 0 8px;padding:6px 10px;` +
+      (hlavni ? 'background:var(--amber-l,#faf0dc)' : 'background:var(--bg,#f4efe7);border:1px solid var(--brd)') +
+      `;border-radius:8px;display:inline-block">${text} · ${wk(s2)}</div>`
+    const deliciCara = '<div style="height:8px;background:var(--red,#9c3b22);border-radius:4px;margin:24px 0 0"></div>'
+
+    zapisKalendar(content,
+      nadpisTydne('Tento týden', week1Start, true) +
       buildWeekTable(week1Start) +
-      `<div style="height:8px;background:var(--red,#9c3b22);border-radius:4px;margin:24px 0 0"></div>` +
-      `<div style="font-size:13px;font-weight:800;color:#211D1A;margin:18px 0 8px;padding:6px 10px;background:var(--bg,#f4efe7);border-radius:8px;display:inline-block;border:1px solid var(--brd)">Následující týden · ${wk(week2Start)}</div>` +
-      buildWeekTable(week2Start)
+      deliciCara +
+      nadpisTydne('Následující týden', week2Start, false) +
+      buildWeekTable(week2Start) +
+      deliciCara +
+      nadpisTydne('Za dva týdny', week3Start, false) +
+      buildWeekTable(week3Start))
   } else {
     // měsíční mřížka — CSS grid, 7 stejných sloupců, čtvercové buňky
     const firstMonday = mondayOf(start)
@@ -10892,7 +11038,7 @@ async function renderCalendar() {
       </div>`
     })
     html += '</div><div style="font-size:11px;color:var(--text3);margin-top:10px">Velké číslo = počet v práci · <span style="color:#c79a00">⚠ problém s časem</span> · <span style="color:var(--blue)">číslo = dovolená</span> · <span style="color:#6a4c93">číslo = nemoc</span> · <span style="color:#5fa463">číslo = plán</span> · klepnutím na den zobrazíte detail</div>'
-    content.innerHTML = html
+    zapisKalendar(content, html)
   }
 
 }
@@ -13580,7 +13726,7 @@ async function loadWorkerInvoices() {
   // Kód z CRM a barvu bereme živě z profilu — barva je vlastnost pracovníka,
   // ne dokladu, takže když se přidělí jinak, projeví se to i u starších faktur.
   let { data, error } = await sb.from('worker_invoices')
-    .select('*, worker:profiles(full_name, profession, crm_code, invoice_color, can_track_hours, is_active)')
+    .select('*, worker:profiles(full_name, profession, crm_code, invoice_color, can_track_hours, is_active, invoice_design)')
     .order('sent_at', { ascending: false })
   if (error) {
     // Bez spuštěné migrace sloupce chybí — načti aspoň to, co bylo dřív,
@@ -13725,7 +13871,19 @@ function renderWorkerInvoices() {
         // Ve kterém vzhledu je faktura vystavená. Bez toho se v přehledu nedalo
         // poznat, který člověk fakturuje v jakém — a přitom se to nastavuje
         // dopředu u pracovníka.
-        `<div style="font-size:10.5px;font-weight:600;color:var(--text3);margin-top:2px" title="Vzhled faktury — nastavuje se u pracovníka">🎨 vzhled ${Number(r.design_idx) || 1}</div>`
+        // Vzhled jde přehodit rovnou tady, bez otvírání faktury. Mění se tím,
+        // v čem bude člověk fakturovat PŘÍŠTĚ — už vystavené PDF zůstává.
+        `<select onchange="event.stopPropagation();ulozVzhledZPrehledu(this,'${r.worker_id}')" onclick="event.stopPropagation()"
+           title="Vzhled, ve kterém bude tenhle člověk fakturovat příště. Už vystavenou fakturu to nepřepíše."
+           style="margin-top:3px;font-family:inherit;font-size:10.5px;font-weight:600;color:var(--text2);background:var(--bg);border:1px solid var(--brd);border-radius:6px;padding:2px 4px;max-width:150px;cursor:pointer">${
+             Object.keys(NAZVY_VZHLEDU).map(i =>
+               `<option value="${i}" ${Number(i) === (Number(r.worker?.invoice_design) || 1) ? 'selected' : ''}>🎨 ${i} — ${NAZVY_VZHLEDU[i]}</option>`).join('')
+           }</select>` + (
+             // Když je už vystavená faktura v jiném vzhledu, ať je to vidět —
+             // jinak by to vypadalo, že se PDF změnilo, a ono se nezměnilo.
+             (Number(r.design_idx) || 1) !== (Number(r.worker?.invoice_design) || 1)
+               ? `<div style="font-size:10px;color:var(--text3);margin-top:1px">tahle faktura: vzhled ${Number(r.design_idx) || 1}</div>` : ''
+           )
       }${
         // Záloha, která se z faktury odečetla. Ať je v přehledu vidět, že
         // částka není celá — a jestli šla na účet, nebo v hotovosti.
@@ -23911,6 +24069,10 @@ async function generateInvoiceMob(lang = 'en', override = null) {
   // hned první faktura, ne až ta druhá.
   const barvaFaktury = await zajistiBarvuFaktury(workerId, prof)
 
+  // A stejně tak vzhled: kdo ho ještě nemá nastavený, dostane ten nejméně
+  // používaný — ať faktury dvou lidí nevypadají stejně.
+  await prideliNejmenePouzivanyVzhled(workerId, prof)
+
   // Otevřené zálohové faktury se z této faktury rovnou odečtou.
   const zaloha = await zalohyKOdecteni(workerId, invoiceNum, totalAmount)
   if (zaloha.castka > 0) {
@@ -32070,7 +32232,7 @@ function nastavRezimUkazky(zapnuto) {
   const pozn = document.getElementById('invoice-design-note')
   const i = u ? u.idx : 1
   if (jmeno) jmeno.textContent = 'Vzhled ' + i + ' — ' + (NAZVY_VZHLEDU[i] || '')
-  if (pocet) pocet.textContent = i + ' z 10'
+  if (pocet) pocet.textContent = i + ' z ' + POCET_VZHLEDU
   if (pouzit) pouzit.style.display = (u && u.pouzit) ? '' : 'none'
   if (pozn) pozn.textContent = u && u.poznamka ? u.poznamka : 'Ukázka se nikam neodesílá ani neukládá.'
   vykresliBarvyUkazky()
@@ -32463,16 +32625,81 @@ function vykresliBarvyPracovnika(vybrana) {
   }).join('')
 }
 
+// Změna vzhledu rovnou z přehledu faktur. Ukládá se k ČLOVĚKU — tedy do čeho
+// bude fakturovat příště. Už vystavené PDF se nepřepisuje (na to je v detailu
+// faktury „Uložit a přepsat PDF").
+async function ulozVzhledZPrehledu(el, workerId) {
+  if (!el || !workerId) return
+  const puvodni = el.dataset.puvodni || ''
+  el.disabled = true
+  try {
+    await ulozVzhledFaktury(el.value, workerId)
+    // Ověř, že to databáze opravdu vzala — PostgREST vrací úspěch i tehdy,
+    // když update kvůli právům netrefil žádný řádek.
+    const { data } = await sb.from('profiles').select('invoice_design').eq('id', workerId).maybeSingle()
+    const ulozeno = Number(data?.invoice_design) || 1
+    if (ulozeno !== Number(el.value)) {
+      el.value = String(ulozeno || puvodni || 1)
+      showToast('⚠️ Vzhled se neuložil — zůstává ' + ulozeno)
+    } else {
+      el.dataset.puvodni = String(ulozeno)
+      // Ať to sedí i v paměti, kdyby se přehled překreslil bez nového dotazu.
+      const zaznamy = window._invCache || []
+      zaznamy.forEach(z => { if (z.worker_id === workerId && z.worker) z.worker.invoice_design = ulozeno })
+    }
+  } finally { el.disabled = false }
+}
+
+// Ze seznamu už použitých vzhledů vybere ten nejméně častý. Je to schválně
+// oddělené od databáze — takhle se dá spočítat i změřit bez připojení.
+// Při shodě vyhrává nižší číslo, ať je to předvídatelné.
+function nejmenePouzivanyVzhled(seznam) {
+  const pocty = {}
+  for (let i = 1; i <= POCET_VZHLEDU; i++) pocty[i] = 0
+  ;(seznam || []).forEach(x => {
+    const n = Number(x && typeof x === 'object' ? x.invoice_design : x)
+    if (n >= 1 && n <= POCET_VZHLEDU) pocty[n]++
+  })
+  let nejlepsi = 1
+  for (let i = 2; i <= POCET_VZHLEDU; i++) if (pocty[i] < pocty[nejlepsi]) nejlepsi = i
+  return nejlepsi
+}
+
+// Novému člověku přidělí ten vzhled, který je zatím nejméně používaný — ať se
+// faktury různých lidí od sebe liší a nesplývají. Když se nepovede (chybí
+// migrace, nejde číst), tiše se nic nestane a platí vzhled 1 jako dosud.
+async function prideliNejmenePouzivanyVzhled(workerId, prof) {
+  if (!workerId || !prof) return null
+  if (prof.invoice_design != null) return prof.invoice_design   // už nějaký má
+  try {
+    const { data, error } = await sb.from('profiles')
+      .select('invoice_design').not('invoice_design', 'is', null)
+    if (error) return null
+    const nejlepsi = nejmenePouzivanyVzhled(data || [])
+    const { error: upErr } = await sb.from('profiles')
+      .update({ invoice_design: nejlepsi }).eq('id', workerId).select('id')
+    if (upErr) return null
+    prof.invoice_design = nejlepsi
+    return nejlepsi
+  } catch (e) { return null }
+}
+
 async function ulozVzhledFaktury(hodnota, workerId) {
   const kdo = workerId || currentWorkerId
   if (!kdo) return
   const n = parseInt(hodnota, 10)
-  if (!Number.isInteger(n) || n < 1 || n > 10) return
+  // POZOR: dřív tu byla natvrdo desítka a vzhledy 11–20 to tiše zahodilo.
+  if (!Number.isInteger(n) || n < 1 || n > POCET_VZHLEDU) return
   const { error } = await sb.from('profiles').update({ invoice_design: n }).eq('id', kdo)
   if (error) {
-    showToast(/invoice_design|column|schema cache/i.test(error.message || '')
-      ? '❌ Chybí sloupec invoice_design — spusťte migraci supabase-migrace-vzhled-faktury.sql'
-      : '❌ Vzhled se neuložil: ' + error.message)
+    // Databáze má u sloupce podmínku na rozsah. Dokud neproběhne migrace,
+    // odmítne vzhledy nad 10 — a to je potřeba říct nahlas, ne spolknout.
+    const m = error.message || ''
+    showToast(/invoice_design_check|violates check constraint/i.test(m)
+      ? '❌ Databáze zatím povoluje jen vzhledy 1–10 — spusťte migraci supabase-migrace-vzhledy-11-az-20.sql'
+      : (/invoice_design|column|schema cache/i.test(m)
+        ? '❌ Chybí sloupec invoice_design — spusťte migraci supabase-migrace-vzhled-faktury.sql'
+        : '❌ Vzhled se neuložil: ' + m))
     return
   }
   if (kdo === currentWorkerId && currentWorkerProfile) currentWorkerProfile.invoice_design = n
@@ -32792,7 +33019,9 @@ function tichaObnovaDat() {
       if (name === 'dashboard' && typeof loadDashboard === 'function') loadDashboard()
       else if (name === 'dochazka' && typeof loadKWData === 'function') loadKWData()
       else if (name === 'pracovnici' && typeof loadWorkers === 'function') loadWorkers()
-      else if (name === 'kalendar' && typeof renderCalendar === 'function') renderCalendar()
+      // `true` = tichý režim: neukáže „Načítám…" a když se data nezměnila,
+      // nepřekreslí vůbec nic. Bez toho kalendář každou minutu bliknul.
+      else if (name === 'kalendar' && typeof renderCalendar === 'function') renderCalendar(true)
       else if (name === 'faktury-archiv' && typeof loadWorkerInvoices === 'function') loadWorkerInvoices()
       else if (name === 'zalohove-faktury' && typeof loadZalohoveFaktury === 'function') loadZalohoveFaktury()
       // 'pristupy' (Přístupy) se sem záměrně nepřidává — má vlastní 5min interval
