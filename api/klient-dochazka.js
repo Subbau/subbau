@@ -189,6 +189,9 @@ function tydenOdDo(dnes) {
   return { od: iso(po), do: iso(ne) };
 }
 
+// Jediné povolené barvy poznámky. Co tu není, se uloží jako „bez barvy".
+const BARVY_POZNAMKY = ['cervena', 'oranzova', 'zelena', 'modra', 'cerna'];
+
 async function db(cesta, klic) {
   const r = await fetch(`${SUPABASE_URL}/rest/v1/${cesta}`, {
     headers: { apikey: klic, Authorization: `Bearer ${klic}`, Accept: 'application/json' },
@@ -334,6 +337,15 @@ module.exports = async (req, res) => {
       }
       // Ukončená spolupráce. Zaškrtnutí a datum jdou zvlášť — odběratel může
       // zaškrtnout hned a datum doplnit až potom, až si ho dohledá.
+      // Zvýraznění poznámky. Ukládá se jen „tučně ano/ne" a NÁZEV barvy —
+      // nikdy ne HTML ani kus stylu, ať se do stránky nedá nic propašovat.
+      if ('pozn_tucne' in telo) {
+        zmena.pozn_tucne = !!telo.pozn_tucne;
+      }
+      if ('pozn_barva' in telo) {
+        const b = String(telo.pozn_barva || '').trim();
+        zmena.pozn_barva = BARVY_POZNAMKY.includes(b) ? b : null;
+      }
       if ('spoluprace_ukoncena' in telo) {
         zmena.spoluprace_ukoncena = !!telo.spoluprace_ukoncena;
       }
@@ -562,6 +574,30 @@ module.exports = async (req, res) => {
       body: JSON.stringify(zmena),
     }).catch(() => {});
 
+    // Dovolené a nemoci. Odběratel potřebuje vědět, kdo mu nepřijde a dokdy —
+    // bere se všechno, co ještě neskončilo před začátkem zobrazeného týdne,
+    // tedy i budoucí. Bez toho se to dozví, až ten člověk nedorazí.
+    let dovolene = {};
+    try {
+      const ids2 = [...new Set(radky.map(r => r.worker))].filter(Boolean);
+      if (ids2.length) {
+        const seznam2 = ids2.map(encodeURIComponent).join(',');
+        const abs = await db(
+          `vacations?select=worker_id,date_from,date_to,type,note` +
+          `&worker_id=in.(${seznam2})&date_to=gte.${od}` +
+          `&order=date_from.asc&limit=300`, klic);
+        for (const a of (abs || [])) {
+          // Nemoc se pozná podle sloupce type; starší záznamy ji mají jen
+          // v poznámce, proto i ta záloha — stejně jako to dělá appka.
+          const nemoc = a.type === 'nemoc'
+            || (!a.type && /^nemoc/i.test(String(a.note || '').trim()));
+          (dovolene[a.worker_id] = dovolene[a.worker_id] || []).push({
+            od: a.date_from, do: a.date_to, nemoc,
+          });
+        }
+      }
+    } catch (e) { console.warn('[klient] dovolené se nenačetly:', e.message); }
+
     // Co si odběratel u lidí poznamenal — fotka, poznámka, známka.
     let poznamky = {};
     try {
@@ -571,7 +607,7 @@ module.exports = async (req, res) => {
       let pz;
       try {
         pz = await db(
-          `client_link_workers?select=worker_id,foto,poznamka,hodnoceni,spoluprace_ukoncena,spoluprace_do&link_id=eq.${odkaz.id}`, klic);
+          `client_link_workers?select=worker_id,foto,poznamka,hodnoceni,spoluprace_ukoncena,spoluprace_do,pozn_tucne,pozn_barva&link_id=eq.${odkaz.id}`, klic);
       } catch (e) {
         // POZOR: db() hlásí jen „db 400", podrobnosti jsou v e.kod.
         // Ústup pouštíme jen u chybějícího sloupce (42703), ne při výpadku.
@@ -584,7 +620,9 @@ module.exports = async (req, res) => {
         poznamky[p.worker_id] = { foto: p.foto || null, poznamka: p.poznamka || '',
                                   hodnoceni: p.hodnoceni || null,
                                   spoluprace_ukoncena: !!p.spoluprace_ukoncena,
-                                  spoluprace_do: p.spoluprace_do || '' };
+                                  spoluprace_do: p.spoluprace_do || '',
+                                  pozn_tucne: !!p.pozn_tucne,
+                                  pozn_barva: BARVY_POZNAMKY.includes(p.pozn_barva) ? p.pozn_barva : '' };
       }
     } catch (e) { console.warn('[klient] poznámky se nenačetly:', e.message); }
 
@@ -615,7 +653,7 @@ module.exports = async (req, res) => {
     }
 
     res.status(200).json({ ok: true, nazev: odkaz.nazev, kw, rok, od, do: doDne,
-                           radky, tydny, poznamky, uhrazeno });
+                           radky, tydny, poznamky, dovolene, uhrazeno });
   } catch (e) {
     // Podrobnosti si nechá log na Vercelu. Ven jde jen obecná hláška, ať
     // z ní nejde vyčíst, jak je databáze postavená.

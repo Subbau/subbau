@@ -38,6 +38,22 @@
   .pozn-obal{padding:10px 16px 0}
   /* Ukončená spolupráce. Když je zaškrtnutá, karta člověka zešedne a nahoře
      je to napsané — ať se to na vytištěném výkazu nedá přehlédnout. */
+  /* Dovolená a nemoc v hlavičce karty — ať odběratel hned vidí, kdo nepřijde. */
+  .absence{display:flex;flex-wrap:wrap;gap:5px;margin-top:4px}
+  .absence span{display:inline-block;font-size:11px;font-weight:800;padding:2px 8px;
+    border-radius:6px;white-space:nowrap}
+  .abs-dov{background:#e4eefb;color:#1f4f8f}
+  .abs-nem{background:#fbe6e2;color:#9c3b22}
+  /* Zvýraznění poznámky. Barvy jsou pevně dané, odběratel si vybírá z nich. */
+  .pozn-nastroje{display:flex;align-items:center;gap:7px;flex-wrap:wrap;margin-top:6px;
+    font-size:11.5px;color:var(--seda)}
+  .pozn-nastroje button{font-family:inherit;font-size:11.5px;padding:3px 9px;border-radius:6px;
+    border:1.5px solid var(--ram);background:#fff;cursor:pointer;color:var(--tmava)}
+  .pozn-nastroje button.on{border-color:var(--tmava);background:var(--tmava);color:#fff}
+  .pozn-barvy{display:flex;gap:4px}
+  .pozn-barvy button{width:20px;height:20px;padding:0;border-radius:50%;border:2px solid transparent}
+  .pozn-barvy button.on{border-color:var(--tmava)}
+  @media print{.pozn-nastroje{display:none}}
   .konec-obal{display:flex;align-items:center;gap:9px;flex-wrap:wrap;
     padding:9px 16px 2px;font-size:12.5px;color:var(--seda)}
   .konec-obal input[type=checkbox]{width:16px;height:16px;cursor:pointer;flex:none}
@@ -151,6 +167,41 @@ function datumCs(iso){
   var d = new Date(iso + 'T00:00:00');
   return isNaN(d) ? iso : DNY_CS[d.getDay()];
 }
+// Povolené barvy poznámky. Musí sedět se seznamem na serveru i v migraci —
+// odběratel si vybírá z nich, nic jiného se neuloží.
+var BARVY_POZNAMKY = [
+  { kod:'cervena',  hex:'#c0281c', popis:'Rot · červená' },
+  { kod:'oranzova', hex:'#c97a12', popis:'Orange · oranžová' },
+  { kod:'zelena',   hex:'#1d7a52', popis:'Grün · zelená' },
+  { kod:'modra',    hex:'#1f4f8f', popis:'Blau · modrá' },
+  { kod:'cerna',    hex:'#211d1a', popis:'Schwarz · černá' }
+];
+
+// Styl poznámky podle zvolených voleb. Skládá se tu, ne v datech — z databáze
+// chodí jen „tučně ano/ne" a název barvy, nikdy hotový kus stylu.
+function stylPoznamky(pz){
+  var kusy = [];
+  if (pz && pz.pozn_tucne) kusy.push('font-weight:800');
+  var b = null;
+  for (var i = 0; i < BARVY_POZNAMKY.length; i++) {
+    if (pz && BARVY_POZNAMKY[i].kod === pz.pozn_barva) b = BARVY_POZNAMKY[i];
+  }
+  if (b) kusy.push('color:' + b.hex);
+  return kusy.join(';');
+}
+
+// Dovolená a nemoc v hlavičce karty. Odběratel musí vidět, kdo mu nepřijde
+// a dokdy — do teď se to dozvěděl, až ten člověk nedorazil.
+function absenceHtml(wid){
+  var sez = (DATA && DATA.dovolene && DATA.dovolene[wid]) || [];
+  if (!sez.length) return '';
+  return '<div class="absence">' + sez.slice(0, 4).map(function(a){
+    var kdy = datumPlne(a.od) + (a.do && a.do !== a.od ? ' – ' + datumPlne(a.do) : '');
+    return '<span class="' + (a.nemoc ? 'abs-nem' : 'abs-dov') + '">'
+         + (a.nemoc ? 'Krankheit · nemoc ' : 'Urlaub · dovolená ') + kdy + '</span>';
+  }).join('') + '</div>';
+}
+
 // Celé datum i s rokem — u ukončené spolupráce musí být jasné, kterého roku.
 // Tvar 15.09.2026 čtou Němci i Češi stejně.
 function datumPlne(iso){
@@ -296,6 +347,7 @@ function vykreslit(d, preklady){
               + (datumKonce ? ' ' + datumPlne(datumKonce) : '') + '</span>'
             : '')
       +   '</div>'
+      +   absenceHtml(wid)
       +   '<div class="penize">' + rozpis(podleSazby, 'Std.')
       +     '<div style="margin-top:2px">Provision ' + rozpis(podleProvize, 'Std.') + '</div>'
       +     '<div style="font-size:11px;color:var(--seda)">hodinovka · provize</div></div>'
@@ -319,7 +371,25 @@ function vykreslit(d, preklady){
       // ---- poznámka přes celou šířku, mezi jménem a hodinami
       + '<div class="pozn-obal">'
       +   '<textarea class="pozn" rows="2" placeholder="Hier können Sie sich eine Notiz machen · zde si můžete napsat poznámku"'
-      +   ' data-w="' + esc(wid) + '" onchange="ulozPoznamku(this)">' + esc(pz.poznamka || '') + '</textarea>'
+      +   ' data-w="' + esc(wid) + '" onchange="ulozPoznamku(this)"'
+      +   ' style="' + stylPoznamky(pz) + '">' + esc(pz.poznamka || '') + '</textarea>'
+      +   '<div class="pozn-nastroje">'
+      +     '<button onclick="prepniTucne(\'' + esc(wid) + '\')"'
+      +       (pz.pozn_tucne ? ' class="on"' : '')
+      +       ' title="Notiz fett · poznámka tučně"><b>F</b> fett · tučně</button>'
+      +     '<span>Farbe · barva</span>'
+      +     '<div class="pozn-barvy">'
+      +       BARVY_POZNAMKY.map(function(b){
+              return '<button onclick="dejBarvu(\'' + esc(wid) + '\',\'' + b.kod + '\')"'
+                   + (pz.pozn_barva === b.kod ? ' class="on"' : '')
+                   + ' style="background:' + b.hex + '" title="' + b.popis + '"></button>'
+            }).join('')
+      +       '<button onclick="dejBarvu(\'' + esc(wid) + '\',\'\')"'
+      +       (pz.pozn_barva ? '' : ' class="on"')
+      +       ' style="background:#fff;border:2px solid var(--ram);font-size:11px;line-height:1"'
+      +       ' title="Ohne Farbe · bez barvy">✕</button>'
+      +     '</div>'
+      +   '</div>'
       + '</div>'
       // ---- ukončená spolupráce: zaškrtnutí a datum
       + '<div class="konec-obal">'
@@ -523,6 +593,48 @@ function oznacKartu(wid){
   }
   stitek.textContent = 'Zusammenarbeit beendet · spolupráce ukončena'
     + (pz.spoluprace_do ? ' ' + datumPlne(pz.spoluprace_do) : '');
+}
+
+// Tučně a barva se ukládají hned. Textarea se přebarví na místě, ať se
+// nemusí překreslovat celá stránka a odběratel nepřišel o rozepsané.
+function prepniTucne(wid){
+  var pz = zajistiPoznamku(wid);
+  pz.pozn_tucne = !pz.pozn_tucne;
+  ulozPoznamkuNaServer({ worker_id: wid, pozn_tucne: pz.pozn_tucne }, function(){
+    obnovStylPoznamky(wid);
+  });
+  obnovStylPoznamky(wid);
+}
+
+function dejBarvu(wid, kod){
+  var pz = zajistiPoznamku(wid);
+  pz.pozn_barva = kod || '';
+  ulozPoznamkuNaServer({ worker_id: wid, pozn_barva: pz.pozn_barva }, function(){
+    obnovStylPoznamky(wid);
+  });
+  obnovStylPoznamky(wid);
+}
+
+function zajistiPoznamku(wid){
+  if (!DATA.poznamky) DATA.poznamky = {};
+  DATA.poznamky[wid] = DATA.poznamky[wid] || {};
+  return DATA.poznamky[wid];
+}
+
+function obnovStylPoznamky(wid){
+  var pz = zajistiPoznamku(wid);
+  var pole = document.querySelector('textarea.pozn[data-w="' + wid + '"]');
+  if (pole) pole.setAttribute('style', stylPoznamky(pz));
+  var nastroje = pole && pole.parentElement
+    ? pole.parentElement.querySelector('.pozn-nastroje') : null;
+  if (!nastroje) return;
+  var tucne = nastroje.querySelector('button');
+  if (tucne) tucne.className = pz.pozn_tucne ? 'on' : '';
+  var barvy = nastroje.querySelectorAll('.pozn-barvy button');
+  for (var i = 0; i < barvy.length; i++) {
+    var kod = i < BARVY_POZNAMKY.length ? BARVY_POZNAMKY[i].kod : '';
+    barvy[i].className = ((pz.pozn_barva || '') === kod) ? 'on' : '';
+  }
 }
 
 // Ukončená spolupráce. Zaškrtnutí a datum se ukládají zvlášť — odběratel může

@@ -29,7 +29,8 @@ ok(/if \('spoluprace_ukoncena' in telo\)/.test(api), 'zaškrtnutí se ukládá')
 ok(/\^\\\\d\{4\}-\\\\d\{2\}-\\\\d\{2\}\$/.test(api) || /\\d\{4\}-\\d\{2\}-\\d\{2\}/.test(api),
    'datum se kontroluje na tvar, ne že se uloží cokoliv')
 ok(/chyba: 'spatne_datum'/.test(api), 'nesmyslné datum server odmítne')
-ok(/spoluprace_ukoncena,spoluprace_do&link_id/.test(api), 'čte se to zpátky do odkazu')
+ok(/spoluprace_ukoncena,spoluprace_do,pozn_tucne,pozn_barva&link_id/.test(api),
+   'čte se to zpátky do odkazu')
 ok(/if \(e\.kod !== '42703' && e\.stav !== 400\) throw e/.test(api),
    'bez migrace se dotaz zopakuje bez nových sloupců — fotky a poznámky se neztratí')
 ok(/pz = await db\(\s*\n\s*`client_link_workers\?select=worker_id,foto,poznamka,hodnoceni&link_id/.test(api),
@@ -52,15 +53,47 @@ ok(/function oznacKartu/.test(klient) && !/vykresli\(\)/.test(klient),
    'po zaškrtnutí se překreslí jen ta jedna karta, ne celá stránka (jinak by přišel o rozepsanou poznámku)')
 
 console.log('\n4) Appka — SubBau to musí vidět')
-ok(/spoluprace_ukoncena, spoluprace_do, upraveno/.test(zdroj), 'načítá se to k poznámkám odběratele')
+ok(/spoluprace_ukoncena, spoluprace_do, pozn_tucne, pozn_barva, upraveno/.test(zdroj),
+   'načítá se to k poznámkám odběratele')
 ok(/r\.hodnoceni \|\| r\.spoluprace_ukoncena/.test(zdroj),
    'ukáže se i člověk, u kterého odběratel označil JEN ukončení')
 ok(/🚫 Odběratel ukončil spolupráci/.test(zdroj), 'je to vidět jako červený odznak')
 ok(/' · datum neuvedl'/.test(zdroj), 'a když datum nevyplnil, je to napsané — ne prázdno')
-ok(/if \(error && \/spoluprace\|42703\|column\/i\.test/.test(zdroj),
+ok(/if \(error && \/spoluprace\|pozn_tucne\|pozn_barva\|42703\|column\/i\.test/.test(zdroj),
    'i tady je ústup, kdyby migrace ještě neproběhla')
 
-console.log('\n5) Prohlížeč — appka se s tím načte')
+console.log('\n5) Dovolená v hlavičce karty')
+ok(/vacations\?select=worker_id,date_from,date_to,type,note/.test(api), 'odkaz načítá dovolené')
+ok(/date_to=gte\.\$\{od\}/.test(api), 'bere i budoucí — odběratel má vědět dopředu, kdo nepřijde')
+ok(/a\.type === 'nemoc'/.test(api) && /\/\^nemoc\/i\.test/.test(api),
+   'nemoc pozná i u starších záznamů, které mají typ jen v poznámce')
+ok(/dovolene \}\);|radky, tydny, poznamky, dovolene, uhrazeno/.test(api), 'a posílá je na stránku')
+ok(/function absenceHtml/.test(klient), 'stránka je umí vykreslit')
+ok(/Urlaub · dovolená/.test(klient) && /Krankheit · nemoc/.test(klient), 'dvojjazyčně')
+ok(/datumPlne\(a\.od\)/.test(klient) && /' – ' \+ datumPlne\(a\.do\)/.test(klient),
+   'je vidět od kdy do kdy, i s rokem')
+ok(/catch \(e\) \{ console\.warn\('\[klient\] dovolené se nenačetly/.test(api),
+   'kdyby se dovolené nenačetly, zbytek stránky běží dál')
+
+console.log('\n6) Poznámka tučně a barevně')
+ok(/pozn_tucne boolean not null default false/.test(mig), 'migrace má tučné')
+ok(/pozn_barva in \('cervena','oranzova','zelena','modra','cerna'\)/.test(mig),
+   'a barvu jen z povoleného seznamu — ne libovolný text')
+ok(/const BARVY_POZNAMKY = \['cervena', 'oranzova', 'zelena', 'modra', 'cerna'\]/.test(api),
+   'server pouští jen ty barvy')
+ok(/zmena\.pozn_barva = BARVY_POZNAMKY\.includes\(b\) \? b : null/.test(api),
+   'co není v seznamu, uloží se jako bez barvy (nedá se propašovat kus stylu)')
+ok(/function stylPoznamky/.test(klient) && /kusy\.push\('font-weight:800'\)/.test(klient),
+   'styl se skládá na stránce z názvu barvy, ne že by chodil hotový z databáze')
+ok(/onclick="prepniTucne/.test(klient) && /onclick="dejBarvu/.test(klient), 'ovládání je u poznámky')
+ok(/@media print\{\.pozn-nastroje\{display:none\}\}/.test(klient), 'na tisku se ovládání schová')
+ok(/function obnovStylPoznamky/.test(klient),
+   'přebarví se jen ta poznámka, ne celá stránka (jinak by přišel o rozepsané)')
+ok(/const BARVY_POZNAMKY_ODBERATELE/.test(zdroj), 'appka zná stejné barvy')
+ok(/r\.pozn_tucne \? 'font-weight:800;' : ''/.test(zdroj),
+   'a ukáže SubBau poznámku tak, jak ji vidí odběratel')
+
+console.log('\n7) Prohlížeč — appka se s tím načte')
 const b = await puppeteer.launch({ headless: 'new', args: ['--no-sandbox'], protocolTimeout: 40000 })
 try {
   const p = await b.newPage()

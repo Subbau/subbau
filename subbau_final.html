@@ -4551,7 +4551,7 @@ async function submitAdminSignatureWithPlacement() {
 // Po nahrání nové verze se snadno pozná, jestli se opravdu nasadila: otevřete
 // appku, zmáčkněte F12 (na Macu ⌥⌘I) a v konzoli je vypsané tohle datum. Když
 // tam svítí starší, prohlížeč nebo GitHub drží starou verzi.
-const SUBBAU_VERZE = '2026-09-18 t — vzhled faktury: údaj u čísla a vlastní sloupec na výběr'
+const SUBBAU_VERZE = '2026-09-18 u — v odkazu dovolené u jména a barevná poznámka'
 console.log('SubBau docházka — verze ' + SUBBAU_VERZE)
 
 // ============ SUPABASE CONFIG ============
@@ -14136,6 +14136,12 @@ async function loadKlientOdkazy() {
 // SubBau to musí vidět: je to zpětná vazba od zákazníka a někdy i důvod, proč
 // někoho ze stavby stáhnout. Pracovník to nevidí, je to jen mezi vámi a klientem.
 const ZNAMKY = { 1:'výborný', 2:'chvalitebný', 3:'dobrý', 4:'dostatečný', 5:'slabý', 6:'nevyhovující' }
+// Barvy, které si odběratel může dát poznámce. Musí sedět se seznamem
+// v klient.html i v migraci — z databáze chodí jen název, ne hotový styl.
+const BARVY_POZNAMKY_ODBERATELE = {
+  cervena: '#c0281c', oranzova: '#c97a12', zelena: '#1d7a52',
+  modra: '#1f4f8f', cerna: '#211d1a'
+}
 
 async function ukazPoznamkyOdberatele(linkId) {
   const box = document.getElementById('pozn-' + linkId)
@@ -14148,9 +14154,9 @@ async function ukazPoznamkyOdberatele(linkId) {
   // migrace, ty sloupce neexistují — pak se ptáme bez nich, ať SubBau nepřijde
   // ani o fotky a poznámky.
   let { data, error } = await sb.from('client_link_workers')
-    .select('worker_id, foto, poznamka, hodnoceni, spoluprace_ukoncena, spoluprace_do, upraveno, worker:profiles!worker_id(full_name)')
+    .select('worker_id, foto, poznamka, hodnoceni, spoluprace_ukoncena, spoluprace_do, pozn_tucne, pozn_barva, upraveno, worker:profiles!worker_id(full_name)')
     .eq('link_id', linkId).order('upraveno', { ascending: false })
-  if (error && /spoluprace|42703|column/i.test(error.message || '')) {
+  if (error && /spoluprace|pozn_tucne|pozn_barva|42703|column/i.test(error.message || '')) {
     ;({ data, error } = await sb.from('client_link_workers')
       .select('worker_id, foto, poznamka, hodnoceni, upraveno, worker:profiles!worker_id(full_name)')
       .eq('link_id', linkId).order('upraveno', { ascending: false }))
@@ -14204,7 +14210,12 @@ async function ukazPoznamkyOdberatele(linkId) {
         <div style="display:flex;gap:8px;align-items:baseline;flex-wrap:wrap">
           <b style="font-size:13.5px">${jmeno}</b>${zn}
         </div>
-        ${r.poznamka ? `<div style="font-size:12.5px;color:var(--text2);margin-top:2px;white-space:pre-wrap">${escAttr(r.poznamka)}</div>` : ''}
+        ${r.poznamka ? `<div style="font-size:12.5px;margin-top:2px;white-space:pre-wrap;${
+          // Odběratel si poznámku mohl udělat tučnou a barevnou — ukaž ji stejně,
+          // jak ji vidí on. Z databáze chodí jen název barvy, styl se skládá tady.
+          (r.pozn_tucne ? 'font-weight:800;' : '') +
+          'color:' + (BARVY_POZNAMKY_ODBERATELE[r.pozn_barva] || 'var(--text2)')
+        }">${escAttr(r.poznamka)}</div>` : ''}
         <div style="font-size:10.5px;color:var(--text3);margin-top:2px">${r.upraveno ? datumCas(r.upraveno) : ''}</div>
       </div>
     </div>`

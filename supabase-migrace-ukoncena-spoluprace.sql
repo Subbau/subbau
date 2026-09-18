@@ -40,15 +40,40 @@ alter table public.client_link_workers
   add constraint client_link_workers_spoluprace_do_check
   check (spoluprace_do is null or spoluprace_do <= (current_date + interval '1 year'));
 
+-- ---------------------------------------------------------------------
+-- ZVÝRAZNĚNÍ POZNÁMKY — odběratel si smí poznámku udělat tučnou a barevnou
+--
+-- PROČ: poznámky jsou u všech lidí stejně šedé a ta důležitá se v nich
+-- ztratí. Ukládá se jen „tučně ano/ne" a název barvy — žádné HTML, takže
+-- se do stránky nedá propašovat nic cizího.
+-- ---------------------------------------------------------------------
+alter table public.client_link_workers
+  add column if not exists pozn_tucne boolean not null default false;
+
+alter table public.client_link_workers
+  add column if not exists pozn_barva text;
+
+comment on column public.client_link_workers.pozn_tucne is
+  'Odběratel si přeje mít poznámku tučně.';
+comment on column public.client_link_workers.pozn_barva is
+  'Barva poznámky. Jen povolené názvy, ne libovolný text — kvůli bezpečnosti.';
+
+alter table public.client_link_workers
+  drop constraint if exists client_link_workers_pozn_barva_check;
+alter table public.client_link_workers
+  add constraint client_link_workers_pozn_barva_check
+  check (pozn_barva is null or pozn_barva in ('cervena','oranzova','zelena','modra','cerna'));
+
 commit;
 
 -- =====================================================================
--- KONTROLA — musí vrátit oba sloupce
+-- KONTROLA — musí vrátit všechny čtyři sloupce
 -- =====================================================================
 -- select column_name, data_type, column_default
 --   from information_schema.columns
 --  where table_schema = 'public' and table_name = 'client_link_workers'
---    and column_name in ('spoluprace_ukoncena', 'spoluprace_do');
+--    and column_name in ('spoluprace_ukoncena', 'spoluprace_do',
+--                        'pozn_tucne', 'pozn_barva');
 --
 -- Kontrolní dotaz na sloupec, který NEEXISTUJE (musí vrátit prázdno —
 -- tím víte, že ta kontrola opravdu měří):
