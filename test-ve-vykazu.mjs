@@ -37,7 +37,7 @@ ok(/w\.team_id === teamId && patriDoVykazu\(w\)/.test(zdroj), 'PDF za tým filtr
 ok((zdroj.match(/w\.team_id === teamId && patriDoVykazu\(w\)/g) || []).length === 2,
    'filtruje i nabídka týdnů u toho PDF (jinak by šel vybrat prázdný týden)')
 ok(/mimoVykaz\.has\(r\.worker_id\)/.test(zdroj), 'týdenní přehled hodin filtruje')
-ok(/\.select\('id, full_name, profession, is_active'\)\.in\('role',\['osvec', ?'partak'\]\)/.test(zdroj),
+ok(/\.select\('id, full_name, profession, is_active(, team_id)?'\)\.in\('role',\['osvec', ?'partak'\]\)/.test(zdroj),
    'flexibilní export má pojistku, kdyby migrace ještě neproběhla')
 ok(/ve_vykazu/.test(fs.readFileSync(path.join(D,'supabase-migrace-ve-vykazu.sql'),'utf8')),
    'migrace je připravená')

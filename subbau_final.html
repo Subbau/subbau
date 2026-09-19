@@ -4551,7 +4551,7 @@ async function submitAdminSignatureWithPlacement() {
 // Po nahrání nové verze se snadno pozná, jestli se opravdu nasadila: otevřete
 // appku, zmáčkněte F12 (na Macu ⌥⌘I) a v konzoli je vypsané tohle datum. Když
 // tam svítí starší, prohlížeč nebo GitHub drží starou verzi.
-const SUBBAU_VERZE = '2026-09-19 w — nový člověk v provizích, odkaz si pamatuje ukončení'
+const SUBBAU_VERZE = '2026-09-19 x — schovaná firma zmizí všude v appce'
 console.log('SubBau docházka — verze ' + SUBBAU_VERZE)
 
 // ============ SUPABASE CONFIG ============
@@ -5420,6 +5420,9 @@ function showAdmin(profile) {
   loadDashboard()
   // Vrátit správce tam, kde skončil. Až po načtení nástěnky, ať se nepřepíše.
   setTimeout(obnovPosledniSekci, 0)
+  // Když zůstaly schované firmy od minula, ať to správce vidí hned po startu —
+  // jinak by se divil, kam se poděly.
+  setTimeout(() => { try { aktualizujPruhSkrytych() } catch (e) {} }, 0)
   loadWorkers()
   loadAttendanceWorkers()
   loadTeams()
@@ -6689,6 +6692,7 @@ async function loadAccess() {
   }
   const podskupinaPristupu = w => (w.subteam_id && pSubById[w.subteam_id]) ? pSubById[w.subteam_id].name : ''
 
+  if (data) data = data.filter(w => !jeSkrytaFirmaPracovnika(w))   // schované firmy
   if (data) {
     data = [...data].sort((a, b) => {
       const fa = firmaPristupu(a), fb = firmaPristupu(b)
@@ -7363,6 +7367,18 @@ async function prepniFirmuVProvizich(el, firmIdx) {
   await prekresliProvize()
 }
 
+// Schová firmu přímo z Provizí. Je to TOTÉŽ schování jako v Týmech (stejné
+// úložiště), takže firma zmizí všude a vrátí se tlačítkem „Ukázat vše".
+function schovejFirmuZProvizi(firmIdx) {
+  const zaznam = (window._provizeFirmy || [])[firmIdx]
+  const tymy = (zaznam && zaznam.tymy) || []
+  if (!tymy.length) { showToast('⚠️ U téhle firmy není žádná skupina, kterou by šlo schovat'); return }
+  const set = skryteTymy()
+  tymy.forEach(id => set.add(String(id)))
+  lsSet(TYMY_SKRYTE_KLIC, JSON.stringify([...set]))
+  poZmeneSkrytych()
+}
+
 async function zapniVsechnyFirmy() {
   lsRemove(PROVIZE_FILTR_KLIC)
   await prekresliProvize()
@@ -7900,6 +7916,25 @@ async function renderProvizeContent() {
     workersAll.sort((a, b) => (a.full_name || '').localeCompare(b.full_name || '', 'cs'))
   }
 
+  // Schované firmy (Týmy → 🙈 Schovat). Musí zmizet z řádků I ze součtů,
+  // proto se vyřadí i jejich docházka — a to až TADY, po doplnění bývalých:
+  // kdyby se vyřadili dřív, jejich hodiny by se vrátily jako „bývalý pracovník".
+  // `att` je konstanta, maže se proto na místě.
+  const skryteVProvizich = new Set(workersAll.filter(jeSkrytaFirmaPracovnika).map(w => w.id))
+  if (skryteVProvizich.size) {
+    workersAll = workersAll.filter(w => !skryteVProvizich.has(w.id))
+    for (let i = att.length - 1; i >= 0; i--) if (skryteVProvizich.has(att[i].worker_id)) att.splice(i, 1)
+  }
+  // A ještě docházka odpracovaná VE schované skupině. Bez toho by člověk, který
+  // ze schované firmy přestoupil do viditelné, ukázal kartu i „Hodiny dnes"
+  // pod názvem té schované — firma na kartě se totiž bere podle skupiny
+  // z docházky, ne z profilu.
+  if (skryteTymy().size) {
+    for (let i = att.length - 1; i >= 0; i--) {
+      if (att[i].team_id != null && !tymJeVidet(att[i].team_id)) att.splice(i, 1)
+    }
+  }
+
   // Poslední skupina, ve které pracovník v zobrazeném měsíci opravdu odpracoval den.
   ;(att || []).forEach(a => {
     if (!a.team_id || a.work_date < mStartStr || a.work_date > mEndStr) return
@@ -8065,6 +8100,7 @@ async function renderProvizeContent() {
     const dueInfo = provizeDueInfo(terms)
     return {
       id: w.id, name: w.full_name + (w._byvaly ? ' (bývalý)' : ''), firm: firmOf(w), rate,
+      teamId: w.team_id || null,
       podskupina: w.subteam_id ? (subteamById[w.subteam_id] || '') : '',
       // Zaměstnanec firmy — sazbu ani výdělek nemá, provize jde firmě.
       zamestnavatel: w.zamestnavatel_id
@@ -8214,7 +8250,13 @@ async function renderProvizeContent() {
     // Do firemního součtu jde jen to, co je v tabulce vidět. Celkové souhrny
     // nahoře se berou ze `souhrn`, tedy ze všech lidí.
     window._provizeFirmTotals[firmIdx] = { day: fDay, week: fWeek, month: fMonth, year: fYear, earn: fEarn }
-    window._provizeFirmy[firmIdx] = { nazev: firm, weekKey, ids: members.map(m => m.id) }
+    window._provizeFirmy[firmIdx] = { nazev: firm, weekKey, ids: members.map(m => m.id),
+      // VŠECHNY skupiny té firmy, ne jen ty, kde někdo ten týden pracoval.
+      // Jedna firma může mít víc staveb — kdyby se schovaly jen některé,
+      // zbytek by zůstal v Pracovnících, Kalendáři a Týmech.
+      tymy: Object.values(teamById)
+        .filter(t => provizeFirmOf({ team_id: t.id }, teamById, companyNameById) === firm)
+        .map(t => String(t.id)) }
     return `
     <div class="card" style="border-left:6px solid ${firmaUhrazena ? 'var(--green)' : (firmaPoSplatnosti ? 'var(--red)' : gc.border)};margin-bottom:16px">
       <div class="card-h" style="flex-wrap:wrap;gap:10px;${firmaUhrazena ? 'background:var(--green-l)' : (firmaPoSplatnosti ? 'background:var(--red-l)' : '')}">
@@ -8227,6 +8269,9 @@ async function renderProvizeContent() {
             <span style="font-size:10.5px;font-weight:700;color:var(--text3);margin-left:5px;letter-spacing:.02em">počítat</span>
           </label>
           <span>🏢 ${firm}</span>
+          ${isNoFirm ? '' : `<button onclick="event.stopPropagation();schovejFirmuZProvizi(${firmIdx})"
+            title="Schovat tuhle firmu všude v appce — v Provizích, Docházce, Kalendáři, Fakturách… Hodí se, když ukazujete appku zákazníkovi. Vrátí se tlačítkem vlevo dole."
+            style="margin-left:4px;padding:3px 9px;font-size:11.5px;font-weight:700;border:1px solid var(--brd);border-radius:7px;cursor:pointer;background:#fff;color:var(--text2);font-family:inherit">🙈 Schovat</button>`}
         </h4>
         <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
           ${kUhrade.length ? `<label title="${firmaPayTableMissing ? 'Nejdřív spusťte migraci supabase-migrace-provize-uhrazeno-firmou.sql' : (firmaUhrazena ? 'Provize za tenhle týden od firmy dorazila' : (firmaPoSplatnosti ? 'Provize je po splatnosti a od firmy zatím nedorazila' : 'Zaškrtněte, až od firmy provize dorazí'))}"
@@ -8538,7 +8583,7 @@ async function loadVacationAlerts() {
   let data = null
   try {
     const res = await sb.from('vacations')
-      .select('id, worker_id, date_from, date_to, note, type, created_by, worker:profiles(full_name)')
+      .select('id, worker_id, date_from, date_to, note, type, created_by, worker:profiles(full_name,team_id)')
       .not('created_by', 'is', null)
       .gte('date_to', localDateStr(hranice))
       .order('date_from', { ascending: false })
@@ -8548,7 +8593,11 @@ async function loadVacationAlerts() {
   } catch (e) { return }
 
   // Vlastní nahlášení pozná podle toho, že zapisující je ten samý člověk.
-  const nove = (data || []).filter(v => String(v.created_by) === String(v.worker_id) && !isVacationAlertDismissed(v.id))
+  // Nahlášení od lidí ze schované firmy se neukáže — okno vyskakuje přes celou
+  // obrazovku a s pípnutím, takže by ho zákazník nemohl přehlédnout.
+  // Neukáže se jen dočasně: až se firma odkryje, okno přijde normálně.
+  const nove = (data || []).filter(v => String(v.created_by) === String(v.worker_id)
+    && !isVacationAlertDismissed(v.id) && !jeSkrytaFirmaPracovnika(v.worker))
   if (!nove.length) return
 
   const ids = nove.map(v => v.id)
@@ -8866,7 +8915,9 @@ async function loadDashboard() {
   // Pracovníci kteří nemají všechny dokumenty schválené
   await loadDocumentAlertsStat()
 
-  const { data: recent } = await sb.from('attendance').select('*, worker:profiles(full_name,profession)').order('created_at',{ascending:false}).limit(10)
+  const { data: recentVse } = await sb.from('attendance').select('*, worker:profiles(full_name,profession,team_id)').order('created_at',{ascending:false}).limit(30)
+  // Schované firmy pryč; bere se víc záznamů, ať po vyřazení zůstane deset.
+  const recent = (recentVse || []).filter(r => !jeSkrytaFirmaPracovnika(r.worker)).slice(0, 10)
   const tbody = document.getElementById('dash-attendance')
   if (!recent?.length) { tbody.innerHTML='<tr><td colspan="6" style="text-align:center;color:var(--text3);padding:20px">Žádné záznamy</td></tr>'; return }
   tbody.innerHTML = recent.map(r=>`
@@ -8991,7 +9042,7 @@ async function computeLongDayAlerts() {
   const now = new Date()
   const since = new Date(now); since.setDate(since.getDate() - 7)
 
-  const sel = '*, worker:profiles(full_name,profession)'
+  const sel = '*, worker:profiles(full_name,profession,team_id)'
   // Neukončené dny hledáme bez omezení data — zapomenutý odchod je potřeba
   // dořešit i po týdnu. Uzavřené dlouhé dny stačí za poslední týden, ať
   // upozornění na dashboardu nezůstává viset donekonečna.
@@ -9053,7 +9104,9 @@ async function loadLongDayAlert() {
   const div = document.getElementById('dash-unclosed-shifts')
   if (!div) return
 
-  const items = await computeLongDayAlerts()
+  // Schované firmy pryč jen z ZOBRAZENÍ. Samotný výpočet necháváme celý —
+  // bere ho i odznak u pracovníků a data se tu nemají měnit.
+  const items = (await computeLongDayAlerts()).filter(r => !jeSkrytaFirmaPracovnika(r.worker))
 
   if (!items.length) {
     div.style.display = 'none'
@@ -9330,7 +9383,9 @@ async function loadWorkers() {
     .order('full_name')
   const tbody = document.getElementById('workers-table')
   const cntEl = document.getElementById('workers-count')
-  if (cntEl) cntEl.textContent = data?.length ? data.length : ''
+  // Počet bez schovaných firem — jinak by nadpis ukazoval 12 a tabulka 8.
+  const pocetViditelnych = (data || []).filter(w => !jeSkrytaFirmaPracovnika(w)).length
+  if (cntEl) cntEl.textContent = pocetViditelnych ? pocetViditelnych : ''
   if (!data?.length) { tbody.innerHTML='<tr><td colspan="8" style="text-align:center;color:var(--text3);padding:20px">Žádní pracovníci</td></tr>'; return }
 
   // Skupiny (firmy) a podskupiny — pro barevné odznaky a řazení podle firmy
@@ -9344,7 +9399,7 @@ async function loadWorkers() {
   // Zjisti, kdo má nezavřenou směnu > 11 h (pro červený odznáček)
   await computeLongDayAlerts()
 
-  const sortedWorkers = sortByGroup(data, teamNameById, subteamById)
+  const sortedWorkers = sortByGroup((data || []).filter(w => !jeSkrytaFirmaPracovnika(w)), teamNameById, subteamById)
 
   tbody.innerHTML = sortedWorkers.map(w=>{
     const canTrack = w.can_track_hours !== false   // null/undefined = povoleno (zpětná kompatibilita)
@@ -9550,6 +9605,10 @@ async function loadTodayTimeline() {
     sb.from('subteams').select('id, name, team_id')
   ])
 
+  // Schovaná firma nesmí být vidět ani v dnešní docházce.
+  if (Array.isArray(data)) {
+    for (let i = data.length - 1; i >= 0; i--) if (jeSkrytaFirmaPracovnika(data[i].worker)) data.splice(i, 1)
+  }
   const teamById = {}
   ;(tmTeams || []).forEach(t => { teamById[t.id] = t })
   const companyNameById = {}
@@ -9796,6 +9855,9 @@ async function loadKWData() {
       .order('full_name'))
   }
   if (!allWorkers) { console.warn('[přehled KW] lidi se nenačetli:', chybaKW?.message); return }
+  // Schované firmy pryč ze seznamu lidí. Jejich docházka se vyřadí níž — jinak
+  // by se jim dodělal řádek jako „bývalému pracovníkovi".
+  allWorkers = allWorkers.filter(w => !jeSkrytaFirmaPracovnika(w))
 
   // Názvy skupin (firem) a podskupin
   const { data: kwTeams } = await sb.from('teams').select('id, name')
@@ -9807,7 +9869,7 @@ async function loadKWData() {
 
   // is_active z profilu tu potřebujeme kvůli řádkům lidí, kterým jsme mezitím odebrali
   // přístup — v seznamu výše nejsou, ale jejich odpracované hodiny se dál musí ukázat.
-  const { data } = await sb.from('attendance').select('*, worker:profiles(full_name,profession,is_active)').eq('kw',week).eq('kw_year',year)
+  const { data } = await sb.from('attendance').select('*, worker:profiles(full_name,profession,is_active,team_id)').eq('kw',week).eq('kw_year',year)
 
   // Dovolené v tomto týdnu — ať se u dnů bez docházky ukáže "Dovolená" místo 0h
   const _wkStart = getWeekStartDate(week, year)
@@ -9844,6 +9906,7 @@ async function loadKWData() {
 
   ;(data||[]).forEach(r => {
     const wid = r.worker_id
+    if (jeSkrytaFirmaPracovnika(r.worker)) return   // schovaná firma
     // Kdo není v seznamu výše, ale docházku v tomhle týdnu má — typicky bývalý
     // pracovník. Řádek mu vytvoříme, ať hodiny z přehledu nezmizí.
     if (!workers[wid]) workers[wid] = { id: wid, name: r.worker?.full_name, prof: r.worker?.profession,
@@ -10138,20 +10201,32 @@ async function renderCalendar(tichy) {
   const subteamById = {}
   calSubteams.forEach(s => { subteamById[s.id] = s })
 
-  // Naplň rozbalovací nabídku firem (jen jednou)
-  const firmEl = document.getElementById('cal-firm')
-  if (firmEl && firmEl.options.length <= 1 && calTeams?.length) {
-    const uniqNames = [...new Set((calTeams||[]).map(t => t.name).filter(Boolean))].sort((a,b)=>a.localeCompare(b,'cs'))
-    firmEl.innerHTML = '<option value="">Všechny firmy</option>' +
-      uniqNames.map(n => `<option value="${n.replace(/"/g,'&quot;')}">${n}</option>`).join('')
+  // Rozbalovací nabídky firem a lidí. Dřív se naplnily JEDNOU všemi firmami
+  // a všemi lidmi a pak už nikdy — takže schovaná firma v nich zůstala
+  // a zákazník by ji viděl, stačilo rozkliknout „Všechny firmy".
+  // Teď se plní jen tím, co je vidět. Přepisuje se jen když se obsah opravdu
+  // změnil, ať se nabídka nezavře pod rukama při tichém obnovování.
+  const naplnNabidku = (el, prvni, moznosti) => {
+    if (!el) return
+    const html = prvni + moznosti.join('')
+    if (el.__moznosti === html) return
+    const bylo = el.value
+    el.innerHTML = html
+    el.__moznosti = html
+    // Vybraná hodnota zůstane, pokud v nabídce pořád je; jinak zpět na „Všechny".
+    el.value = [...el.options].some(o => o.value === bylo) ? bylo : ''
   }
+  const viditelneTymy = (calTeams || []).filter(t => tymJeVidet(t.id))
+  const viditelniLide = (allWorkers || []).filter(w => !jeSkrytaFirmaPracovnika(w))
 
-  // Naplň filtr pracovníků (jen jednou)
+  const firmEl = document.getElementById('cal-firm')
+  const uniqNames = [...new Set(viditelneTymy.map(t => t.name).filter(Boolean))].sort((a,b)=>a.localeCompare(b,'cs'))
+  naplnNabidku(firmEl, '<option value="">Všechny firmy</option>',
+    uniqNames.map(n => `<option value="${n.replace(/"/g,'&quot;')}">${escAttr(n)}</option>`))
+
   const selEl = document.getElementById('cal-worker')
-  if (selEl && selEl.options.length <= 1 && allWorkers?.length) {
-    selEl.innerHTML = '<option value="">Všichni pracovníci</option>' +
-      allWorkers.map(w => `<option value="${w.id}">${escAttr(w.full_name)}</option>`).join('')
-  }
+  naplnNabidku(selEl, '<option value="">Všichni pracovníci</option>',
+    viditelniLide.map(w => `<option value="${w.id}">${escAttr(w.full_name)}</option>`))
   const filterId = selEl?.value || ''
   let workers = filterId ? (allWorkers||[]).filter(w => w.id === filterId) : (allWorkers||[])
   // Filtr podle vybrané firmy
@@ -10159,6 +10234,8 @@ async function renderCalendar(tichy) {
   if (firmVal) {
     workers = workers.filter(w => (w.team_id && teamNameById[w.team_id]) ? teamNameById[w.team_id] === firmVal : false)
   }
+  // Schované firmy pryč i z kalendáře.
+  workers = workers.filter(w => !jeSkrytaFirmaPracovnika(w))
 
   // Rozsah období
   let start, end
@@ -10534,7 +10611,8 @@ let _docValidityEditId = null
 const _docLabels = DOC_LABELS
 async function loadDocuments() {
   const { data } = await sb.from('documents').select('*, worker:profiles!worker_id(full_name)').order('uploaded_at',{ascending:false})
-  _docsCache = data || []
+  const skryti = await skrytiLideIds()   // schované firmy
+  _docsCache = (data || []).filter(d => !skryti.has(d.worker_id))
   renderDocuments()
 }
 
@@ -10557,6 +10635,10 @@ async function loadSitePhotosAdmin() {
       data = res2.data || []
     } catch (e2) { console.warn('[admin fotky] load:', e2?.message) }
   }
+  // Fotky od lidí ze schovaných firem pryč — u fotky je vidět jméno autora
+  // i název skupiny, tedy přímo to, co má zůstat schované.
+  { const skryti = await skrytiLideIds(); data = data.filter(p => !skryti.has(p.worker_id)
+      && !(p.team_id != null && !tymJeVidet(p.team_id))) }
   _sitePhotosCache = data
   const cnt = document.getElementById('fotky-count')
   if (cnt) cnt.textContent = data.length ? data.length : ''
@@ -11389,9 +11471,13 @@ async function loadChatAlerts() {
   if (!konverzace.length) { box.style.display = 'none'; box.innerHTML = ''; return }
 
   const { data: profs } = await sb.from('profiles')
-    .select('id, full_name').in('id', konverzace.map(k => k.workerId))
+    .select('id, full_name, team_id').in('id', konverzace.map(k => k.workerId))
   const jmena = {}
   ;(profs || []).forEach(p => { jmena[p.id] = p.full_name })
+  // Zprávy od lidí ze schované firmy na nástěnce neukazuj — ani jméno, ani úryvek.
+  const skrytiVChatu = new Set((profs || []).filter(jeSkrytaFirmaPracovnika).map(p => p.id))
+  for (let i = konverzace.length - 1; i >= 0; i--) if (skrytiVChatu.has(konverzace[i].workerId)) konverzace.splice(i, 1)
+  if (!konverzace.length) { box.style.display = 'none'; box.innerHTML = ''; return }
 
   await loadChatAlertDismissals()   // co smazali ostatní admini
   const videt = konverzace.filter(k => !isChatAlertDismissed(chatAlertKey(k.workerId, k.last.id)))
@@ -11458,7 +11544,10 @@ async function upozorniNaZpravu(workerId) {
   _posledniUpozorneniZprava = ted
   let jmeno = ''
   try {
-    const { data } = await sb.from('profiles').select('full_name').eq('id', workerId).maybeSingle()
+    const { data } = await sb.from('profiles').select('full_name, team_id').eq('id', workerId).maybeSingle()
+    // Zpráva od člověka ze schované firmy — hlášku vůbec neukazuj. Vyskočila
+    // by nad čímkoli a zákazník by jméno viděl uprostřed ukázky.
+    if (jeSkrytaFirmaPracovnika(data)) return
     jmeno = data?.full_name || ''
   } catch (e) {}
   try { showToast(jmeno ? ('💬 Nová zpráva: ' + jmeno) : '💬 Nová zpráva od pracovníka') } catch (e) {}
@@ -11479,12 +11568,14 @@ function scrollChatBottom(id) {
 
 // ── ADMIN CHAT ──
 async function loadAdminChatList() {
+  const skrytiChat = await skrytiLideIds()   // schované firmy
   // Načti všechny workery s jejich poslední zprávou
-  const { data: workers } = await sb.from('profiles')
+  const { data: workersVse } = await sb.from('profiles')
     .select('id, full_name, profession')
     .in('role', ['osvec', 'partak'])
     
     .order('full_name')
+  const workers = (workersVse || []).filter(w => !skrytiChat.has(w.id))
 
   if (!workers?.length) {
     document.getElementById('admin-chat-list').innerHTML = '<div style="text-align:center;padding:20px;color:var(--text3);font-size:13px">Žádní pracovníci</div>'
@@ -12479,19 +12570,20 @@ const zfDatum = iso => {
 
 async function loadZalohoveFaktury() {
   const tb = document.getElementById('zf-tabulka')
+  const skrytiZF = await skrytiLideIds()   // schované firmy
   try {
     const { data, error } = await sb.from('zalohove_faktury')
       .select('*, worker:profiles!zalohove_faktury_worker_id_fkey(full_name)')
       .order('created_at', { ascending: false })
     if (error) throw error
-    _zfSeznam = data || []
+    _zfSeznam = (data || []).filter(z => !skrytiZF.has(z.worker_id))
     _zfTabulkaChybi = false
   } catch (e) {
     // Bez vazby na profil to zkusíme ještě jednou — jméno doplníme ze seznamu lidí.
     try {
       const { data, error } = await sb.from('zalohove_faktury').select('*').order('created_at', { ascending: false })
       if (error) throw error
-      _zfSeznam = data || []
+      _zfSeznam = (data || []).filter(z => !skrytiZF.has(z.worker_id))
       _zfTabulkaChybi = false
     } catch (e2) {
       _zfSeznam = []
@@ -12559,12 +12651,16 @@ async function otevriNovouZalohu() {
   if (!box) return
   box.style.display = 'block'
   const sel = document.getElementById('zf-worker')
-  if (sel && !sel.options.length) {
+  // Plní se při KAŽDÉM otevření. Dřív jen jednou — a pak už v nabídce zůstali
+  // i lidé ze firmy, kterou mezitím někdo schoval.
+  if (sel) {
     const { data } = await sb.from('profiles').select('*')
       .in('role', ['osvec', 'partak']).eq('is_active', true).order('full_name')
-    _zfLide = data || []
+    _zfLide = data || []   // celý seznam zůstává — podle něj se dohledávají jména
+    const skryti = await skrytiLideIds()
     sel.innerHTML = '<option value="">— vyberte pracovníka —</option>'
-      + _zfLide.map(l => `<option value="${escAttr(l.id)}">${escAttr(l.full_name || '')}</option>`).join('')
+      + _zfLide.filter(l => !skryti.has(l.id))
+          .map(l => `<option value="${escAttr(l.id)}">${escAttr(l.full_name || '')}</option>`).join('')
   }
   const dnes = document.getElementById('zf-vystaveni')
   if (dnes && !dnes.value) dnes.value = zfDnes()
@@ -13066,7 +13162,7 @@ async function loadWorkerInvoices() {
   // Kód z CRM a barvu bereme živě z profilu — barva je vlastnost pracovníka,
   // ne dokladu, takže když se přidělí jinak, projeví se to i u starších faktur.
   let { data, error } = await sb.from('worker_invoices')
-    .select('*, worker:profiles(full_name, profession, crm_code, invoice_color, can_track_hours, is_active, invoice_design)')
+    .select('*, worker:profiles(full_name, profession, crm_code, invoice_color, can_track_hours, is_active, invoice_design, team_id)')
     .order('sent_at', { ascending: false })
   if (error) {
     // Bez spuštěné migrace sloupce chybí — načti aspoň to, co bylo dřív,
@@ -13093,7 +13189,12 @@ async function loadWorkerInvoices() {
     return
   }
   _invTableMissing = false
-  _invCache = data || []
+  // Faktury lidí ze schovaných firem v přehledu nejsou. Smazané ani jinak
+  // dotčené nejsou — jen se neukazují, dokud je firma schovaná.
+  // Náhradní dotaz (bez migrace) skupinu člověka nenačte, proto se jistí
+  // ještě seznamem ID lidí ze schovaných firem — ať filtr nepovolí tiše.
+  const skrytiFakt = await skrytiLideIds()
+  _invCache = (data || []).filter(r => !jeSkrytaFirmaPracovnika(r.worker) && !skrytiFakt.has(r.worker_id))
   fillInvoiceYearFilter()
   renderWorkerInvoices()
   refreshInvoiceBadge()
@@ -13935,7 +14036,12 @@ async function saveCompany() {
 async function loadCompanies() {
   const tbody = document.getElementById('companies-table')
   if (!tbody) return
-  const { data, error } = await sb.from('companies').select('*').order('name')
+  let { data, error } = await sb.from('companies').select('*').order('name')
+  // Firmy, jejichž všechny skupiny jsou schované, se v seznamu neukážou.
+  if (!error && data && skryteTymy().size) {
+    const { data: tymyF } = await sb.from('teams').select('id, company_id')
+    data = data.filter(c => !firmaCeleSkryta(c.id, tymyF || []))
+  }
   if (error) {
     tbody.innerHTML = `<tr><td colspan="6" style="text-align:center;color:var(--red);padding:20px">${/does not exist/i.test(error.message) ? 'Tabulka firem zatím neexistuje — spusťte SQL pro vytvoření.' : 'Chyba načtení: '+error.message}</td></tr>`
     return
@@ -13975,8 +14081,9 @@ async function showCompanyWorkers(companyName) {
   // Kdo pracuje teď (aktuální team_id)
   let current = []
   if (matchIds.length) {
-    const { data: cur } = await sb.from('profiles').select('id, full_name, profession').in('team_id', matchIds).eq('is_active', true).order('full_name')
-    current = cur || []
+    const { data: cur } = await sb.from('profiles').select('id, full_name, profession, team_id').in('team_id', matchIds).eq('is_active', true).order('full_name')
+    // Firma může mít viditelnou i schovanou skupinu — lidi ze schované nevypisuj.
+    current = (cur || []).filter(w => !jeSkrytaFirmaPracovnika(w))
   }
 
   // Historie — z team_assignments podle názvu firmy
@@ -13985,7 +14092,8 @@ async function showCompanyWorkers(companyName) {
     const { data: hist } = await sb.from('team_assignments')
       .select('worker_id, team_name, assigned_at, removed_at, worker:profiles!worker_id(full_name)')
       .order('assigned_at', { ascending: false })
-    history = (hist||[]).filter(h => match(h.team_name))
+    const skrytiHist = await skrytiLideIds()
+    history = (hist||[]).filter(h => match(h.team_name) && !skrytiHist.has(h.worker_id))
   } catch(e) { /* tabulka historie nemusí existovat */ }
 
   const currentIds = new Set(current.map(c => c.id))
@@ -14120,7 +14228,21 @@ async function loadKlientOdkazy() {
   const pocty = {}
   ;(vazby || []).forEach(v => { pocty[v.link_id] = (pocty[v.link_id] || 0) + 1 })
 
-  box.innerHTML = data.map(o => {
+  // Odkaz, jehož VŠECHNY skupiny jsou schované, se neukáže — název odkazu je
+  // obvykle přímo jméno odběratele, tedy té schované firmy. Odkaz bez skupin
+  // nebo s aspoň jednou viditelnou zůstává.
+  const skupinyOdkazu = {}
+  ;(vazby || []).forEach(v => { (skupinyOdkazu[v.link_id] = skupinyOdkazu[v.link_id] || []).push(v.team_id) })
+  const odkazyVidet = data.filter(o => {
+    const sk = skupinyOdkazu[o.id] || []
+    return !sk.length || sk.some(t => tymJeVidet(t))
+  })
+  if (!odkazyVidet.length) {
+    box.innerHTML = '<div style="text-align:center;color:var(--text3);padding:14px;font-size:13px">Zatím žádný odkaz.</div>'
+    return
+  }
+
+  box.innerHTML = odkazyVidet.map(o => {
     const prosly = o.plati_do && o.plati_do < dnes
     const bezi = o.aktivni && !prosly
     const stav = !o.aktivni ? ['Vypnutý', 'var(--red)']
@@ -14199,7 +14321,9 @@ async function ukazPoznamkyOdberatele(linkId) {
     }
   } catch (e) { console.warn('[odkazy] odškrtnuté týdny:', e?.message) }
 
-  const zapsane = (data || []).filter(r => r.foto || r.poznamka || r.hodnoceni || r.spoluprace_ukoncena)
+  const skrytiPozn = await skrytiLideIds()   // schované firmy — jména pryč
+  const zapsane = (data || []).filter(r => (r.foto || r.poznamka || r.hodnoceni || r.spoluprace_ukoncena)
+    && !skrytiPozn.has(r.worker_id))
   if (!zapsane.length) {
     box.innerHTML = tydnyHtml
       + '<div style="color:var(--text3);font-size:12.5px">Odběratel si u lidí zatím nic nezapsal.</div>'
@@ -14638,18 +14762,82 @@ function skryteTymy() {
 
 function tymJeVidet(id) { return !skryteTymy().has(String(id)) }
 
+// Patří člověk do schované firmy? Jediné místo, které to rozhoduje — ptá se
+// na to každá sekce, kde se vypisují lidi. Bere se skupina (team_id), kterou
+// má člověk v profilu nebo v připojeném záznamu docházky.
+function jeSkrytaFirmaPracovnika(w) {
+  if (!w) return false
+  const tid = w.team_id != null ? w.team_id : (w.worker && w.worker.team_id)
+  return tid != null && skryteTymy().has(String(tid))
+}
+
+// Je firma (companies) schovaná CELÁ? Tedy má aspoň jednu skupinu a všechny
+// její skupiny jsou schované. Firma s jedinou viditelnou skupinou zůstává
+// vidět — jinak by zmizela i z karet, které na obrazovce zůstaly.
+function firmaCeleSkryta(companyId, tymy) {
+  if (companyId == null) return false
+  const jeji = (tymy || []).filter(t => String(t.company_id) === String(companyId))
+  return jeji.length > 0 && jeji.every(t => !tymJeVidet(t.id))
+}
+
+// ID lidí ze schovaných firem. Pro sekce, které lidi neznají přes skupinu,
+// ale jen přes worker_id (doklady, smlouvy, fotky, zálohy…). Když nic
+// schované není, nestojí to ani jeden dotaz. Výsledek se chvíli drží,
+// ať se při přepínání sekcí nedotazuje pořád dokola.
+let _skrytiCache = { klic: '', ids: new Set(), cas: 0 }
+async function skrytiLideIds() {
+  const tymy = [...skryteTymy()]
+  if (!tymy.length) return new Set()
+  const klic = tymy.slice().sort().join(',')
+  if (_skrytiCache.klic === klic && Date.now() - _skrytiCache.cas < 30000) return _skrytiCache.ids
+  try {
+    const { data } = await sb.from('profiles').select('id').in('team_id', tymy)
+    const ids = new Set((data || []).map(x => x.id))
+    _skrytiCache = { klic, ids, cas: Date.now() }
+    return ids
+  } catch (e) { return new Set() }
+}
+
+// Po schování nebo odkrytí firmy překresli tu sekci, kde správce zrovna je —
+// ne jen Týmy. Jinak by firma v Provizích nebo Docházce zůstala viset, dokud
+// by se neobnovila stránka.
+function poZmeneSkrytych() {
+  _skrytiCache.klic = ''   // seznam schovaných lidí se změnil, zahoď zapamatovaný
+  aktualizujPruhSkrytych()
+  try { renderTeams() } catch (e) {}
+  try { if (typeof obnovOtevrenouSekci === 'function') obnovOtevrenouSekci() } catch (e) {}
+}
+
+// Malá plovoucí značka vlevo dole, dokud je něco schované. Schválně NEVYPISUJE
+// jména schovaných firem — ukazuje se to zákazníkovi a ten je vidět nemá.
+function aktualizujPruhSkrytych() {
+  const n = skryteTymy().size
+  let el = document.getElementById('pruh-skrytych-firem')
+  if (!n || !currentProfile || currentProfile.role !== 'admin') { if (el) el.remove(); return }
+  if (!el) {
+    el = document.createElement('div')
+    el.id = 'pruh-skrytych-firem'
+    el.style.cssText = 'position:fixed;left:14px;bottom:14px;z-index:900;display:flex;align-items:center;gap:8px;'
+      + 'padding:7px 8px 7px 12px;background:#fff;border:1.5px solid var(--brd);border-radius:999px;'
+      + 'box-shadow:0 3px 14px rgba(0,0,0,.12);font-size:12.5px;font-weight:700;color:var(--text2)'
+    document.body.appendChild(el)
+  }
+  el.innerHTML = `<span>🙈 Schováno: ${n}</span>`
+    + `<button onclick="ukazVsechnyTymy()" style="padding:4px 10px;border:1px solid var(--brd);border-radius:999px;background:var(--bg);cursor:pointer;font-family:inherit;font-size:12px;font-weight:700">Ukázat vše</button>`
+}
+
 function skryjTym(id) {
   const set = skryteTymy()
   set.add(String(id))
   lsSet(TYMY_SKRYTE_KLIC, JSON.stringify([...set]))
-  renderTeams()
+  poZmeneSkrytych()
 }
 
 function odkryjTym(id) {
   const set = skryteTymy()
   set.delete(String(id))
   lsSet(TYMY_SKRYTE_KLIC, JSON.stringify([...set]))
-  renderTeams()
+  poZmeneSkrytych()
 }
 
 // Nechá vidět JEDINOU firmu — na to je to celé. Jedno kliknutí místo
@@ -14657,12 +14845,12 @@ function odkryjTym(id) {
 function jenTatoFirma(id) {
   const vsechny = (_teamsCache || []).map(t => String(t.id))
   lsSet(TYMY_SKRYTE_KLIC, JSON.stringify(vsechny.filter(x => x !== String(id))))
-  renderTeams()
+  poZmeneSkrytych()
 }
 
 function ukazVsechnyTymy() {
   lsRemove(TYMY_SKRYTE_KLIC)
-  renderTeams()
+  poZmeneSkrytych()
 }
 
 function renderTeams() {
@@ -14711,7 +14899,6 @@ function renderTeams() {
   const skrytePruh = skryto.length
     ? `<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:12px;padding:9px 13px;background:var(--bg2,#f4efe7);border:1px solid var(--brd);border-radius:10px">
         <span style="font-size:12.5px;font-weight:800;color:var(--text2)">🙈 Schováno ${skryto.length} ${skryto.length === 1 ? 'firma' : (skryto.length < 5 ? 'firmy' : 'firem')}</span>
-        <span style="font-size:11.5px;color:var(--text3)">${skryto.map(t => escAttr(cleanTeamName(t.name))).join(' · ')}</span>
         <button onclick="ukazVsechnyTymy()" style="margin-left:auto;padding:5px 11px;background:#fff;border:1px solid var(--brd);border-radius:8px;cursor:pointer;font-family:inherit;font-size:12px;font-weight:700">Ukázat všechny</button>
       </div>`
     : ''
@@ -14734,7 +14921,12 @@ function renderTeams() {
               <span style="font-size:11px;color:var(--text3)">🏢 Firma:</span>
               <select onchange="setTeamCompany('${t.id}', this.value)" style="font-size:11px;padding:3px 6px;border:1px solid var(--brd);border-radius:6px;font-family:inherit;max-width:200px">
                 <option value="">— nenavázáno —</option>
-                ${_teamCompaniesCache.map(c => `<option value="${c.id}" ${String(t.company_id)===String(c.id)?'selected':''}>${(c.name||'').replace(/</g,'&lt;')}</option>`).join('')}
+                ${_teamCompaniesCache
+                  // Firmy, které jsou celé schované, v nabídce nejsou — ale tu,
+                  // která je u karty vybraná, necháváme, jinak by nabídka ukázala
+                  // něco jiného, než je doopravdy uložené.
+                  .filter(c => String(t.company_id) === String(c.id) || !firmaCeleSkryta(c.id, _teamsCache))
+                  .map(c => `<option value="${c.id}" ${String(t.company_id)===String(c.id)?'selected':''}>${(c.name||'').replace(/</g,'&lt;')}</option>`).join('')}
               </select>
             </div>
           </div>
@@ -14794,7 +14986,7 @@ function renderTeams() {
           <span onclick="openWorkerModal('${w.id}')" style="font-size:13px;cursor:pointer;color:var(--blue)" title="Zobrazit detail pracovníka">${escAttr(w.full_name)} ↗</span>
           ${teams.length ? `<select onchange="assignToTeam('${w.id}',this.value)" style="font-size:11px;padding:3px 6px;border:1px solid var(--brd);border-radius:6px;font-family:inherit">
             <option value="">Přiřadit do...</option>
-            ${teams.map(t=>`<option value="${t.id}">${t.name}</option>`).join('')}
+            ${teams.filter(t => tymJeVidet(t.id)).map(t=>`<option value="${t.id}">${escAttr(t.name)}</option>`).join('')}
           </select>` : ''}
         </div>`).join('')
       : '<div style="font-size:12px;color:var(--text3);text-align:center;padding:12px">' + (qWorker ? 'Žádný nepřiřazený pracovník neodpovídá hledání' : 'Všichni pracovníci jsou ve skupinách') + '</div>'
@@ -15185,7 +15377,14 @@ async function fillCompanyPicker() {
   const sel = document.getElementById('new-team-company')
   if (!sel) return
   _selectedTeamCompanyId = null
-  const { data, error } = await sb.from('companies').select('id, name, site, address').order('name')
+  let { data, error } = await sb.from('companies').select('id, name, site, address').order('name')
+  // Firmy celé schované v nabídce nejsou. Pozor: hodnota <option> je POŘADÍ
+  // v _teamCompanies, takže se musí filtrovat obojí stejně, jinak by se po
+  // výběru vzala jiná firma.
+  if (!error && data && skryteTymy().size) {
+    const { data: tymyP } = await sb.from('teams').select('id, company_id')
+    data = data.filter(c => !firmaCeleSkryta(c.id, tymyP || []))
+  }
   _teamCompanies = data || []
   if (error || !data?.length) {
     sel.innerHTML = '<option value="">— žádné uložené firmy —</option>'
@@ -20562,7 +20761,8 @@ async function exportKW() {
     const { data: vyrazeni } = await sb.from('profiles').select('id').eq('ve_vykazu', false)
     ;(vyrazeni || []).forEach(x => mimoVykaz.add(x.id))
   } catch (e) { console.warn('[exportKW] ve_vykazu se nenačetlo:', e) }
-  const att = (attVse || []).filter(r => !mimoVykaz.has(r.worker_id))
+  const skrytiExport = await skrytiLideIds()   // schované firmy
+  const att = (attVse || []).filter(r => !mimoVykaz.has(r.worker_id) && !skrytiExport.has(r.worker_id))
 
   if (!att?.length) { showToast('❌ Žádná data pro tento týden'); return }
 
@@ -20664,7 +20864,7 @@ async function initExportForm() {
   // a občas je potřeba vyexportovat i zpětně. Zaškrtnutí ale nedostanou, aby se
   // do běžného exportu nepletli; kdo je potřebuje, klikne na ně.
   let { data: workers, error: chybaLidi } = await sb.from('profiles')
-    .select('id, full_name, profession, is_active, ve_vykazu').in('role',['osvec','partak']).order('full_name')
+    .select('id, full_name, profession, is_active, ve_vykazu, team_id').in('role',['osvec','partak']).order('full_name')
   // Bez sloupce ve_vykazu (neproběhlá migrace) vrátí dotaz chybu a prázdno.
   // Bez téhle pojistky by se správci ukázalo „Žádní pracovníci" a export by
   // přestal fungovat. Ustupuje se ale JEN u chybějícího sloupce — při výpadku
@@ -20672,8 +20872,11 @@ async function initExportForm() {
   if (!workers?.length && chybaLidi
       && (chybaLidi.code === '42703' || /ve_vykazu|column .* does not exist|schema cache/i.test(chybaLidi.message || ''))) {
     ;({ data: workers } = await sb.from('profiles')
-      .select('id, full_name, profession, is_active').in('role',['osvec','partak']).order('full_name'))
+      .select('id, full_name, profession, is_active, team_id').in('role',['osvec','partak']).order('full_name'))
   }
+  // Lidé ze schovaných firem v nabídce exportu nejsou vůbec — dřív tam byli
+  // a navíc předem zaškrtnutí, takže by se dostali i do PDF.
+  if (workers) workers = workers.filter(w => !jeSkrytaFirmaPracovnika(w))
   if (!workers?.length) { list.innerHTML = '<div style="text-align:center;color:var(--text3);font-size:13px;padding:10px">Žádní pracovníci</div>'; return }
   const serazeni = workers.slice().sort((a, b) => {
     const ab = a.is_active === false ? 1 : 0, bb = b.is_active === false ? 1 : 0
@@ -22848,8 +23051,9 @@ async function loadManualWorkers() {
   const { data } = await sb.from('profiles').select('id,full_name').in('role',['osvec','partak']).eq('is_active',true).order('full_name')
   const sel = document.getElementById('manual-worker')
   if (!sel || !data) return
+  const skryti = await skrytiLideIds()   // schované firmy nejsou ani v nabídce
   sel.innerHTML = '<option value="">— Vyberte pracovníka —</option>' +
-    data.map(w=>`<option value="${w.id}">${escAttr(w.full_name)}</option>`).join('')
+    data.filter(w => !skryti.has(w.id)).map(w=>`<option value="${w.id}">${escAttr(w.full_name)}</option>`).join('')
 }
 
 // Mapa prefix → skryté pole s časem HH:MM pro ruční formulář
@@ -23049,7 +23253,7 @@ async function loadDocumentAlertsStat() {
   // Načti všechny AKTIVNÍ OSVČ pracovníky (neaktivní/odebrané neřešíme).
   // bez_ridicaku říká, kdo prohlásil, že řidičák nemá — po tom se nechce.
   let { data: workers, error: chybaLidi } = await sb.from('profiles')
-    .select('id, full_name, profession, bez_ridicaku')
+    .select('id, full_name, profession, bez_ridicaku, team_id')
     .in('role', ['osvec', 'partak'])
     .eq('is_active', true)
     .order('full_name')
@@ -23058,11 +23262,14 @@ async function loadDocumentAlertsStat() {
   if (!workers && chybaLidi
       && (chybaLidi.code === '42703' || /bez_ridicaku|column .* does not exist|schema cache/i.test(chybaLidi.message || ''))) {
     ;({ data: workers } = await sb.from('profiles')
-      .select('id, full_name, profession')
+      .select('id, full_name, profession, team_id')
       .in('role', ['osvec', 'partak'])
       .eq('is_active', true)
       .order('full_name'))
   }
+  // Schované firmy pryč — tohle je PRVNÍ obrazovka po přihlášení a zákazník
+  // by tu jména lidí ze schované firmy viděl hned.
+  if (workers) workers = workers.filter(w => !jeSkrytaFirmaPracovnika(w))
 
   if (!workers?.length) {
     // Dlaždice s počtem už na nástěnce není — číslovka je v nadpisu karty
@@ -27671,8 +27878,9 @@ async function loadContractWorkers() {
   const { data } = await sb.from('profiles').select('id,full_name').in('role',['osvec','partak']).eq('is_active',true).order('full_name')
   const sel = document.getElementById('contract-worker')
   if (!sel || !data) return
+  const skryti = await skrytiLideIds()   // schované firmy nejsou ani v nabídce
   sel.innerHTML = '<option value="">— Vyberte pracovníka —</option>' +
-    data.map(w=>`<option value="${w.id}">${escAttr(w.full_name)}</option>`).join('')
+    data.filter(w => !skryti.has(w.id)).map(w=>`<option value="${w.id}">${escAttr(w.full_name)}</option>`).join('')
 }
 
 async function uploadContract() {
@@ -28981,6 +29189,7 @@ async function loadAdminContracts() {
   const div = document.getElementById('contracts-list')
   if (!div) return
   if (cErr) { div.innerHTML=`<div style="color:red;padding:10px;font-size:12px">Chyba: ${cErr.message}</div>`; return }
+  { const skryti = await skrytiLideIds(); if (data) data = data.filter(c => !skryti.has(c.worker_id)) }   // schované firmy
   if (!data?.length) { div.innerHTML='<div style="text-align:center;padding:20px;color:var(--text3)">Žádné smlouvy</div>'; return }
   const statusLabels = {admin_pending:'⏳ Čeká na podpis admina',pending:'📝 Čeká na podpis OSVČ',signed_electronic:'✅ Podepsána',signed_scan:'✅ Podepsána (sken)',rejected:'❌ Zamítnuta'}
   // Verze smluv v úložišti — jeden dotaz pro celý seznam
@@ -29379,9 +29588,13 @@ async function loadNotifWorkers() {
   const { data } = await sb.from('profiles').select('id,full_name').in('role',['osvec','partak']).eq('is_active',true).order('full_name')
   const sel = document.getElementById('notif-worker')
   if (!sel || !data) return
+  // Jména ze schovaných firem v nabídce nejsou. „VŠEM" ale dál ukazuje
+  // skutečný počet — zpráva všem půjde opravdu všem, schování je jen
+  // zobrazení a nesmí měnit, komu se co pošle.
+  const skryti = await skrytiLideIds()
   sel.innerHTML = '<option value="">— Vyberte pracovníka —</option>' +
     '<option value="__all__">📢 VŠEM pracovníkům (' + data.length + ')</option>' +
-    data.map(w => `<option value="${w.id}">${escAttr(w.full_name)}</option>`).join('')
+    data.filter(w => !skryti.has(w.id)).map(w => `<option value="${w.id}">${escAttr(w.full_name)}</option>`).join('')
 }
 
 async function sendNotification() {
@@ -29420,10 +29633,14 @@ async function sendNotification() {
 }
 
 async function loadNotifHistory() {
-  const { data } = await sb.from('notifications')
+  const { data: dataVse } = await sb.from('notifications')
     .select('*, worker:profiles!worker_id(full_name)')
     .order('created_at', { ascending: false })
     .limit(30)
+  // Zprávy jednotlivcům ze schovaných firem pryč. Zprávy „všem" (bez
+  // worker_id) zůstávají — není u nich vidět žádné jméno.
+  const skrytiZpr = await skrytiLideIds()
+  const data = (dataVse || []).filter(n => !n.worker_id || !skrytiZpr.has(n.worker_id))
   const div = document.getElementById('notif-history')
   if (!div) return
   if (!data?.length) {

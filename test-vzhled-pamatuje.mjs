@@ -44,7 +44,7 @@ ok(/order\('created_at', \{ ascending: false \}\)\.limit\(1\)/.test(zdroj),
    'když v profilu nic není, zkopíruje se vzhled z POSLEDNÍ faktury')
 ok(/\.not\('design_idx', 'is', null\)/.test(zdroj),
    'a to jen z faktury, která nějaký vzhled opravdu má')
-ok(/invoice_color, can_track_hours, is_active, invoice_design\)/.test(zdroj),
+ok(/invoice_color, can_track_hours, is_active, invoice_design[,)]/.test(zdroj),
    'přehled faktur si natáhne i vzhled nastavený u člověka')
 ok(/onchange="event\.stopPropagation\(\);ulozVzhledZPrehledu\(this,'\$\{r\.worker_id\}'\)"/.test(zdroj),
    'v přehledu je rolovací výběr a klik nepropadne na řádek pod ním')
