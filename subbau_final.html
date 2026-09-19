@@ -4551,7 +4551,7 @@ async function submitAdminSignatureWithPlacement() {
 // Po nahrání nové verze se snadno pozná, jestli se opravdu nasadila: otevřete
 // appku, zmáčkněte F12 (na Macu ⌥⌘I) a v konzoli je vypsané tohle datum. Když
 // tam svítí starší, prohlížeč nebo GitHub drží starou verzi.
-const SUBBAU_VERZE = '2026-09-18 u — v odkazu dovolené u jména a barevná poznámka'
+const SUBBAU_VERZE = '2026-09-19 v — oprava přepočtu provizí, skrývání firem v týmech'
 console.log('SubBau docházka — verze ' + SUBBAU_VERZE)
 
 // ============ SUPABASE CONFIG ============
@@ -7351,8 +7351,12 @@ function firmaVProvizich(nazev) {
   return !odskrtnuteFirmy().has(nazev || 'Bez firmy')
 }
 
-async function prepniFirmuVProvizich(el, nazev) {
-  const jmeno = nazev || 'Bez firmy'
+// POZOR: sem chodí POŘADOVÉ ČÍSLO firmy, ne její název. Název se do HTML
+// atributu vložit nedá — firmy se jmenují i s uvozovkami a atribut se tím
+// rozpadl, takže kliknutí nic neudělalo. Jméno si najdeme v _provizeFirmy.
+async function prepniFirmuVProvizich(el, firmIdx) {
+  const zaznam = (window._provizeFirmy || [])[firmIdx]
+  const jmeno = (zaznam && zaznam.nazev) || 'Bez firmy'
   const set = odskrtnuteFirmy()
   if (el && el.checked) set.delete(jmeno); else set.add(jmeno)
   lsSet(PROVIZE_FILTR_KLIC, JSON.stringify([...set]))
@@ -8206,7 +8210,7 @@ async function renderProvizeContent() {
           <label title="Zaškrtnuto = firma se počítá do součtů nahoře. Odškrtnutím ji ze součtů vyndáte — na data ani na fakturaci to nemá vliv."
                  onclick="event.stopPropagation()" style="display:flex;align-items:center;cursor:pointer">
             <input type="checkbox" ${firmaVProvizich(firm) ? 'checked' : ''}
-                   onchange="event.stopPropagation();prepniFirmuVProvizich(this,${JSON.stringify(firm)})"
+                   onchange="event.stopPropagation();prepniFirmuVProvizich(this,${firmIdx})"
                    style="width:17px;height:17px;cursor:pointer;accent-color:var(--blue)">
             <span style="font-size:10.5px;font-weight:700;color:var(--text3);margin-left:5px;letter-spacing:.02em">počítat</span>
           </label>
@@ -14605,6 +14609,50 @@ function cleanTeamName(name) {
   return parts[0].trim() || String(name).trim()
 }
 
+// ====== SKRÝVÁNÍ FIREM V TÝMECH ======
+// Když se se zákazníkem bavíme o jedné firmě a koukáme na to spolu do appky,
+// nesmí vidět ostatní. Proto jde každou firmu schovat — je to jen zobrazení
+// v tomhle prohlížeči, na data ani na výpočty to nesahá.
+const TYMY_SKRYTE_KLIC = 'sb_tymy_skryte_firmy'
+
+function skryteTymy() {
+  try {
+    const raw = lsGet(TYMY_SKRYTE_KLIC)
+    if (!raw) return new Set()
+    const pole = JSON.parse(raw)
+    return new Set(Array.isArray(pole) ? pole : [])
+  } catch (e) { return new Set() }
+}
+
+function tymJeVidet(id) { return !skryteTymy().has(String(id)) }
+
+function skryjTym(id) {
+  const set = skryteTymy()
+  set.add(String(id))
+  lsSet(TYMY_SKRYTE_KLIC, JSON.stringify([...set]))
+  renderTeams()
+}
+
+function odkryjTym(id) {
+  const set = skryteTymy()
+  set.delete(String(id))
+  lsSet(TYMY_SKRYTE_KLIC, JSON.stringify([...set]))
+  renderTeams()
+}
+
+// Nechá vidět JEDINOU firmu — na to je to celé. Jedno kliknutí místo
+// odklikávání všech ostatních.
+function jenTatoFirma(id) {
+  const vsechny = (_teamsCache || []).map(t => String(t.id))
+  lsSet(TYMY_SKRYTE_KLIC, JSON.stringify(vsechny.filter(x => x !== String(id))))
+  renderTeams()
+}
+
+function ukazVsechnyTymy() {
+  lsRemove(TYMY_SKRYTE_KLIC)
+  renderTeams()
+}
+
 function renderTeams() {
   const div = document.getElementById('teams-list')
   const unassignedDiv = document.getElementById('unassigned-workers')
@@ -14643,8 +14691,21 @@ function renderTeams() {
     ? `<div style="background:#fdf3e3;border:1px solid var(--amber);border-radius:10px;padding:10px 12px;margin-bottom:10px;font-size:12px;color:var(--text2);line-height:1.5">⚠️ Podskupiny se nepodařilo načíst, proto se nezobrazují a nejdou zakládat.<br>Lidé zařazení do podskupin jsou zatím vypsaní jako „bez skupiny", takže o nikoho nepřijdete.<br><span style="color:var(--text3)">Detail: ${String(stErr.message || stErr).replace(/</g,'&lt;')}</span></div>`
     : ''
 
+  // Schované firmy z výpisu vyndej. Kolik jich je, se řekne v proužku níž,
+  // ať se nestane, že si správce bude myslet, že firma zmizela z databáze.
+  const skryto = shownTeams.filter(t => !tymJeVidet(t.id))
+  shownTeams = shownTeams.filter(t => tymJeVidet(t.id))
+
+  const skrytePruh = skryto.length
+    ? `<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:12px;padding:9px 13px;background:var(--bg2,#f4efe7);border:1px solid var(--brd);border-radius:10px">
+        <span style="font-size:12.5px;font-weight:800;color:var(--text2)">🙈 Schováno ${skryto.length} ${skryto.length === 1 ? 'firma' : (skryto.length < 5 ? 'firmy' : 'firem')}</span>
+        <span style="font-size:11.5px;color:var(--text3)">${skryto.map(t => escAttr(cleanTeamName(t.name))).join(' · ')}</span>
+        <button onclick="ukazVsechnyTymy()" style="margin-left:auto;padding:5px 11px;background:#fff;border:1px solid var(--brd);border-radius:8px;cursor:pointer;font-family:inherit;font-size:12px;font-weight:700">Ukázat všechny</button>
+      </div>`
+    : ''
+
   if (teams.length && shownTeams.length) {
-    div.innerHTML = stWarn + shownTeams.map(t => {
+    div.innerHTML = stWarn + skrytePruh + shownTeams.map(t => {
       let members = workers.filter(w => w.team_id === t.id)
       const skryti = (_workersCache || []).filter(w => w.team_id === t.id
         && (w.is_active === false || w.can_track_hours === false))
@@ -14666,6 +14727,8 @@ function renderTeams() {
             </div>
           </div>
           <div style="display:flex;gap:6px">
+            <button onclick="jenTatoFirma('${t.id}')" title="Nechat na obrazovce jen tuhle firmu — ostatní schovat. Hodí se, když ukazujete appku zákazníkovi." style="padding:4px 9px;font-size:12px;border:1px solid var(--brd);border-radius:6px;cursor:pointer;background:var(--bg);font-family:inherit">👁 Jen tuhle</button>
+            <button onclick="skryjTym('${t.id}')" title="Schovat tuhle firmu z výpisu. Data ani výpočty to nemění, je to jen zobrazení v tomhle prohlížeči." style="padding:4px 9px;font-size:12px;border:1px solid var(--brd);border-radius:6px;cursor:pointer;background:var(--bg);font-family:inherit">🙈 Schovat</button>
             <button onclick="openAddMemberModal('${t.id}','${(t.name||'').replace(/'/g,String.fromCharCode(39))}')" style="padding:4px 10px;font-size:12px;border:1px solid var(--brd);border-radius:6px;cursor:pointer;background:var(--bg);font-family:inherit">+ Přidat</button>
             <button onclick="deleteTeam('${t.id}','${(t.name||'').replace(/'/g,String.fromCharCode(39))}')" style="padding:4px 8px;font-size:12px;border:1px solid var(--red);border-radius:6px;cursor:pointer;background:none;color:var(--red);font-family:inherit"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:1em;height:1em;flex-shrink:0;vertical-align:-2px"><path d="M3 6h18M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6M14 11v6"/></svg> </button>
           </div>
@@ -14701,7 +14764,10 @@ function renderTeams() {
     // Po vykreslení karet doplň do rozbalovátek týdny, kdy členové týmu pracovali
     populateTeamPdfWeeks()
   } else if (teams.length && !shownTeams.length) {
-    div.innerHTML = '<div style="text-align:center;color:var(--text3);padding:20px">Žádná skupina neodpovídá hledání</div>'
+    // Proužek musí být i tady — jinak by se ten, kdo schoval úplně všechny
+    // firmy, neměl jak vrátit zpátky.
+    div.innerHTML = skrytePruh + '<div style="text-align:center;color:var(--text3);padding:20px">'
+      + (skryto.length ? 'Všechny firmy jsou schované' : 'Žádná skupina neodpovídá hledání') + '</div>'
   } else {
     div.innerHTML = '<div style="text-align:center;color:var(--text3);padding:20px">Žádné skupiny — vytvořte první</div>'
   }

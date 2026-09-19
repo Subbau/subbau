@@ -28,8 +28,9 @@ ok(/if \(!firmaVProvizich\(firmaPodleId\[a\.worker_id\]\)\) return/.test(zdroj),
    'dlaždice „dnes v práci" taky')
 ok(/if \(!firmaVProvizich\(firmOf\(w\)\)\) return/.test(zdroj),
    'a dnešní provize i hodiny taky (jinak by čísla proti sobě nesedělá)')
-ok(/prepniFirmuVProvizich\(this,\$\{JSON\.stringify\(firm\)\}\)/.test(zdroj),
-   'zaškrtávátko je v hlavičce firmy a jméno firmy je bezpečně vložené')
+ok(/prepniFirmuVProvizich\(this,\$\{firmIdx\}\)/.test(zdroj),
+   'do atributu jde pořadové číslo firmy, ne název (název s uvozovkou atribut rozbil)')
+ok(!/JSON\.stringify\(firm\)/.test(zdroj), 'a ten starý rozbitý způsob je pryč')
 ok(/firmaVProvizich\(firm\) \? 'checked' : ''/.test(zdroj), 'výchozí stav je zaškrtnuto')
 ok(/Čísla jsou jen za \$\{zapnute\} z \$\{vsechny\} firem/.test(zdroj),
    'nad čísly je vidět, že filtr běží — jinak by se správce divil')
@@ -58,21 +59,22 @@ try {
     out.vychoziNeznama = firmaVProvizich('Úplně nová firma s.r.o.')
     out.vychoziBezFirmy = firmaVProvizich('Bez firmy')
 
-    // ── B) odškrtnutí ──
-    prepniFirmuVProvizich({ checked: false }, 'Treskower')
+    // ── B) odškrtnutí. Přepínání samo se zkouší kliknutím níž v části 3 —
+    //    tady jen ověřujeme, že uložená volba opravdu rozhoduje. ──
+    const uloz = (pole) => { try { localStorage.setItem(PROVIZE_FILTR_KLIC, JSON.stringify(pole)) } catch (e) {} }
+    uloz(['Treskower'])
     out.poOdskrtnuti = firmaVProvizich('Treskower')
     out.ostatniNedotcene = firmaVProvizich('Jiná firma')
 
-    // ── C) přežije to znovunačtení stránky? (uloženo v prohlížeči) ──
+    // ── C) přežije to znovunačtení stránky? ──
     out.ulozeno = (() => { try { return localStorage.getItem(PROVIZE_FILTR_KLIC) } catch (e) { return null } })()
 
     // ── D) zaškrtnutí zpátky ──
-    prepniFirmuVProvizich({ checked: true }, 'Treskower')
+    uloz([])
     out.poZaskrtnuti = firmaVProvizich('Treskower')
 
     // ── E) „Zapnout všechny" ──
-    prepniFirmuVProvizich({ checked: false }, 'A')
-    prepniFirmuVProvizich({ checked: false }, 'B')
+    uloz(['A', 'B'])
     out.dveOdskrtnute = !firmaVProvizich('A') && !firmaVProvizich('B')
     zapniVsechnyFirmy()
     out.poZapnutiVsech = firmaVProvizich('A') && firmaVProvizich('B')
@@ -96,6 +98,67 @@ try {
   ok(v.prezijeSmeti === true, 'poškozené uložené nastavení appku neshodí — počítá se všechno')
   ok(padky.length === 0, 'stránka nespadla' + (padky.length ? ': ' + padky[0] : ''))
 } finally { await b.close() }
+
+console.log('\n3) Skutečné kliknutí — čísla se musí přepočítat HNED, bez obnovení stránky')
+const b2 = await puppeteer.launch({ headless: 'new', args: ['--no-sandbox'], protocolTimeout: 60000 })
+try {
+  const p = await b2.newPage()
+  const padky = []
+  p.on('pageerror', e => padky.push(e.message))
+  p.on('dialog', async d => { try { await d.accept() } catch (e) {} })
+  await p.goto('file://' + UKAZKA, { waitUntil: 'networkidle0', timeout: 30000 })
+  await new Promise(r => setTimeout(r, 1500))
+
+  const v = await p.evaluate(async () => {
+    const sekce = document.getElementById('v-provize')
+    if (!sekce) return { chyba: 'sekce Provize nenalezena' }
+    document.querySelectorAll('.view').forEach(x => x.classList.remove('on'))
+    sekce.classList.add('on'); sekce.style.display = 'block'
+    const zamek = document.getElementById('provize-lock'); if (zamek) zamek.style.display = 'none'
+    try { localStorage.removeItem(PROVIZE_FILTR_KLIC) } catch (e) {}
+    await renderProvizeContent()
+    await new Promise(r => setTimeout(r, 600))
+
+    const cti = () => ({
+      tyden: document.getElementById('pv-gw')?.textContent || '',
+      mesic: document.getElementById('pv-gm')?.textContent || '',
+      rok: document.getElementById('pv-gy')?.textContent || ''
+    })
+    const zask = [...sekce.querySelectorAll('input[onchange*="prepniFirmuVProvizich"]')]
+    const out = { pocet: zask.length, atribut: zask[0]?.getAttribute('onchange') || '' }
+    out.pred = cti()
+    // KLIKNI, jak by kliknul člověk. Ne volat funkci — právě proto se dřív
+    // nepoznalo, že je atribut rozbitý a kliknutí nic nedělá.
+    if (zask[0]) zask[0].click()
+    await new Promise(r => setTimeout(r, 1300))
+    out.po = cti()
+    out.prouzek = /Čísla jsou jen za/.test(sekce.textContent)
+    // a zpátky
+    const zask2 = [...sekce.querySelectorAll('input[onchange*="prepniFirmuVProvizich"]')]
+    if (zask2[0]) zask2[0].click()
+    await new Promise(r => setTimeout(r, 1300))
+    out.zpatky = cti()
+    try { localStorage.removeItem(PROVIZE_FILTR_KLIC) } catch (e) {}
+    return out
+  })
+
+  if (v.chyba) { chyby++; console.log('  ❌ ' + v.chyba) }
+  else {
+    ok(v.pocet >= 1, `v přehledu jsou zaškrtávátka firem (${v.pocet})`)
+    ok(!/\(this,$/.test(v.atribut.trim()) && /\(this,\d+\)/.test(v.atribut),
+       'atribut onchange je celý, ne useknutý')
+    ok(v.pred.tyden !== v.po.tyden,
+       `týdenní provize se po kliknutí přepočítala (${v.pred.tyden} → ${v.po.tyden})`)
+    ok(v.pred.rok !== v.po.rok, `a roční taky (${v.pred.rok} → ${v.po.rok})`)
+    ok(v.prouzek, 'nad čísly se objevilo upozornění, že platí jen za část firem')
+    const naCislo = t => Number(String(t).replace(/[^0-9,.-]/g, '').replace(/\./g, '').replace(',', '.')) || 0
+    const pred = naCislo(v.pred.tyden), po = naCislo(v.po.tyden), zpatky = naCislo(v.zpatky.tyden)
+    ok(po < pred, `odškrtnutím čísla klesla (${pred} → ${po})`)
+    ok(zpatky > po && Math.abs(zpatky - pred) < 5,
+       `zaškrtnutím zpátky se vrátila (${po} → ${zpatky}, původně ${pred}) — kontrolní měření`)
+    ok(padky.length === 0, 'kliknutí nevyhodilo chybu' + (padky.length ? ': ' + padky[0] : ''))
+  }
+} finally { await b2.close() }
 
 console.log(chyby ? `\n❌ ${chyby} chyb` : '\n✅ Filtr firem v provizích funguje')
 process.exit(chyby ? 1 : 0)

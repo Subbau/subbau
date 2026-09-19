@@ -93,7 +93,33 @@ ok(/const BARVY_POZNAMKY_ODBERATELE/.test(zdroj), 'appka zná stejné barvy')
 ok(/r\.pozn_tucne \? 'font-weight:800;' : ''/.test(zdroj),
    'a ukáže SubBau poznámku tak, jak ji vidí odběratel')
 
-console.log('\n7) Prohlížeč — appka se s tím načte')
+console.log('\n7) Kam to patří a kdy se to ukazuje')
+ok(/\.hlava[\s\S]{0,60}|konec-obal/.test(klient) && /'<\/div>'\s*\n\s*\+   '<div class="konec-obal">'/.test(klient) === false,
+   'ukončená spolupráce je v hlavičce u jména, ne dole u poznámky')
+ok(/'<div class="pozn-nastroje" style="display:none">'/.test(klient),
+   'nástroje poznámky jsou schované, dokud se do poznámky neklikne')
+ok(/onfocus="ukazNastroje\(this\)" onblur="schovejNastroje\(this\)"/.test(klient),
+   'ukazují se po kliknutí a mizí po odchodu')
+ok(/function drzNastroje/.test(klient),
+   'kliknutí na tlačítko je nezavře dřív, než stihne zabrat')
+ok(/title="Fett · tučně">F<\/button>/.test(klient),
+   'tlačítko tučného je jen písmeno F — v německém Wordu i Excelu se tučné značí F (Fett)')
+ok(/\.pozn-nastroje button\.tucne\{width:26px;height:26px/.test(klient),
+   'a je čtvercové jako v Office')
+
+console.log('\n8) Když se uložení nepovede, musí to být vidět')
+ok(/function ulozPoznamkuNaServer\(data, hotovo, selhalo\)/.test(klient),
+   'ukládání umí ohlásit i neúspěch')
+ok(/selhalo && selhalo\(duvod\)/.test(klient) && /selhalo && selhalo\('offline'\)/.test(klient),
+   'hlásí ho i při chybě serveru i bez připojení')
+ok(/pole\.checked = !zapnuto;/.test(klient),
+   'neuložené zaškrtnutí se vrátí zpátky — jinak to vypadá uloženě a zmizí až po obnovení')
+ok(/pole\.value = puvodni;   \/\/ neuložilo se/.test(klient), 'a neuložené datum taky')
+ok(/pz\.pozn_tucne = puvodni;/.test(klient) && /pz\.pozn_barva = puvodni;/.test(klient),
+   'stejně tak tučné i barva')
+ok(/Ungültiges Datum · neplatné datum/.test(klient), 'špatné datum má vlastní hlášku')
+
+console.log('\n9) Prohlížeč — appka se s tím načte')
 const b = await puppeteer.launch({ headless: 'new', args: ['--no-sandbox'], protocolTimeout: 40000 })
 try {
   const p = await b.newPage()
