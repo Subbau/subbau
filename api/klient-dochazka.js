@@ -342,6 +342,7 @@ module.exports = async (req, res) => {
       if ('pozn_tucne' in telo) {
         zmena.pozn_tucne = !!telo.pozn_tucne;
       }
+
       if ('pozn_barva' in telo) {
         const b = String(telo.pozn_barva || '').trim();
         zmena.pozn_barva = BARVY_POZNAMKY.includes(b) ? b : null;
@@ -372,7 +373,13 @@ module.exports = async (req, res) => {
         if (!r.ok) {
           const t = await r.text().catch(() => '');
           console.error('[klient] zápis poznámky:', r.status, t.slice(0, 300));
-          res.status(500).json({ ok: false, chyba: 'nelze_ulozit' }); return;
+          // Chybějící sloupec = migrace ještě neproběhla. Ať to odběratel
+          // pozná jako „tahle funkce ještě není připravená", ne jako závadu.
+          const chybiSloupec = /42703|does not exist|schema cache/i.test(t);
+          if (chybiSloupec) console.error('[klient] SPUSŤTE supabase-migrace-ukoncena-spoluprace.sql');
+          res.status(chybiSloupec ? 503 : 500)
+             .json({ ok: false, chyba: chybiSloupec ? 'funkce_neni_pripravena' : 'nelze_ulozit' });
+          return;
         }
       } catch (e) {
         console.error('[klient] zápis poznámky:', e);
@@ -601,21 +608,30 @@ module.exports = async (req, res) => {
     // Co si odběratel u lidí poznamenal — fotka, poznámka, známka.
     let poznamky = {};
     try {
-      // Dokud neproběhne migrace, sloupce o ukončené spolupráci neexistují.
-      // Kdyby na tom celý dotaz spadl, odběratel by přišel i o fotky a poznámky —
-      // proto se to zkusí znovu bez nich.
-      let pz;
-      try {
-        pz = await db(
-          `client_link_workers?select=worker_id,foto,poznamka,hodnoceni,spoluprace_ukoncena,spoluprace_do,pozn_tucne,pozn_barva&link_id=eq.${odkaz.id}`, klic);
-      } catch (e) {
-        // POZOR: db() hlásí jen „db 400", podrobnosti jsou v e.kod.
-        // Ústup pouštíme jen u chybějícího sloupce (42703), ne při výpadku.
-        if (e.kod !== '42703' && e.stav !== 400) throw e;
-        console.warn('[klient] chybí sloupce o ukončené spolupráci — spusťte supabase-migrace-ukoncena-spoluprace.sql');
-        pz = await db(
-          `client_link_workers?select=worker_id,foto,poznamka,hodnoceni&link_id=eq.${odkaz.id}`, klic);
+      // Migrace mohla proběhnout jen zčásti — například ukončená spolupráce už
+      // v databázi je, ale barva poznámky ještě ne. Proto se zkouší postupně
+      // od nejúplnějšího dotazu k nejchudšímu. Dřív to bylo všechno-nebo-nic
+      // a chybějící barva zahodila i ukončenou spolupráci, kterou databáze měla.
+      const ZAKLAD = 'worker_id,foto,poznamka,hodnoceni';
+      const varianty = [
+        ZAKLAD + ',spoluprace_ukoncena,spoluprace_do,pozn_tucne,pozn_barva',
+        ZAKLAD + ',spoluprace_ukoncena,spoluprace_do',
+        ZAKLAD + ',pozn_tucne,pozn_barva',
+        ZAKLAD,
+      ];
+      let pz = null, posledniChyba = null;
+      for (const sloupce of varianty) {
+        try {
+          pz = await db(`client_link_workers?select=${sloupce}&link_id=eq.${odkaz.id}`, klic);
+          break;
+        } catch (e) {
+          // POZOR: db() hlásí jen „db 400", podrobnosti jsou v e.kod.
+          // Zkoušet dál smí jen u chybějícího sloupce, ne při výpadku sítě.
+          if (e.kod !== '42703' && e.stav !== 400) throw e;
+          posledniChyba = e;
+        }
       }
+      if (pz === null) throw posledniChyba;
       for (const p of (pz || [])) {
         poznamky[p.worker_id] = { foto: p.foto || null, poznamka: p.poznamka || '',
                                   hodnoceni: p.hodnoceni || null,

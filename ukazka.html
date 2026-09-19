@@ -5234,7 +5234,7 @@ async function submitAdminSignatureWithPlacement() {
 // Po nahrání nové verze se snadno pozná, jestli se opravdu nasadila: otevřete
 // appku, zmáčkněte F12 (na Macu ⌥⌘I) a v konzoli je vypsané tohle datum. Když
 // tam svítí starší, prohlížeč nebo GitHub drží starou verzi.
-const SUBBAU_VERZE = '2026-09-19 v — oprava přepočtu provizí, skrývání firem v týmech'
+const SUBBAU_VERZE = '2026-09-19 w — nový člověk v provizích, odkaz si pamatuje ukončení'
 console.log('StavKo docházka — verze ' + SUBBAU_VERZE)
 
 // ============ SUPABASE CONFIG ============
@@ -8731,6 +8731,11 @@ async function renderProvizeContent() {
     const rate = w.hourly_rate_worker || 0
     const prov = provUcinna(w.id)           // do peněz; nula u „bez provize"
     const provUlozena = provMap[w.id] || 0  // do políčka, ať jde příznak vrátit
+    // POZOR: `|| 0` výš zahodí rozdíl mezi „nastaveno na nulu" a „vůbec
+    // nenastaveno". Právě kvůli tomu se nově přidaný člověk v přehledu vůbec
+    // neobjevil — vypadal, že sazbu má (nulovou). Proto si to držíme zvlášť.
+    const sazbaNenastavena = w.hourly_rate_worker == null || w.hourly_rate_worker === ''
+    const provizeNenastavena = provMap[w.id] == null || provMap[w.id] === ''
     const pay = payMap[w.id] || null
     const paid = !!(pay && pay.paid)
     const terms = termsMap[w.id] || '7/14'
@@ -8745,10 +8750,15 @@ async function renderProvizeContent() {
         : '',
       jeFirma: w.supplier_type === 'sro',
       prov, provUlozena, bezProvize: bezProvize.has(w.id), byvaly: !!w._byvaly,
+      sazbaNenastavena, provizeNenastavena,
       // Do přehledu patří jen ten, jehož skupina je přiřazená k nějaké firmě.
       // Samotná skupina bez firmy nestačí — za takového člověka není komu
       // provizi účtovat. Bere se dnešní zařazení, ne to z docházky.
-      maFirmu: !!(w.team_id && teamById[w.team_id] && teamById[w.team_id].company_id),
+      // POZOR: dřív to vyžadovalo, aby skupina byla navázaná na firmu
+      // v číselníku. Kdo se přidal do skupiny bez navázané firmy, v Provizích
+      // se vůbec neobjevil — a tím pádem mu nešlo nastavit sazbu, dokud si
+      // nezapsal první hodiny. Stačí, že je někam zařazený.
+      maFirmu: !!w.team_id,
       terms,
       hoursDay: hrs.day, hoursWeek: hrs.week, hoursMonth: hrs.month, hoursYear: hrs.year,
       // Odměny i výdělky jsou sečtené po dnech, každý den svou sazbou (viz výše).
@@ -8785,13 +8795,15 @@ async function renderProvizeContent() {
     : provizeMode === 'month' ? r.hoursMonth > 0
     : r.hoursWeek > 0
   // ...a nově přidaný člověk, který ještě nemá nastavenou sazbu nebo provizi.
+  // Objeví se hned, jak ho zařadíte do skupiny — i když ještě neodpracoval
+  // ani hodinu. Jinak by nebylo kde mu tu sazbu zadat.
   // Bez něj by nešlo nastavit, za kolik dělá — v přehledu by vůbec nebyl,
   // dokud si nezapíše první hodiny. Jakmile má obojí vyplněné a nepracuje,
   // ze seznamu zmizí jako ostatní.
   // Zaměstnanec firmy sazbu nikdy mít nebude, takže na nastavení nečeká —
   // jinak by v přehledu svítil pořád, i když ten týden nepracoval.
   const cekaNaNastaveni = r => r.maFirmu && !r.byvaly && !r.zamestnavatel
-    && (r.rate == null || r.rate === '' || r.provUlozena == null || r.provUlozena === '')
+    && (r.sazbaNenastavena || r.provizeNenastavena)
   const patriDoPrehledu = r => odpracoval(r) || cekaNaNastaveni(r)
   const rowsZobrazit = rows.filter(patriDoPrehledu)
   const skrytoLidi = rows.length - rowsZobrazit.length

@@ -29,8 +29,10 @@ ok((zdroj.match(/poprve \? 'zpetne'/g) || []).length === 2,
 ok(/async function oznacVsechnyUhrazeno/.test(zdroj), 'existuje hromadné označení uhrazeno')
 ok(/const patriDoPrehledu = r => odpracoval\(r\) \|\| cekaNaNastaveni\(r\)/.test(zdroj),
    'v přehledu jsou ti, kdo pracovali — a nově přidaní, co čekají na sazbu')
-ok(/r\.rate == null \|\| r\.rate === '' \|\| r\.provUlozena == null/.test(zdroj),
+ok(/&& \(r\.sazbaNenastavena \|\| r\.provizeNenastavena\)/.test(zdroj),
    'nově přidaný se pozná podle chybějící sazby nebo provize')
+ok(/w\.hourly_rate_worker == null \|\| w\.hourly_rate_worker === ''/.test(zdroj),
+   'a „nenastaveno" se nepočítá jako nula — kvůli tomu se dřív vůbec neobjevil')
 ok(/'2px solid var\(--red\)'/.test(zdroj), 'prázdná políčka mají červený rámeček')
 ok(!/TOHLE_TAM_NENI/.test(zdroj), 'kontrolní měření: test umí i nenajít')
 

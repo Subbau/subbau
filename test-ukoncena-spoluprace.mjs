@@ -29,12 +29,20 @@ ok(/if \('spoluprace_ukoncena' in telo\)/.test(api), 'zaškrtnutí se ukládá')
 ok(/\^\\\\d\{4\}-\\\\d\{2\}-\\\\d\{2\}\$/.test(api) || /\\d\{4\}-\\d\{2\}-\\d\{2\}/.test(api),
    'datum se kontroluje na tvar, ne že se uloží cokoliv')
 ok(/chyba: 'spatne_datum'/.test(api), 'nesmyslné datum server odmítne')
-ok(/spoluprace_ukoncena,spoluprace_do,pozn_tucne,pozn_barva&link_id/.test(api),
+ok(/ZAKLAD \+ ',spoluprace_ukoncena,spoluprace_do,pozn_tucne,pozn_barva'/.test(api),
    'čte se to zpátky do odkazu')
 ok(/if \(e\.kod !== '42703' && e\.stav !== 400\) throw e/.test(api),
    'bez migrace se dotaz zopakuje bez nových sloupců — fotky a poznámky se neztratí')
-ok(/pz = await db\(\s*\n\s*`client_link_workers\?select=worker_id,foto,poznamka,hodnoceni&link_id/.test(api),
-   'a ten náhradní dotaz tam opravdu je')
+ok(/const varianty = \[/.test(api) && (api.match(/ZAKLAD \+ ',/g) || []).length >= 3,
+   'ústup jde po sloupcích, ne všechno nebo nic')
+ok(/ZAKLAD \+ ',spoluprace_ukoncena,spoluprace_do',/.test(api),
+   'když chybí jen barva poznámky, ukončená spolupráce se NEZAHODÍ (přesně tohle ji mazalo)')
+ok(/if \(pz === null\) throw posledniChyba/.test(api),
+   'když neprojde ani jeden dotaz, chyba se nespolkne')
+ok(/chyba: chybiSloupec \? 'funkce_neni_pripravena' : 'nelze_ulozit'/.test(api),
+   'chybějící sloupec se hlásí jako „funkce není připravená", ne jako závada')
+ok(/Funktion noch nicht verfügbar · funkce ještě není připravená/.test(klient),
+   'a odběratel to vidí dvojjazyčně')
 ok(!/spoluprace_neexistujici/.test(api), 'kontrolní měření: test umí i nenajít')
 
 console.log('\n3) Stránka pro odběratele — dvojjazyčně')
