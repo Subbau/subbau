@@ -1,8 +1,11 @@
 // Změří PŮVODNÍ vzhled 1 — ten není šablona, ale kód přímo v renderInvoice,
 // takže ho ostatní zkoušky nevidí. Přitom ho má většina lidí.
 // Spouští se opravdová renderInvoice, jen s náhradou okolí appky.
-import fs from 'fs'; import puppeteer from 'puppeteer'
-const src = fs.readFileSync('../nasazeni4/subbau_final.html', 'utf8')
+import fs from 'fs'
+import path from 'path'
+// Vlastní složka, ne natvrdo „nasazeni4“ — jinak se měří cizí kopie.
+const _KDE = path.dirname(new URL(import.meta.url).pathname); import puppeteer from 'puppeteer'
+const src = fs.readFileSync(path.join(_KDE, 'subbau_final.html'), 'utf8')
 const vezmi = (od, doo) => {
   const i = src.indexOf(od); const j = src.indexOf(doo, i + od.length)
   if (i < 0 || j < 0) throw new Error('nenašel: ' + od)

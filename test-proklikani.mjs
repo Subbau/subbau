@@ -3,7 +3,10 @@
 import puppeteer from 'puppeteer'
 import fs from 'fs'
 import path from 'path'
-const SOUBOR = 'file://' + path.resolve('../nasazeni4/ukazka.html')
+// Cesta ke VLASTNÍ složce, ne k natvrdo napsanému „nasazeni4“ — jinak
+// zkouška čte ukázku z jiné pracovní kopie a měří něco úplně jiného.
+const _KDE = path.dirname(new URL(import.meta.url).pathname)
+const SOUBOR = 'file://' + path.join(_KDE, 'ukazka.html')
 
 // POJISTKA: ukázka se generuje z appky. Když se nepřegeneruje, běžela by
 // zkouška na starém kódu a tvrdila by nesmysly — to se už jednou stalo.
@@ -20,7 +23,7 @@ function stejnaVerze(appka, ukazka) {
   }
 }
 
-stejnaVerze('../nasazeni4/subbau_final.html'.replace('../nasazeni4/', ''), SOUBOR.replace('file://', ''))
+stejnaVerze(path.join(_KDE, 'subbau_final.html'), SOUBOR.replace('file://', ''))
 const b = await puppeteer.launch({ args: ['--no-sandbox'] })
 const p = await b.newPage()
 await p.setViewport({ width: 1280, height: 900 })

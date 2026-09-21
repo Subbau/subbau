@@ -4551,7 +4551,7 @@ async function submitAdminSignatureWithPlacement() {
 // Po nahrání nové verze se snadno pozná, jestli se opravdu nasadila: otevřete
 // appku, zmáčkněte F12 (na Macu ⌥⌘I) a v konzoli je vypsané tohle datum. Když
 // tam svítí starší, prohlížeč nebo GitHub drží starou verzi.
-const SUBBAU_VERZE = '2026-09-19 x — schovaná firma zmizí všude v appce'
+const SUBBAU_VERZE = '2026-09-21 y — KW jde upravit, stažené PDF je Rechnung'
 console.log('SubBau docházka — verze ' + SUBBAU_VERZE)
 
 // ============ SUPABASE CONFIG ============
@@ -13613,6 +13613,10 @@ function openInvoiceEdit(id) {
   document.getElementById('invedit-iban-do-profilu').checked = false
   const cisloEl = document.getElementById('invedit-number')
   if (cisloEl) cisloEl.value = String(r.invoice_number || '')
+  const kwEl = document.getElementById('invedit-kw')
+  const kwRokEl = document.getElementById('invedit-kw-rok')
+  if (kwEl) kwEl.value = r.kw != null ? String(r.kw) : ''
+  if (kwRokEl) kwRokEl.value = r.kw_year != null ? String(r.kw_year) : ''
   const vzEl = document.getElementById('invedit-design')
   const vzProfil = document.getElementById('invedit-design-do-profilu')
   if (vzProfil) vzProfil.checked = false
@@ -13794,6 +13798,23 @@ async function saveInvoiceEdit() {
   closeInvoiceOverlay()
 
   // 3) Zápis do databáze
+  // Kalendářní týden. Prázdno se nechává být — starší faktury ho mít
+  // nemusí a nutit ho dodatečně by znamenalo hádat, za co byly.
+  const kwSurovy = String(document.getElementById('invedit-kw')?.value || '').trim()
+  const kwRokSurovy = String(document.getElementById('invedit-kw-rok')?.value || '').trim()
+  const kwNovy = kwSurovy === '' ? null : parseInt(kwSurovy, 10)
+  const kwRokNovy = kwRokSurovy === '' ? null : parseInt(kwRokSurovy, 10)
+  if (kwNovy != null && (!Number.isInteger(kwNovy) || kwNovy < 1 || kwNovy > 53)) {
+    finish('⚠️ Týden musí být číslo od 1 do 53'); return
+  }
+  if (kwRokNovy != null && (!Number.isInteger(kwRokNovy) || kwRokNovy < 2000 || kwRokNovy > 2100)) {
+    finish('⚠️ Rok u týdne vypadá nesmyslně'); return
+  }
+  // Půlka údaje je horší než žádný: podle dvojice se páruje uhrazená provize.
+  if ((kwNovy == null) !== (kwRokNovy == null)) {
+    finish('⚠️ Vyplňte týden i rok, nebo ani jedno'); return
+  }
+
   const upd = {
     cash_paid: cash, cash_paid_note: note || null, cash_paid_typ: cashTyp,
     edited_at: new Date().toISOString(),
@@ -13801,6 +13822,7 @@ async function saveInvoiceEdit() {
     iban: ibanNovy, swift: swiftNovy || null,
     design_idx: vzhledZvoleny,
     invoice_number: cisloNove,
+    kw: kwNovy, kw_year: kwRokNovy,
   }
 
   // Když správce zálohu na faktuře změní, musí se tomu přizpůsobit i rozpis,
@@ -13832,6 +13854,15 @@ async function saveInvoiceEdit() {
     upd.original_pdf_url = r.pdf_url
     upd.original_pdf_path = r.pdf_path
   }
+
+  // Uhrazená provize se páruje podle DVOJICE pracovník + týden. Když se
+  // týden na faktuře změní, musí se přesunout s ní — jinak by „uhrazeno"
+  // zůstalo viset u týdne, ke kterému už žádná faktura není, a u nového
+  // týdne by chybělo. Odepisuje se ze starého AŽ PO zápisu faktury, aby
+  // se při neúspěchu nerozešly.
+  const kwZmeneno = String(r.kw ?? '') !== String(kwNovy ?? '')
+    || String(r.kw_year ?? '') !== String(kwRokNovy ?? '')
+  const byloZaplaceno = r.status === 'paid'
 
   let bezPuvodni = false
   let bezVzhledu = false
@@ -13916,9 +13947,24 @@ async function saveInvoiceEdit() {
     }
   }
 
+  // Přesun uhrazené provize na nový týden. Dělá se AŽ TEĎ, po úspěšném
+  // zápisu faktury — kdyby se to udělalo dřív a zápis selhal, provize by
+  // ukazovala na týden, ke kterému faktura není.
+  let provizeNepresunuta = ''
+  if (kwZmeneno && byloZaplaceno) {
+    const stary = await syncProvizePaidFromInvoice(r.worker_id, r.kw, r.kw_year, false)
+    const novy = await syncProvizePaidFromInvoice(r.worker_id, kwNovy, kwRokNovy, true)
+    const chyba = stary.error || novy.error
+    if (chyba) provizeNepresunuta = chyba.message || String(chyba)
+  }
+
   Object.assign(r, upd)
   renderWorkerInvoices()
   closeInvoiceEdit()
+  if (provizeNepresunuta) {
+    finish('⚠️ Faktura přepsaná, ale „uhrazeno" v Provizích zůstalo u starého týdne: ' + provizeNepresunuta)
+    return
+  }
   if (profilNeulozen) {
     finish('⚠️ Faktura přepsaná, ale do profilu pracovníka se účet neuložil — opravte ho prosím na jeho kartě')
     return
@@ -27266,7 +27312,7 @@ function invoiceFileName() {
   const num = (window._lastInvoiceNum || '').toString().replace(/[^a-zA-Z0-9_-]/g, '')
   const who = (window._lastInvoiceName || '').normalize('NFD').replace(/[̀-ͯ]/g, '')
     .replace(/[^a-zA-Z0-9]+/g, '_').replace(/^_+|_+$/g, '')
-  return 'Faktura' + (num ? '_' + num : '') + (who ? '_' + who : '') + '.pdf'
+  return 'Rechnung' + (num ? '_' + num : '') + (who ? '_' + who : '') + '.pdf'
 }
 
 // ===== ULOŽIT FAKTURU JAKO PDF — vždy přesně jedna stránka A4 =====
@@ -33390,6 +33436,16 @@ document.addEventListener('visibilitychange', () => {
     <label style="display:block;font-size:12px;color:#7a7168;font-weight:700;margin:16px 0 5px">Číslo faktury</label>
     <input type="text" id="invedit-number" maxlength="24" autocomplete="off"
            style="width:100%;padding:12px;border:1.5px solid #d8cfc0;border-radius:10px;font-size:16px;font-weight:800;font-family:inherit;box-sizing:border-box">
+    <label style="display:block;font-size:12px;color:#7a7168;font-weight:700;margin:16px 0 5px">Kalendářní týden (KW)</label>
+    <div style="display:flex;gap:8px;align-items:center">
+      <input type="number" id="invedit-kw" min="1" max="53" inputmode="numeric" autocomplete="off"
+             style="width:90px;padding:12px;border:1.5px solid #d8cfc0;border-radius:10px;font-size:16px;font-weight:800;font-family:inherit;box-sizing:border-box">
+      <span style="color:#7a7168;font-size:14px">/</span>
+      <input type="number" id="invedit-kw-rok" min="2000" max="2100" inputmode="numeric" autocomplete="off"
+             style="width:110px;padding:12px;border:1.5px solid #d8cfc0;border-radius:10px;font-size:16px;font-weight:800;font-family:inherit;box-sizing:border-box">
+    </div>
+    <div style="font-size:11px;color:#9a9a9a;margin-top:4px;line-height:1.45">Za který týden je faktura vystavená. Podle toho se v Provizích páruje „uhrazeno" — když týden změníte, přesune se to s fakturou.</div>
+
     <div style="font-size:11px;color:#9a9a9a;margin-top:4px;line-height:1.45">Přepsané číslo se propíše i do PDF. Další faktury pak pokračují v tomhle tvaru.</div>
 
     <div style="background:#faf7f2;border-radius:12px;padding:14px;margin:16px 0">
