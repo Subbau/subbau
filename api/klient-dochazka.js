@@ -490,37 +490,69 @@ module.exports = async (req, res) => {
       let telefony = {}, ridicaky = {};
       if (ids.length) {
         const seznamIds = ids.map(encodeURIComponent).join(',');
-        // Jméno a hodinová sazba. SubBau si přeje, aby odběratel viděl u každého
-        // člověka sazbu i provizi — vyžádal si to sám, aby si mohl fakturu
-        // překontrolovat. V appce zůstává provize dál jen pro správce.
-        const lidi = await db(
-          `profiles?select=id,full_name,hourly_rate_worker,phone&id=in.(${seznamIds})`, klic);
+
+        // ČTYŘI DOTAZY NARÁZ, NE ČTYŘI ZA SEBOU.
+        //
+        // Žádný z nich nepotřebuje výsledek toho předchozího — všechny se
+        // ptají na tytéž `ids`. Do 23. 9. 2026 se přesto čekalo postupně
+        // a každý stál celou cestu na Supabase a zpátky. Majitel: „strašně
+        // dlouho se načítá ten odkaz." Změřeno: probuzení funkce a JEDEN
+        // dotaz trvá 0,4 s (2,2 s po studeném startu), a stránka jich
+        // dělala čtrnáct v řadě.
+        //
+        // KAŽDÝ MÁ VLASTNÍ OŠETŘENÍ CHYBY, jinak by jeden výpadek shodil
+        // všechny ostatní — Promise.all padá na první odmítnuté sliby.
+        // Výjimka je `profiles`: bez jmen nemá stránka co ukázat, takže
+        // ten se schválně NECHYTÁ a chyba projde ven jako dřív.
+        const tise = (popis) => (e) => {
+          console.warn('[klient] ' + popis + ':', e.message); return null;
+        };
+        const [lidi, dokl, prov, h] = await Promise.all([
+          // Jméno, hodinová sazba a telefon. SubBau si přeje, aby odběratel
+          // viděl u každého člověka sazbu i provizi — vyžádal si to sám, aby
+          // si mohl fakturu překontrolovat. V appce zůstává provize dál jen
+          // pro správce.
+          db(`profiles?select=id,full_name,hourly_rate_worker,phone&id=in.(${seznamIds})`, klic),
+          // ŘIDIČÁK SE POSUZUJE STEJNĚ JAKO V UPOMÍNCE (check-expiring-docs):
+          // doklad platí, dokud nebyl odmítnutý nebo označený jako nečitelný.
+          // Druhé, vlastní pravidlo by se časem rozešlo s appkou — přesně
+          // jako by se rozešlo zaokrouhlování hodin, kdyby se počítalo dvakrát.
+          // NEJDE VEN SAMOTNÝ DOKLAD ANI JEHO ČÍSLO, jen „má / nemá" a datum.
+          db(`documents?select=worker_id,status,valid_until&doc_type=eq.ridicak` +
+             `&worker_id=in.(${seznamIds})`, klic).catch(tise('řidičáky se nenačetly')),
+          db(`worker_commissions?select=worker_id,provize,bez_provize&worker_id=in.(${seznamIds})`,
+             klic).catch(tise('provize se nenačetly')),
+          // Historie sazeb — bez ní by se týden, ve kterém se sazba měnila,
+          // spočítal celý novou sazbou a nesedělo by to s fakturou.
+          db(`worker_rate_history?select=worker_id,druh,hodnota,valid_from&worker_id=in.(${seznamIds})` +
+             `&order=valid_from.asc`, klic).catch(tise('historie sazeb se nenačetla')),
+        ]);
+
         for (const p of (lidi || [])) {
           jmena[p.id] = p.full_name;
           sazbaTed[p.id] = Number(p.hourly_rate_worker) || 0;
           telefony[p.id] = (p.phone || '').trim();
         }
-        // ŘIDIČÁK SE POSUZUJE STEJNĚ JAKO V UPOMÍNCE (api/check-expiring-docs.js):
-        // doklad platí, dokud nebyl odmítnutý nebo označený jako nečitelný.
-        // Druhé, vlastní pravidlo by se časem rozešlo s appkou — přesně jako
-        // by se rozešlo zaokrouhlování hodin, kdyby se počítalo dvakrát.
-        //
-        // NEJDE VEN SAMOTNÝ DOKLAD ANI JEHO ČÍSLO. Jen „má / nemá" a datum
-        // platnosti; fotku řidičáku odběratel nedostane.
-        try {
-          const dokl = await db(
-            `documents?select=worker_id,status,valid_until&doc_type=eq.ridicak` +
-            `&worker_id=in.(${seznamIds})`, klic);
-          for (const d of (dokl || [])) {
-            if (d.status === 'rejected' || d.status === 'unreadable') continue;
-            const doKdy = d.valid_until ? String(d.valid_until).slice(0, 10) : '';
-            const stav = ridicaky[d.worker_id];
-            // Kdyby jich měl víc, platí ten s nejdelší platností. Doklad bez
-            // data je slabší než doklad s datem v budoucnu, ale silnější než
-            // propadlý — proto se prázdno řadí doprostřed, ne na konec.
-            if (!stav || doKdy > (stav.do || '')) ridicaky[d.worker_id] = { do: doKdy };
-          }
-        } catch (e) { console.warn('[klient] řidičáky se nenačetly:', e.message); }
+        for (const d of (dokl || [])) {
+          if (d.status === 'rejected' || d.status === 'unreadable') continue;
+          const doKdy = d.valid_until ? String(d.valid_until).slice(0, 10) : '';
+          const stav = ridicaky[d.worker_id];
+          // Kdyby jich měl víc, platí ten s nejdelší platností. Doklad bez
+          // data je slabší než doklad s datem v budoucnu, ale silnější než
+          // propadlý — proto se prázdno řadí doprostřed, ne na konec.
+          if (!stav || doKdy > (stav.do || '')) ridicaky[d.worker_id] = { do: doKdy };
+        }
+        for (const p of (prov || [])) {
+          if (p.bez_provize) { bezProvize.add(p.worker_id); continue; }
+          provizeTed[p.worker_id] = Number(p.provize) || 0;
+        }
+        for (const r of (h || [])) {
+          const kos = (historie[r.druh] = historie[r.druh] || {});
+          (kos[r.worker_id] = kos[r.worker_id] || []).push({
+            od: String(r.valid_from).slice(0, 10), hodnota: Number(r.hodnota) || 0,
+          });
+        }
+
         // Jedna položka na člověka. Kdo telefon ani řidičák nemá, do mapy
         // se nedostane — stránka pak pod jménem prostě nic nenakreslí.
         for (const id of ids) {
@@ -529,27 +561,6 @@ module.exports = async (req, res) => {
           if (!tel && !rp) continue;
           lide[id] = { telefon: tel, ridicak: rp ? { do: rp.do || '' } : null };
         }
-        try {
-          const prov = await db(
-            `worker_commissions?select=worker_id,provize,bez_provize&worker_id=in.(${seznamIds})`, klic);
-          for (const p of (prov || [])) {
-            if (p.bez_provize) { bezProvize.add(p.worker_id); continue; }
-            provizeTed[p.worker_id] = Number(p.provize) || 0;
-          }
-        } catch (e) { console.warn('[klient] provize se nenačetly:', e.message); }
-        // Historie sazeb — bez ní by se týden, ve kterém se sazba měnila,
-        // spočítal celý novou sazbou a nesedělo by to s fakturou.
-        try {
-          const h = await db(
-            `worker_rate_history?select=worker_id,druh,hodnota,valid_from&worker_id=in.(${seznamIds})` +
-            `&order=valid_from.asc`, klic);
-          for (const r of (h || [])) {
-            const kos = (historie[r.druh] = historie[r.druh] || {});
-            (kos[r.worker_id] = kos[r.worker_id] || []).push({
-              od: String(r.valid_from).slice(0, 10), hodnota: Number(r.hodnota) || 0,
-            });
-          }
-        } catch (e) { console.warn('[klient] historie sazeb se nenačetla:', e.message); }
       }
       // Kolik platilo v konkrétní den. Když u člověka historie není, platí dnešní.
       const kDni = (druh, wid, den, vychozi) => {
@@ -695,8 +706,17 @@ module.exports = async (req, res) => {
 
     // Které týdny má smysl nabídnout v přepínači. Bereme je z docházky těch
     // part, ať se odběratel neproklikává do prázdných týdnů.
-    let tydny = [];
-    if (teamIds.length || lideVeSkupinach.length) {
+    //
+    // POČÍTÁ SE JEN PŘI SKUTEČNÉM OTEVŘENÍ STRÁNKY, ne při každém obnovení
+    // ani při přepnutí týdne. Je to zdaleka nejdražší dotaz celé funkce:
+    // tahá docházku OD ROKU 2000 DO DNEŠKA (až 5000 řádků) jen proto, aby
+    // z ní vypadl seznam různých týdnů. Do 23. 9. 2026 běžel pokaždé —
+    // i když odběratel jen přepnul týden. Seznam se mezi dvěma obnoveními
+    // stejně nezmění, tak si ho drží stránka (`tydny: null` znamená
+    // „nech si ten, co máš").
+    let tydny = null;
+    if (prvniOtevreni && (teamIds.length || lideVeSkupinach.length)) {
+      tydny = [];
       try {
         // Od začátku spolupráce až do dneška — odběratel má vidět celou dobu,
         // co pro něj ti lidé dělají, ne jen probíhající týden.
