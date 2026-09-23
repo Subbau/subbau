@@ -8,9 +8,14 @@
 // (SUPABASE_SERVICE_ROLE_KEY) zná jen server na Vercelu.
 //
 // CO POUŠTÍ VEN: jméno, datum, příchod, pauza, odchod, hodiny, stavba,
-// popis práce. NIC JINÉHO. Sazby, provize, telefony, e-maily, doklady ani
-// GPS souřadnice (attendance.location_address) se ven nedostanou — nejsou
-// v dotazu do databáze, takže je funkce vůbec nemá.
+// popis práce, sazbu a provizi (to si SubBau vyžádal sám, ať si odběratel
+// překontroluje fakturu) a od 23. 9. 2026 TELEFON a údaj, jestli má člověk
+// řidičák. Odběratel lidem volá přímo na stavbu a potřebuje vědět, koho
+// smí poslat s dodávkou.
+//
+// CO VEN NEJDE ANI TEĎ: e-maily, samotné doklady a jejich čísla, fotka
+// řidičáku, adresy bydliště ani GPS souřadnice (attendance.location_lat/lng).
+// Nejsou v dotazech do databáze, takže je funkce vůbec nemá.
 //
 // OBDOBÍ: jen aktuální týden. Týden si klient nevybírá, počítá ho server.
 // =====================================================================
@@ -458,6 +463,10 @@ module.exports = async (req, res) => {
     }
 
     let radky = [];
+    // Telefon a řidičák u každého člověka. Sestavuje se uvnitř bloku níž,
+    // ale deklaruje se TADY: odpověď se skládá až za ním a `let` uvnitř
+    // bloku by z ní udělal nedefinovanou proměnnou.
+    let lide = {};
     if (teamIds.length || lideVeSkupinach.length) {
       // Adresa: nejdřív ručně zapsaná stavba, a když chybí, adresa z příchodu —
       // stejné pořadí, jaké má správce v appce (attDisplaySite). Bez té druhé
@@ -476,16 +485,49 @@ module.exports = async (req, res) => {
 
       const ids = [...new Set((dochazka || []).map(z => z.worker_id))];
       let jmena = {}, sazbaTed = {}, provizeTed = {}, bezProvize = new Set(), historie = {};
+      // Telefon a řidičák — od 23. 9. 2026 na přání SubBau. Odběratel volá
+      // lidem na stavbu přímo a potřebuje vědět, koho smí poslat s dodávkou.
+      let telefony = {}, ridicaky = {};
       if (ids.length) {
         const seznamIds = ids.map(encodeURIComponent).join(',');
         // Jméno a hodinová sazba. SubBau si přeje, aby odběratel viděl u každého
         // člověka sazbu i provizi — vyžádal si to sám, aby si mohl fakturu
         // překontrolovat. V appce zůstává provize dál jen pro správce.
         const lidi = await db(
-          `profiles?select=id,full_name,hourly_rate_worker&id=in.(${seznamIds})`, klic);
+          `profiles?select=id,full_name,hourly_rate_worker,phone&id=in.(${seznamIds})`, klic);
         for (const p of (lidi || [])) {
           jmena[p.id] = p.full_name;
           sazbaTed[p.id] = Number(p.hourly_rate_worker) || 0;
+          telefony[p.id] = (p.phone || '').trim();
+        }
+        // ŘIDIČÁK SE POSUZUJE STEJNĚ JAKO V UPOMÍNCE (api/check-expiring-docs.js):
+        // doklad platí, dokud nebyl odmítnutý nebo označený jako nečitelný.
+        // Druhé, vlastní pravidlo by se časem rozešlo s appkou — přesně jako
+        // by se rozešlo zaokrouhlování hodin, kdyby se počítalo dvakrát.
+        //
+        // NEJDE VEN SAMOTNÝ DOKLAD ANI JEHO ČÍSLO. Jen „má / nemá" a datum
+        // platnosti; fotku řidičáku odběratel nedostane.
+        try {
+          const dokl = await db(
+            `documents?select=worker_id,status,valid_until&doc_type=eq.ridicak` +
+            `&worker_id=in.(${seznamIds})`, klic);
+          for (const d of (dokl || [])) {
+            if (d.status === 'rejected' || d.status === 'unreadable') continue;
+            const doKdy = d.valid_until ? String(d.valid_until).slice(0, 10) : '';
+            const stav = ridicaky[d.worker_id];
+            // Kdyby jich měl víc, platí ten s nejdelší platností. Doklad bez
+            // data je slabší než doklad s datem v budoucnu, ale silnější než
+            // propadlý — proto se prázdno řadí doprostřed, ne na konec.
+            if (!stav || doKdy > (stav.do || '')) ridicaky[d.worker_id] = { do: doKdy };
+          }
+        } catch (e) { console.warn('[klient] řidičáky se nenačetly:', e.message); }
+        // Jedna položka na člověka. Kdo telefon ani řidičák nemá, do mapy
+        // se nedostane — stránka pak pod jménem prostě nic nenakreslí.
+        for (const id of ids) {
+          const tel = telefony[id] || '';
+          const rp = ridicaky[id] || null;
+          if (!tel && !rp) continue;
+          lide[id] = { telefon: tel, ridicak: rp ? { do: rp.do || '' } : null };
         }
         try {
           const prov = await db(
@@ -669,7 +711,7 @@ module.exports = async (req, res) => {
     }
 
     res.status(200).json({ ok: true, nazev: odkaz.nazev, kw, rok, od, do: doDne,
-                           radky, tydny, poznamky, dovolene, uhrazeno });
+                           radky, tydny, poznamky, dovolene, uhrazeno, lide });
   } catch (e) {
     // Podrobnosti si nechá log na Vercelu. Ven jde jen obecná hláška, ať
     // z ní nejde vyčíst, jak je databáze postavená.
