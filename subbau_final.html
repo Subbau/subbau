@@ -9837,13 +9837,50 @@ async function loadKWData() {
   const [week, year] = val.split('-').map(Number)
   const tbody = document.getElementById('kw-table')
 
+  // ═══ PĚT DOTAZŮ NAJEDNOU, NE ZA SEBOU ═══════════════════════════════════
+  // Do 29. 9. 2026 se tu čekalo na pět dotazů popořadě — lidi, firmy,
+  // podskupiny, docházka, dovolené. Žádný z nich přitom nepotřebuje výsledek
+  // toho předchozího, takže se pětkrát čekalo na obrátku k serveru úplně
+  // zbytečně. Majitel: „když přepínám mezi jednotlivýma týdnama, trvá to
+  // strašně dlouho" — a se čtyřiceti lidmi to bylo znát nejvíc.
+  //
+  // Promise.all je tu nutnost, ne ozdoba: dotaz Supabase se odesílá až ve
+  // chvíli, kdy se na něj čeká. Uložit si ho do proměnné nic nespustí.
+  //
+  // Termíny týdne se počítají NAHOŘE, protože je potřebuje dotaz na dovolené.
+  const _wkStart = getWeekStartDate(week, year)
+  const _wkEnd = new Date(_wkStart); _wkEnd.setDate(_wkStart.getDate() + 6)
+  const _wkStartStr = localDateStr(_wkStart), _wkEndStr = localDateStr(_wkEnd)
+
   // Všichni aktivní pracovníci — i ti se zablokovanou docházkou.
   // (Jinak by z přehledu zmizely i hodiny, které stihli odpracovat před zablokováním.)
-  let { data: allWorkers, error: chybaKW } = await sb.from('profiles')
-    .select('id, full_name, profession, team_id, subteam_id, can_track_hours, ve_vykazu')
-    .in('role', ['osvec', 'partak'])
-    .eq('is_active', true)
-    .order('full_name')
+  const [
+    { data: _lidi, error: chybaKW },
+    { data: kwTeams },
+    { data: kwSubteams },
+    { data },
+    { data: _vacs }
+  ] = await Promise.all([
+    sb.from('profiles')
+      .select('id, full_name, profession, team_id, subteam_id, can_track_hours, ve_vykazu')
+      .in('role', ['osvec', 'partak'])
+      .eq('is_active', true)
+      .order('full_name'),
+    sb.from('teams').select('id, name'),
+    sb.from('subteams').select('id, name, team_id'),
+    // is_active z profilu tu potřebujeme kvůli řádkům lidí, kterým jsme mezitím
+    // odebrali přístup — v seznamu výš nejsou, ale jejich hodiny se dál musí ukázat.
+    sb.from('attendance')
+      .select('*, worker:profiles(full_name,profession,is_active,team_id)')
+      .eq('kw', week).eq('kw_year', year),
+    // Dovolené v tomhle týdnu — ať se u dnů bez docházky ukáže „Dovolená" místo 0h.
+    // Tabulka nemusí být dostupná; chybu proto spolkneme a vrátíme prázdno,
+    // jinak by Promise.all shodil celý přehled kvůli vedlejšímu údaji.
+    sb.from('vacations').select('*')
+      .lte('date_from', _wkEndStr).gte('date_to', _wkStartStr)
+      .then(r => r, () => ({ data: [] }))
+  ])
+  let allWorkers = _lidi
   // Bez migrace sloupec ve_vykazu neexistuje a dotaz spadne. Přehled hodin je
   // to poslední, co smí kvůli tomu zmizet — tak se zkusí ještě jednou bez něj.
   if (!allWorkers && chybaKW
@@ -9860,25 +9897,14 @@ async function loadKWData() {
   allWorkers = allWorkers.filter(w => !jeSkrytaFirmaPracovnika(w))
 
   // Názvy skupin (firem) a podskupin
-  const { data: kwTeams } = await sb.from('teams').select('id, name')
   const kwTeamName = {}
   ;(kwTeams||[]).forEach(t => { kwTeamName[t.id] = t.name })
-  const { data: kwSubteams } = await sb.from('subteams').select('id, name, team_id')
   const kwSubteamById = {}
   ;(kwSubteams||[]).forEach(s => { kwSubteamById[s.id] = s })
 
-  // is_active z profilu tu potřebujeme kvůli řádkům lidí, kterým jsme mezitím odebrali
-  // přístup — v seznamu výše nejsou, ale jejich odpracované hodiny se dál musí ukázat.
-  const { data } = await sb.from('attendance').select('*, worker:profiles(full_name,profession,is_active,team_id)').eq('kw',week).eq('kw_year',year)
-
-  // Dovolené v tomto týdnu — ať se u dnů bez docházky ukáže "Dovolená" místo 0h
-  const _wkStart = getWeekStartDate(week, year)
-  const _wkEnd = new Date(_wkStart); _wkEnd.setDate(_wkStart.getDate() + 6)
-  const _wkStartStr = localDateStr(_wkStart), _wkEndStr = localDateStr(_wkEnd)
   let vacDays = {}   // { "workerId|YYYY-MM-DD": {note, type} }
   try {
-    const { data: vacs } = await sb.from('vacations').select('*')
-      .lte('date_from', _wkEndStr).gte('date_to', _wkStartStr)
+    const vacs = _vacs
     ;(vacs||[]).forEach(v => {
       let d = new Date(v.date_from < _wkStartStr ? _wkStartStr : v.date_from)
       const end = new Date(v.date_to > _wkEndStr ? _wkEndStr : v.date_to)
