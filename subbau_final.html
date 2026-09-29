@@ -7515,8 +7515,15 @@ async function oznacVsechnyUhrazeno(checkbox, firmIdx) {
       : '❌ Chyba: ' + error.message)
     return
   }
-  showToast(paid ? '✅ Označeno jako uhrazené všem (' + ids.length + ')'
-                 : '✅ Zrušeno u všech (' + ids.length + ')')
+  // Propiš to i do Faktur — stejně jako to dělá zaškrtnutí u jednoho řádku.
+  const res = await syncInvoicePaidFromProvizeDavka(ids, f.weekKey, paid)
+  if (res.error) {
+    showToast('⚠️ Uloženo v Provizích, do Faktur se to nepropsalo: ' + res.error.message)
+  } else {
+    showToast((paid ? '✅ Označeno jako uhrazené všem (' + ids.length + ')'
+                    : '✅ Zrušeno u všech (' + ids.length + ')')
+      + (res.count ? ' — a propsáno do ' + res.count + ' faktur' : ''))
+  }
   prekresliProvize()
 }
 
@@ -13468,6 +13475,29 @@ async function syncInvoicePaidFromProvize(workerId, periodKey, paid) {
     // Ať sedí i tabulka Faktur, pokud ji má admin načtenou z dřívějška
     const ids = new Set(data.map(r => r.id))
     _invCache.forEach(r => { if (ids.has(r.id)) r.status = paid ? 'paid' : 'seen' })
+    if (document.getElementById('v-faktury-archiv')?.classList.contains('on')) renderWorkerInvoices()
+    refreshInvoiceBadge()
+  }
+  return { error, count: (data || []).length }
+}
+
+// TOTÉŽ PRO CELOU FIRMU NAJEDNOU, a jedním dotazem.
+// Hromadné „uhrazeno" u firmy se do Faktur do 29. 9. 2026 NEPROPISOVALO —
+// propsalo se jen zaškrtnutí u jednotlivého řádku. Majitel to tedy odklikal
+// v Provizích a ve Fakturách mu to zůstalo viset jako nezaplacené.
+//
+// Jeden dotaz přes .in(), ne padesát po sobě: u padesáti lidí by to byla
+// padesátka obrátek na server.
+async function syncInvoicePaidFromProvizeDavka(ids, periodKey, paid) {
+  const wk = weekFromProvizeKey(periodKey)
+  if (!ids || !ids.length || !wk) return { skipped: true, count: 0 }
+  const { data, error } = await sb.from('worker_invoices')
+    .update({ status: paid ? 'paid' : 'seen' })
+    .in('worker_id', ids).eq('kw', wk.week).eq('kw_year', wk.year)
+    .select('id')
+  if (!error && data && data.length) {
+    const hotove = new Set(data.map(r => r.id))
+    _invCache.forEach(r => { if (hotove.has(r.id)) r.status = paid ? 'paid' : 'seen' })
     if (document.getElementById('v-faktury-archiv')?.classList.contains('on')) renderWorkerInvoices()
     refreshInvoiceBadge()
   }
