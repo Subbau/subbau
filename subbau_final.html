@@ -2673,9 +2673,9 @@ setTimeout(function () {
     <div style="background:var(--blue);padding:18px 22px;display:flex;justify-content:space-between;align-items:center">
       <div style="display:flex;align-items:center;gap:14px">
         <div style="position:relative;flex-shrink:0">
-          <div id="wd-avatar-wrap" onclick="openWorkerAvatarPreview()" title="Zobrazit fotku ve velkém" style="width:48px;height:48px;border-radius:50%;background:rgba(255,255,255,.2);display:flex;align-items:center;justify-content:center;overflow:hidden;cursor:default">
-            <img id="wd-avatar-img" src="" style="width:48px;height:48px;border-radius:50%;object-fit:cover;display:none">
-            <span id="wd-avatar-init" style="font-size:18px;font-weight:700;color:#E8A13A">—</span>
+          <div id="wd-avatar-wrap" onclick="openWorkerAvatarPreview()" title="Zobrazit fotku ve velkém" style="width:56px;height:56px;border-radius:8px;background:rgba(255,255,255,.2);display:flex;align-items:center;justify-content:center;overflow:hidden;cursor:default">
+            <img id="wd-avatar-img" src="" style="width:56px;height:56px;border-radius:8px;object-fit:cover;display:none">
+            <span id="wd-avatar-init" style="font-size:21px;font-weight:700;color:#E8A13A">—</span>
           </div>
           <button id="wd-avatar-edit" class="foto-zmen" onclick="vyberFotkuPracovnika()" title="Nastavit fotku pracovníka" style="display:none"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" style="width:14px;height:14px;display:block"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg></button>
         </div>
@@ -9699,6 +9699,11 @@ async function loadTodayTimeline() {
         check_in: null, check_out: null,
         breaks: [],           // [{bs,be}] ze všech záznamů
         gpsAddr: null, manualAddr: null,
+        // Fotka a záznam s odchodem. Denní tabulka je jediná obrazovka, kde
+        // se na lidi dívá správce každý den — a jako jediná je do 29. 9. 2026
+        // neměla, ačkoli v jiných pohledech už fotky i adresa odchodu byly.
+        avatar: r.worker?.avatar_url || null,
+        zaznamOdchodu: null,
         descs: [], total: 0, running: false
       }
     }
@@ -9707,7 +9712,13 @@ async function loadTodayTimeline() {
     const ci = r.check_in ? r.check_in.slice(0,5) : null
     const co = r.check_out ? r.check_out.slice(0,5) : null
     if (ci && (!g.check_in || ci < g.check_in)) g.check_in = ci
-    if (co && (!g.check_out || co > g.check_out)) g.check_out = co
+    if (co && (!g.check_out || co > g.check_out)) {
+      g.check_out = co
+      // Adresa odchodu patří k TOMU záznamu, ve kterém odchod je. Kdo má za
+      // den dvě stavby, má dva záznamy — a platí ten pozdější.
+      g.zaznamOdchodu = r
+    }
+    if (!g.avatar && r.worker?.avatar_url) g.avatar = r.worker.avatar_url
     // Pauzy: primárně z pole breaks (víc pauz za směnu), fallback na break_start/break_end (+ break2)
     if (Array.isArray(r.breaks) && r.breaks.length) {
       r.breaks.forEach(b => { if (b && b.bs) g.breaks.push({ bs: b.bs, be: b.be || null }) })
@@ -9787,13 +9798,23 @@ async function loadTodayTimeline() {
           const addrParts = []
           if (g.gpsAddr) addrParts.push(`<div style="white-space:normal">📍 ${g.gpsAddr}</div>`)
           if (g.manualAddr) addrParts.push(`<div style="white-space:normal">✍️ ${g.manualAddr}</div>`)
-          const addrCell = addrParts.length ? addrParts.join('') : '<span style="color:var(--text3)">—</span>'
+          // Kde zmáčkl konec směny a jak daleko to je od příchodu. Stejná
+          // funkce jako v kartě pracovníka, ať to na obou místech vypadá a
+          // počítá stejně. Bez odchodu vrátí prázdno a nic se nepřidá.
+          // Adresa příchodu už v téhle buňce stojí výš (📍), takže se nesmí
+          // vypsat podruhé. odchodPolohaHtml ji vynechá právě tehdy, když je
+          // construction_site PRÁZDNÁ — u sebe si to tak jmenuje „už je nahoře".
+          // Napoprvé jsem tam poslal adresu a dostal ji v řádku dvakrát.
+          const odchodHtml = g.zaznamOdchodu
+            ? odchodPolohaHtml({ ...g.zaznamOdchodu, construction_site: '' })
+            : ''
+          const addrCell = (addrParts.length ? addrParts.join('') : '<span style="color:var(--text3)">—</span>') + odchodHtml
           const desc = g.descs.length ? g.descs.join('; ') : '—'
           // Do hledání patří i firma a podskupina, ať jde vypsat celá parta najednou
           const searchKey = [g.name, g.firm, g.sub].filter(Boolean).join(' ')
           return groupHead + `
             <tr class="today-row" data-id="${g.worker_id||''}" data-name="${searchKey.replace(/"/g,'&quot;')}" data-worker="${(g.name||'').replace(/"/g,'&quot;')}" style="border-top:0.5px solid var(--brd);border-left:4px solid ${gc.border}" title="Klikněte na časy pro úpravu hodin">
-              <td class="td-open today-name" title="Klikněte pro otevření profilu pracovníka" style="padding:10px;cursor:pointer"><b>${g.name||'—'}</b><br><small style="color:var(--text3)">${escAttr(profLabel(g.profession)||'')}</small>${groupLine}</td>
+              <td class="td-open today-name" title="Klikněte pro otevření profilu pracovníka" style="padding:10px;cursor:pointer"><span style="display:inline-flex;align-items:center;gap:8px;min-width:0;vertical-align:middle">${fotkaHtml(g.avatar, g.name, 44)}<b>${g.name||'—'}</b></span><br><small style="color:var(--text3)">${escAttr(profLabel(g.profession)||'')}</small>${groupLine}</td>
               <td class="td-open" style="padding:10px;font-weight:700;color:var(--green);cursor:pointer;font-size:15px">${fmt(g.check_in)}</td>
               <td class="td-open" style="padding:10px;color:var(--text2);cursor:pointer;min-width:130px">${breaksHtml}</td>
               <td class="td-open" style="padding:10px;font-weight:700;color:${g.check_out?'var(--red)':'var(--text3)'};cursor:pointer;font-size:15px">${fmt(g.check_out)}</td>
@@ -9868,8 +9889,12 @@ async function deleteTodayRecord(id, name) {
 // Barva kolečka se odvozuje ze jména, takže je u téhož člověka pokaždé
 // stejná a dá se podle ní očima chytat.
 function fotkaHtml(url, jmeno, px) {
-  const v = px || 28
-  const zaklad = `width:${v}px;height:${v}px;border-radius:50%;flex-shrink:0;vertical-align:middle`
+  // ČTVERCOVÉ A VĚTŠÍ (majitel 29. 9. 2026: „fotky čtverečkové a větší").
+  // Kolečko z fotky z dokladu ukrajovalo rohy a obličej v něm byl menší;
+  // 28 px bylo na seznam, do kterého se správce dívá celý den, málo.
+  // Rohy se jen zaoblí (6 px), ať to nevypadá jako lepenka z občanky.
+  const v = px || 40
+  const zaklad = `width:${v}px;height:${v}px;border-radius:6px;flex-shrink:0;vertical-align:middle`
   if (url) {
     // onerror: když se fotka nenačte (smazaná z úložiště), schová se a zůstanou
     // iniciály pod ní — ne ikona rozbitého obrázku.
@@ -32964,7 +32989,7 @@ async function otevriVyrezFotky(file, workerId) {
     <div style="color:#fff;font-size:15px;font-weight:700;text-align:center">Nastavte výřez fotky<br>
       <span style="font-size:12px;font-weight:400;opacity:.75">Táhněte prstem nebo myší · posuvníkem přiblížíte</span></div>
     <canvas id="vyrez-platno" width="${PLOCHA}" height="${PLOCHA}"
-      style="width:${PLOCHA}px;height:${PLOCHA}px;border-radius:50%;touch-action:none;cursor:grab;background:#000;box-shadow:0 0 0 3px rgba(232,161,58,.7)"></canvas>
+      style="width:${PLOCHA}px;height:${PLOCHA}px;border-radius:10px;touch-action:none;cursor:grab;background:#000;box-shadow:0 0 0 3px rgba(232,161,58,.7)"></canvas>
     <input id="vyrez-zoom" type="range" min="100" max="400" value="100"
       style="width:${PLOCHA}px;max-width:90vw;accent-color:#E8A13A">
     <div style="display:flex;gap:10px;width:${PLOCHA}px;max-width:90vw">
