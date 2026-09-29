@@ -9882,7 +9882,9 @@ async function loadTodayTimeline() {
       .select('*, worker:profiles(full_name,profession,team_id,subteam_id,avatar_url)')
       .eq('work_date', today)
       .order('check_in', { ascending: true }),
-    sb.from('teams').select('id, name, company_id'),
+    // select('*'): kvůli běžné pracovní době (prac_doba_od/do). Vyjmenovat ty
+    // sloupce by před spuštěním migrace shodilo celý dotaz — a s ním i firmy.
+    sb.from('teams').select('*'),
     sb.from('companies').select('id, name'),
     sb.from('subteams').select('id, name, team_id')
   ])
@@ -9953,6 +9955,9 @@ async function loadTodayTimeline() {
         check_in: null, check_out: null,
         breaks: [],           // [{bs,be}] ze všech záznamů
         gpsAddr: null, manualAddr: null,
+        // Firma kvůli běžné pracovní době; „vše v pořádku" = správce označil
+        // odchylku u VŠECH záznamů toho dne (viz oznacOdchylkuOk).
+        tym: t, okVse: true,
         // Fotka a záznam s odchodem. Denní tabulka je jediná obrazovka, kde
         // se na lidi dívá správce každý den — a jako jediná je do 29. 9. 2026
         // neměla, ačkoli v jiných pohledech už fotky i adresa odchodu byly.
@@ -9963,6 +9968,7 @@ async function loadTodayTimeline() {
     }
     const g = byWorker[wid]
     if (r.id) g.ids.push(r.id)
+    if (r.odchylka_ok !== true) g.okVse = false
     const ci = r.check_in ? r.check_in.slice(0,5) : null
     const co = r.check_out ? r.check_out.slice(0,5) : null
     if (ci && (!g.check_in || ci < g.check_in)) g.check_in = ci
@@ -10064,6 +10070,10 @@ async function loadTodayTimeline() {
             : ''
           const addrCell = (addrParts.length ? addrParts.join('') : '<span style="color:var(--text3)">—</span>') + odchodHtml
           const desc = g.descs.length ? g.descs.join('; ') : '—'
+          // Odchylka se počítá z nejdřívějšího příchodu a nejpozdějšího odchodu
+          // dne — tedy z toho, co je v řádku vidět.
+          const odch = odchylkaOdDoby({ check_in: g.check_in, check_out: g.check_out,
+                                        odchylka_ok: g.okVse }, g.tym)
           // Do hledání patří i firma a podskupina, ať jde vypsat celá parta najednou
           const searchKey = [g.name, g.firm, g.sub].filter(Boolean).join(' ')
           return groupHead + `
@@ -10080,9 +10090,11 @@ async function loadTodayTimeline() {
                     ${groupLine}
                   </div>
                 </div></td>
-              <td class="td-open" style="padding:10px;font-weight:700;color:var(--green);cursor:pointer;font-size:15px">${fmt(g.check_in)}</td>
+              <td class="td-open" style="padding:10px;font-weight:700;color:${odch.prichod ? '#1d4ed8' : 'var(--green)'};cursor:pointer;font-size:15px">${fmt(g.check_in)}${
+                odch.prichod ? ' ' + flagBadge('odchylka', odch.prichod) + (odch.odchod ? '' : odchylkaBtn(g.ids.join(','), 'den')) : ''}</td>
               <td class="td-open" style="padding:10px;color:var(--text2);cursor:pointer;min-width:130px">${breaksHtml}</td>
-              <td class="td-open" style="padding:10px;font-weight:700;color:${g.check_out?'var(--red)':'var(--text3)'};cursor:pointer;font-size:15px">${fmt(g.check_out)}</td>
+              <td class="td-open" style="padding:10px;font-weight:700;color:${odch.odchod ? '#1d4ed8' : (g.check_out?'var(--red)':'var(--text3)')};cursor:pointer;font-size:15px">${fmt(g.check_out)}${
+                odch.odchod ? ' ' + flagBadge('odchylka', odch.odchod) + odchylkaBtn(g.ids.join(','), 'den') : ''}</td>
               <td class="td-open" style="padding:10px;text-align:right;font-weight:700;cursor:pointer">${hours}</td>
               <td class="td-open" style="padding:10px;cursor:pointer;font-size:12px;color:var(--text2);max-width:240px;line-height:1.4">${addrCell}</td>
               <td class="td-open" style="padding:10px;cursor:pointer;font-size:12px;color:var(--text2);max-width:220px">${escAttr(desc)}</td>
@@ -15355,6 +15367,84 @@ function ukazVsechnyTymy() {
   poZmeneSkrytych()
 }
 
+// PRAVIDLA FIRMY V TÝMECH — poloha při zápisu a běžná pracovní doba.
+// Majitel 30. 9. 2026 (zadání od vedení): u firmy zvolit, jestli může zapisovat
+// ručně, nebo jen s polohou; a jaká je běžná pracovní doba — kdo ji poruší,
+// má ve výkazu svítit, dokud to správce neopraví nebo neoznačí jako v pořádku.
+// Sloupce jsou v supabase-migrace-tymy-oznameni-puntiky.sql. Dokud neběží,
+// v objektu firmy prostě nejsou (select('*')) — ovládání se ukáže zašedlé
+// s poznámkou, místo aby tvrdilo, že se něco uloží.
+function pravidlaFirmyHtml(t) {
+  const maSloupce = t && ('zapis_jen_gps' in t)
+  const hhmm = (v) => (v ? String(v).slice(0, 5) : '')
+  const vyp = maSloupce ? '' : 'disabled'
+  const migrace = maSloupce ? '' : `<span style="font-size:11px;color:var(--amber);font-weight:700">⚠️ spusťte migraci supabase-migrace-tymy-oznameni-puntiky.sql</span>`
+  return `<div style="margin-top:10px;padding-top:10px;border-top:1px dashed var(--brd);display:flex;flex-direction:column;gap:8px">
+    <label onclick="event.stopPropagation()" title="Zapnuto = lidi z téhle firmy zapíšou příchod i odchod jen s povolenou polohou. Bez polohy se nezapíše nic a ruční adresa se nenabídne."
+      style="display:flex;align-items:center;gap:9px;min-height:44px;cursor:${maSloupce ? 'pointer' : 'not-allowed'};font-size:12.5px;font-weight:700;color:var(--text2)">
+      <input type="checkbox" ${t.zapis_jen_gps ? 'checked' : ''} ${vyp} onchange="nastavZapisJenGps('${t.id}', this)"
+        style="width:20px;height:20px;cursor:inherit;accent-color:var(--blue)">
+      📍 Příchod a odchod jen s polohou (GPS)
+    </label>
+    <div style="display:flex;align-items:center;gap:7px;flex-wrap:wrap;font-size:12.5px;font-weight:700;color:var(--text2)"
+      title="Kdo přijde nebo odejde mimo tuhle dobu, bude ve výkazu svítit modře, dokud to neopravíte nebo neoznačíte jako v pořádku. Na hodiny ani faktury to vliv nemá.">
+      <span>⏰ Běžná pracovní doba</span>
+      <input type="time" id="tym-od-${t.id}" value="${hhmm(t.prac_doba_od)}" ${vyp} onchange="nastavPracDobuTymu('${t.id}')"
+        style="min-height:40px;padding:6px 8px;border:1.5px solid var(--brd);border-radius:8px;font-family:inherit;font-size:13px">
+      <span>–</span>
+      <input type="time" id="tym-do-${t.id}" value="${hhmm(t.prac_doba_do)}" ${vyp} onchange="nastavPracDobuTymu('${t.id}')"
+        style="min-height:40px;padding:6px 8px;border:1.5px solid var(--brd);border-radius:8px;font-family:inherit;font-size:13px">
+      ${t.prac_doba_od || t.prac_doba_do ? `<button onclick="event.stopPropagation();nastavPracDobuTymu('${t.id}', true)" ${vyp}
+        style="min-height:40px;padding:6px 10px;border:1px solid var(--brd);border-radius:8px;background:#fff;cursor:pointer;font-family:inherit;font-size:12px">zrušit</button>` : ''}
+    </div>
+    ${migrace}
+  </div>`
+}
+
+async function nastavZapisJenGps(teamId, el) {
+  const zapnout = !!(el && el.checked)
+  if (el) el.disabled = true
+  const { data, error } = await sb.from('teams')
+    .update({ zapis_jen_gps: zapnout }).eq('id', teamId).select('id, zapis_jen_gps')
+  if (el) el.disabled = false
+  if (error || !data || !data.length || data[0].zapis_jen_gps !== zapnout) {
+    if (el) el.checked = !zapnout
+    showToast(error && /zapis_jen_gps|column|schema cache/i.test(error.message || '')
+      ? '❌ Chybí sloupec — spusťte migraci supabase-migrace-tymy-oznameni-puntiky.sql'
+      : '❌ Nastavení se neuložilo' + (error ? ': ' + error.message : ' — zkontrolujte oprávnění'))
+    return
+  }
+  const t = (_teamsCache || []).find(x => x.id === teamId)
+  if (t) t.zapis_jen_gps = zapnout
+  showToast(zapnout ? '📍 Tahle firma teď zapisuje docházku jen s polohou' : '✅ Tahle firma zapisuje jako dřív (i ručně)')
+}
+
+async function nastavPracDobuTymu(teamId, zrusit) {
+  const odEl = document.getElementById('tym-od-' + teamId)
+  const doEl = document.getElementById('tym-do-' + teamId)
+  const od = zrusit ? '' : (odEl?.value || '')
+  const doo = zrusit ? '' : (doEl?.value || '')
+  // Jeden čas bez druhého nic neznamená — neukládat, jen říct.
+  if (!zrusit && (!od || !doo)) {
+    if (od || doo) showToast('⏰ Doplňte začátek i konec pracovní doby')
+    return
+  }
+  // Noční směnu firma jako běžnou dobu nemá; začátek po konci je skoro jistě překlep.
+  if (!zrusit && od >= doo) { showToast('⏰ Začátek musí být dřív než konec'); return }
+  const zapis = { prac_doba_od: od || null, prac_doba_do: doo || null }
+  const { data, error } = await sb.from('teams').update(zapis).eq('id', teamId).select('id, prac_doba_od, prac_doba_do')
+  if (error || !data || !data.length) {
+    showToast(error && /prac_doba|column|schema cache/i.test(error.message || '')
+      ? '❌ Chybí sloupce — spusťte migraci supabase-migrace-tymy-oznameni-puntiky.sql'
+      : '❌ Pracovní doba se neuložila' + (error ? ': ' + error.message : ' — zkontrolujte oprávnění'))
+    return
+  }
+  const t = (_teamsCache || []).find(x => x.id === teamId)
+  if (t) { t.prac_doba_od = data[0].prac_doba_od; t.prac_doba_do = data[0].prac_doba_do }
+  showToast(zrusit ? '✅ Běžná pracovní doba zrušena' : '✅ Běžná pracovní doba ' + od + '–' + doo)
+  renderTeams()
+}
+
 function renderTeams() {
   const div = document.getElementById('teams-list')
   const unassignedDiv = document.getElementById('unassigned-workers')
@@ -15458,6 +15548,7 @@ function renderTeams() {
             ${rezimOptions('')}
           </select>
         </div>
+        ${pravidlaFirmyHtml(t)}
         <div style="margin-top:10px;padding-top:10px;border-top:1px dashed var(--brd);display:flex;flex-wrap:wrap;gap:8px;align-items:center">
           <span style="font-size:11px;color:var(--text3);font-weight:600">📄 Docházka týmu:</span>
           <select id="team-pdf-week-${t.id}" class="team-pdf-week" data-team-id="${t.id}" style="font-size:12px;padding:5px 8px;border:1px solid var(--brd);border-radius:6px;font-family:inherit;flex:1;min-width:150px">
@@ -17004,12 +17095,20 @@ async function mobCheckin(type) {
   window.zapisProbiha = true
   // Bezpečnostní pojistka: kdyby cokoliv zůstalo viset (slabý signál na stavbě),
   // po 20 s flag tvrdě uvolni, ať tlačítka nezamrznou napořád.
-  const _stuckGuard = setTimeout(() => {
-    if (checkinInProgress) {
-      checkinInProgress = false
-      showToast('⚠️ Slabé připojení — zkuste to prosím znovu')
-    }
-  }, 20000)
+  // `let` a funkce na znovunastavení: u firmy „jen s polohou" se pojistka na
+  // dobu měření vypne (měření trvá až 10 s + dohledání adresy a pojistka by jinak
+  // hlásila slabé připojení, i když appka jen čeká na GPS) a pak se nastaví znovu.
+  let _stuckGuard = null
+  const zapniPojistku = () => {
+    clearTimeout(_stuckGuard)
+    _stuckGuard = setTimeout(() => {
+      if (checkinInProgress) {
+        checkinInProgress = false
+        showToast('⚠️ Slabé připojení — zkuste to prosím znovu')
+      }
+    }, 20000)
+  }
+  zapniPojistku()
   // Časový limit pro síťová volání
   const withTimeout = (promise, ms) => Promise.race([
     promise,
@@ -17019,6 +17118,31 @@ async function mobCheckin(type) {
   const timeStr = now.toTimeString().slice(0,8)
   const today = localDateStr(now)
   const kw = getKW()
+
+  // FIRMA „JEN S POLOHOU". Majitel 30. 9. 2026: „zvolit, které firmy můžou
+  // zapisovat ručně a které jen přes GPS lokaci, a to jak příchod, odchod —
+  // pokud to nepovolí, nepůjde zapisovat do docházky."
+  // Týká se JEN příchodu a odchodu. Pauzu polohou neblokujeme — zadání se jí
+  // netýká a zdržovat člověka na stavbě měřením kvůli pauze nedává smysl.
+  // Poloha se tu měří PŘED zápisem (u ostatních firem až po něm): jinak by se
+  // čas zapsal a poloha by se pak nemusela podařit. Čas je ten z klepnutí
+  // (`now` výš), ne z konce měření.
+  let povinnaPoloha = null
+  if (type === 'in' || type === 'out') {
+    if (await mojeFirmaChcePolohu()) {
+      clearTimeout(_stuckGuard)
+      showToast('📍 Zjišťuji polohu — vaše firma zapisuje docházku jen s polohou…')
+      povinnaPoloha = await ziskejPolohuPovinne()
+      if (!povinnaPoloha) {
+        checkinInProgress = false
+        window.zapisProbiha = false
+        showToast('📍 ' + (type === 'in' ? 'Příchod' : 'Odchod') + ' se NEZAPSAL — vaše firma zapisuje '
+          + 'docházku jen s polohou. Povolte polohu (Nastavení → Soukromí → Polohové služby) a zkuste to znovu.')
+        return
+      }
+      zapniPojistku()
+    }
+  }
 
   try {
     if (type === 'in') {
@@ -17064,9 +17188,12 @@ async function mobCheckin(type) {
         worker_id: currentUser.id,
         work_date: today,
         check_in: timeStr,
-        location_address: null,
-        location_lat: null,
-        location_lng: null,
+        // U firmy „jen s polohou" jde poloha rovnou se záznamem — změřená před
+        // chvílí, pro TUHLE směnu. Jinde zůstává prázdná a dohledá se po zápisu.
+        location_address: povinnaPoloha ? povinnaPoloha.adresa : null,
+        location_lat: povinnaPoloha ? povinnaPoloha.lat : null,
+        location_lng: povinnaPoloha ? povinnaPoloha.lng : null,
+        ...(povinnaPoloha ? { gps_address: povinnaPoloha.adresa, address_source: 'gps' } : {}),
         kw: kw.week,
         kw_year: kw.year,
         is_saturday: now.getDay() === 6,
@@ -17083,8 +17210,14 @@ async function mobCheckin(type) {
       // Aktualizuj UI ihned z čerstvých dat — nezávisle na serveru
       updateMobStav(data, [data])
       showToast('✅ Příchod zaznamenán — ' + timeStr)
-      // Zeptej se na adresu pracoviště (jen pokud ještě není potvrzená)
-      askAddressIfNeeded(data.id, 'Příchod')
+      if (povinnaPoloha) {
+        // Poloha je už u záznamu. Znovu ji neměřit a hlavně NENABÍZET ruční
+        // adresu — to by u firmy „jen s polohou" obešlo celé pravidlo.
+        gpsAddr = povinnaPoloha.adresa; gpsLat = povinnaPoloha.lat; gpsLng = povinnaPoloha.lng
+      } else {
+        // Zeptej se na adresu pracoviště (jen pokud ještě není potvrzená)
+        askAddressIfNeeded(data.id, 'Příchod')
+      }
       // Přehled dnešních směn dotáhneme JEDNÍM awaitovaným dotazem (bez závodu s okamžitým renderem).
       // Aktivní směnu držíme z právě vloženého záznamu — nesmí ji přepsat pomalejší čtení.
       try {
@@ -17250,6 +17383,14 @@ async function mobCheckin(type) {
               return
             }
           }
+        }
+        // Firma „jen s polohou": poloha odchodu se uloží HNED a musí se uložit.
+        // Neuloží-li se, odchod nepustíme — jinak by šlo odejít bez polohy.
+        if (povinnaPoloha && !(await ulozPovinnouPolohuOdchodu(todayAttId, povinnaPoloha))) {
+          showToast('📍 Odchod se NEZAPSAL — polohu se nepodařilo uložit. Zkuste to prosím znovu.')
+          updateMobStav(current, [current])
+          checkinInProgress = false
+          return
         }
         // Pauza jedním klikem se zapisuje rovnou i s koncem. Když si ji někdo
         // dá těsně před odchodem, mohl by konec pauzy přetéct za odchod — a den
@@ -20881,6 +21022,47 @@ async function adresaZeSouradnic(lat, lng) {
   return Number(lat).toFixed(5) + ', ' + Number(lng).toFixed(5)
 }
 
+// CHCE MOJE FIRMA DOCHÁZKU JEN S POLOHOU? Ptá se databáze přes funkci
+// muj_zapis_jen_gps() — ta vrací jen ano/ne o firmě přihlášeného. Pracovník
+// tak nepotřebuje právo číst tabulku firem (a nepotřebuje o nich vědět nic víc).
+// Bez migrace funkce neexistuje → false = chování jako dosud. Stejně tak při
+// výpadku sítě: bez sítě se docházka stejně nezapíše.
+async function mojeFirmaChcePolohu() {
+  try {
+    const r = await Promise.race([
+      sb.rpc('muj_zapis_jen_gps'),
+      new Promise((_, ne) => setTimeout(() => ne(new Error('timeout')), 8000))
+    ])
+    if (r?.error) return false
+    return r?.data === true
+  } catch (e) { return false }
+}
+
+// Poloha, BEZ KTERÉ SE NEZAPISUJE. Vrací { lat, lng, adresa }, nebo null.
+// captureLocationNow() při neúspěchu vrací '' a globální gpsLat/gpsLng NECHÁ
+// z minula — proto se úspěch pozná jen podle vrácené adresy, ne podle nich.
+// Jinak by se k dnešnímu příchodu zapsala včerejší poloha.
+async function ziskejPolohuPovinne() {
+  try {
+    const adresa = await captureLocationNow()
+    if (!adresa || gpsLat == null || gpsLng == null) return null
+    return { lat: gpsLat, lng: gpsLng, adresa }
+  } catch (e) { return null }
+}
+
+async function ulozPovinnouPolohuOdchodu(attId, poloha) {
+  if (!attId || !poloha) return false
+  try {
+    const { data, error } = await sb.from('attendance').update({
+      odchod_lat: poloha.lat, odchod_lng: poloha.lng, odchod_adresa: poloha.adresa,
+      odchod_gps_cas: new Date().toISOString()
+    }).eq('id', attId).select('id')
+    if (error || !data || !data.length) return false
+    window._povinnaPolohaOdchodu = attId
+    return true
+  } catch (e) { return false }
+}
+
 // Zachytí polohu ve chvíli, kdy pracovník mačká konec směny. Ukládá se
 // ZVLÁŠŤ, do sloupců odchod_*, a vidí to POUZE správce v docházce — do PDF
 // výkazů ani do odkazu pro odběrateli se nikdy nedostane; tam platí adresa
@@ -20891,6 +21073,9 @@ async function adresaZeSouradnic(lat, lng) {
 // se zapíše tak jako tak — poloha je bonus navíc, ne podmínka.
 function zachytPolohuOdchodu(attId) {
   if (!attId || !navigator.geolocation) return
+  // U firmy „jen s polohou" je poloha odchodu už uložená — změřená přesněji
+  // (čeká se na ≤ 50 m) a ještě před zápisem. Tady by ji jen přepsalo horší měření.
+  if (window._povinnaPolohaOdchodu === attId) return
   try {
     navigator.geolocation.getCurrentPosition(async (poz) => {
       try {
@@ -31781,6 +31966,59 @@ function attAllBreaks(r) {
   return out
 }
 
+// ODCHYLKA OD BĚŽNÉ PRACOVNÍ DOBY FIRMY. Majitel 30. 9. 2026 (zadání od vedení):
+// „pokud tu standardní pracovní dobu poruší — budou dřív v práci, později, nebo
+// odejdou — bude to zvýrazněné, dokud to neopravím, nebo neoznačím, že je to OK."
+// JEN ZNAČKA PRO SPRÁVCE. Na hodiny, zaokrouhlení, výkazy ani faktury nemá vliv —
+// ty dál počítá applyAttendanceRules podle SHIFT. Kdo by to sem chtěl zapojit do
+// peněz, musel by projít všechna místa, kde se hodiny sčítají.
+// Tolerance 10 minut, stejně jako „hájená doba" HAJENA_DOBA_MIN u příchodu —
+// ať se nesvítí kvůli minutě, o kterou se minulo tlačítko.
+const TOLERANCE_DOBY_MIN = 10
+function odchylkaOdDoby(rec, tym) {
+  const nic = { prichod: null, odchod: null }
+  if (!rec || !tym || !tym.prac_doba_od || !tym.prac_doba_do) return nic
+  if (rec.odchylka_ok === true) return nic
+  const od = timeToMin(String(tym.prac_doba_od).slice(0, 5))
+  const doo = timeToMin(String(tym.prac_doba_do).slice(0, 5))
+  if (od == null || doo == null) return nic
+  const ci = rec.check_in ? timeToMin(String(rec.check_in).slice(0, 5)) : null
+  const co = rec.check_out ? timeToMin(String(rec.check_out).slice(0, 5)) : null
+  // Noční směna (odchod „dřív" než příchod) do běžné denní doby nepatří —
+  // označovat ji jako „odešel dřív" by byl nesmysl.
+  const nocni = ci != null && co != null && co < ci
+  const T = TOLERANCE_DOBY_MIN
+  return {
+    prichod: ci == null ? null : (ci < od - T ? 'dřív' : (ci > od + T ? 'pozdě' : null)),
+    odchod: (co == null || nocni) ? null : (co < doo - T ? 'dřív' : (co > doo + T ? 'pozdě' : null))
+  }
+}
+
+// „V pořádku" — odchylku zhasne. Zapíše se ke všem záznamům toho dne (kdo měl
+// dvě směny, má dva). Čas se nemění; kdo chce čas opravit, opraví čas.
+async function oznacOdchylkuOk(ids, btn, poUlozeni) {
+  const seznam = String(ids || '').split(',').filter(Boolean)
+  if (!seznam.length) return
+  if (btn) { btn.disabled = true; btn.textContent = '…' }
+  const { data, error } = await sb.from('attendance').update({ odchylka_ok: true })
+    .in('id', seznam).select('id, odchylka_ok')
+  if (error || !data || data.length !== seznam.length) {
+    if (btn) { btn.disabled = false; btn.textContent = '✓ v pořádku' }
+    showToast(error && /odchylka_ok|column|schema cache/i.test(error.message || '')
+      ? '❌ Chybí sloupec — spusťte migraci supabase-migrace-tymy-oznameni-puntiky.sql'
+      : '❌ Neuložilo se' + (error ? ': ' + error.message : ' — zkontrolujte oprávnění'))
+    return
+  }
+  showToast('✅ Označeno jako v pořádku')
+  if (poUlozeni === 'den') loadTodayTimeline()
+  else if (poUlozeni === 'karta') loadWdAttendance()
+}
+
+function odchylkaBtn(ids, kam) {
+  return `<button onclick="event.stopPropagation();oznacOdchylkuOk('${ids}', this, '${kam}')" title="Odchylka je v pořádku — přestane svítit"
+    style="margin-left:6px;min-height:32px;padding:3px 9px;border:1px solid #1d4ed8;border-radius:7px;background:#fff;color:#1d4ed8;font-size:11px;font-weight:800;cursor:pointer;font-family:inherit">✓ v pořádku</button>`
+}
+
 // Helper pro zobrazení s příznakem
 function flagBadge(flag, text) {
   const badges = {
@@ -31790,7 +32028,8 @@ function flagBadge(flag, text) {
     overtime:   { bg: '#d1e7dd', color: '#146c43', label: 'Přesčas' },
     abnormal:   { bg: '#f8d7da', color: '#842029', label: 'Dlouhá pracovní doba — konec po 20:30' },
     incomplete: { bg: '#f8d7da', color: '#842029', label: 'Nesplněná směna (< 8h)' },
-    prichodKontrola: { bg: '#f8d7da', color: '#842029', label: 'Příchod mezi 7:01 a 7:30 — zkontrolujte' }
+    prichodKontrola: { bg: '#f8d7da', color: '#842029', label: 'Příchod mezi 7:01 a 7:30 — zkontrolujte' },
+    odchylka:   { bg: '#dbe7ff', color: '#1d4ed8', label: 'Mimo běžnou pracovní dobu firmy — opravte čas, nebo označte „v pořádku"' }
   }
   const b = badges[flag]
   if (!b) return text
@@ -31935,7 +32174,18 @@ async function loadWdAttendance() {
     document.getElementById('wd-att-total').textContent='0h'
     return
   }
+  // Firma pracovníka kvůli běžné pracovní době — jen na zvýraznění odchylek.
+  // select('*'), ať to před spuštěním migrace nic neshodí (sloupce prostě nebudou).
+  let tymPrac = null
+  try {
+    const tid = currentWorkerProfile?.team_id
+    if (tid) {
+      const { data: t } = await sb.from('teams').select('*').eq('id', tid).maybeSingle()
+      tymPrac = t || null
+    }
+  } catch (e) { /* bez firmy se jen nezvýrazňuje */ }
   tbody.innerHTML = summaryHtml + data.map(r => {
+    const odch = odchylkaOdDoby(r, tymPrac)
     const adj = r.check_in && r.check_out ? applyAttendanceRules(r) : { checkIn: r.check_in?.slice(0,5), checkOut: r.check_out?.slice(0,5), breakStart: r.break_start?.slice(0,5), breakEnd: r.break_end?.slice(0,5), hours: r.total_hours||0, flags: {} }
     let hoursDisplay = '—'
     // 0 je falsy → uzavřený den s 0 h se vykreslil jako „—“, což se čte jako
@@ -31977,16 +32227,18 @@ async function loadWdAttendance() {
     return `<tr${nezaplaceno ? ' style="background:var(--red-l);text-decoration:line-through;text-decoration-color:var(--red);text-decoration-thickness:2px"' : ''}>
       <td style="font-size:12px;white-space:nowrap">${r.work_date ? new Date(r.work_date).toLocaleDateString('cs-CZ') : '—'}${vyjimkaOdznak}</td>
       <td>
-        <span style="font-weight:700;color:var(--green)">${adj.checkIn || (r.check_in ? r.check_in.slice(0,5) : '—')}</span>
-        ${adj.flags.lateIn ? ' ' + flagBadge('lateIn', 'pozdě') : ''}${adj.flags.prichodKontrola ? ' ' + flagBadge('prichodKontrola', '!') : ''}
+        <span style="font-weight:700;color:${odch.prichod ? '#1d4ed8' : 'var(--green)'}">${adj.checkIn || (r.check_in ? r.check_in.slice(0,5) : '—')}</span>
+        ${adj.flags.lateIn ? ' ' + flagBadge('lateIn', 'pozdě') : ''}${adj.flags.prichodKontrola ? ' ' + flagBadge('prichodKontrola', '!') : ''}${
+          odch.prichod ? ' ' + flagBadge('odchylka', odch.prichod) + (odch.odchod ? '' : odchylkaBtn(r.id, 'karta')) : ''}
         ${r.check_in && adj.checkIn && r.check_in.slice(0,5) !== adj.checkIn
           ? `<div style="font-size:10px;color:var(--text3);margin-top:1px">zaznamenáno ${r.check_in.slice(0,5)}</div>` : ''}
       </td>
       <td style="font-size:12px;color:var(--text2)">${adj.flags.lateBreak ? flagBadge('lateBreak', brStartCell) : brStartCell}</td>
       <td style="font-size:12px;color:var(--text2)">${brEndCell}</td>
       <td>
-        <span style="font-weight:700;color:var(--red)">${adj.checkOut || (r.check_out ? r.check_out.slice(0,5) : '—')}</span>
-        ${adj.flags.earlyOut ? ' ' + flagBadge('earlyOut', 'dříve') : adj.flags.abnormal ? ' ' + flagBadge('abnormal', '!') : ''}
+        <span style="font-weight:700;color:${odch.odchod ? '#1d4ed8' : 'var(--red)'}">${adj.checkOut || (r.check_out ? r.check_out.slice(0,5) : '—')}</span>
+        ${adj.flags.earlyOut ? ' ' + flagBadge('earlyOut', 'dříve') : adj.flags.abnormal ? ' ' + flagBadge('abnormal', '!') : ''}${
+          odch.odchod ? ' ' + flagBadge('odchylka', odch.odchod) + odchylkaBtn(r.id, 'karta') : ''}
         ${r.check_out && adj.checkOut && r.check_out.slice(0,5) !== adj.checkOut
           ? `<div style="font-size:10px;color:var(--text3);margin-top:1px">zaznamenáno ${r.check_out.slice(0,5)}</div>` : ''}
       </td>
