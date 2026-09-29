@@ -29821,16 +29821,34 @@ function updateNotifTemplate() {
 }
 
 async function loadNotifWorkers() {
-  const { data } = await sb.from('profiles').select('id,full_name').in('role',['osvec','partak']).eq('is_active',true).order('full_name')
+  // Majitel: „potřebuju, aby bylo možno si vybrat, komu to oznámení jde —
+  // že to nebude všem, kdo má aplikaci, ale jenom pro jednu firmu."
+  // Proto přibyla mezi „jednomu" a „všem" ještě celá firma.
+  const [{ data }, { data: tymy }] = await Promise.all([
+    sb.from('profiles').select('id,full_name,team_id').in('role',['osvec','partak']).eq('is_active',true).order('full_name'),
+    sb.from('teams').select('id,name').order('name')
+  ])
   const sel = document.getElementById('notif-worker')
   if (!sel || !data) return
   // Jména ze schovaných firem v nabídce nejsou. „VŠEM" ale dál ukazuje
   // skutečný počet — zpráva všem půjde opravdu všem, schování je jen
   // zobrazení a nesmí měnit, komu se co pošle.
   const skryti = await skrytiLideIds()
-  sel.innerHTML = '<option value="">— Vyberte pracovníka —</option>' +
-    '<option value="__all__">📢 VŠEM pracovníkům (' + data.length + ')</option>' +
-    data.filter(w => !skryti.has(w.id)).map(w => `<option value="${w.id}">${escAttr(w.full_name)}</option>`).join('')
+  const vidt = data.filter(w => !skryti.has(w.id))
+
+  // Firmy jen ty, ve kterých někdo opravdu je — prázdná volba by jen mátla.
+  const pocty = {}
+  vidt.forEach(w => { if (w.team_id != null) pocty[w.team_id] = (pocty[w.team_id] || 0) + 1 })
+  const firmy = (tymy || []).filter(t => pocty[t.id] && tymJeVidet(t.id))
+
+  sel.innerHTML = '<option value="">— Vyberte komu —</option>'
+    + '<option value="__all__">📢 VŠEM pracovníkům (' + data.length + ')</option>'
+    + (firmy.length ? '<optgroup label="Celá firma">'
+        + firmy.map(t => `<option value="__team__${t.id}">🏢 ${escAttr(t.name)} (${pocty[t.id]})</option>`).join('')
+        + '</optgroup>' : '')
+    + '<optgroup label="Jeden pracovník">'
+    + vidt.map(w => `<option value="${w.id}">${escAttr(w.full_name)}</option>`).join('')
+    + '</optgroup>'
 }
 
 async function sendNotification() {
@@ -29845,7 +29863,21 @@ async function sendNotification() {
 
   const title = icon + ' ' + titles[type]
 
-  if (workerId === '__all__') {
+  if (workerId.startsWith('__team__')) {
+    // Celá firma. Seznam se bere ŽIVĚ, ne z nabídky — ta mohla být načtená
+    // před půlhodinou a mezitím někdo přibyl nebo odešel.
+    const teamId = workerId.slice('__team__'.length)
+    const { data: lide, error: chybaL } = await sb.from('profiles')
+      .select('id').in('role',['osvec','partak']).eq('is_active', true).eq('team_id', teamId)
+    if (chybaL) { showToast('❌ Nepodařilo se načíst lidi firmy: ' + chybaL.message); return }
+    if (!lide?.length) { showToast('⚠️ V téhle firmě není nikdo aktivní'); return }
+    const nazev = document.querySelector(`#notif-worker option[value="${workerId}"]`)?.textContent || 'firmě'
+    if (!confirm(`Odeslat zprávu ${lide.length} lidem — ${nazev.replace(/\s*\(\d+\)\s*$/, '')}?`)) return
+    const { error } = await sb.from('notifications')
+      .insert(lide.map(w => ({ worker_id: w.id, title, message, type, is_read: false })))
+    if (error) { showToast('❌ Chyba: ' + error.message); return }
+    showToast(`✅ Odesláno ${lide.length} lidem`)
+  } else if (workerId === '__all__') {
     // Hromadné odeslání všem aktivním pracovníkům
     const { data: workers } = await sb.from('profiles')
       .select('id').in('role',['osvec','partak']).eq('is_active', true)
