@@ -1626,6 +1626,17 @@ setTimeout(function () {
                   </select>
                 </div>
                 <div class="fg">
+                  <!-- ŽLUTÁ / ČERVENÁ. Majitel 29. 9. 2026: „nastavím typ — když
+                       je žlutá, vypíšu to oznámení; a pokud to bude červená, tak
+                       tam musí být tlačítko ‚Porozuměl jsem' odkliknout a mně se
+                       ukáže fajfka, kdo to má odškrtnuté." -->
+                  <label>Důležitost</label>
+                  <select id="notif-duraz" style="width:100%">
+                    <option value="zluta">🟡 Běžná — stačí si přečíst</option>
+                    <option value="cervena">🔴 Důležitá — musí odkliknout „Porozuměl jsem"</option>
+                  </select>
+                </div>
+                <div class="fg">
                   <label>Zpráva</label>
                   <textarea id="notif-message" rows="5" style="width:100%;padding:10px;border:1.5px solid var(--brd);border-radius:8px;font-size:13px;font-family:inherit;resize:vertical" placeholder="Napište zprávu..."></textarea>
                 </div>
@@ -30384,10 +30395,26 @@ async function sendNotification() {
   // rozeslat padesáti lidem omylem se nedá vzít zpátky.
   if (ids.length > 1 && !confirm('Odeslat zprávu ' + ids.length + ' lidem — ' + popis + '?')) return
 
-  const { error } = await sb.from('notifications')
-    .insert(ids.map(id => ({ worker_id: id, title, message, type, is_read: false })))
+  const musiPotvrdit = (document.getElementById('notif-duraz')?.value || 'zluta') === 'cervena'
+  const radky = ids.map(id => ({ worker_id: id, title, message, type, is_read: false,
+    vyzaduje_potvrzeni: musiPotvrdit }))
+  let { error } = await sb.from('notifications').insert(radky)
+  // Bez migrace sloupec není. Zprávu je pak lepší poslat aspoň bez potvrzení
+  // než ji neposlat vůbec — ale musí se to říct, ne zamlčet.
+  if (error && /vyzaduje_potvrzeni|column|schema cache/i.test(error.message || '')) {
+    ;({ error } = await sb.from('notifications')
+      .insert(ids.map(id => ({ worker_id: id, title, message, type, is_read: false }))))
+    if (!error && musiPotvrdit) {
+      showToast('⚠️ Odesláno, ale BEZ potvrzování — spusťte migraci supabase-migrace-tymy-oznameni-puntiky.sql')
+      document.getElementById('notif-message').value = ''
+      document.getElementById('notif-worker').value = ''
+      loadNotifHistory()
+      return
+    }
+  }
   if (error) { showToast('❌ Chyba: ' + error.message); return }
-  showToast(ids.length === 1 ? '✅ Zpráva odeslána' : `✅ Odesláno ${ids.length} lidem`)
+  showToast((ids.length === 1 ? '✅ Zpráva odeslána' : `✅ Odesláno ${ids.length} lidem`)
+    + (musiPotvrdit ? ' — čeká se na potvrzení' : ''))
 
   document.getElementById('notif-message').value = ''
   document.getElementById('notif-worker').value = ''
@@ -30420,6 +30447,8 @@ async function loadNotifHistory() {
         <div style="text-align:right;flex-shrink:0;margin-left:8px">
           <div style="font-size:10px;color:var(--text3)">${n.created_at?.slice(0,10)}</div>
           <span class="pill ${n.is_read?'pq':'pb'}" style="margin-top:4px;display:inline-block">${n.is_read?'Přečteno':'Nepřečteno'}</span>
+          ${n.vyzaduje_potvrzeni ? `<div style="margin-top:4px;font-size:11px;font-weight:800;color:${n.potvrzeno_v ? 'var(--green)' : 'var(--red)'}">${
+            n.potvrzeno_v ? '✓ Porozuměl ' + String(n.potvrzeno_v).slice(0,10) : '⏳ Nepotvrzeno'}</div>` : ''}
         </div>
       </div>
     </div>`).join('')
@@ -30456,15 +30485,52 @@ async function loadMobNotifications() {
     return
   }
 
-  div.innerHTML = data.map(n => `
-    <div onclick="markRead('${n.id}', this)" style="padding:12px;border-radius:10px;margin-bottom:8px;background:${n.is_read?'var(--bg)':'var(--blue-l)'};border:1.5px solid ${n.is_read?'var(--brd)':'var(--blue-m)'};cursor:pointer">
+  div.innerHTML = data.map(n => {
+    // ČERVENÁ ZPRÁVA se musí odkliknout. Dokud se tak nestane, drží si
+    // červený rám a tlačítko — přečtení (is_read) tu nestačí, protože to
+    // se nastaví i pouhým otevřením seznamu.
+    const ceka = n.vyzaduje_potvrzeni && !n.potvrzeno_v
+    const ram = ceka ? '2px solid var(--red)' : '1.5px solid var(--brd)'
+    const pozadi = ceka ? 'var(--red-l,#f6e9e4)' : (n.is_read ? 'var(--bg)' : 'var(--blue-l)')
+    return `
+    <div onclick="markRead('${n.id}', this)" style="padding:12px;border-radius:10px;margin-bottom:8px;background:${pozadi};border:${ram}">
       <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:4px">
-        <div style="font-size:13px;font-weight:700">${escAttr(n.title)}</div>
+        <div style="font-size:13px;font-weight:700">${ceka ? '🔴 ' : ''}${escAttr(n.title)}</div>
         ${!n.is_read ? '<span style="width:8px;height:8px;border-radius:50%;background:var(--blue);display:inline-block;flex-shrink:0;margin-top:4px"></span>' : ''}
       </div>
       <div style="font-size:13px;color:var(--text)">${n.message}</div>
       <div style="font-size:11px;color:var(--text3);margin-top:4px">${n.created_at?.slice(0,10)}</div>
-    </div>`).join('')
+      ${ceka ? `<button onclick="event.stopPropagation();potvrdZpravu('${n.id}', this)"
+          style="width:100%;margin-top:10px;min-height:44px;padding:11px;border:none;border-radius:10px;background:var(--red);color:#fff;font-size:15px;font-weight:800;font-family:inherit;cursor:pointer">
+          Porozuměl jsem</button>` : ''}
+      ${n.vyzaduje_potvrzeni && n.potvrzeno_v ? `<div style="font-size:11px;color:var(--green);font-weight:700;margin-top:6px">✓ Potvrzeno ${String(n.potvrzeno_v).slice(0,10)}</div>` : ''}
+    </div>`
+  }).join('')
+}
+
+// „Porozuměl jsem". Píše se rovnou čas — správce podle něj pozná, kdo
+// zprávu opravdu vzal na vědomí a kdo ji jen měl v seznamu.
+async function potvrdZpravu(id, btn) {
+  if (btn) { btn.disabled = true; btn.textContent = 'Ukládám…' }
+  const { data, error } = await sb.from('notifications')
+    .update({ potvrzeno_v: new Date().toISOString(), is_read: true })
+    .eq('id', id).eq('worker_id', currentUser?.id).select('id, potvrzeno_v')
+  if (error) {
+    if (btn) { btn.disabled = false; btn.textContent = 'Porozuměl jsem' }
+    showToast(/potvrzeno_v|column|schema cache/i.test(error.message || '')
+      ? '❌ Chybí sloupec potvrzení — spusťte migraci supabase-migrace-tymy-oznameni-puntiky.sql'
+      : '❌ Nepodařilo se uložit: ' + error.message)
+    return
+  }
+  // Zápis může projít a nezměnit nic (cizí zpráva) — pak se nesmí tvrdit,
+  // že je potvrzeno.
+  if (!data || !data.length) {
+    if (btn) { btn.disabled = false; btn.textContent = 'Porozuměl jsem' }
+    showToast('❌ Potvrzení se neuložilo')
+    return
+  }
+  showToast('✅ Potvrzeno')
+  loadMobNotifications()
 }
 
 async function markNotificationsRead() {
