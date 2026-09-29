@@ -10057,7 +10057,18 @@ async function loadTodayTimeline() {
           const searchKey = [g.name, g.firm, g.sub].filter(Boolean).join(' ')
           return groupHead + `
             <tr class="today-row" data-id="${g.worker_id||''}" data-name="${searchKey.replace(/"/g,'&quot;')}" data-worker="${(g.name||'').replace(/"/g,'&quot;')}" style="border-top:0.5px solid var(--brd);border-left:4px solid ${gc.border}" title="Klikněte na časy pro úpravu hodin">
-              <td class="td-open today-name" title="Klikněte pro otevření profilu pracovníka" style="padding:10px;cursor:pointer"><span style="display:inline-flex;align-items:center;gap:8px;min-width:0;vertical-align:middle">${fotkaHtml(g.avatar, g.name, 44)}<b>${g.name||'—'}</b></span><br><small style="color:var(--text3)">${escAttr(profLabel(g.profession)||'')}</small>${groupLine}</td>
+              <td class="td-open today-name" title="Klikněte pro otevření profilu pracovníka" style="padding:8px 10px;cursor:pointer;height:1px">
+                <!-- Fotka vlevo přes celou výšku řádku, VŠECHEN text vedle ní.
+                     Dřív bylo jméno vedle a profese s firmou pod fotkou, takže
+                     fotka nemohla být větší než jeden řádek textu. -->
+                <div style="display:flex;align-items:stretch;gap:10px;min-height:64px;height:100%">
+                  ${fotkaHtml(g.avatar, g.name, 44, true)}
+                  <div style="display:flex;flex-direction:column;justify-content:center;min-width:0">
+                    <b>${g.name||'—'}</b>
+                    <small style="color:var(--text3)">${escAttr(profLabel(g.profession)||'')}</small>
+                    ${groupLine}
+                  </div>
+                </div></td>
               <td class="td-open" style="padding:10px;font-weight:700;color:var(--green);cursor:pointer;font-size:15px">${fmt(g.check_in)}</td>
               <td class="td-open" style="padding:10px;color:var(--text2);cursor:pointer;min-width:130px">${breaksHtml}</td>
               <td class="td-open" style="padding:10px;font-weight:700;color:${g.check_out?'var(--red)':'var(--text3)'};cursor:pointer;font-size:15px">${fmt(g.check_out)}</td>
@@ -10131,24 +10142,37 @@ async function deleteTodayRecord(id, name) {
 // rozbitý obrázek: řádky by jinak poskakovaly podle toho, kdo fotku má.
 // Barva kolečka se odvozuje ze jména, takže je u téhož člověka pokaždé
 // stejná a dá se podle ní očima chytat.
-function fotkaHtml(url, jmeno, px) {
-  // ČTVERCOVÉ A VĚTŠÍ (majitel 29. 9. 2026: „fotky čtverečkové a větší").
-  // Kolečko z fotky z dokladu ukrajovalo rohy a obličej v něm byl menší;
-  // 28 px bylo na seznam, do kterého se správce dívá celý den, málo.
-  // Rohy se jen zaoblí (6 px), ať to nevypadá jako lepenka z občanky.
+function fotkaHtml(url, jmeno, px, obdelnik) {
+  // ČTVERCOVÁ MINIATURA (px), NEBO OBDÉLNÍK 3:4 PŘES CELOU VÝŠKU ŘÁDKU.
+  //
+  // Majitel 29. 9. 2026: „všude bude ta fotka větší obdélníček na celou tu
+  // výšku té řádky a nebude po ní veškerý text, bude vedle té fotky, aby ta
+  // fotka mohla být co největší a abych si ji mohl přibližovat."
+  //
+  // 3:4 NA VÝŠKU je tvar fotky z dokladu — a je to týž poměr, v jakém se
+  // ořezává (viz otevriVyrezFotky). Kdyby se ořezávalo do čtverce a ukazovalo
+  // do vysokého obdélníku, ořízl by se obličej po stranách.
+  //
+  // Vnitřek je POLOHOVANÝ ABSOLUTNĚ: jen tak si obal udrží výšku z řádku
+  // a šířku dopočítá z poměru. Když měl obrázek `width:100%`, přetlačil to
+  // a vyšel čtverec 100×100.
+  //
+  // KLIK JI ZVĚTŠÍ. Jen když fotka opravdu je — u iniciál není co zvětšovat.
   const v = px || 40
-  const zaklad = `width:${v}px;height:${v}px;border-radius:6px;flex-shrink:0;vertical-align:middle`
-  if (url) {
-    // onerror: když se fotka nenačte (smazaná z úložiště), schová se a zůstanou
-    // iniciály pod ní — ne ikona rozbitého obrázku.
-    return `<span style="display:inline-flex;position:relative;${zaklad}">
-      <span style="${zaklad};display:flex;align-items:center;justify-content:center;background:${fotkaBarva(jmeno)};color:#fff;font-size:${Math.round(v*0.4)}px;font-weight:700;position:absolute;inset:0">${escAttr(fotkaIniciraly(jmeno))}</span>
-      <img src="${escAttr(url)}" alt="" loading="lazy" style="${zaklad};object-fit:cover;position:relative" onerror="this.style.display='none'">
-    </span>`
-  }
-  return `<span style="${zaklad};display:inline-flex;align-items:center;justify-content:center;background:${fotkaBarva(jmeno)};color:#fff;font-size:${Math.round(v*0.4)}px;font-weight:700">${escAttr(fotkaIniciraly(jmeno))}</span>`
+  const obal = obdelnik
+    ? `height:100%;min-height:${Math.round(v * 4 / 3)}px;aspect-ratio:3/4;border-radius:8px;flex-shrink:0;overflow:hidden;position:relative`
+    : `width:${v}px;height:${v}px;border-radius:6px;flex-shrink:0;vertical-align:middle;overflow:hidden;position:relative`
+  const pismo = obdelnik ? 18 : Math.round(v * 0.4)
+  const iniciraly = `<span data-fotka="iniciraly" style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;background:${fotkaBarva(jmeno)};color:#fff;font-size:${pismo}px;font-weight:700">${escAttr(fotkaIniciraly(jmeno))}</span>`
+  if (!url) return `<span data-fotka="obal" style="display:inline-flex;${obal}">${iniciraly}</span>`
+  // onerror: když se fotka nenačte (smazaná z úložiště), schová se a zůstanou
+  // iniciály pod ní — ne ikona rozbitého obrázku.
+  return `<span data-fotka="obal" onclick="event.stopPropagation();showAvatarPreview('${escAttr(url)}')" title="Kliknutím zvětšíte"
+      style="display:inline-flex;cursor:zoom-in;${obal}">
+    ${iniciraly}
+    <img src="${escAttr(url)}" alt="" loading="lazy" style="position:absolute;inset:0;width:100%;height:100%;object-fit:cover" onerror="this.style.display='none'">
+  </span>`
 }
-
 function fotkaIniciraly(jmeno) {
   const c = String(jmeno || '').trim().split(/\s+/).filter(Boolean)
   if (!c.length) return '?'
@@ -10405,7 +10429,7 @@ async function loadKWData() {
 
   const kwHtml = list.map(w=>`
     <tr style="cursor:pointer;height:56px" class="kw-row" data-id="${w.id||''}" data-name="${(w.name||'').replace(/"/g,'&quot;')}">
-      <td class="kw-name" title="Klikněte pro otevření profilu pracovníka" style="vertical-align:middle;overflow:hidden"><span style="display:inline-flex;align-items:center;gap:8px;min-width:0">${fotkaHtml(w.fotka, w.name)}<b style="overflow:hidden;text-overflow:ellipsis">${w.name}</b></span>${w.byvaly?' <span style="font-size:10px;font-weight:700;background:var(--bg);color:var(--text3);border:1px solid var(--brd);padding:1px 6px;border-radius:8px;white-space:nowrap" title="Pracovník už do aplikace nemá přístup. Hodiny, které stihl odpracovat, zůstávají v přehledu.">📦 bývalý</span>':''}${w.mimoVykaz?' <span style="font-size:10px;font-weight:700;background:var(--bg);color:var(--red);border:1px solid var(--red);padding:1px 6px;border-radius:8px;white-space:nowrap" title="V Týmech je odškrtnutý. Tady ho vidíte i s hodinami, ale do vytištěného výkazu se nedostane — proto tam bude jiný součet.">🚫 mimo výkaz</span>':''}${w.blocked?' <span style="font-size:10px;font-weight:700;background:var(--red-l);color:var(--red);border:1px solid #e8c4ba;padding:1px 6px;border-radius:8px;white-space:nowrap" title="Pracovník má dočasně zablokované zapisování docházky">🚫 docházka zablokovaná</span>':''}${(w.firm||w.sub)?`<div style="margin-top:3px">${groupCellHtml(w.firm, w.sub)}</div>`:''}</td><td style="font-size:12px;vertical-align:middle">${profLabel(w.prof)||''}</td>
+      <td class="kw-name" title="Klikněte pro otevření profilu pracovníka" style="vertical-align:middle;overflow:hidden;padding:6px 8px"><span style="display:inline-flex;align-items:stretch;gap:9px;min-width:0;min-height:52px">${fotkaHtml(w.fotka, w.name, 40, true)}<b style="overflow:hidden;text-overflow:ellipsis;align-self:center">${w.name}</b></span>${w.byvaly?' <span style="font-size:10px;font-weight:700;background:var(--bg);color:var(--text3);border:1px solid var(--brd);padding:1px 6px;border-radius:8px;white-space:nowrap" title="Pracovník už do aplikace nemá přístup. Hodiny, které stihl odpracovat, zůstávají v přehledu.">📦 bývalý</span>':''}${w.mimoVykaz?' <span style="font-size:10px;font-weight:700;background:var(--bg);color:var(--red);border:1px solid var(--red);padding:1px 6px;border-radius:8px;white-space:nowrap" title="V Týmech je odškrtnutý. Tady ho vidíte i s hodinami, ale do vytištěného výkazu se nedostane — proto tam bude jiný součet.">🚫 mimo výkaz</span>':''}${w.blocked?' <span style="font-size:10px;font-weight:700;background:var(--red-l);color:var(--red);border:1px solid #e8c4ba;padding:1px 6px;border-radius:8px;white-space:nowrap" title="Pracovník má dočasně zablokované zapisování docházky">🚫 docházka zablokovaná</span>':''}${(w.firm||w.sub)?`<div style="margin-top:3px">${groupCellHtml(w.firm, w.sub)}</div>`:''}</td><td style="font-size:12px;vertical-align:middle">${profLabel(w.prof)||''}</td>
       ${dayCell(w,1)}${dayCell(w,2)}${dayCell(w,3)}${dayCell(w,4)}${dayCell(w,5)}${dayCell(w,6)}${dayCell(w,7)}
       <td style="vertical-align:middle"><b style="color:var(--blue)">${w.total.toFixed(1)}h</b></td>
     </tr>`).join('')
@@ -20912,9 +20936,14 @@ function odchodPolohaHtml(r) {
 
   // Adresa příchodu se neopakuje, když už stojí v buňce jako název stavby.
   const uzJeNahore = !((r.construction_site || '').trim()) && prichodAdr
-  const jinde = prichodAdr && odchodAdr
-    && odchodAdr.toLowerCase() !== prichodAdr.toLowerCase()
   const m = vzdalenostMetru(r.location_lat, r.location_lng, r.odchod_lat, r.odchod_lng)
+  // ČERVENĚ A S VYKŘIČNÍKEM AŽ NAD JEDEN KILOMETR (majitel 29. 9. 2026).
+  // Do 29. 9. stačilo, že se adresa lišila jiným textem — a to se stane
+  // pokaždé, když GPS trefí sousední dům nebo jinak zapsanou ulici. Červená
+  // pak svítila skoro u všech a přestala cokoli znamenat.
+  // Když souřadnice chybí, vzdálenost se spočítat nedá — pak se nezvýrazňuje,
+  // protože není podle čeho.
+  const daleko = m !== null && m > 1000
   const odkaz = (la, ln, text) => (la && ln)
     ? `<a href="https://www.google.com/maps?q=${la},${ln}" target="_blank" rel="noopener" style="color:inherit;text-decoration:underline">${text}</a>`
     : text
@@ -20925,8 +20954,8 @@ function odchodPolohaHtml(r) {
       <span>🏠</span><span>příchod: ${odkaz(r.location_lat, r.location_lng, escAttr(prichodAdr))}</span></div>`
   }
   if (odchodAdr) {
-    html += `<div title="Kde pracovník zmáčkl konec směny. Vidí to jen SubBau — do výkazů ani odběrateli se to nedostane." style="font-size:12px;font-weight:${jinde ? '700' : '400'};color:${jinde ? 'var(--red)' : 'var(--text3)'};margin-top:2px;display:flex;align-items:center;gap:4px;flex-wrap:wrap">
-      <span>${jinde ? '⚠️' : '🏁'}</span><span>odchod: ${odkaz(r.odchod_lat, r.odchod_lng, escAttr(odchodAdr))}</span>${
+    html += `<div title="Kde pracovník zmáčkl konec směny. Vidí to jen SubBau — do výkazů ani odběrateli se to nedostane.${daleko ? ' Je to víc než kilometr od příchodu.' : ''}" style="font-size:12px;font-weight:${daleko ? '700' : '400'};color:${daleko ? 'var(--red)' : 'var(--text)'};margin-top:2px;display:flex;align-items:center;gap:4px;flex-wrap:wrap">
+      <span>${daleko ? '⚠️' : '🏁'}</span><span>odchod: ${odkaz(r.odchod_lat, r.odchod_lng, escAttr(odchodAdr))}</span>${
         m !== null ? `<span style="color:var(--text3);font-weight:400">· ${vzdalenostText(m)}</span>` : ''}</div>`
   }
   return html
@@ -33364,11 +33393,71 @@ let _vyrez = null
 // musela opsat po svém — a měřila by pak svůj opis, ne appku.
 function smiNastavitFotku() { return currentProfile?.role === 'admin' }
 
-function vyberFotkuPracovnika(workerId) {
+// ODKUD FOTKU VZÍT: z už nahraného dokladu, nebo ze souboru.
+// Majitel 29. 9. 2026: „když budu tu fotku nahrávat, chci, aby mi to dalo
+// přímo z dokumentů, které už jsou nahrané u toho člověka — a tam si přiblížím
+// a nasměruju, abych tam viděl jenom tu fotku třeba z občanského průkazu."
+//
+// PDF se nenabízí. Vykreslit ho do plátna by znamenalo tahat celou PDF
+// knihovnu — a nabídnout doklad, ze kterého výřez stejně neudělám, je horší
+// než ho nenabídnout vůbec.
+function jeObrazek(d) {
+  const t = ((d?.file_name || '') + ' ' + (d?.file_url || '')).toLowerCase()
+  return /\.(jpe?g|png|webp|gif|bmp|heic|heif)(\?|$|#)/.test(t)
+}
+
+async function vyberFotkuPracovnika(workerId) {
   // Druhá závora. Schovaný knoflík není ochrana — na tuhle funkci se dá sáhnout
   // z konzole. Skutečnou ochranu drží politika úložiště, tohle jen dřív a
   // srozumitelněji řekne ne.
   if (!smiNastavitFotku()) { showToast('⚠️ Fotku pracovníka smí nastavit jen správce'); return }
+  const id = workerId || currentWorkerId
+  if (!id) { showToast('⚠️ Není vybraný pracovník'); return }
+
+  let doklady = []
+  try {
+    const { data } = await sb.from('documents')
+      .select('id, doc_type, file_name, file_url, status').eq('worker_id', id)
+    doklady = (data || []).filter(d => d.file_url && jeObrazek(d)
+      && d.status !== 'rejected' && d.status !== 'unreadable')
+  } catch (e) { /* bez dokladů se prostě nabídne jen soubor */ }
+
+  const ov = document.createElement('div')
+  ov.id = 'zdroj-fotky-overlay'
+  ov.style.cssText = 'position:fixed;inset:0;z-index:100000;background:rgba(20,17,15,.6);display:flex;align-items:flex-start;justify-content:center;overflow-y:auto;padding:20px'
+  ov.innerHTML = `
+    <div style="background:#fff;border-radius:16px;max-width:560px;width:100%;margin:auto;box-shadow:0 24px 80px rgba(0,0,0,.4);overflow:hidden">
+      <div style="background:var(--blue);padding:16px 20px;display:flex;justify-content:space-between;align-items:center">
+        <div style="color:#fff;font-size:16px;font-weight:800">Odkud vzít fotku?</div>
+        <button id="zdroj-zavri" style="background:rgba(255,255,255,.2);border:none;color:#fff;width:34px;height:34px;border-radius:50%;cursor:pointer;font-family:inherit;font-size:18px;line-height:1">×</button>
+      </div>
+      <div style="padding:18px 20px">
+        <button id="zdroj-soubor" class="btn-pri" style="width:100%;min-height:48px;font-size:15px;font-weight:800;margin-bottom:16px">📁 Nahrát nový soubor</button>
+        <div style="font-size:12px;font-weight:700;color:#6b6157;margin-bottom:8px">
+          ${doklady.length ? 'Nebo z dokladů, které už má nahrané — vyberte a pak si najeďte na obličej:' : 'Nahrané doklady nemá žádné (nebo jsou to PDF).'}
+        </div>
+        <div id="zdroj-doklady" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(110px,1fr));gap:10px">
+          ${doklady.map(d => `
+            <button class="zdroj-doklad" data-url="${escAttr(d.file_url)}"
+              style="padding:0;border:2px solid var(--brd);border-radius:10px;background:#fff;cursor:pointer;overflow:hidden;text-align:left">
+              <img src="${escAttr(d.file_url)}" alt="" loading="lazy"
+                style="width:100%;height:80px;object-fit:cover;display:block;background:#f4efe7">
+              <span style="display:block;padding:6px 8px;font-size:11px;font-weight:700;color:#211D1A">${escAttr(docLabel(d.doc_type))}</span>
+            </button>`).join('')}
+        </div>
+      </div>
+    </div>`
+  document.body.appendChild(ov)
+  const zavri = () => ov.remove()
+  ov.querySelector('#zdroj-zavri').onclick = zavri
+  ov.onclick = (e) => { if (e.target === ov) zavri() }
+  ov.querySelector('#zdroj-soubor').onclick = () => { zavri(); vyberFotkuZeSouboru(id) }
+  ov.querySelectorAll('.zdroj-doklad').forEach(b => {
+    b.onclick = () => { zavri(); otevriVyrezFotky({ url: b.dataset.url }, id) }
+  })
+}
+
+function vyberFotkuZeSouboru(workerId) {
   const id = workerId || currentWorkerId
   if (!id) { showToast('⚠️ Není vybraný pracovník'); return }
   const vstup = document.createElement('input')
@@ -33378,26 +33467,42 @@ function vyberFotkuPracovnika(workerId) {
   vstup.click()
 }
 
-async function otevriVyrezFotky(file, workerId) {
-  if (!file.type?.startsWith('image/')) { showToast('⚠️ Tohle není obrázek'); return }
+// `zdroj` je buď soubor z telefonu (File), nebo už nahraný doklad ({ url }).
+async function otevriVyrezFotky(zdroj, workerId) {
+  const zUrl = !!(zdroj && zdroj.url)
+  if (!zUrl && !zdroj?.type?.startsWith('image/')) { showToast('⚠️ Tohle není obrázek'); return }
   let obr
   try {
     obr = await new Promise((ok, ne) => {
       const i = new Image()
+      // crossOrigin u obrázku z úložiště je POVINNÉ. Bez něj se plátno „ušpiní"
+      // a toBlob na konci spadne na SecurityError — výřez z dokladu by se
+      // nakreslil, ale nešel uložit.
+      if (zUrl) i.crossOrigin = 'anonymous'
       i.onload = () => ok(i)
-      i.onerror = () => ne(new Error('Obrázek se nepodařilo načíst'))
-      i.src = URL.createObjectURL(file)
+      i.onerror = () => ne(new Error(zUrl
+        ? 'Doklad se nepodařilo načíst — zkuste fotku nahrát ze souboru'
+        : 'Obrázek se nepodařilo načíst'))
+      i.src = zUrl ? zdroj.url : URL.createObjectURL(zdroj)
     })
   } catch (e) { showToast('❌ ' + e.message); return }
 
+  // Výřez je 3:4 NA VÝŠKU — týž tvar, v jakém se fotka pak ukazuje v seznamech
+  // (viz fotkaHtml) i týž, jaký má fotka v dokladu. Do 29. 9. 2026 se ořezávalo
+  // do čtverce a po přechodu na obdélník by se obličej ořízl po stranách.
   const PLOCHA = Math.min(320, Math.round(Math.min(window.innerWidth, window.innerHeight) * 0.7))
+  const SIRKA = Math.round(PLOCHA * 3 / 4)
   const ov = document.createElement('div')
+  // Jmenovka, aby se okno dalo spolehlivě najít a zavřít. Hledat ho podle
+  // stylu nejde: `cssText` serializuje s mezerou za dvojtečkou, takže výběr
+  // [style*="z-index:100000"] nikdy nic netrefí.
+  ov.id = 'vyrez-overlay'
   ov.style.cssText = 'position:fixed;inset:0;z-index:100000;background:rgba(20,17,15,.94);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:16px;padding:20px'
   ov.innerHTML = `
     <div style="color:#fff;font-size:15px;font-weight:700;text-align:center">Nastavte výřez fotky<br>
       <span style="font-size:12px;font-weight:400;opacity:.75">Táhněte prstem nebo myší · posuvníkem přiblížíte</span></div>
-    <canvas id="vyrez-platno" width="${PLOCHA}" height="${PLOCHA}"
-      style="width:${PLOCHA}px;height:${PLOCHA}px;border-radius:10px;touch-action:none;cursor:grab;background:#000;box-shadow:0 0 0 3px rgba(232,161,58,.7)"></canvas>
+    <canvas id="vyrez-platno" width="${SIRKA}" height="${PLOCHA}"
+      style="width:${SIRKA}px;height:${PLOCHA}px;border-radius:10px;touch-action:none;cursor:grab;background:#000;box-shadow:0 0 0 3px rgba(232,161,58,.7)"></canvas>
     <input id="vyrez-zoom" type="range" min="100" max="400" value="100"
       style="width:${PLOCHA}px;max-width:90vw;accent-color:#E8A13A">
     <div style="display:flex;gap:10px;width:${PLOCHA}px;max-width:90vw">
@@ -33408,17 +33513,19 @@ async function otevriVyrezFotky(file, workerId) {
 
   const platno = ov.querySelector('#vyrez-platno')
   const ctx = platno.getContext('2d')
-  // Výchozí přiblížení: obrázek vyplní kolečko celý (kratší strana na plochu).
-  const zaklad = PLOCHA / Math.min(obr.width, obr.height)
+  // Výchozí přiblížení: obrázek musí pokrýt CELÝ výřez, tedy obě jeho strany.
+  // U čtverce stačila kratší strana; u obdélníku 3:4 ne — širokou fotku by to
+  // na výšku nepokrylo a nahoře i dole by zůstalo prázdno.
+  const zaklad = Math.max(SIRKA / obr.width, PLOCHA / obr.height)
   const st = { zoom: 1, x: 0, y: 0 }
 
   function kresli() {
     const m = zaklad * st.zoom
     const w = obr.width * m, h = obr.height * m
     // Posun se drží v mezích, ať nevznikne prázdný okraj.
-    st.x = Math.min(0, Math.max(PLOCHA - w, st.x))
+    st.x = Math.min(0, Math.max(SIRKA - w, st.x))
     st.y = Math.min(0, Math.max(PLOCHA - h, st.y))
-    ctx.clearRect(0, 0, PLOCHA, PLOCHA)
+    ctx.clearRect(0, 0, SIRKA, PLOCHA)
     ctx.drawImage(obr, st.x, st.y, w, h)
   }
   kresli()
@@ -33438,27 +33545,36 @@ async function otevriVyrezFotky(file, workerId) {
     const novy = Number(e.target.value) / 100
     // Přibližuje se ke STŘEDU kolečka, ne k levému hornímu rohu — jinak by
     // obličej při přiblížení utekl pryč a muselo by se doostřovat tahem.
-    const stred = PLOCHA / 2
+    const stredX = SIRKA / 2, stredY = PLOCHA / 2
     const pomer = novy / st.zoom
-    st.x = stred - (stred - st.x) * pomer
-    st.y = stred - (stred - st.y) * pomer
+    st.x = stredX - (stredX - st.x) * pomer
+    st.y = stredY - (stredY - st.y) * pomer
     st.zoom = novy
     kresli()
   }
 
-  const zavri = () => { try { URL.revokeObjectURL(obr.src) } catch(e){}
+  const zavri = () => { try { if (!zUrl) URL.revokeObjectURL(obr.src) } catch(e){}
     window.removeEventListener('mousemove', tah); window.removeEventListener('mouseup', konec); ov.remove() }
   ov.querySelector('#vyrez-zrus').onclick = zavri
   ov.querySelector('#vyrez-uloz').onclick = async () => {
     const btn = ov.querySelector('#vyrez-uloz')
     btn.disabled = true; btn.textContent = 'Ukládám…'
-    // 400 px stačí: největší, kde se fotka ukazuje, je 88 px na mobilu.
-    const cil = document.createElement('canvas'); cil.width = 400; cil.height = 400
+    // 400×533 (3:4). Větší nemá smysl: největší, kde se fotka ukazuje, je
+    // výška řádku v tabulce, tedy řádově 120 px.
+    const cil = document.createElement('canvas'); cil.width = 400; cil.height = 533
     const c2 = cil.getContext('2d')
-    const m = (400 / PLOCHA) * zaklad * st.zoom
-    c2.drawImage(obr, st.x * (400 / PLOCHA), st.y * (400 / PLOCHA), obr.width * m, obr.height * m)
-    const blob = await new Promise(ok => cil.toBlob(ok, 'image/jpeg', 0.85))
-    if (!blob) { showToast('❌ Výřez se nepodařilo vytvořit'); btn.disabled = false; btn.textContent = 'Uložit fotku'; return }
+    const mer = 533 / PLOCHA
+    const m = mer * zaklad * st.zoom
+    c2.drawImage(obr, st.x * mer, st.y * mer, obr.width * m, obr.height * m)
+    let blob = null
+    try { blob = await new Promise((ok, ne) => { try { cil.toBlob(ok, 'image/jpeg', 0.85) } catch (e) { ne(e) } }) }
+    catch (e) { blob = null }
+    if (!blob) {
+      showToast(zUrl
+        ? '❌ Z tohohle dokladu výřez uložit nejde — nahrajte fotku ze souboru'
+        : '❌ Výřez se nepodařilo vytvořit')
+      btn.disabled = false; btn.textContent = 'Uložit fotku'; return
+    }
     const ok = await ulozFotkuPracovnika(workerId, blob)
     btn.disabled = false; btn.textContent = 'Uložit fotku'
     if (ok) zavri()
