@@ -7237,6 +7237,20 @@ function zeptejSeOdKdy(popis, puvodni, nova, jmeno) {
   })
 }
 
+// JE SAZBA (NEBO PROVIZE) VŮBEC ZADANÁ? Nula se počítá jako NEZADANÁ —
+// políčko ji tak i ukazuje (prázdné) a kdo má nulu, nedostal za odpracované
+// hodiny nic. Nemění se tedy „z něčeho na něco", ale zadává se poprvé.
+//
+// Do 29. 9. 2026 bylo tohle rozhodnuté na třech místech ROZDÍLNĚ: zápis
+// základu do historie nulu za sazbu nepovažoval, ale rozhodnutí „mám se
+// zeptat, od kdy to platí?" ano — a v kartě pracovníka se ta otázka
+// nepřeskakovala vůbec. U nového člověka proto okno vyskočilo i při prvním
+// zadání. Majitel: „když poprvé zadávám tu hodinovou sazbu, nechci, aby se
+// mě to ptalo — je to od prvopočátku, od prvního zaznamenání hodin."
+//
+// Kdo tohle pravidlo mění, musí projít všechna volání sazbaJeZadana().
+function sazbaJeZadana(v) { return v != null && v !== '' && Number(v) > 0 }
+
 // Uloží novou hodnotu a podle odpovědi k ní doplní historii.
 // Vrací true, když se uložilo.
 async function ulozSazbuSHistorii(workerId, druh, puvodni, nova, odKdy) {
@@ -7253,7 +7267,7 @@ async function ulozSazbuSHistorii(workerId, druh, puvodni, nova, odKdy) {
   // Pozor: když pracovník žádnou sazbu JEŠTĚ NEMĚL, není co chránit a základ se
   // psát nesmí. Zapsala by se nula platná od roku 1900 a všechny dny, které do
   // té doby odpracoval, by se spočítaly za 0 € — faktura by vyšla na nulu.
-  const maPuvodni = puvodni != null && puvodni !== '' && Number(puvodni) > 0
+  const maPuvodni = sazbaJeZadana(puvodni)
   try {
     const { data: mame } = await sb.from('worker_rate_history')
       .select('id').eq('worker_id', workerId).eq('druh', druh).limit(1)
@@ -7481,7 +7495,7 @@ async function saveProvizeRate(input, workerId) {
   // Novému člověku se sazba zadává poprvé — není co zachovávat, takže se
   // neptáme „od kdy" a platí na všechno. Kdyby platila až ode dneška, dny,
   // které už stihl odpracovat, by zůstaly za nulu.
-  const poprve = (puvodni == null || puvodni === '') && rate != null
+  const poprve = !sazbaJeZadana(puvodni) && rate != null
   const odKdy = poprve ? 'zpetne'
     : await zeptejSeOdKdy('Hodinová sazba pracovníka', puvodni, rate, p && p.full_name)
   if (!odKdy) { input.value = puvodni == null ? '' : puvodni; return }
@@ -7508,7 +7522,7 @@ async function saveProvizeCommission(input, workerId) {
   if (String(puvodni ?? '') === String(provize ?? '')) return   // nic se nezměnilo
 
   // Stejně jako u sazby: poprvé se neptáme, platí na všechno.
-  const poprve = (puvodni == null || puvodni === '') && provize != null
+  const poprve = !sazbaJeZadana(puvodni) && provize != null
   const odKdy = poprve ? 'zpetne'
     : await zeptejSeOdKdy('Provize SubBau na hodinu', puvodni, provize, pr && pr.full_name)
   if (!odKdy) { input.value = puvodni == null ? '' : puvodni; return }
@@ -32841,7 +32855,13 @@ async function saveWorkerProfile() {
   const puvSazba = puvProfil.hourly_rate_worker
   let sazbaKUlozeni = rate
   let odKdySazba = null
-  if ((Number(puvSazba) || 0) !== (Number(rate) || 0)) {
+  // Poprvé se neptáme a platí to na všechno odpracované — stejně jako
+  // v Provizích. Tady ta výjimka do 29. 9. 2026 CHYBĚLA, takže „Uložit"
+  // u nového pracovníka vždycky vyhodilo okno „od kdy platí nová sazba".
+  const poprveSazba = !sazbaJeZadana(puvSazba) && rate != null
+  if (poprveSazba) {
+    odKdySazba = 'zpetne'
+  } else if ((Number(puvSazba) || 0) !== (Number(rate) || 0)) {
     odKdySazba = await zeptejSeOdKdy('Hodinová sazba pracovníka', puvSazba, rate,
                                      puvProfil.full_name)
     if (!odKdySazba) {
