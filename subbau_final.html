@@ -20370,20 +20370,57 @@ function zachytPolohuOdchodu(attId) {
 // pracovníka pro správce. Do PDF výkazů ani do odkazu pro odběratele se
 // tahle funkce nikde nevolá; tam se dál používá adresa z příchodu.
 // Když se odchod klikal jinde než příchod, je to hned vidět.
+function vzdalenostMetru(la1, ln1, la2, ln2) {
+  // Haversine. Na vzdálenosti v rámci kraje je to přesné až dost a nepotřebuje
+  // to žádnou knihovnu ani dotaz na server.
+  if ([la1, ln1, la2, ln2].some(x => x === null || x === undefined || isNaN(x))) return null
+  const R = 6371000, rad = Math.PI / 180
+  const dLa = (la2 - la1) * rad, dLn = (ln2 - ln1) * rad
+  const a = Math.sin(dLa/2)**2 + Math.cos(la1*rad) * Math.cos(la2*rad) * Math.sin(dLn/2)**2
+  return Math.round(2 * R * Math.asin(Math.sqrt(a)))
+}
+
+// „Do sta metrů" schválně: GPS na stavbě běžně ukazuje o pár desítek metrů
+// vedle, takže menší číslo by jen předstíralo přesnost, kterou nemá.
+function vzdalenostText(m) {
+  if (m === null) return ''
+  if (m < 100) return 'do 100 m'
+  if (m < 1000) return Math.round(m / 10) * 10 + ' m'
+  return (Math.round(m / 100) / 10).toString().replace('.', ',') + ' km'
+}
+
+// KDE ČLOVĚK ZAČAL A KDE SKONČIL, POD SEBOU, A VEDLE ODCHODU VZDÁLENOST.
+// Do 29. 9. 2026 se ukazoval jen odchod, a to písmem 10,5 px. Majitel chtěl
+// vidět obojí i s tím, jak daleko od sebe to je.
+//
+// Vidí to JEN SubBau v docházce. Do PDF výkazů ani do odkazu pro odběratele
+// se tahle funkce nevolá; tam se dál používá adresa z příchodu.
 function odchodPolohaHtml(r) {
-  const adr = r && r.odchod_adresa
-  if (!adr) return ''
-  const prichod = (r.location_address || r.manual_address || '').trim().toLowerCase()
-  const jinde = prichod && String(adr).trim().toLowerCase() !== prichod
-  const mapa = (r.odchod_lat && r.odchod_lng)
-    ? `https://www.google.com/maps?q=${r.odchod_lat},${r.odchod_lng}` : ''
-  const text = escAttr(String(adr))
-  const vnitrek = mapa
-    ? `<a href="${mapa}" target="_blank" rel="noopener" style="color:inherit;text-decoration:underline">${text}</a>`
+  if (!r) return ''
+  const prichodAdr = (r.location_address || r.manual_address || r.gps_address || '').trim()
+  const odchodAdr  = (r.odchod_adresa || '').trim()
+  if (!prichodAdr && !odchodAdr) return ''
+
+  // Adresa příchodu se neopakuje, když už stojí v buňce jako název stavby.
+  const uzJeNahore = !((r.construction_site || '').trim()) && prichodAdr
+  const jinde = prichodAdr && odchodAdr
+    && odchodAdr.toLowerCase() !== prichodAdr.toLowerCase()
+  const m = vzdalenostMetru(r.location_lat, r.location_lng, r.odchod_lat, r.odchod_lng)
+  const odkaz = (la, ln, text) => (la && ln)
+    ? `<a href="https://www.google.com/maps?q=${la},${ln}" target="_blank" rel="noopener" style="color:inherit;text-decoration:underline">${text}</a>`
     : text
-  return `<div title="Kde pracovník zmáčkl konec směny. Vidí to jen SubBau — do výkazů ani odběrateli se to nedostane." style="font-size:10.5px;font-weight:${jinde ? '700' : '400'};color:${jinde ? 'var(--red)' : 'var(--text3)'};margin-top:2px;display:flex;align-items:center;gap:3px">
-    <span>${jinde ? '⚠️' : '🏁'}</span><span>odchod: ${vnitrek}</span>
-  </div>`
+
+  let html = ''
+  if (prichodAdr && !uzJeNahore) {
+    html += `<div style="font-size:12px;font-weight:400;color:var(--text3);margin-top:2px;display:flex;align-items:center;gap:4px">
+      <span>🏠</span><span>příchod: ${odkaz(r.location_lat, r.location_lng, escAttr(prichodAdr))}</span></div>`
+  }
+  if (odchodAdr) {
+    html += `<div title="Kde pracovník zmáčkl konec směny. Vidí to jen SubBau — do výkazů ani odběrateli se to nedostane." style="font-size:12px;font-weight:${jinde ? '700' : '400'};color:${jinde ? 'var(--red)' : 'var(--text3)'};margin-top:2px;display:flex;align-items:center;gap:4px;flex-wrap:wrap">
+      <span>${jinde ? '⚠️' : '🏁'}</span><span>odchod: ${odkaz(r.odchod_lat, r.odchod_lng, escAttr(odchodAdr))}</span>${
+        m !== null ? `<span style="color:var(--text3);font-weight:400">· ${vzdalenostText(m)}</span>` : ''}</div>`
+  }
+  return html
 }
 
 // Pracovník prohlásí, že řidičák nemá — appka ho po něm přestane chtít.
