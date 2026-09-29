@@ -30025,9 +30025,14 @@ async function loadNotifWorkers() {
   // Majitel: „potřebuju, aby bylo možno si vybrat, komu to oznámení jde —
   // že to nebude všem, kdo má aplikaci, ale jenom pro jednu firmu."
   // Proto přibyla mezi „jednomu" a „všem" ještě celá firma.
-  const [{ data }, { data: tymy }] = await Promise.all([
-    sb.from('profiles').select('id,full_name,team_id').in('role',['osvec','partak']).eq('is_active',true).order('full_name'),
-    sb.from('teams').select('id,name').order('name')
+  const [{ data }, { data: tymy }, { data: party }] = await Promise.all([
+    sb.from('profiles').select('id,full_name,team_id,subteam_id').in('role',['osvec','partak']).eq('is_active',true).order('full_name'),
+    sb.from('teams').select('id,name').order('name'),
+    // Parta (skupina) — majitel 29. 9. 2026: „ať se to netýká všech, ale
+    // třeba skupiny, člověka, nebo všech lidí pod jednou firmou."
+    // Bez nasazené migrace podskupin se sem vrátí prázdno a volba se prostě
+    // nenabídne; zbytek nabídky funguje dál.
+    sb.from('subteams').select('id,name,team_id').order('name').then(r => r, () => ({ data: [] }))
   ])
   const sel = document.getElementById('notif-worker')
   if (!sel || !data) return
@@ -30042,14 +30047,36 @@ async function loadNotifWorkers() {
   vidt.forEach(w => { if (w.team_id != null) pocty[w.team_id] = (pocty[w.team_id] || 0) + 1 })
   const firmy = (tymy || []).filter(t => pocty[t.id] && tymJeVidet(t.id))
 
+  // Party jen ty, ve kterých někdo je — a jen pod firmou, která je vidět.
+  // K názvu party patří i firma: „Parta A" může být ve dvou firmách a podle
+  // samotného názvu by se nedalo poznat, které se to týká.
+  const poctyPart = {}
+  vidt.forEach(w => { if (w.subteam_id != null) poctyPart[w.subteam_id] = (poctyPart[w.subteam_id] || 0) + 1 })
+  const nazvyFirem = {}
+  ;(tymy || []).forEach(t => { nazvyFirem[t.id] = t.name })
+  const skupiny = (party || []).filter(p => poctyPart[p.id] && tymJeVidet(p.team_id))
+
   sel.innerHTML = '<option value="">— Vyberte komu —</option>'
     + '<option value="__all__">📢 VŠEM pracovníkům (' + data.length + ')</option>'
     + (firmy.length ? '<optgroup label="Celá firma">'
         + firmy.map(t => `<option value="__team__${t.id}">🏢 ${escAttr(t.name)} (${pocty[t.id]})</option>`).join('')
         + '</optgroup>' : '')
+    + (skupiny.length ? '<optgroup label="Parta / skupina">'
+        + skupiny.map(p => `<option value="__sub__${p.id}">👥 ${escAttr(p.name)}`
+            + (nazvyFirem[p.team_id] ? ` — ${escAttr(nazvyFirem[p.team_id])}` : '')
+            + ` (${poctyPart[p.id]})</option>`).join('')
+        + '</optgroup>' : '')
     + '<optgroup label="Jeden pracovník">'
     + vidt.map(w => `<option value="${w.id}">${escAttr(w.full_name)}</option>`).join('')
     + '</optgroup>'
+}
+
+// Název vybrané volby, bez počtu v závorce — ten by v otázce „odeslat 12
+// lidem — 🏢 Markantelli (12)?" stál dvakrát.
+function nazevVolbyOznameni(hodnota, nahrada) {
+  const opt = document.querySelector('#notif-worker option[value="' + hodnota + '"]')
+  const txt = (opt?.textContent || '').replace(/\s*\(\d+\)\s*$/, '').trim()
+  return txt || nahrada
 }
 
 async function sendNotification() {
@@ -30064,37 +30091,50 @@ async function sendNotification() {
 
   const title = icon + ' ' + titles[type]
 
-  if (workerId.startsWith('__team__')) {
-    // Celá firma. Seznam se bere ŽIVĚ, ne z nabídky — ta mohla být načtená
-    // před půlhodinou a mezitím někdo přibyl nebo odešel.
-    const teamId = workerId.slice('__team__'.length)
-    const { data: lide, error: chybaL } = await sb.from('profiles')
-      .select('id').in('role',['osvec','partak']).eq('is_active', true).eq('team_id', teamId)
-    if (chybaL) { showToast('❌ Nepodařilo se načíst lidi firmy: ' + chybaL.message); return }
-    if (!lide?.length) { showToast('⚠️ V téhle firmě není nikdo aktivní'); return }
-    const nazev = document.querySelector(`#notif-worker option[value="${workerId}"]`)?.textContent || 'firmě'
-    if (!confirm(`Odeslat zprávu ${lide.length} lidem — ${nazev.replace(/\s*\(\d+\)\s*$/, '')}?`)) return
-    const { error } = await sb.from('notifications')
-      .insert(lide.map(w => ({ worker_id: w.id, title, message, type, is_read: false })))
-    if (error) { showToast('❌ Chyba: ' + error.message); return }
-    showToast(`✅ Odesláno ${lide.length} lidem`)
-  } else if (workerId === '__all__') {
-    // Hromadné odeslání všem aktivním pracovníkům
-    const { data: workers } = await sb.from('profiles')
-      .select('id').in('role',['osvec','partak']).eq('is_active', true)
-    if (!workers?.length) { showToast('⚠️ Žádní aktivní pracovníci'); return }
-    if (!confirm(`Odeslat zprávu všem ${workers.length} pracovníkům?`)) return
-    const rows = workers.map(w => ({ worker_id: w.id, title, message, type, is_read: false }))
-    const { error } = await sb.from('notifications').insert(rows)
-    if (error) { showToast('❌ Chyba: ' + error.message); return }
-    showToast(`✅ Odesláno ${workers.length} pracovníkům`)
-  } else {
-    const { error } = await sb.from('notifications').insert({
-      worker_id: workerId, title, message, type, is_read: false
-    })
-    if (error) { showToast('❌ Chyba: ' + error.message); return }
-    showToast('✅ Zpráva odeslána')
+  // KOMU TO JDE. Seznam se vždycky bere ŽIVĚ z databáze, ne z nabídky —
+  // ta mohla být načtená před půlhodinou a mezitím někdo přibyl nebo odešel.
+  //
+  // Tři větve (firma, parta, všichni) měly každá vlastní kopii zápisu
+  // i hlášek. Teď se jen zjistí SEZNAM LIDÍ a zapisuje se na jednom místě;
+  // přidat další způsob výběru tak znamená doplnit jednu větev, ne čtyři.
+  const jenAktivni = (q) => q.in('role', ['osvec', 'partak']).eq('is_active', true)
+  let ids = null
+  let popis = ''
+  try {
+    if (workerId === '__all__') {
+      const { data, error } = await jenAktivni(sb.from('profiles').select('id'))
+      if (error) throw error
+      ids = (data || []).map(w => w.id)
+      popis = `všem ${ids.length} pracovníkům`
+    } else if (workerId.startsWith('__team__')) {
+      const { data, error } = await jenAktivni(sb.from('profiles').select('id'))
+        .eq('team_id', workerId.slice('__team__'.length))
+      if (error) throw error
+      ids = (data || []).map(w => w.id)
+      popis = nazevVolbyOznameni(workerId, 'firmě')
+    } else if (workerId.startsWith('__sub__')) {
+      const { data, error } = await jenAktivni(sb.from('profiles').select('id'))
+        .eq('subteam_id', workerId.slice('__sub__'.length))
+      if (error) throw error
+      ids = (data || []).map(w => w.id)
+      popis = nazevVolbyOznameni(workerId, 'partě')
+    } else {
+      ids = [workerId]
+    }
+  } catch (e) {
+    showToast('❌ Nepodařilo se zjistit, komu zprávu poslat: ' + (e?.message || e))
+    return
   }
+
+  if (!ids.length) { showToast('⚠️ V tomhle výběru není nikdo aktivní'); return }
+  // U jednoho člověka se neptáme — to je běžné posílání. U skupiny ano:
+  // rozeslat padesáti lidem omylem se nedá vzít zpátky.
+  if (ids.length > 1 && !confirm('Odeslat zprávu ' + ids.length + ' lidem — ' + popis + '?')) return
+
+  const { error } = await sb.from('notifications')
+    .insert(ids.map(id => ({ worker_id: id, title, message, type, is_read: false })))
+  if (error) { showToast('❌ Chyba: ' + error.message); return }
+  showToast(ids.length === 1 ? '✅ Zpráva odeslána' : `✅ Odesláno ${ids.length} lidem`)
 
   document.getElementById('notif-message').value = ''
   document.getElementById('notif-worker').value = ''
