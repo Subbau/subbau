@@ -5460,6 +5460,9 @@ function showAdmin(profile) {
   loadDashboard()
   // Vrátit správce tam, kde skončil. Až po načtení nástěnky, ať se nepřepíše.
   setTimeout(obnovPosledniSekci, 0)
+  // Upomínka na chybějící doklady. Až po dokreslení a s odstupem, ať se kvůli
+  // ní nečeká na start appky — a sama si hlídá, že je pondělí nebo čtvrtek.
+  setTimeout(() => { try { upomenChybejiciDoklady() } catch (e) {} }, 4000)
   // Když zůstaly schované firmy od minula, ať to správce vidí hned po startu —
   // jinak by se divil, kam se poděly.
   setTimeout(() => { try { aktualizujPruhSkrytych() } catch (e) {} }, 0)
@@ -13490,7 +13493,12 @@ function renderWorkerInvoices() {
     }
     return oddelovac + `
     <tr>
-      <td style="border-left:5px solid ${barva || 'transparent'}"><span style="display:inline-flex;align-items:center;gap:8px;min-width:0">${fotkaHtml(r.worker?.avatar_url, r.worker?.full_name || r.supplier_name)}<b style="overflow:hidden;text-overflow:ellipsis">${escAttr(r.worker?.full_name || r.supplier_name || '—')}</b></span>${r.supplier_name && r.worker?.full_name && r.supplier_name !== r.worker.full_name ? `<div style="font-size:11px;color:var(--text3)">${escAttr(r.supplier_name)}</div>` : ''}</td>
+      <!-- Fotka je tu 28 px, ne 40 jako v denním přehledu. Tahle tabulka má
+           deset sloupců a při okně 1280 jí zbývá asi 1005 px, zatímco potřebuje
+           nejmíň 1023 — každý pixel navíc znamená rolování do stran. Změřeno
+           29. 9. 2026; na obličeje se správce dívá v denním přehledu, tady jde
+           o čísla. -->
+      <td style="border-left:5px solid ${barva || 'transparent'}"><span style="display:inline-flex;align-items:center;gap:8px;min-width:0">${fotkaHtml(r.worker?.avatar_url, r.worker?.full_name || r.supplier_name, 28)}<b style="overflow:hidden;text-overflow:ellipsis">${escAttr(r.worker?.full_name || r.supplier_name || '—')}</b></span>${r.supplier_name && r.worker?.full_name && r.supplier_name !== r.worker.full_name ? `<div style="font-size:11px;color:var(--text3)">${escAttr(r.supplier_name)}</div>` : ''}</td>
       <td style="font-weight:700;white-space:nowrap">${escAttr(r.invoice_number || '—')}${kod ? `<div style="font-size:11.5px;font-weight:800;letter-spacing:.03em;color:${barva || 'var(--text3)'}">${escAttr(kod)}</div>` : ''}${
         // V JAKÉM VZHLEDU JE TAHLE FAKTURA VYSTAVENÁ. Je to údaj o už
         // vystaveném dokladu, ne nastavení — proto se tu nedá měnit.
@@ -17409,6 +17417,103 @@ function povinneDokladyPro(profil) {
 }
 const REQUIRED_DOC_LABELS = {}
 REQUIRED_DOC_TYPES.forEach(id => { REQUIRED_DOC_LABELS[id] = id === 'op' ? 'Občanský průkaz / Pas' : docLabel(id) })
+
+// ═══ TÝDENNÍ UPOMÍNKA NA CHYBĚJÍCÍ DOKLADY ═══════════════════════════════
+// Majitel: „ať jim to jednou týdně připomene, že nemají nahrané doklady."
+//
+// PROČ TO BĚŽÍ V APPCE A NE NA SERVERU: v api/check-expiring-docs.js to
+// napsané je, ale ten endpoint potřebuje CRON_SECRET a SUPABASE_SERVICE_ROLE_KEY
+// v nastavení Vercelu. Ty tam nejsou a adresa vrací „cron_secret_not_configured",
+// takže to od 29. 9. 2026 nikomu nic neposlalo. Čekat, až to někdo nastaví,
+// znamená, že to nefunguje. Tady to běží pod přihlášeným správcem, žádné
+// nastavení nepotřebuje a serverová verze zůstává — až se klíče doplní,
+// poběží obojí a dvakrát se nic neodešle (hlídá se to podle nadpisu).
+//
+// NADPIS MUSÍ ZŮSTAT STEJNÝ jako v api/check-expiring-docs.js, jinak se
+// serverová a appková verze navzájem nepoznají a lidem přijde upomínka dvakrát.
+const UPOMINKA_NADPIS = '📄 Chybí nám od vás doklady'
+
+// Pondělí a čtvrtek — dvakrát týdně, stejně jako to měla dělat serverová verze.
+function jeDenNaUpominku(iso) {
+  const den = new Date(iso + 'T00:00:00').getDay()   // 0 = neděle
+  return den === 1 || den === 4
+}
+
+async function upomenChybejiciDoklady(rucne) {
+  if (!currentProfile || currentProfile.role !== 'admin') return
+  const dnes = localDateStr()
+  if (!rucne) {
+    if (!jeDenNaUpominku(dnes)) return
+    // Místní pojistka, ať se to nepouští při každém otevření appky. Skutečnou
+    // ochranu před dvojím odesláním drží kontrola v databázi níž — tahle jen
+    // šetří dotazy.
+    if (lsGet('upominkaDoklady') === dnes) return
+  }
+  try {
+    // Sloupec bez_ridicaku nemusí být (nenasazená migrace) — pak se načte bez něj
+    // a řidičák se chce po všech, což je původní chování.
+    let lide = null
+    const dotaz = (sloupce) => sb.from('profiles').select(sloupce)
+      .in('role', ['osvec', 'partak']).eq('is_active', true)
+    let { data, error } = await dotaz('id, full_name, bez_ridicaku')
+    if (error) ({ data, error } = await dotaz('id, full_name'))
+    if (error) throw error
+    lide = data || []
+    if (!lide.length) return
+
+    const ids = lide.map(w => w.id)
+    const [{ data: doklady, error: chybaDok }, { data: dnesniUpominky }] = await Promise.all([
+      sb.from('documents').select('worker_id, doc_type, status').in('worker_id', ids),
+      // Co už dneska odešlo. Pozná se to podle NADPISU, ne podle typu zprávy —
+      // sloupec `type` má v databázi omezený výčet hodnot a nová hodnota by
+      // zápis tiše shodila.
+      sb.from('notifications').select('worker_id')
+        .eq('title', UPOMINKA_NADPIS).gte('created_at', dnes + 'T00:00:00')
+        .then(r => r, () => ({ data: [] }))
+    ])
+    if (chybaDok) throw chybaDok
+    const uzDnes = new Set((dnesniUpominky || []).map(n => n.worker_id))
+
+    const radky = []
+    for (const w of lide) {
+      if (uzDnes.has(w.id)) continue
+      const moje = (doklady || []).filter(d => d.worker_id === w.id)
+      const chybi = povinneDokladyPro(w).filter(typ => !moje.some(d => {
+        // Občanka a pas jsou zaměnitelné — stačí jeden z nich.
+        const sedi = typ === 'op' ? (d.doc_type === 'op' || d.doc_type === 'pas') : d.doc_type === typ
+        // Odmítnutý nebo nečitelný doklad se nepočítá, jako by nebyl.
+        return sedi && d.status !== 'rejected' && d.status !== 'unreadable'
+      }))
+      if (!chybi.length) continue
+      const seznam = chybi.map(t => REQUIRED_DOC_LABELS[t] || docLabel(t)).join(', ')
+      radky.push({
+        worker_id: w.id,
+        title: UPOMINKA_NADPIS,
+        message: 'Zatím nemáme: ' + seznam
+          + '. Nahrajte je prosím v aplikaci v sekci Dokumenty. Bez nich vám nemůžeme proplácet práci.',
+        type: 'obecna',
+        is_read: false
+      })
+    }
+    if (!radky.length) {
+      lsSet('upominkaDoklady', dnes)
+      if (rucne) showToast('✅ Všichni mají doklady nahrané — není komu připomínat')
+      return
+    }
+    // Jedním zápisem, ne po jednom: při padesáti lidech je to padesát cest tam
+    // a zpět a půlka by se poslala, než se přijde na to, že to nejde.
+    const { error: chybaZapisu } = await sb.from('notifications').insert(radky)
+    if (chybaZapisu) throw chybaZapisu
+    lsSet('upominkaDoklady', dnes)
+    showToast('📄 Upomínka na chybějící doklady odeslána: ' + radky.length)
+  } catch (e) {
+    // Tiché selhání by bylo horší než žádná upomínka — správce by si myslel,
+    // že to běží. Místní pojistku schválně NEnastavujeme, ať se to zkusí znovu.
+    const m = e?.message || String(e)
+    console.warn('[upomínka dokladů]', m)
+    showToast('⚠️ Upomínku na doklady se nepodařilo odeslat: ' + m)
+  }
+}
 
 async function checkMissingDocsAlert() {
   try {
