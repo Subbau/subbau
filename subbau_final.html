@@ -7649,8 +7649,11 @@ async function toggleBezProvize(checkbox, workerId) {
   renderProvizeContent()
 }
 
-async function saveProvizeTerms(select, workerId) {
-  const terms = select.value
+async function saveProvizeTerms(select, workerId, firemni) {
+  // Prázdno znamená „žádná vlastní, ať platí firemní" — do databáze jde null,
+  // ne prázdný řetězec: ten by prošel jako nastavená hodnota a účinná splatnost
+  // by pak vyšla 7/14 i u firmy, která má 7/7.
+  const terms = select.value || null
   const { error } = await sb.from('worker_commissions')
     .upsert({ worker_id: workerId, payment_terms: terms, updated_at: new Date().toISOString() }, { onConflict: 'worker_id' })
   if (error) {
@@ -7659,7 +7662,10 @@ async function saveProvizeTerms(select, workerId) {
   }
   // Dny splatnosti přepiš i do profilu — z něj je bere faktura.
   // Tabulku worker_commissions pracovník číst nesmí (je v ní provize SubBau).
-  const days = parseInt((terms || '7/14').split('/')[1], 10)
+  // Bez vlastní se propisuje FIREMNÍ, ne výchozí — jinak by se u člověka
+  // „podle firmy (7/7)" na faktuře objevilo 14 dní.
+  const ucinne = terms || firemni || '7/14'
+  const days = parseInt(ucinne.split('/')[1], 10)
   if (!isNaN(days)) {
     const { error: pErr } = await sb.from('profiles').update({ invoice_due_days: days }).eq('id', workerId)
     if (pErr) {
@@ -7668,7 +7674,45 @@ async function saveProvizeTerms(select, workerId) {
       return
     }
   }
-  showToast('✅ Splatnost uložena — propíše se i do faktury')
+  showToast(terms
+    ? '✅ Splatnost uložena — propíše se i do faktury'
+    : '✅ Splatnost se řídí firmou (' + (firemni || '7/14') + ')')
+  renderProvizeContent()
+}
+
+// SPLATNOST CELÉ FIRMY. Zapisuje se všem týmům té firmy najednou — jedna firma
+// jich může mít víc (víc staveb) a kdyby se změnil jen jeden, rozešla by se
+// firma sama se sebou a lidi by měli různou splatnost podle toho, na které
+// stavbě zrovna jsou.
+async function saveFirmaTerms(select, firmIdx) {
+  const f = (window._provizeFirmy || [])[firmIdx]
+  if (!f || !f.tymy?.length) { showToast('⚠️ Tahle firma nemá žádnou skupinu, kam splatnost uložit'); return }
+  const terms = select.value || null
+  const { error } = await sb.from('teams').update({ payment_terms: terms }).in('id', f.tymy)
+  if (error) {
+    showToast(/payment_terms|column|schema cache/i.test(error.message || '')
+      ? '❌ Chybí sloupec u firem — spusťte migraci supabase-migrace-splatnost-firmy.sql'
+      : '❌ Chyba: ' + error.message)
+    return
+  }
+  // Propsat do profilů těch, kdo nemají vlastní. Faktura si bere dny z profilu,
+  // takže bez tohohle by se změna u firmy na fakturách neprojevila.
+  try {
+    const { data: vyjimky } = await sb.from('worker_commissions')
+      .select('worker_id, payment_terms').in('worker_id', f.ids || [])
+    const maVlastni = new Set((vyjimky || []).filter(v => v.payment_terms).map(v => v.worker_id))
+    const bezVlastni = (f.ids || []).filter(id => !maVlastni.has(id))
+    const days = parseInt((terms || '7/14').split('/')[1], 10)
+    if (bezVlastni.length && !isNaN(days)) {
+      await sb.from('profiles').update({ invoice_due_days: days }).in('id', bezVlastni)
+    }
+    showToast(terms
+      ? '✅ Splatnost firmy ' + terms + ' — platí pro ' + bezVlastni.length + ' lidí'
+      : '✅ Splatnost firmy zrušena — platí 7/14')
+  } catch (e) {
+    showToast('⚠️ Splatnost firmy uložena, ale do faktur se nepropsala: ' + (e?.message || e))
+  }
+  renderProvizeContent()
 }
 
 // Vygeneruje tiskový PDF report provize jedné firmy za týden nebo měsíc (podle aktuálně zvoleného období)
@@ -7857,7 +7901,11 @@ async function renderProvizeContent() {
   const [{ data: workers }, provResult, { data: teams }, { data: companies }, { data: subteams }] = await Promise.all([
     sb.from('profiles').select('id, full_name, hourly_rate_worker, team_id, subteam_id, zamestnavatel_id, supplier_type, company_name').in('role', ['osvec', 'partak']).eq('is_active', true).order('full_name'),
     sb.from('worker_commissions').select('worker_id, provize, payment_terms, bez_provize'),
-    sb.from('teams').select('id, name, company_id, is_active'),
+    // payment_terms u firmy je nepovinné — bez migrace supabase-migrace-splatnost-firmy.sql
+    // sloupec není a celý dotaz by skončil chybou, takže by zmizely i firmy.
+    sb.from('teams').select('id, name, company_id, is_active, payment_terms')
+      .then(r => r.error ? sb.from('teams').select('id, name, company_id, is_active') : r,
+            () => sb.from('teams').select('id, name, company_id, is_active')),
     sb.from('companies').select('id, name'),
     // Podskupiny — v Provizích má být u jména vidět, do které patří, stejně
     // jako v Týmech. Bez toho se u větších firem nedá poznat, kdo kde dělá.
@@ -7865,6 +7913,17 @@ async function renderProvizeContent() {
   ])
   const subteamById = {}
   ;(subteams || []).forEach(st => { subteamById[st.id] = st.name })
+
+  // SPLATNOST FIRMY. Majitel 29. 9. 2026: „když si nastavím splatnost u firmy
+  // a přiřadím lidi k firmě, ať je tam předvyplněná."
+  // Drží se u týmu (teams.payment_terms). Jedna firma může mít víc týmů —
+  // bere se první nastavená a při uložení se srovnají všechny, ať se firma
+  // nerozejde sama se sebou.
+  const firmaTermsMap = {}
+  const firmaTermsChybi = !(teams || []).some(t => 'payment_terms' in t)
+  ;(teams || []).forEach(t => {
+    if (t.payment_terms) firmaTermsMap[String(t.id)] = t.payment_terms
+  })
 
   // Když ještě neproběhla migrace supabase-migrace-provize-splatnost.sql, sloupec payment_terms
   // v tabulce neexistuje a celý select výše skončí chybou — BEZ retry by to smazalo i provize
@@ -7911,7 +7970,11 @@ async function renderProvizeContent() {
   ;(provRows || []).forEach(p => {
     if (p.provize != null) provMap[p.worker_id] = Number(p.provize)
     if (!bezProvizeColumnMissing && p.bez_provize) bezProvize.add(p.worker_id)
-    if (!paymentTermsColumnMissing) termsMap[p.worker_id] = p.payment_terms || '7/14'
+    // PRÁZDNO ZŮSTÁVÁ PRÁZDNÉ. Dřív se tu místo chybějící hodnoty dosadilo
+    // rovnou '7/14' — od chvíle, kdy splatnost umí nastavit i firma, by to
+    // znamenalo, že každý vypadá jako by měl vlastní výjimku 7/14 a firemní
+    // hodnota by se neuplatnila u nikoho.
+    if (!paymentTermsColumnMissing) termsMap[p.worker_id] = p.payment_terms || ''
   })
   const teamById = {}
   ;(teams || []).forEach(t => { teamById[t.id] = t })
@@ -8160,7 +8223,12 @@ async function renderProvizeContent() {
     const provizeNenastavena = provMap[w.id] == null || provMap[w.id] === ''
     const pay = payMap[w.id] || null
     const paid = !!(pay && pay.paid)
-    const terms = termsMap[w.id] || '7/14'
+    // VLASTNÍ přebíjí FIREMNÍ, a když není ani jedna, platí 7/14.
+    // `vlastniTerms` se drží zvlášť: v nabídce se podle něj pozná, jestli má
+    // člověk výjimku, nebo jede podle firmy.
+    const vlastniTerms = termsMap[w.id] || ''
+    const firemniTerms = firmaTermsMap[String(w.team_id)] || ''
+    const terms = vlastniTerms || firemniTerms || '7/14'
     const dueInfo = provizeDueInfo(terms)
     return {
       id: w.id, name: w.full_name + (w._byvaly ? ' (bývalý)' : ''), firm: firmOf(w), rate,
@@ -8182,7 +8250,7 @@ async function renderProvizeContent() {
       // se vůbec neobjevil — a tím pádem mu nešlo nastavit sazbu, dokud si
       // nezapsal první hodiny. Stačí, že je někam zařazený.
       maFirmu: !!w.team_id,
-      terms,
+      terms, vlastniTerms, firemniTerms,
       hoursDay: hrs.day, hoursWeek: hrs.week, hoursMonth: hrs.month, hoursYear: hrs.year,
       // Odměny i výdělky jsou sečtené po dnech, každý den svou sazbou (viz výše).
       commDay: hrs.pDay, commWeek: hrs.pWeek, commMonth: hrs.pMonth, commYear: hrs.pYear,
@@ -8275,7 +8343,11 @@ async function renderProvizeContent() {
     const memberRows = members.map(r => {
       fDay += r.commDay; fWeek += r.commWeek; fMonth += r.commMonth; fYear += r.commYear; fEarn += r.earnWeek; fEarnDay += r.earnDay; if (r.paid) fPaidCount++
       window._provizeIndex[r.id] = { hoursDay: r.hoursDay, hoursWeek: r.hoursWeek, hoursMonth: r.hoursMonth, hoursYear: r.hoursYear, prov: r.prov, rate: r.rate, firmIdx }
-      const termsOpts = TERMS_OPTIONS.map(t => `<option value="${t}" ${r.terms === t ? 'selected' : ''}>${t}</option>`).join('')
+      // Prázdná hodnota = „nemá vlastní, jede podle firmy". Díky tomu stačí
+    // nastavit splatnost jednou u firmy a u lidí se nemusí nic proklikávat.
+    const termsOpts = `<option value="" ${r.vlastniTerms ? '' : 'selected'}>podle firmy${
+      r.firemniTerms ? ' (' + r.firemniTerms + ')' : ' (7/14)'}</option>`
+      + TERMS_OPTIONS.map(t => `<option value="${t}" ${r.vlastniTerms === t ? 'selected' : ''}>${t}</option>`).join('')
       const rowBg = (r.bezProvize ? 'opacity:0.55;' : '')
       + (r.paid ? 'background:var(--green-l)' : (r.overdue ? 'background:var(--red-l)' : ''))
       const dueLabel = paymentTermsColumnMissing
@@ -8308,12 +8380,18 @@ async function renderProvizeContent() {
         <td style="text-align:right"><b id="pv-w-${r.id}" style="font-size:14px">${eur(r.commWeek)}</b><div style="font-size:11px;color:var(--text3)">${r.hoursWeek.toFixed(2)} h</div></td>
         <td style="text-align:right"><b id="pv-m-${r.id}" style="font-size:14px">${eur(r.commMonth)}</b><div style="font-size:11px;color:var(--text3)">${r.hoursMonth.toFixed(2)} h</div></td>
         <td style="text-align:center;padding:0"><label style="display:flex;align-items:center;justify-content:center;width:100%;height:100%;min-height:44px;padding:8px;cursor:${paymentsTableMissing ? 'not-allowed' : 'pointer'}"><input type="checkbox" ${r.paid ? 'checked' : ''} ${escAttr(paymentsTableMissing ? 'disabled title="Nejdřív spusťte migraci supabase-migrace-provize-platby.sql"' : '')} onchange="toggleProvizePaid(this,'${r.id}','week','${weekKey}')" style="width:21px;height:21px;cursor:${paymentsTableMissing ? 'not-allowed' : 'pointer'};accent-color:var(--green)"></label></td>
-        <td><select onchange="saveProvizeTerms(this,'${r.id}')" style="padding:6px 8px;border:1.5px solid var(--brd);border-radius:7px;font-size:13px;font-family:inherit">${termsOpts}</select>${dueLabel}</td>
+        <td><select onchange="saveProvizeTerms(this,'${r.id}','${r.firemniTerms}')" style="padding:6px 8px;border:1.5px solid var(--brd);border-radius:7px;font-size:13px;font-family:inherit">${termsOpts}</select>${dueLabel}</td>
       </tr>`
     }).join('')
     // Do firemního součtu jde jen to, co je v tabulce vidět. Celkové souhrny
     // nahoře se berou ze `souhrn`, tedy ze všech lidí.
     window._provizeFirmTotals[firmIdx] = { day: fDay, week: fWeek, month: fMonth, year: fYear, earn: fEarn }
+    // Splatnost firmy k zobrazení: první nastavená mezi jejími týmy. Když se
+    // liší, uložením se všechny srovnají (viz saveFirmaTerms).
+    const firmaTymy = Object.values(teamById)
+      .filter(t => provizeFirmOf({ team_id: t.id }, teamById, companyNameById) === firm)
+      .map(t => String(t.id))
+    const firmaSplatnostKod = firmaTymy.map(id => firmaTermsMap[id]).find(Boolean) || ''
     window._provizeFirmy[firmIdx] = { nazev: firm, weekKey, ids: members.map(m => m.id),
       // VŠECHNY skupiny té firmy, ne jen ty, kde někdo ten týden pracoval.
       // Jedna firma může mít víc staveb — kdyby se schovaly jen některé,
@@ -8351,6 +8429,16 @@ async function renderProvizeContent() {
               ? '<span style="font-weight:600;font-size:11px;color:var(--amber)">⚠️ neukládá se — chybí migrace</span>'
               : (firmaSplatnost && !firmaUhrazena ? `<span style="font-weight:600;font-size:12px;opacity:.85">${firmaPoSplatnosti ? 'byla' : 'splatnost'} ${firmaSplatnost.toLocaleDateString('cs-CZ')}</span>` : '')}
           </label>` : ''}
+          ${isNoFirm ? '' : `<label title="Splatnost pro celou firmu. Komu ji přiřadíte, tomu se předvyplní — u jednotlivce se dá přebít vlastní."
+            style="display:flex;align-items:center;gap:7px;font-size:12.5px;color:var(--text2);font-weight:600">
+            <span>Splatnost firmy</span>
+            <select onchange="saveFirmaTerms(this,${firmIdx})" ${firmaTermsChybi ? 'disabled' : ''}
+              style="padding:5px 8px;border:1.5px solid var(--brd);border-radius:7px;font-size:13px;font-family:inherit;cursor:${firmaTermsChybi ? 'not-allowed' : 'pointer'}">
+              <option value="" ${firmaSplatnostKod ? '' : 'selected'}>nenastaveno (7/14)</option>
+              ${TERMS_OPTIONS.map(t => `<option value="${t}" ${firmaSplatnostKod === t ? 'selected' : ''}>${t}</option>`).join('')}
+            </select>
+            ${firmaTermsChybi ? '<span style="font-size:11px;color:var(--amber);font-weight:700">⚠️ chybí migrace</span>' : ''}
+          </label>`}
           <span style="font-size:13px;color:var(--text3)">${members.length} lidí · ${fPaidCount}/${members.length} uhrazeno (týden)</span>
           <button onclick="generateProvizeFirmReport('${safeFirm}','week')" style="font-size:12px;padding:6px 11px;border:1px solid var(--brd);border-radius:7px;cursor:pointer;background:#fff;font-family:inherit">📄 Týdenní provize</button>
           <button onclick="generateProvizeFirmReport('${safeFirm}','month')" style="font-size:12px;padding:6px 11px;border:1px solid var(--brd);border-radius:7px;cursor:pointer;background:#fff;font-family:inherit">📄 Měsíční provize</button>
@@ -28333,6 +28421,19 @@ async function loadInvoiceWeeks() {
 
 }
 
+// Splatnost firmy, do které pracovník patří. Bez nasazené migrace
+// supabase-migrace-splatnost-firmy.sql sloupec není a vrátí se prázdno —
+// pak platí to, co platilo dřív.
+async function splatnostFirmyPracovnika(workerId) {
+  try {
+    const { data: p } = await sb.from('profiles').select('team_id').eq('id', workerId).maybeSingle()
+    if (!p?.team_id) return null
+    const { data: t, error } = await sb.from('teams').select('payment_terms').eq('id', p.team_id).maybeSingle()
+    if (error) return null
+    return t?.payment_terms || null
+  } catch (e) { return null }
+}
+
 // Splatnost zadává SubBau v sekci Provize jako kód "7/14" (worker_commissions.payment_terms)
 // a propisuje se do profilu jako invoice_due_days. Když ten sloupec v databázi ještě není,
 // přečteme kód rovnou z Provizí — jinak by faktura tiše počítala s výchozími 14 dny.
@@ -28345,8 +28446,12 @@ async function dueDaysFromProvize(workerId) {
   try {
     const { data, error } = await sb.from('worker_commissions')
       .select('payment_terms').eq('worker_id', workerId).maybeSingle()
-    if (error || !data || !data.payment_terms) return null
-    const days = parseInt(String(data.payment_terms).split('/')[1], 10)
+    let kod = (!error && data) ? data.payment_terms : null
+    // Nemá vlastní → platí firemní. Bez tohohle by se u člověka, kterému se
+    // splatnost nastavila jen u firmy, počítalo s výchozími 14 dny.
+    if (!kod) kod = await splatnostFirmyPracovnika(workerId)
+    if (!kod) return null
+    const days = parseInt(String(kod).split('/')[1], 10)
     return isNaN(days) ? null : days
   } catch(e) { return null }
 }
