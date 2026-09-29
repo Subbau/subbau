@@ -13269,6 +13269,16 @@ function _invSortValue(r, key) {
   }
 }
 
+// Firma (skupina) pracovníka u faktury. Bere se ŽIVĚ z _teamsCache, ne z řádku
+// faktury — firma je vlastnost člověka, ne dokladu, takže když se přeřadí,
+// projeví se to i u starších faktur. Stejně to dělá barva o kus níž.
+function firmaFaktury(r) {
+  const tid = r && (r.worker?.team_id ?? r.team_id)
+  if (tid == null) return 'Bez firmy'
+  const t = (_teamsCache || []).find(x => String(x.id) === String(tid))
+  return (t && t.name) || 'Bez firmy'
+}
+
 function renderWorkerInvoices() {
   const tbody = document.getElementById('inv-table')
   if (!tbody || _invTableMissing) return
@@ -13293,7 +13303,21 @@ function renderWorkerInvoices() {
   }
 
   const dir = _invSortDir === 'asc' ? 1 : -1
+  // KDYŽ SE DĚLÍ PO TÝDNECH, ŘADÍ SE TÝDEN → FIRMA → JMÉNO.
+  // Majitel: „ti lidi jsou z jiných firem, ať jsou seřazený — nejdřív jedna
+  // firma a pod ní druhá, v ten týden." Řazení podle času odeslání to
+  // nezajistí: dva lidé z téže firmy poslali fakturu v jiné minuty, takže se
+  // proložili s ostatními.
+  const delitTydny = _invSortKey === 'week' || _invSortKey === 'sent'
   rows.sort((a, b) => {
+    if (delitTydny) {
+      const ta = (a.kw_year || 0) * 100 + (a.kw || 0)
+      const tb = (b.kw_year || 0) * 100 + (b.kw || 0)
+      if (ta !== tb) return (ta - tb) * dir
+      const fa = firmaFaktury(a), fb = firmaFaktury(b)
+      if (fa !== fb) return fa.localeCompare(fb, 'cs')
+      return String(a.worker?.full_name || '').localeCompare(String(b.worker?.full_name || ''), 'cs')
+    }
     const va = _invSortValue(a, _invSortKey), vb = _invSortValue(b, _invSortKey)
     if (typeof va === 'string' || typeof vb === 'string') return String(va).localeCompare(String(vb), 'cs') * dir
     return (va - vb) * dir
@@ -13333,8 +13357,8 @@ function renderWorkerInvoices() {
   // Oddělovač mezi týdny. Má smysl jen u řazení, kde týdny tvoří souvislé bloky —
   // podle týdne nebo podle data odeslání. Při řazení podle jména nebo částky by
   // čáry vznikaly mezi skoro každými dvěma řádky a jen by překážely.
-  const delitTydny = _invSortKey === 'week' || _invSortKey === 'sent'
   let _poslKw = null
+  let _poslFirma = null
 
   tbody.innerHTML = rows.map(r => {
     // Barva je vlastnost pracovníka, ne dokladu — proto se bere živě z profilu.
@@ -13346,6 +13370,16 @@ function renderWorkerInvoices() {
     if (delitTydny && kwTeto !== _poslKw) {
       oddelovac = `<tr><td colspan="10" style="padding:10px 12px 6px;border-top:2px solid var(--blue,#211D1A);background:var(--bg,#f4efe7);font-size:12.5px;font-weight:800;color:var(--text2)">${r.kw ? 'KW ' + r.kw + ' / ' + r.kw_year : 'Bez týdne'}</td></tr>`
       _poslKw = kwTeto
+      _poslFirma = null   // nový týden začíná i novou firmou
+    }
+    // Firma uvnitř týdne. Odsazený a jemnější než nadpis týdne, ať je poznat,
+    // co je čemu nadřazené.
+    if (delitTydny) {
+      const firmaTeto = firmaFaktury(r)
+      if (firmaTeto !== _poslFirma) {
+        oddelovac += `<tr><td colspan="10" style="padding:6px 12px 4px 24px;background:var(--bg,#f4efe7);font-size:12px;font-weight:700;color:var(--text3)">${escAttr(firmaTeto)}</td></tr>`
+        _poslFirma = firmaTeto
+      }
     }
     return oddelovac + `
     <tr>
