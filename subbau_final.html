@@ -987,9 +987,9 @@ setTimeout(function () {
               <span id="workers-search-info" style="display:none;width:100%;font-size:12px;color:var(--text3)"></span>
             </div>
             <table>
-              <thead><tr><th>Jméno</th><th>Skupina</th><th>Profese</th><th>Email</th><th>Role</th><th>Stav</th><th>Docházka</th><th>Přístup</th></tr></thead>
+              <thead><tr><th>Jméno</th><th>Skupina</th><th>Ubytování</th><th>Profese</th><th>Email</th><th>Role</th><th>Stav</th><th>Docházka</th><th>Přístup</th></tr></thead>
               <tbody id="workers-table">
-                <tr><td colspan="8" style="text-align:center;color:var(--text3);padding:20px">Načítám pracovníky...</td></tr>
+                <tr><td colspan="9" style="text-align:center;color:var(--text3);padding:20px">Načítám pracovníky...</td></tr>
               </tbody>
             </table>
           </div>
@@ -9450,7 +9450,7 @@ async function loadWorkers() {
   // Počet bez schovaných firem — jinak by nadpis ukazoval 12 a tabulka 8.
   const pocetViditelnych = (data || []).filter(w => !jeSkrytaFirmaPracovnika(w)).length
   if (cntEl) cntEl.textContent = pocetViditelnych ? pocetViditelnych : ''
-  if (!data?.length) { tbody.innerHTML='<tr><td colspan="8" style="text-align:center;color:var(--text3);padding:20px">Žádní pracovníci</td></tr>'; return }
+  if (!data?.length) { tbody.innerHTML='<tr><td colspan="9" style="text-align:center;color:var(--text3);padding:20px">Žádní pracovníci</td></tr>'; return }
 
   // Skupiny (firmy) a podskupiny — pro barevné odznaky a řazení podle firmy
   const { data: teamsForW } = await sb.from('teams').select('id,name')
@@ -9473,6 +9473,7 @@ async function loadWorkers() {
     <tr style="cursor:pointer" class="worker-row" data-id="${w.id}" data-name="${escAttr(((w.full_name||'') + ' ' + (w.email||'')).replace(/"/g,'&quot;'))}">
       <td><b>${escAttr(w.full_name)}</b>${w.has_car ? ' <span style="font-size:11px;background:#eef7ee;color:#2e7d32;border:1px solid #b8dcb8;font-weight:700;padding:1px 6px;border-radius:8px;white-space:nowrap" title="Má vlastní auto">🚗 auto</span>' : ''}${(window.unclosedWorkerIds && window.unclosedWorkerIds.has(w.id)) ? ' <span style="background:var(--red);color:#fff;font-size:10px;font-weight:700;padding:2px 6px;border-radius:8px;white-space:nowrap" title="Nemá ukončený den — směna běží i po 20:30">⚠️ neukončeno</span>' : ''}</td>
       <td>${groupCellHtml(teamName, subName)}</td>
+      <td onclick="event.stopPropagation();otevriUbytovani('${w.id}')" title="Kliknutím upravíte adresu ubytování i poznámky (kódy, patro, pokoj)" style="cursor:pointer;font-size:12px;max-width:190px">${ubytovaniBunka(w)}</td>
       <td>${escAttr(profLabel(w.profession)||'—')}</td>
       <td style="font-size:12px">${escAttr(w.email)}</td>
       <td><span class="pill pb">${{admin:'Admin',osvec:'OSVČ',partak:'Parťák',klient:'Klient'}[w.role]||w.role}</span>${((w.role==='osvec'||w.role==='partak') && (w.business_type==='sro'||w.is_osvec===false)) ? ` <span class="pill" style="background:#eef;color:#3b4cad;margin-left:2px">s.r.o.</span>` : ''}</td>
@@ -9490,6 +9491,124 @@ async function loadWorkers() {
   }
   // Hledání musí přežít překreslení tabulky — jinak by se skryté řádky po obnovení vrátily.
   filterTableRows('workers-search', '#workers-table .worker-row')
+}
+
+// ═══ UBYTOVÁNÍ PRACOVNÍKA ═══════════════════════════════════════════════
+// Majitel 29. 9. 2026: „v přehledu pracovníků mezi skupinou a profesí chci
+// sloupec, kde ten člověk bydlí — a když na tu adresu kliknu, ať se otevře
+// úprava, kde můžu vypsat třeba kódy k ubytování."
+//
+// Adresa i poznámky jsou v profiles (ubytovani_adresa, ubytovani_poznamka).
+// Bez migrace supabase-migrace-ubytovani.sql sloupce nejsou; čtení je přes
+// select('*'), takže se nic nerozbije — jen se nic neukáže a uložení řekne,
+// kterou migraci spustit.
+function ubytovaniBunka(w) {
+  const adr = (w?.ubytovani_adresa || '').trim()
+  const pozn = (w?.ubytovani_poznamka || '').trim()
+  if (!adr && !pozn) {
+    return '<span style="color:var(--text3)">+ doplnit</span>'
+  }
+  // Když je adresa prázdná, ale poznámka ne, ať to není vidět jako prázdný
+  // řádek — jinak by se zdálo, že o tom člověku nic nemáme.
+  const hlavni = adr || '(jen poznámka)'
+  const znacka = pozn
+    ? ' <span title="Jsou tu i poznámky — kódy, patro, pokoj" style="font-size:11px">🔑</span>'
+    : ''
+  return '<span style="display:inline-block;max-width:175px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;vertical-align:bottom">'
+    + escAttr(hlavni) + '</span>' + znacka
+}
+
+async function otevriUbytovani(workerId) {
+  // ČTE SE Z DATABÁZE, ne z _workersCache. Ten plní až obrazovka Týmy —
+  // kdo přijde rovnou na Pracovníky, měl by ho prázdný a okno by hlásilo
+  // „pracovníka se nepodařilo najít". Navíc takhle je vidět i změna, kterou
+  // mezitím udělal někdo jiný.
+  let w = null
+  try {
+    const { data, error } = await sb.from('profiles')
+      .select('id, full_name, ubytovani_adresa, ubytovani_poznamka')
+      .eq('id', workerId).maybeSingle()
+    if (error) throw error
+    w = data
+  } catch (e) {
+    // Chybí sloupce (nenasazená migrace)? Ukaž okno aspoň prázdné a uložení
+    // pak samo řekne, kterou migraci spustit.
+    w = (_workersCache || []).find(x => x.id === workerId) || null
+    if (!w) { showToast('❌ Pracovníka se nepodařilo načíst: ' + (e?.message || e)); return }
+  }
+  if (!w) { showToast('⚠️ Pracovníka se nepodařilo najít'); return }
+  // Okno se staví z JavaScriptu, ne vkládáním HTML — v tomhle souboru je osm
+  // „</body>" a sedm z nich je uvnitř skriptu.
+  const ov = document.createElement('div')
+  ov.id = 'ubytovani-overlay'
+  ov.style.cssText = 'position:fixed;inset:0;z-index:100000;background:rgba(20,17,15,.6);display:flex;align-items:flex-start;justify-content:center;overflow-y:auto;padding:20px'
+  ov.innerHTML = `
+    <div style="background:#fff;border-radius:16px;max-width:560px;width:100%;margin:auto;box-shadow:0 24px 80px rgba(0,0,0,.4);overflow:hidden">
+      <div style="background:var(--blue);padding:16px 20px;display:flex;justify-content:space-between;align-items:center">
+        <div style="color:#fff">
+          <div style="font-size:16px;font-weight:800">🏠 Ubytování</div>
+          <div style="font-size:12px;color:rgba(255,255,255,.7)">${escAttr(w.full_name || '')}</div>
+        </div>
+        <button id="ubyt-zavri" style="background:rgba(255,255,255,.2);border:none;color:#fff;width:34px;height:34px;border-radius:50%;cursor:pointer;font-family:inherit;font-size:18px;line-height:1">×</button>
+      </div>
+      <div style="padding:18px 20px">
+        <label style="display:block;font-size:12px;font-weight:700;color:#6b6157;margin-bottom:6px">Adresa ubytování</label>
+        <input id="ubyt-adresa" type="text" placeholder="Bahnhofstraße 12, 85276 Pfaffenhofen"
+          style="width:100%;padding:11px;border:1.5px solid var(--brd);border-radius:10px;font-size:14px;font-family:inherit;margin-bottom:14px">
+        <label style="display:block;font-size:12px;font-weight:700;color:#6b6157;margin-bottom:6px">Poznámky — kódy, patro, pokoj, kontakt</label>
+        <textarea id="ubyt-poznamka" rows="6" placeholder="Kód od domu: 4721#&#10;Patro 3, pokoj 12&#10;Majitel: Herr Müller, +49 170 1234567"
+          style="width:100%;padding:11px;border:1.5px solid var(--brd);border-radius:10px;font-size:14px;font-family:inherit;resize:vertical"></textarea>
+        <div style="display:flex;gap:10px;margin-top:16px">
+          <button id="ubyt-zrus" style="flex:1;min-height:44px;padding:12px;border-radius:12px;border:2px solid var(--brd);background:#fff;color:#211D1A;font-size:15px;font-weight:700;font-family:inherit;cursor:pointer">Zrušit</button>
+          <button id="ubyt-uloz" class="btn-pri" style="flex:1;min-height:44px;font-size:15px;font-weight:800">Uložit</button>
+        </div>
+      </div>
+    </div>`
+  document.body.appendChild(ov)
+  const adr = ov.querySelector('#ubyt-adresa')
+  const pozn = ov.querySelector('#ubyt-poznamka')
+  adr.value = w.ubytovani_adresa || ''
+  pozn.value = w.ubytovani_poznamka || ''
+  const zavri = () => ov.remove()
+  ov.querySelector('#ubyt-zavri').onclick = zavri
+  ov.querySelector('#ubyt-zrus').onclick = zavri
+  ov.onclick = (e) => { if (e.target === ov) zavri() }
+  setTimeout(() => { try { adr.focus() } catch (e) {} }, 60)
+  ov.querySelector('#ubyt-uloz').onclick = async () => {
+    const btn = ov.querySelector('#ubyt-uloz')
+    btn.disabled = true; btn.textContent = 'Ukládám…'
+    const ok = await ulozUbytovani(workerId, adr.value.trim(), pozn.value.trim())
+    btn.disabled = false; btn.textContent = 'Uložit'
+    if (ok) zavri()
+  }
+}
+
+async function ulozUbytovani(workerId, adresa, poznamka) {
+  try {
+    const { data, error } = await sb.from('profiles')
+      .update({ ubytovani_adresa: adresa || null, ubytovani_poznamka: poznamka || null })
+      .eq('id', workerId).select('id, ubytovani_adresa, ubytovani_poznamka')
+    if (error) {
+      showToast(/ubytovani_|column|schema cache/i.test(error.message || '')
+        ? '❌ Chybí sloupce ubytování — spusťte migraci supabase-migrace-ubytovani.sql'
+        : '❌ Chyba: ' + error.message)
+      return false
+    }
+    // Zápis může projít bez chyby a NEZMĚNIT žádný řádek (odmítnou ho práva) —
+    // hlásit „uloženo" nad nezměněným profilem je horší než chyba.
+    if (!data || !data.length) {
+      showToast('❌ Uložení neprošlo — zkontrolujte oprávnění')
+      return false
+    }
+    const w = (_workersCache || []).find(x => x.id === workerId)
+    if (w) { w.ubytovani_adresa = data[0].ubytovani_adresa; w.ubytovani_poznamka = data[0].ubytovani_poznamka }
+    showToast('✅ Ubytování uloženo')
+    loadWorkers()
+    return true
+  } catch (e) {
+    showToast('❌ Chyba: ' + (e?.message || e))
+    return false
+  }
 }
 
 function openAddWorker() {
