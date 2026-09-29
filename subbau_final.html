@@ -30761,6 +30761,14 @@ function buildKWOptions() {
 // Standardní směna: příchod 7:00, přestávka 11:00-11:30, odchod 16:00.
 // abnormal = hranice dlouhé pracovní doby (20:30), stejná jako u upozornění na dashboardu.
 const SHIFT = { start: 7*60, breakStart: 11*60, breakLen: 30, end: 16*60, abnormal: 20*60+30 }
+// PŘÍCHOD K OČNÍ KONTROLE (majitel 29. 9. 2026): 7:01 až 7:30.
+// Právě v tomhle pásmu dělá zaokrouhlení největší rozdíl a vyplatí se na to
+// mrknout: do 7:10 se jde DOLŮ na 7:00 (člověk má placeno od sedmi, i když
+// přišel později), od 7:11 NAHORU na 7:30 (přijde o půl hodiny). Vykřičník
+// je proto, ať se nemusí procházet čtyřicet lidí řádek po řádku.
+//
+// HODINY ANI ZAOKROUHLENÍ SE TÍM NEMĚNÍ — je to jen značka na obrazovce.
+const KONTROLA_PRICHODU = { od: 7*60 + 1, do: 7*60 + 30 }
 // Kolik minut po CELÉ hodině se ještě odpouští dolů. 7:08 → 7:00, ale 7:11 → 7:30.
 // Po půlhodině se neodpouští nic: 9:37 → 10:00.
 const HAJENA_DOBA_MIN = 10
@@ -30885,7 +30893,7 @@ function applyAttendanceRules(record) {
   const bs = timeToMin(record.break_start)
   const be = timeToMin(record.break_end)
 
-  const flags = { lateIn: false, lateBreak: false, earlyOut: false, overtime: 0, abnormal: false, incomplete: false }
+  const flags = { lateIn: false, lateBreak: false, earlyOut: false, overtime: 0, abnormal: false, incomplete: false, prichodKontrola: false }
 
   if (ci === null || co === null) {
     return { checkIn: record.check_in, checkOut: record.check_out,
@@ -30905,6 +30913,9 @@ function applyAttendanceRules(record) {
     ? ci - minutyPoCele                 // do 10 minut po celé → dolů na celou
     : Math.ceil(ci / 30) * 30           // jinak nahoru na nejbližší půlhodinu
   if (adjCi > SHIFT.start) flags.lateIn = true
+  // Řídí se SKUTEČNĚ ZAPSANÝM časem, ne zaokrouhleným — jde o to, co člověk
+  // doopravdy zmáčkl, ne co se mu započítá.
+  if (ci >= KONTROLA_PRICHODU.od && ci <= KONTROLA_PRICHODU.do) flags.prichodKontrola = true
 
   // --- 2. PŘESTÁVKA ---
   let adjBs = bs, adjBe = be
@@ -31073,7 +31084,8 @@ function flagBadge(flag, text) {
     earlyOut:   { bg: '#cfe2ff', color: '#0a58ca', label: 'Brzy odešel' },
     overtime:   { bg: '#d1e7dd', color: '#146c43', label: 'Přesčas' },
     abnormal:   { bg: '#f8d7da', color: '#842029', label: 'Dlouhá pracovní doba — konec po 20:30' },
-    incomplete: { bg: '#f8d7da', color: '#842029', label: 'Nesplněná směna (< 8h)' }
+    incomplete: { bg: '#f8d7da', color: '#842029', label: 'Nesplněná směna (< 8h)' },
+    prichodKontrola: { bg: '#f8d7da', color: '#842029', label: 'Příchod mezi 7:01 a 7:30 — zkontrolujte' }
   }
   const b = badges[flag]
   if (!b) return text
@@ -31261,7 +31273,7 @@ async function loadWdAttendance() {
       <td style="font-size:12px;white-space:nowrap">${r.work_date ? new Date(r.work_date).toLocaleDateString('cs-CZ') : '—'}${vyjimkaOdznak}</td>
       <td>
         <span style="font-weight:700;color:var(--green)">${adj.checkIn || (r.check_in ? r.check_in.slice(0,5) : '—')}</span>
-        ${adj.flags.lateIn ? ' ' + flagBadge('lateIn', 'pozdě') : ''}
+        ${adj.flags.lateIn ? ' ' + flagBadge('lateIn', 'pozdě') : ''}${adj.flags.prichodKontrola ? ' ' + flagBadge('prichodKontrola', '!') : ''}
         ${r.check_in && adj.checkIn && r.check_in.slice(0,5) !== adj.checkIn
           ? `<div style="font-size:10px;color:var(--text3);margin-top:1px">zaznamenáno ${r.check_in.slice(0,5)}</div>` : ''}
       </td>
