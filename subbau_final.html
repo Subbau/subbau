@@ -9058,7 +9058,7 @@ async function computeLongDayAlerts() {
   const now = new Date()
   const since = new Date(now); since.setDate(since.getDate() - 7)
 
-  const sel = '*, worker:profiles(full_name,profession,team_id)'
+  const sel = '*, worker:profiles(full_name,profession,team_id,avatar_url)'
   // Neukončené dny hledáme bez omezení data — zapomenutý odchod je potřeba
   // dořešit i po týdnu. Uzavřené dlouhé dny stačí za poslední týden, ať
   // upozornění na dashboardu nezůstává viset donekonečna.
@@ -9613,7 +9613,7 @@ async function loadTodayTimeline() {
   // Všechny dnešní záznamy všech pracovníků + firma a podskupina, podle kterých se řadí
   const [{ data }, { data: tmTeams }, { data: tmComps }, { data: tmSubs }] = await Promise.all([
     sb.from('attendance')
-      .select('*, worker:profiles(full_name,profession,team_id,subteam_id)')
+      .select('*, worker:profiles(full_name,profession,team_id,subteam_id,avatar_url)')
       .eq('work_date', today)
       .order('check_in', { ascending: true }),
     sb.from('teams').select('id, name, company_id'),
@@ -9847,6 +9847,43 @@ async function deleteTodayRecord(id, name) {
   refreshAttendanceEverywhere()
 }
 
+// MINIATURA PRACOVNÍKA PŘED JMÉNEM.
+// Majitel: „ať se ta fotka přenáší všude — nebude tam jenom jméno, ale před
+// jménem bude fotka a pak jeho jméno."
+//
+// Kdo fotku nemá, dostane kolečko s iniciálami, ne prázdné místo ani
+// rozbitý obrázek: řádky by jinak poskakovaly podle toho, kdo fotku má.
+// Barva kolečka se odvozuje ze jména, takže je u téhož člověka pokaždé
+// stejná a dá se podle ní očima chytat.
+function fotkaHtml(url, jmeno, px) {
+  const v = px || 28
+  const zaklad = `width:${v}px;height:${v}px;border-radius:50%;flex-shrink:0;vertical-align:middle`
+  if (url) {
+    // onerror: když se fotka nenačte (smazaná z úložiště), schová se a zůstanou
+    // iniciály pod ní — ne ikona rozbitého obrázku.
+    return `<span style="display:inline-flex;position:relative;${zaklad}">
+      <span style="${zaklad};display:flex;align-items:center;justify-content:center;background:${fotkaBarva(jmeno)};color:#fff;font-size:${Math.round(v*0.4)}px;font-weight:700;position:absolute;inset:0">${escAttr(fotkaIniciraly(jmeno))}</span>
+      <img src="${escAttr(url)}" alt="" loading="lazy" style="${zaklad};object-fit:cover;position:relative" onerror="this.style.display='none'">
+    </span>`
+  }
+  return `<span style="${zaklad};display:inline-flex;align-items:center;justify-content:center;background:${fotkaBarva(jmeno)};color:#fff;font-size:${Math.round(v*0.4)}px;font-weight:700">${escAttr(fotkaIniciraly(jmeno))}</span>`
+}
+
+function fotkaIniciraly(jmeno) {
+  const c = String(jmeno || '').trim().split(/\s+/).filter(Boolean)
+  if (!c.length) return '?'
+  return (c[0][0] + (c.length > 1 ? c[c.length - 1][0] : '')).toUpperCase()
+}
+
+// Odstín z jména — pokaždé stejný. Tmavost je pevná, ať jsou bílé iniciály
+// vždycky čitelné; náhodná světlost by u některých jmen zmizela.
+function fotkaBarva(jmeno) {
+  let h = 0
+  const t = String(jmeno || '')
+  for (let i = 0; i < t.length; i++) h = (h * 31 + t.charCodeAt(i)) % 360
+  return `hsl(${h}, 42%, 42%)`
+}
+
 async function loadKWData() {
   const val = document.getElementById('kw-select')?.value
   if (!val) return
@@ -9878,7 +9915,7 @@ async function loadKWData() {
     { data: _vacs }
   ] = await Promise.all([
     sb.from('profiles')
-      .select('id, full_name, profession, team_id, subteam_id, can_track_hours, ve_vykazu')
+      .select('id, full_name, profession, team_id, subteam_id, can_track_hours, ve_vykazu, avatar_url')
       .in('role', ['osvec', 'partak'])
       .eq('is_active', true)
       .order('full_name'),
@@ -9887,7 +9924,7 @@ async function loadKWData() {
     // is_active z profilu tu potřebujeme kvůli řádkům lidí, kterým jsme mezitím
     // odebrali přístup — v seznamu výš nejsou, ale jejich hodiny se dál musí ukázat.
     sb.from('attendance')
-      .select('*, worker:profiles(full_name,profession,is_active,team_id)')
+      .select('*, worker:profiles(full_name,profession,is_active,team_id,avatar_url)')
       .eq('kw', week).eq('kw_year', year),
     // Dovolené v tomhle týdnu — ať se u dnů bez docházky ukáže „Dovolená" místo 0h.
     // Tabulka nemusí být dostupná; chybu proto spolkneme a vrátíme prázdno,
@@ -9938,7 +9975,7 @@ async function loadKWData() {
   // Inicializuj všechny pracovníky (i s 0h)
   const workers = {}
   allWorkers.forEach(w => {
-    workers[w.id] = { id: w.id, name: w.full_name, prof: w.profession,
+    workers[w.id] = { id: w.id, name: w.full_name, prof: w.profession, fotka: w.avatar_url || '',
       firm: w.team_id ? (kwTeamName[w.team_id] || '') : '',
       sub: w.subteam_id ? (kwSubteamById[w.subteam_id]?.name || '') : '',
       blocked: w.can_track_hours === false,
@@ -10088,7 +10125,7 @@ async function loadKWData() {
 
   const kwHtml = list.map(w=>`
     <tr style="cursor:pointer;height:56px" class="kw-row" data-id="${w.id||''}" data-name="${(w.name||'').replace(/"/g,'&quot;')}">
-      <td class="kw-name" title="Klikněte pro otevření profilu pracovníka" style="vertical-align:middle;overflow:hidden"><b>${w.name}</b>${w.byvaly?' <span style="font-size:10px;font-weight:700;background:var(--bg);color:var(--text3);border:1px solid var(--brd);padding:1px 6px;border-radius:8px;white-space:nowrap" title="Pracovník už do aplikace nemá přístup. Hodiny, které stihl odpracovat, zůstávají v přehledu.">📦 bývalý</span>':''}${w.mimoVykaz?' <span style="font-size:10px;font-weight:700;background:var(--bg);color:var(--red);border:1px solid var(--red);padding:1px 6px;border-radius:8px;white-space:nowrap" title="V Týmech je odškrtnutý. Tady ho vidíte i s hodinami, ale do vytištěného výkazu se nedostane — proto tam bude jiný součet.">🚫 mimo výkaz</span>':''}${w.blocked?' <span style="font-size:10px;font-weight:700;background:var(--red-l);color:var(--red);border:1px solid #e8c4ba;padding:1px 6px;border-radius:8px;white-space:nowrap" title="Pracovník má dočasně zablokované zapisování docházky">🚫 docházka zablokovaná</span>':''}${(w.firm||w.sub)?`<div style="margin-top:3px">${groupCellHtml(w.firm, w.sub)}</div>`:''}</td><td style="font-size:12px;vertical-align:middle">${profLabel(w.prof)||''}</td>
+      <td class="kw-name" title="Klikněte pro otevření profilu pracovníka" style="vertical-align:middle;overflow:hidden"><span style="display:inline-flex;align-items:center;gap:8px;min-width:0">${fotkaHtml(w.fotka, w.name)}<b style="overflow:hidden;text-overflow:ellipsis">${w.name}</b></span>${w.byvaly?' <span style="font-size:10px;font-weight:700;background:var(--bg);color:var(--text3);border:1px solid var(--brd);padding:1px 6px;border-radius:8px;white-space:nowrap" title="Pracovník už do aplikace nemá přístup. Hodiny, které stihl odpracovat, zůstávají v přehledu.">📦 bývalý</span>':''}${w.mimoVykaz?' <span style="font-size:10px;font-weight:700;background:var(--bg);color:var(--red);border:1px solid var(--red);padding:1px 6px;border-radius:8px;white-space:nowrap" title="V Týmech je odškrtnutý. Tady ho vidíte i s hodinami, ale do vytištěného výkazu se nedostane — proto tam bude jiný součet.">🚫 mimo výkaz</span>':''}${w.blocked?' <span style="font-size:10px;font-weight:700;background:var(--red-l);color:var(--red);border:1px solid #e8c4ba;padding:1px 6px;border-radius:8px;white-space:nowrap" title="Pracovník má dočasně zablokované zapisování docházky">🚫 docházka zablokovaná</span>':''}${(w.firm||w.sub)?`<div style="margin-top:3px">${groupCellHtml(w.firm, w.sub)}</div>`:''}</td><td style="font-size:12px;vertical-align:middle">${profLabel(w.prof)||''}</td>
       ${dayCell(w,1)}${dayCell(w,2)}${dayCell(w,3)}${dayCell(w,4)}${dayCell(w,5)}${dayCell(w,6)}${dayCell(w,7)}
       <td style="vertical-align:middle"><b style="color:var(--blue)">${w.total.toFixed(1)}h</b></td>
     </tr>`).join('')
@@ -13204,7 +13241,7 @@ async function loadWorkerInvoices() {
   // Kód z CRM a barvu bereme živě z profilu — barva je vlastnost pracovníka,
   // ne dokladu, takže když se přidělí jinak, projeví se to i u starších faktur.
   let { data, error } = await sb.from('worker_invoices')
-    .select('*, worker:profiles(full_name, profession, crm_code, invoice_color, can_track_hours, is_active, invoice_design, team_id)')
+    .select('*, worker:profiles(full_name, profession, crm_code, invoice_color, can_track_hours, is_active, invoice_design, team_id, avatar_url)')
     .order('sent_at', { ascending: false })
   if (error) {
     // Bez spuštěné migrace sloupce chybí — načti aspoň to, co bylo dřív,
@@ -13383,7 +13420,7 @@ function renderWorkerInvoices() {
     }
     return oddelovac + `
     <tr>
-      <td style="border-left:5px solid ${barva || 'transparent'}"><b>${escAttr(r.worker?.full_name || r.supplier_name || '—')}</b>${r.supplier_name && r.worker?.full_name && r.supplier_name !== r.worker.full_name ? `<div style="font-size:11px;color:var(--text3)">${escAttr(r.supplier_name)}</div>` : ''}</td>
+      <td style="border-left:5px solid ${barva || 'transparent'}"><span style="display:inline-flex;align-items:center;gap:8px;min-width:0">${fotkaHtml(r.worker?.avatar_url, r.worker?.full_name || r.supplier_name)}<b style="overflow:hidden;text-overflow:ellipsis">${escAttr(r.worker?.full_name || r.supplier_name || '—')}</b></span>${r.supplier_name && r.worker?.full_name && r.supplier_name !== r.worker.full_name ? `<div style="font-size:11px;color:var(--text3)">${escAttr(r.supplier_name)}</div>` : ''}</td>
       <td style="font-weight:700;white-space:nowrap">${escAttr(r.invoice_number || '—')}${kod ? `<div style="font-size:11.5px;font-weight:800;letter-spacing:.03em;color:${barva || 'var(--text3)'}">${escAttr(kod)}</div>` : ''}${
         // V JAKÉM VZHLEDU JE TAHLE FAKTURA VYSTAVENÁ. Je to údaj o už
         // vystaveném dokladu, ne nastavení — proto se tu nedá měnit.
