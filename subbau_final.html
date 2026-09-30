@@ -8255,12 +8255,25 @@ async function renderProvizeContent() {
     }
   }
 
-  // Poslední skupina, ve které pracovník v zobrazeném měsíci opravdu odpracoval den.
-  ;(att || []).forEach(a => {
-    if (!a.team_id || a.work_date < mStartStr || a.work_date > mEndStr) return
-    const d = teamZDochazky[a.worker_id]
-    if (!d || a.work_date >= d.den) teamZDochazky[a.worker_id] = { den: a.work_date, team: a.team_id }
-  })
+  // Poslední skupina, ve které pracovník v ZOBRAZENÉM OBDOBÍ opravdu odpracoval
+  // den (den / týden / měsíc podle přepínače). Audit 30. 9. 2026: dřív se brala
+  // vždycky poslední skupina měsíce — kdo byl celý týden u firmy A a další týden
+  // u B, měl v týdnu A provizi (i splatnost a „uhrazeno") připsanou firmě B.
+  // Když v období nedělal, bere se měsíc a pak dnešní zařazení jako dřív.
+  const [obdOd, obdDo] = provizeMode === 'day' ? [dStartStr, dEndStr]
+    : provizeMode === 'month' ? [mStartStr, mEndStr] : [wStartStr, wEndStr]
+  const posledniVObdobi = (od, doo) => {
+    const mapa = {}
+    ;(att || []).forEach(a => {
+      if (!a.team_id || a.work_date < od || a.work_date > doo) return
+      const d = mapa[a.worker_id]
+      if (!d || a.work_date >= d.den) mapa[a.worker_id] = { den: a.work_date, team: a.team_id }
+    })
+    return mapa
+  }
+  const _vObdobi = posledniVObdobi(obdOd, obdDo)
+  const _vMesici = posledniVObdobi(mStartStr, mEndStr)
+  Object.assign(teamZDochazky, _vMesici, _vObdobi)
 
   // Sazba platná v konkrétní den. Historie je seřazená od nejstarší; hledá se
   // poslední záznam, který začal platit nejpozději ten den. Když u pracovníka
