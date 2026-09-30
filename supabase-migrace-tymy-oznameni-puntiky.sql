@@ -104,6 +104,15 @@ comment on table public.puntiky is
 
 create index if not exists puntiky_worker_idx on public.puntiky (worker_id, work_date);
 
+-- Srážka za trojici puntíků. Zapíše se k puntíku, který trojici dovršil —
+-- podle toho appka pozná, za které trojice už se odečítalo a za které ne.
+-- Samotné peníze jdou přes stávající „ručně nastavenou částku" u dne
+-- (attendance.vyplata_castka), tu respektuje faktura pracovníka i provize.
+alter table public.puntiky add column if not exists srazka_den date;
+alter table public.puntiky add column if not exists srazka_zapsana_v timestamptz;
+comment on column public.puntiky.srazka_den is
+  'Den, ze kterého se za tuhle trojici puntíků odečetly 2 hodiny.';
+
 -- PRÁVA. Nová tabulka dostane od Supabase plná práva všem rolím, proto
 -- se nejdřív VŠECHNO odebere a teprve pak se pustí dovnitř politikami.
 revoke all on public.puntiky from anon, authenticated, public;
@@ -187,7 +196,7 @@ comment on column public.profiles.ubytovani_adresa is
 commit;
 
 -- ── Co se má vypsat ──────────────────────────────────────────────────
--- Pošlete mi ten výpis celý. Řádky „sloupec:" musí být ŠEST, „funkce"
+-- Pošlete mi ten výpis celý. Řádky „sloupec:" musí být OSM, „funkce"
 -- jedna, tabulky puntiky a ubytovani_kody po DVOU pravidlech, „kódy
 -- zbylé v profilech" 0 a „adresy: zdvojené, které se LIŠÍ" ideálně 0. Poslední řádky ukážou, jak jsou
 -- nastavená pravidla ČTENÍ profilů — to potřebuju vidět.
@@ -196,7 +205,8 @@ select 'sloupec: ' || table_name || '.' || column_name as co, data_type as podro
  where table_schema = 'public'
    and ((table_name = 'teams' and column_name in ('zapis_jen_gps','prac_doba_od','prac_doba_do'))
      or (table_name = 'notifications' and column_name in ('vyzaduje_potvrzeni','potvrzeno_v'))
-     or (table_name = 'attendance' and column_name = 'odchylka_ok'))
+     or (table_name = 'attendance' and column_name = 'odchylka_ok')
+     or (table_name = 'puntiky' and column_name in ('srazka_den','srazka_zapsana_v')))
 union all
 select 'funkce muj_zapis_jen_gps', 'ANO'
   from pg_proc where proname = 'muj_zapis_jen_gps' and pronamespace = 'public'::regnamespace

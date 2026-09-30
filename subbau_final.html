@@ -2930,6 +2930,7 @@ setTimeout(function () {
             <button onclick="saveWorkerTurnus()" style="padding:8px 14px;background:#211D1A;color:#E8A13A;border:none;border-radius:8px;cursor:pointer;font-family:inherit;font-weight:700;font-size:12px"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:1em;height:1em;flex-shrink:0;vertical-align:-2px"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><path d="M17 21v-8H7v8M7 3v5h8"/></svg> Uložit</button>
           </div>
         </div>
+        <div id="wd-puntiky"></div>
         <div style="display:flex;gap:8px;margin-bottom:12px;align-items:center">
           <label style="font-size:12px;color:var(--text2)">Týden:</label>
           <select id="wd-kw-sel" onchange="loadWdAttendance()" style="padding:5px 10px;border:1px solid var(--brd);border-radius:7px;font-size:12px;width:auto"></select>
@@ -10198,6 +10199,8 @@ async function loadTodayTimeline() {
               <td class="td-open" style="padding:10px;cursor:pointer;font-size:12px;color:var(--text2);max-width:240px;line-height:1.4">${addrCell}</td>
               <td class="td-open" style="padding:10px;cursor:pointer;font-size:12px;color:var(--text2);max-width:220px">${escAttr(desc)}</td>
               <td style="padding:10px;text-align:center">
+                <button onclick="event.stopPropagation();pridatPuntik('${g.worker_id}', '${today}', '${safeName}')" title="Dát černý puntík"
+                  style="background:none;border:1px solid var(--brd);border-radius:6px;padding:5px 8px;cursor:pointer;margin-right:4px;min-height:32px">⚫</button>
                 <button onclick="deleteTodayRecord('${g.ids.join(',')}','${safeName}')" title="Smazat dnešní docházku" style="background:none;border:1px solid var(--brd);border-radius:6px;padding:5px 9px;cursor:pointer;color:var(--red);font-family:inherit"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:1em;height:1em;flex-shrink:0;vertical-align:-2px"><path d="M3 6h18M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6M14 11v6"/></svg> </button>
               </td>
             </tr>`
@@ -19604,9 +19607,13 @@ function loadMobProfil(profile) {
       </div>
       ${[['Tým',profile.team?.name||'—'],['Lokace',profile.team?.location||'—']].map(([l,v])=>`
       <div style="display:flex;justify-content:space-between;padding:9px 0;border-bottom:1px solid var(--brd)"><span style="font-size:12px;color:var(--text3)">${l}</span><span style="font-size:13px;font-weight:600;color:#211D1A">${v}</span></div>`).join('')}
+      <div id="mob-puntiky"></div>
       ${(isMobile() && !isAppInstalled()) ? `
       <button onclick="installApp()" style="width:100%;margin-top:14px;padding:12px;background:#f4efe7;color:#211D1A;border:1.5px solid var(--brd);border-radius:10px;font-size:13px;font-weight:700;cursor:pointer;font-family:inherit;display:flex;align-items:center;justify-content:center;gap:8px"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:1em;height:1em;flex-shrink:0"><rect x="5" y="2" width="14" height="20" rx="2"/><path d="M12 18h.01"/></svg> Stáhnout aplikaci do telefonu</button>` : ''}
     </div>`
+
+  // Moje černé puntíky — dotáhnou se zvlášť.
+  nactiMojePuntiky(profile)
 
   // Fakturační pole žijí v sekci Faktury — překresli je, ať sedí s profilem
   // (SubBau mohl mezitím změnit sazbu nebo splatnost).
@@ -32120,6 +32127,229 @@ function odchylkaBtn(ids, kam) {
     style="margin-left:6px;min-height:32px;padding:3px 9px;border:1px solid #1d4ed8;border-radius:7px;background:#fff;color:#1d4ed8;font-size:11px;font-weight:800;cursor:pointer;font-family:inherit">✓ v pořádku</button>`
 }
 
+// ═══ ČERNÉ PUNTÍKY ═══════════════════════════════════════════════════════
+// Majitel 30. 9. 2026 (zadání od vedení): „u každého člověka při docházce můžu
+// zaznamenat černý puntík. Když nasbírají 3, bude jim odečteno 2 hodiny z jejich
+// aktuálního pracovního dne. Když se nasbírají, ať mi to upozorní; puntíky
+// všechny uvidím v profilu toho člověka; může je vidět i ten sám."
+//
+// ODEČET 2 H JEN PO POTVRZENÍ SPRÁVCEM — jde o peníze. A jde STÁVAJÍCÍ cestou:
+// u dne se nastaví „ručně nastavená částka" (attendance.vyplata_castka) na
+// (hodiny − 2) × sazba toho dne, s poznámkou. Tu už respektuje faktura
+// pracovníka (hodinyPodleSazeb) i jeho výdělek v Provizích, a odběratel ji
+// nevidí — jeho hodiny ve výkazu zůstávají, jak byly odpracované. Nový výpočet
+// peněz tím nevzniká. Kterou trojici už se odečítalo, pozná appka podle
+// puntíku, který ji dovršil (srazka_den / srazka_zapsana_v).
+const PUNTIKY_NA_SRAZKU = 3
+const SRAZKA_HODIN = 2
+// Poznámka se skládá z čísel výš — kdyby se změnila, nesmí u dne zůstat lživé „2 h".
+const SRAZKA_POZNAMKA = 'Srážka ' + SRAZKA_HODIN + ' h — ' + PUNTIKY_NA_SRAZKU + ' černé puntíky'
+
+function puntikyStav(seznam) {
+  const s = (seznam || []).slice().sort((a, b) => String(a.vytvoreno_v || '').localeCompare(String(b.vytvoreno_v || '')))
+  const trojic = Math.floor(s.length / PUNTIKY_NA_SRAZKU)
+  const provedeno = s.filter(p => p.srazka_zapsana_v).length
+  // Puntík, který dovršil nejstarší trojici bez srážky — k němu se srážka zapíše.
+  const dovrsil = provedeno < trojic ? s[(provedeno + 1) * PUNTIKY_NA_SRAZKU - 1] : null
+  return { seznam: s, pocet: s.length, trojic, provedeno, ceka: Math.max(0, trojic - provedeno), dovrsil }
+}
+
+async function nactiPuntiky(workerId) {
+  const { data, error } = await sb.from('puntiky').select('*').eq('worker_id', workerId)
+  if (error) return { chyba: error }
+  return { seznam: data || [] }
+}
+
+function jeChybiPuntiky(e) { return /puntiky|does not exist|schema cache|PGRST205|42P01/i.test((e && (e.message || e.code)) || '') }
+
+// Přidání s důvodem — okno z JavaScriptu (osm „</body>" v souboru).
+async function pridatPuntik(workerId, den, jmeno) {
+  if (!workerId) return
+  const ov = document.createElement('div')
+  ov.id = 'puntik-overlay'
+  ov.style.cssText = 'position:fixed;inset:0;z-index:100000;background:rgba(20,17,15,.6);display:flex;align-items:flex-start;justify-content:center;overflow-y:auto;padding:20px'
+  ov.innerHTML = `
+    <div style="background:#fff;border-radius:16px;max-width:460px;width:100%;margin:auto;box-shadow:0 24px 80px rgba(0,0,0,.4);overflow:hidden">
+      <div style="background:#211D1A;padding:14px 18px;color:#fff">
+        <div style="font-size:16px;font-weight:800">⚫ Černý puntík</div>
+        <div style="font-size:12px;color:rgba(255,255,255,.7)">${escAttr(jmeno || '')}</div>
+      </div>
+      <div style="padding:16px 18px">
+        <label style="display:block;font-size:12px;font-weight:700;color:#6b6157;margin-bottom:6px">Den</label>
+        <input id="puntik-den" type="date" value="${escAttr(den || localDateStr())}"
+          style="width:100%;min-height:44px;padding:9px;border:1.5px solid var(--brd);border-radius:10px;font-family:inherit;margin-bottom:12px">
+        <label style="display:block;font-size:12px;font-weight:700;color:#6b6157;margin-bottom:6px">Za co (uvidí to i pracovník)</label>
+        <input id="puntik-duvod" type="text" maxlength="300" placeholder="Pozdní příchod, nepořádek na stavbě…"
+          style="width:100%;min-height:44px;padding:10px;border:1.5px solid var(--brd);border-radius:10px;font-family:inherit;font-size:14px">
+        <div style="display:flex;gap:10px;margin-top:14px">
+          <button id="puntik-zrus" style="flex:1;min-height:44px;border-radius:12px;border:2px solid var(--brd);background:#fff;font-weight:700;font-family:inherit;cursor:pointer">Zrušit</button>
+          <button id="puntik-uloz" style="flex:1;min-height:44px;border-radius:12px;border:none;background:#211D1A;color:#E8A13A;font-weight:800;font-family:inherit;cursor:pointer">Dát puntík</button>
+        </div>
+      </div>
+    </div>`
+  document.body.appendChild(ov)
+  const zavri = () => ov.remove()
+  ov.querySelector('#puntik-zrus').onclick = zavri
+  ov.onclick = (e) => { if (e.target === ov) zavri() }
+  setTimeout(() => { try { ov.querySelector('#puntik-duvod').focus() } catch (e) {} }, 60)
+  ov.querySelector('#puntik-uloz').onclick = async () => {
+    const duvod = ov.querySelector('#puntik-duvod').value.trim()
+    const denV = ov.querySelector('#puntik-den').value || localDateStr()
+    if (!duvod) { showToast('⚫ Napište, za co puntík je'); return }
+    const btn = ov.querySelector('#puntik-uloz'); btn.disabled = true; btn.textContent = 'Ukládám…'
+    const ok = await ulozPuntik(workerId, denV, duvod, jmeno)
+    btn.disabled = false; btn.textContent = 'Dát puntík'
+    if (ok) zavri()
+  }
+}
+
+async function ulozPuntik(workerId, den, duvod, jmeno) {
+  const { data, error } = await sb.from('puntiky')
+    .insert({ worker_id: workerId, work_date: den, duvod, zadal: currentUser?.id || null }).select('id')
+  if (error || !data || !data.length) {
+    showToast(error && jeChybiPuntiky(error)
+      ? '❌ Puntíky zatím nejdou — spusťte migraci supabase-migrace-tymy-oznameni-puntiky.sql'
+      : '❌ Puntík se neuložil' + (error ? ': ' + error.message : ' — zkontrolujte oprávnění'))
+    return false
+  }
+  const n = await nactiPuntiky(workerId)
+  const st = puntikyStav(n.seznam)
+  if (st.ceka > 0 && st.pocet % PUNTIKY_NA_SRAZKU === 0) {
+    // UPOZORNĚNÍ — přesně při 3., 6., 9. puntíku. Odečet se nabídne, ne provede.
+    showToast('⚫ ' + (jmeno || 'Pracovník') + ' má ' + st.pocet + ' černé puntíky — navržená srážka 2 h')
+    if (confirm((jmeno || 'Pracovník') + ' nasbíral(a) ' + PUNTIKY_NA_SRAZKU + ' černé puntíky (celkem ' + st.pocet + ').\n\n'
+        + 'Odečíst ' + SRAZKA_HODIN + ' hodiny z jeho/jejího pracovního dne ' + new Date(den + 'T00:00:00').toLocaleDateString('cs-CZ') + '?\n\n'
+        + '• OK = ukážu přesná čísla a zeptám se ještě jednou\n• Zrušit = teď ne (jde to udělat později v kartě pracovníka)')) {
+      await odecistSrazku(workerId, den, jmeno)
+    }
+  } else {
+    showToast('⚫ Puntík zapsán (' + st.pocet + ' z ' + (st.trojic * PUNTIKY_NA_SRAZKU + PUNTIKY_NA_SRAZKU) + ')')
+  }
+  if (typeof nactiPuntikyKarta === 'function' && currentWorkerId === workerId) nactiPuntikyKarta()
+  return true
+}
+
+async function smazatPuntik(id, workerId) {
+  if (!confirm('Smazat tenhle puntík?\n\nSrážka, která už se za trojici zapsala, zůstane — tu je případně potřeba vrátit v úpravě dne.')) return
+  const { data, error } = await sb.from('puntiky').delete().eq('id', id).select('id')
+  if (error || !data || !data.length) {
+    showToast('❌ Puntík se nesmazal' + (error ? ': ' + error.message : ' — zkontrolujte oprávnění'))
+    return
+  }
+  showToast('🗑 Puntík smazán')
+  if (currentWorkerId === workerId) nactiPuntikyKarta()
+}
+
+// ODEČET 2 H — přes „ručně nastavenou částku" dne. Ukáže čísla a ptá se
+// ještě jednou. Nikdy nepřepíše částku, kterou u dne ručně nastavil správce.
+async function odecistSrazku(workerId, den, jmeno) {
+  const { data: dny, error } = await sb.from('attendance').select('*').eq('worker_id', workerId).eq('work_date', den)
+  if (error) { showToast('❌ Docházku dne se nepodařilo načíst: ' + error.message); return false }
+  const uzavrene = (dny || []).filter(r => r.check_out && Number(r.total_hours) > 0)
+  if (!uzavrene.length) {
+    showToast('⚫ Den ' + new Date(den + 'T00:00:00').toLocaleDateString('cs-CZ') + ' nemá uzavřenou docházku — srážku jde zapsat, až pracovník odejde (v jeho kartě u puntíků)')
+    return false
+  }
+  // Víc směn za den: odečte se z té nejdelší — ať se hodiny nerozbíjejí po kouscích.
+  const r = uzavrene.slice().sort((a, b) => Number(b.total_hours) - Number(a.total_hours))[0]
+  if (r.vyplata_castka != null && r.vyplata_castka !== '') {
+    showToast('⚠️ U toho dne už je ručně nastavená částka (' + r.vyplata_castka + ' €) — upravte ji v úpravě dne, ať se nic nepřepíše')
+    return false
+  }
+  let sazba = 0
+  try {
+    const { data: p } = await sb.from('profiles').select('hourly_rate_worker').eq('id', workerId).maybeSingle()
+    const kDni = await sazbyPracovnika(workerId, 'sazba', parseFloat(p?.hourly_rate_worker) || 0)
+    sazba = Number(kDni(den)) || 0
+  } catch (e) { sazba = 0 }
+  if (!(sazba > 0)) { showToast('⚠️ Pracovník nemá hodinovou sazbu — srážku nejde spočítat'); return false }
+  const h = Number(r.total_hours) || 0
+  const hPo = Math.max(0, Math.round((h - SRAZKA_HODIN) * 100) / 100)
+  const castka = Math.round(hPo * sazba * 100) / 100
+  const eur = (x) => x.toLocaleString('cs-CZ', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + ' €'
+  if (!confirm('Srážka ' + SRAZKA_HODIN + ' h — ' + (jmeno || '') + ', ' + new Date(den + 'T00:00:00').toLocaleDateString('cs-CZ') + '\n\n'
+      + 'Teď: ' + h + ' h × ' + eur(sazba) + ' = ' + eur(h * sazba) + '\n'
+      + 'Po srážce: ' + hPo + ' h × ' + eur(sazba) + ' = ' + eur(castka) + '\n\n'
+      + 'Zapíše se jako ručně nastavená částka dne. Odběratel dál vidí odpracované hodiny beze změny.')) return false
+  const { data: z, error: ez } = await sb.from('attendance')
+    .update({ vyplata_castka: castka, vyplata_poznamka: SRAZKA_POZNAMKA }).eq('id', r.id).select('id, vyplata_castka')
+  if (ez || !z || !z.length || Number(z[0].vyplata_castka) !== castka) {
+    showToast('❌ Srážka se nezapsala' + (ez ? ': ' + ez.message : ' — zkontrolujte oprávnění'))
+    return false
+  }
+  // Označit trojici. Když se to nepodaří, srážka UŽ PLATÍ — musí se to říct,
+  // jinak by appka nabídla srážku za tutéž trojici znovu.
+  const n = await nactiPuntiky(workerId)
+  const st = puntikyStav(n.seznam)
+  if (st.dovrsil) {
+    const { data: m, error: em } = await sb.from('puntiky')
+      .update({ srazka_den: den, srazka_zapsana_v: new Date().toISOString() }).eq('id', st.dovrsil.id).select('id')
+    if (em || !m || !m.length) {
+      showToast('⚠️ Srážka zapsaná, ale u puntíků se neoznačila — NEODEČÍTEJTE ji znovu. ' + (em ? em.message : ''))
+      return true
+    }
+  }
+  showToast('✅ Srážka ' + SRAZKA_HODIN + ' h zapsaná (' + eur(castka) + ' za den)')
+  if (currentWorkerId === workerId) { nactiPuntikyKarta(); if (typeof loadWdAttendance === 'function') loadWdAttendance() }
+  return true
+}
+
+// Panel v kartě pracovníka (záložka Docházka).
+async function nactiPuntikyKarta() {
+  const el = document.getElementById('wd-puntiky')
+  if (!el || !currentWorkerId) return
+  const wid = currentWorkerId
+  const jmeno = currentWorkerProfile?.full_name || ''
+  const n = await nactiPuntiky(wid)
+  if (wid !== currentWorkerId) return   // mezitím se otevřel jiný pracovník
+  if (n.chyba) {
+    el.innerHTML = jeChybiPuntiky(n.chyba)
+      ? `<div style="margin-bottom:12px;font-size:12px;color:var(--amber);font-weight:700">⚫ Černé puntíky — spusťte migraci supabase-migrace-tymy-oznameni-puntiky.sql</div>`
+      : ''
+    return
+  }
+  const st = puntikyStav(n.seznam)
+  const dnes = localDateStr()
+  el.innerHTML = `<div style="margin-bottom:12px;padding:12px 14px;border:1.5px solid ${st.ceka ? 'var(--amber)' : 'var(--brd)'};border-radius:12px;background:${st.ceka ? 'var(--amber-l,#faf0dc)' : '#fff'}">
+    <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+      <b style="font-size:14px">⚫ Černé puntíky: ${st.pocet}</b>
+      <span style="font-size:12px;color:var(--text3)">${st.provedeno ? 'srážek už: ' + st.provedeno + ' · ' : ''}do další srážky: ${PUNTIKY_NA_SRAZKU - (st.pocet % PUNTIKY_NA_SRAZKU)}</span>
+      <button onclick="pridatPuntik('${wid}', '${dnes}', ${escAttr(JSON.stringify(jmeno))})"
+        style="margin-left:auto;min-height:40px;padding:8px 12px;border-radius:9px;border:none;background:#211D1A;color:#E8A13A;font-weight:800;font-family:inherit;cursor:pointer">+ Dát puntík</button>
+    </div>
+    ${st.ceka ? `<div style="margin-top:10px;font-size:13px;font-weight:700;color:#8a5a00">Nasbíral(a) ${PUNTIKY_NA_SRAZKU} puntíky — navržená srážka ${SRAZKA_HODIN} h čeká.
+      <button onclick="odecistSrazku('${wid}', '${st.dovrsil ? escAttr(String(st.dovrsil.work_date).slice(0, 10)) : dnes}', ${escAttr(JSON.stringify(jmeno))})"
+        style="margin-left:6px;min-height:36px;padding:6px 11px;border-radius:8px;border:1.5px solid #8a5a00;background:#fff;color:#8a5a00;font-weight:800;font-family:inherit;cursor:pointer">Odečíst ${SRAZKA_HODIN} h</button></div>` : ''}
+    ${st.pocet ? `<div style="margin-top:10px;display:flex;flex-direction:column;gap:4px">${st.seznam.slice().reverse().map(p => `
+      <div style="display:flex;align-items:center;gap:8px;font-size:12.5px;padding:5px 0;border-top:1px dashed var(--brd)">
+        <span style="color:var(--text3);white-space:nowrap">${escAttr(new Date(String(p.work_date).slice(0, 10) + 'T00:00:00').toLocaleDateString('cs-CZ'))}</span>
+        <span style="flex:1">${escAttr(p.duvod || '—')}${p.srazka_zapsana_v ? ' <b style="color:#8a5a00">· srážka ' + escAttr(new Date(String(p.srazka_den).slice(0, 10) + 'T00:00:00').toLocaleDateString('cs-CZ')) + '</b>' : ''}</span>
+        <button onclick="smazatPuntik('${p.id}', '${wid}')" title="Smazat (omylem přidaný)"
+          style="min-height:32px;padding:3px 8px;border:1px solid var(--brd);border-radius:7px;background:#fff;cursor:pointer;font-family:inherit">🗑</button>
+      </div>`).join('')}</div>` : ''}
+  </div>`
+}
+
+// U pracovníka v profilu — jen ke čtení. RLS mu vydá jen jeho puntíky.
+async function nactiMojePuntiky(profile) {
+  const el = document.getElementById('mob-puntiky')
+  if (!el || !profile?.id) return
+  let seznam = []
+  try {
+    const { data, error } = await sb.from('puntiky').select('work_date, duvod, srazka_den, srazka_zapsana_v, vytvoreno_v').eq('worker_id', profile.id)
+    if (!error) seznam = data || []
+  } catch (e) {}
+  if (!seznam.length) { el.innerHTML = ''; return }
+  const st = puntikyStav(seznam)
+  el.innerHTML = `<div style="margin-top:14px;padding:12px 14px;border-radius:12px;background:#f4efe7;border:1px solid var(--brd)">
+    <div style="font-size:13px;font-weight:800;color:#211D1A">⚫ Moje černé puntíky: ${st.pocet}</div>
+    <div style="font-size:12px;color:var(--text2);margin:3px 0 8px">Za každé ${PUNTIKY_NA_SRAZKU} puntíky se odečítají ${SRAZKA_HODIN} hodiny.</div>
+    ${st.seznam.slice().reverse().map(p => `<div style="font-size:13px;padding:5px 0;border-top:1px dashed var(--brd)">
+      <span style="color:var(--text3)">${escAttr(new Date(String(p.work_date).slice(0, 10) + 'T00:00:00').toLocaleDateString('cs-CZ'))}</span> — ${escAttr(p.duvod || '—')}
+      ${p.srazka_zapsana_v ? '<b style="color:#8a5a00"> · srážka ' + SRAZKA_HODIN + ' h</b>' : ''}</div>`).join('')}
+  </div>`
+}
+
 // Helper pro zobrazení s příznakem
 function flagBadge(flag, text) {
   const badges = {
@@ -32235,6 +32465,7 @@ function attOriginBadge(r) {
 
 async function loadWdAttendance() {
   if(!currentWorkerId) return
+  nactiPuntikyKarta()
   const val = document.getElementById('wd-kw-sel').value
   const [week,year] = val.split('-').map(Number)
   const { data } = await sb.from('attendance').select('*').eq('worker_id',currentWorkerId).eq('kw',week).eq('kw_year',year).order('work_date')
