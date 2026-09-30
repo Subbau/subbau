@@ -4613,19 +4613,26 @@ async function submitAdminSignatureWithPlacement() {
     if (dbErr) throw new Error('DB error: ' + dbErr.message)
 
     // 7. Notifikace pracovníkovi — jen u běžného admin podpisu (ne když admin podepsal za OSVČ)
+    let zpravaNeodesla = false
     if (!isForWorker) {
       const { data: cont } = await sb.from('contracts').select('worker_id,title').eq('id', pdfSignState.contractId).maybeSingle()
       if (cont) {
-        await sb.from('notifications').insert({
+        // Text zprávy je prostý text — escapuje se až při zobrazení (jinak by
+        // pracovník viděl „&amp;" místo „&").
+        const { error: chybaOzn } = await sb.from('notifications').insert({
           worker_id: cont.worker_id,
           title: '✍️ Smlouva čeká na Váš podpis',
-          message: `Smlouva "${escAttr(cont.title)}" byla podepsána adminem. Přejděte do sekce Smlouvy a podepište ji.`,
+          message: `Smlouva "${cont.title || ''}" byla podepsána adminem. Přejděte do sekce Smlouvy a podepište ji.`,
           type: 'smlouva', is_read: false
         })
+        if (chybaOzn) zpravaNeodesla = true
       }
     }
 
-    showToast(isForWorker ? '✅ Podpis za OSVČ uložen do smlouvy!' : '✅ Podpis vložen do PDF a odeslán pracovníkovi!')
+    showToast(isForWorker ? '✅ Podpis za OSVČ uložen do smlouvy!'
+      : (zpravaNeodesla
+        ? '✅ Podpis vložen do PDF — ale zprávu pracovníkovi se nepodařilo poslat, dejte mu vědět'
+        : '✅ Podpis vložen do PDF a odeslán pracovníkovi!'))
     closeAdminSignModal()
     loadAdminContracts()
     if (typeof currentWorkerId !== 'undefined' && currentWorkerId && typeof loadWdContracts === 'function') loadWdContracts(currentWorkerId)
@@ -14697,13 +14704,13 @@ async function saveInvoiceEdit() {
 
   let bezPuvodni = false
   let bezVzhledu = false
-  let { error } = await sb.from('worker_invoices').update(upd).eq('id', r.id)
+  let { data: zapsanoF, error } = await sb.from('worker_invoices').update(upd).eq('id', r.id).select('id')
   // Sloupec se vzhledem ještě nemusí být v databázi. PDF už je přepsané správně,
   // takže zálohu ulož i bez něj a řekni nahlas, co chybí.
   if (error && /zalohy_pouzite/i.test(error.message || '')) {
     // Nespuštěná migrace — fakturu kvůli tomu neblokuj.
     delete upd.zalohy_pouzite
-    ;({ error } = await sb.from('worker_invoices').update(upd).eq('id', r.id))
+    ;({ data: zapsanoF, error } = await sb.from('worker_invoices').update(upd).eq('id', r.id).select('id'))
   }
   // Sloupec cash_paid_typ nemusí být v databázi (nespuštěná migrace). PDF je
   // přepsané správně, jen si appka nezapamatuje, že šlo o zálohu na účet —
@@ -14712,12 +14719,12 @@ async function saveInvoiceEdit() {
   if (error && /cash_paid_typ/i.test(error.message || '')) {
     bezTypuZalohy = true
     delete upd.cash_paid_typ
-    ;({ error } = await sb.from('worker_invoices').update(upd).eq('id', r.id))
+    ;({ data: zapsanoF, error } = await sb.from('worker_invoices').update(upd).eq('id', r.id).select('id'))
   }
   if (error && /design_idx/i.test(error.message || '')) {
     bezVzhledu = true
     delete upd.design_idx
-    ;({ error } = await sb.from('worker_invoices').update(upd).eq('id', r.id))
+    ;({ data: zapsanoF, error } = await sb.from('worker_invoices').update(upd).eq('id', r.id).select('id'))
   }
   // Sloupce na původní verzi ještě nemusí být v databázi. Fakturu kvůli tomu
   // neblokuj — zálohu ulož i bez nich a řekni nahlas, co chybí.
@@ -14725,7 +14732,7 @@ async function saveInvoiceEdit() {
     bezPuvodni = true
     delete upd.original_pdf_url
     delete upd.original_pdf_path
-    ;({ error } = await sb.from('worker_invoices').update(upd).eq('id', r.id))
+    ;({ data: zapsanoF, error } = await sb.from('worker_invoices').update(upd).eq('id', r.id).select('id'))
   }
   // Na číslo je v databázi unikátní index. Kdyby ho mezitím obsadila jiná
   // faktura, ať admin nečte hlášku z Postgresu, ale ví, co má udělat.
@@ -14742,6 +14749,10 @@ async function saveInvoiceEdit() {
     return
   }
   if (error) { finish('❌ Uložení selhalo: ' + error.message); return }
+  // Zápis bez chyby, který netrefil fakturu (mezitím smazaná, práva) — dřív
+  // appka hlásila „záloha zapsána, PDF přepsáno" a „uhrazeno" přesunula na
+  // nový týden, i když faktura v databázi zůstala stará (audit 30. 9. 2026).
+  if (!zapsanoF || !zapsanoF.length) { finish('❌ Faktura se neuložila — mezitím se změnila nebo na to chybí oprávnění. Načtěte faktury znovu.'); return }
 
   // Původní PDF se NEMAŽE — drží se jako doklad. Uklidí se jen předchozí přepsaná
   // verze, ať se ve složce nehromadí. Když se původní verzi nepodařilo zaevidovat,
@@ -16426,10 +16437,13 @@ async function setTeamCompany(teamId, companyId) {
   if (cid) {
     // Přepiš odběratele u všech členů týmu podle nové firmy
     const members = _workersCache.filter(w => String(w.team_id) === String(teamId))
+    let nepovedlo = 0
     for (const m of members) {
-      await fillInvoiceCustomerFromTeam(m.id, teamId)
+      if (!(await fillInvoiceCustomerFromTeam(m.id, teamId))) nepovedlo++
     }
-    showToast('✅ Firma navázána, fakturace členů aktualizována')
+    showToast(nepovedlo
+      ? '⚠️ Firma navázána, ale u ' + nepovedlo + ' z ' + members.length + ' lidí se odběratel faktur nepřepsal — zkontrolujte je'
+      : '✅ Firma navázána, fakturace členů aktualizována')
   } else {
     showToast('Firma odpojena od týmu')
   }
@@ -16469,8 +16483,8 @@ async function addToTeam(workerId, teamId) {
   const { error } = await updateWorkerTeam(workerId, teamId)
   if (error) { showToast('Chyba: ' + error.message); return }
   await logTeamAssignment(workerId, teamId)
-  await fillInvoiceCustomerFromTeam(workerId, teamId)
-  showToast('Přidáno do skupiny!')
+  const odberatelOk = await fillInvoiceCustomerFromTeam(workerId, teamId)
+  showToast(odberatelOk ? 'Přidáno do skupiny!' : '⚠️ Přidáno do skupiny' + ODBERATEL_NEPREPSAN)
   loadUnassignedForModal()
   loadTeams()
 }
@@ -16509,8 +16523,8 @@ async function assignToTeam(workerId, teamId) {
   const { error } = await updateWorkerTeam(workerId, teamId)
   if (error) { showToast('Chyba: ' + error.message); return }
   await logTeamAssignment(workerId, teamId)
-  await fillInvoiceCustomerFromTeam(workerId, teamId)
-  showToast('Prirazen do skupiny!')
+  const odberatelOk = await fillInvoiceCustomerFromTeam(workerId, teamId)
+  showToast(odberatelOk ? 'Prirazen do skupiny!' : '⚠️ Přiřazen do skupiny' + ODBERATEL_NEPREPSAN)
   loadTeams()
 }
 
@@ -16535,19 +16549,26 @@ async function closeTeamAssignment(workerId) {
 // Když pracovníka přiřadíme do týmu, předvyplní se mu odběratel faktury
 // podle firmy navázané na tým (tým má přednost — přepíše dosavadní odběratele).
 async function fillInvoiceCustomerFromTeam(workerId, teamId) {
+  // Audit 30. 9. 2026: žádný krok tu nečetl chybu — při přestupu do jiné firmy
+  // appka ohlásila „Přidáno do skupiny!" a faktury dál chodily staré firmě.
+  // Vrací false, když se odběratele přepsat nepodařilo; hlášku dá volající.
   try {
-    const { data: team } = await sb.from('teams').select('company_id').eq('id', teamId).maybeSingle()
-    if (!team || !team.company_id) return  // tým nemá navázanou firmu → nic neměníme
-    const { data: c } = await sb.from('companies').select('name, ico, dic, address').eq('id', team.company_id).maybeSingle()
-    if (!c) return
-    await sb.from('profiles').update({
+    const { data: team, error: e1 } = await sb.from('teams').select('company_id').eq('id', teamId).maybeSingle()
+    if (e1) return false
+    if (!team || !team.company_id) return true  // tým nemá navázanou firmu → nic neměníme
+    const { data: c, error: e2 } = await sb.from('companies').select('name, ico, dic, address').eq('id', team.company_id).maybeSingle()
+    if (e2) return false
+    if (!c) return true
+    const { data: z, error: e3 } = await sb.from('profiles').update({
       invoice_customer_name: c.name || null,
       invoice_customer_id: c.ico || null,
       invoice_customer_vat: c.dic || null,
       invoice_customer_address: c.address || null
-    }).eq('id', workerId)
-  } catch(e) { console.warn('fillInvoiceCustomerFromTeam:', e?.message) }
+    }).eq('id', workerId).select('id')
+    return !e3 && !!z && z.length > 0
+  } catch(e) { console.warn('fillInvoiceCustomerFromTeam:', e?.message); return false }
 }
+const ODBERATEL_NEPREPSAN = ' — ale odběratele na fakturách se nepodařilo přepsat, zkontrolujte ho v kartě pracovníka'
 
 // ============ OSVČ MOBILE ============
 
@@ -33844,17 +33865,21 @@ async function rejectDocWd(id, workerId) {
   }
   if (error) { showToast('❌ Chyba: ' + error.message); return }
   if (!ulozenyDuvod) showToast('⚠️ Důvod se neuložil — chybí sloupec reject_reason')
-  // Pošli pracovníkovi oznámení
+  // Pošli pracovníkovi oznámení. Že dostal zprávu, se řekne, jen když opravdu
+  // odešla (audit 30. 9. 2026 — dřív se to hlásilo vždycky).
+  let upozornen = false
   try {
-    await sb.from('notifications').insert({
+    const { error: chybaOzn } = await sb.from('notifications').insert({
       worker_id: workerId,
       title: '📄 Dokument odmítnut',
       message: duvod + ' — nahrajte dokument znovu.',
       type: 'document',
       is_read: false
     })
+    upozornen = !chybaOzn
   } catch(e) {}
-  showToast('✖ Dokument odmítnut — pracovník byl upozorněn')
+  showToast(upozornen ? '✖ Dokument odmítnut — pracovník byl upozorněn'
+    : '✖ Dokument odmítnut — ale zprávu pracovníkovi se nepodařilo poslat, dejte mu vědět jinak')
   loadWdDocs(workerId)
 }
 
