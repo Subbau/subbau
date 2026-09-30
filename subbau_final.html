@@ -9410,7 +9410,9 @@ async function deleteLongDayRecord(id, workerId, jmeno, popis) {
     + (jmeno || 'Pracovník') + '\n' + (popis || '')
     + '\n\nHodiny tohoto dne se nenávratně ztratí.'
     + '\nPokud jen nesedí časy, dejte Zrušit a raději je opravte kliknutím na pracovníka.')) return
-  const { error } = await sb.from('attendance').delete().eq('id', id)
+  const { data: smazano, error: chybaMazani } = await sb.from('attendance').delete().eq('id', id).select('id')
+  // Mazání, které databáze nepustí, v Postgresu nechybuje — jen nesmaže nic.
+  const error = chybaMazani || ((!smazano || !smazano.length) ? { message: 'row-level security: záznam se nesmazal' } : null)
   if (error) {
     showToast(/row-level security|policy|permission|42501/i.test(error.message || '')
       ? '❌ Databáze mazání nepovolila — chybí oprávnění pro admina'
@@ -10487,8 +10489,15 @@ async function deleteTodayRecord(id, name) {
   if (!ids.length) return
   const kolik = ids.length > 1 ? '\n\nDen má ' + ids.length + ' záznamy — smažou se všechny.' : ''
   if (!confirm('Opravdu smazat dnešní docházku pro ' + (name || 'tohoto pracovníka') + '?' + kolik + '\n\nTato akce je nevratná.')) return
-  const { error } = await sb.from('attendance').delete().in('id', ids)
+  const { data: smazano, error } = await sb.from('attendance').delete().in('id', ids).select('id')
   if (error) { showToast('❌ Chyba mazání: ' + error.message); return }
+  // 0 smazaných = databáze to nepustila (bez chyby). Dřív se hlásilo „smazán"
+  // a záznam se po obnovení vrátil.
+  if ((smazano || []).length !== ids.length) {
+    showToast((smazano || []).length ? '⚠️ Smazala se jen část záznamů dne — zkontrolujte ho' : '❌ Záznam se nesmazal — databáze to nepovolila')
+    if (typeof loadTodayTimeline === 'function') loadTodayTimeline()
+    return
+  }
   showToast('🗑 Záznam smazán')
   refreshAttendanceEverywhere()
 }
@@ -22020,19 +22029,26 @@ async function exportKW() {
   const endDate = new Date(startDate); endDate.setDate(endDate.getDate() + 6)
   const fmt = d => localDateStr(d)
 
-  const { data: attVse } = await sb.from('attendance')
+  const { data: attVse, error: chybaDochazky } = await sb.from('attendance')
     .select('*, worker:profiles!worker_id(full_name, profession)')
     .gte('work_date', fmt(startDate))
     .lte('work_date', fmt(endDate))
     .order('work_date')
+  if (chybaDochazky) { showToast('❌ Docházku se nepodařilo načíst — výkaz se nevytvořil. Zkuste to prosím znovu.'); return }
 
   // Kdo je v Týmech odškrtnutý („mimo výkaz"), do tohohle přehledu nepatří.
   // Když sloupec ještě neexistuje (neproběhlá migrace), nevyřadí se nikdo.
+  // Jiná chyba ale výkaz zastaví — dřív se pak do výkazu pro odběratele
+  // dostali i vyřazení lidé (audit 30. 9. 2026).
   const mimoVykaz = new Set()
-  try {
-    const { data: vyrazeni } = await sb.from('profiles').select('id').eq('ve_vykazu', false)
+  {
+    const { data: vyrazeni, error: chybaVyrazenych } = await sb.from('profiles').select('id').eq('ve_vykazu', false)
+    if (chybaVyrazenych && !(chybaVyrazenych.code === '42703' || /ve_vykazu|column .* does not exist|schema cache/i.test(chybaVyrazenych.message || ''))) {
+      showToast('❌ Nepodařilo se zjistit, kdo je mimo výkaz — výkaz se nevytvořil. Zkuste to prosím znovu.')
+      return
+    }
     ;(vyrazeni || []).forEach(x => mimoVykaz.add(x.id))
-  } catch (e) { console.warn('[exportKW] ve_vykazu se nenačetlo:', e) }
+  }
   const skrytiExport = await skrytiLideIds()   // schované firmy
   const att = (attVse || []).filter(r => !mimoVykaz.has(r.worker_id) && !skrytiExport.has(r.worker_id))
 
@@ -24302,8 +24318,9 @@ async function deleteAttRecord() {
     return
   }
   if (!confirm('Opravdu smazat tento záznam docházky?')) return
-  const { error } = await sb.from('attendance').delete().eq('id', id)
+  const { data: smazano, error } = await sb.from('attendance').delete().eq('id', id).select('id')
   if (error) { showToast('❌ Chyba: ' + error.message); return }
+  if (!smazano || !smazano.length) { showToast('❌ Záznam se nesmazal — databáze to nepovolila'); return }
   showToast('🗑 Záznam smazán')
 
   // Týdenní režim — zůstaň v modalu, obnov den-picker
@@ -29790,10 +29807,21 @@ async function showCompanySignedView(contractId) {
   const body = document.getElementById('company-sign-body')
   if (!body) return
   body.innerHTML = '<div style="text-align:center;color:var(--text3);padding:30px">…</div>'
-  // Načti aktuální data smlouvy
-  const { data: c } = await sb.from('contracts')
+  // Načti aktuální data smlouvy — STEJNOU cestou, jakou se stránka otevřela
+  // (přes token z odkazu; firma je nepřihlášená).
+  let q = sb.from('contracts')
     .select('id,title,file_url,company_signature_url,company_signed_at, worker:profiles!worker_id(full_name)')
-    .eq('id', contractId).maybeSingle()
+  q = (typeof _signToken === 'string' && _signToken) ? q.eq('sign_token', _signToken) : q.eq('id', contractId)
+  const { data: c, error: chybaCteni } = await q.maybeSingle()
+  // Audit 30. 9. 2026: potvrzení „Vertrag unterschrieben" se ukazovalo vždycky,
+  // i když databáze zápis nepustila (chybějící datum se doplnilo dnešním).
+  // Teď se ukáže jen tehdy, když podpis v databázi opravdu je.
+  if (!chybaCteni && c && !c.company_signed_at) {
+    body.innerHTML = csErrorBox('Unterschrift nicht gespeichert',
+      'Ihre Unterschrift konnte leider nicht gespeichert werden. Bitte versuchen Sie es erneut oder kontaktieren Sie SubBau.'
+      + ' · Podpis se nepodařilo uložit — zkuste to prosím znovu nebo kontaktujte SubBau.')
+    return
+  }
   const dlUrl = (c && (c.company_signature_url || c.file_url)) || null
   const dateStr = c?.company_signed_at ? new Date(c.company_signed_at).toLocaleDateString('de-DE') : new Date().toLocaleDateString('de-DE')
   body.innerHTML = `
@@ -33298,8 +33326,9 @@ async function deleteWorkerDay(id, workDate) {
   if (!id) return
   const dateLabel = workDate ? new Date(workDate).toLocaleDateString('cs-CZ', {weekday:'long', day:'2-digit', month:'2-digit', year:'numeric'}) : 'tento den'
   if (!confirm('Opravdu smazat docházku za ' + dateLabel + '?\n\nTato akce je nevratná.')) return
-  const { error } = await sb.from('attendance').delete().eq('id', id)
+  const { data: smazano, error } = await sb.from('attendance').delete().eq('id', id).select('id')
   if (error) { showToast('❌ Chyba mazání: ' + error.message); return }
+  if (!smazano || !smazano.length) { showToast('❌ Den se nesmazal — databáze to nepovolila'); return }
   showToast('🗑 Den smazán')
   loadWdAttendance()
 }
