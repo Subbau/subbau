@@ -57,10 +57,14 @@ const MAX_UBYTOVANI = 300;       // adresa ubytování — jeden řádek textu
 // „Stundenerfassung läuft". Ví tedy, kdo mu na stavbě je, ale hodiny uvidí,
 // až budou hotové a SubBau je stihne případně opravit.
 
+// VTEŘINY SE NEPOČÍTAJÍ — stejně jako v appce (timeToMin). Mobil ukládá příchod
+// i s vteřinami a 07:10:30 by tu vyšlo jako „po hájené době" a zaokrouhlilo se na
+// 07:30, zatímco appka (a faktura) počítá 07:00 (audit 30. 9. 2026).
 function naMinuty(t) {
   if (!t) return null;
-  const [h, m, s] = String(t).slice(0, 8).split(':').map(Number);
-  return h * 60 + m + (s || 0) / 60;
+  const [h, m] = String(t).slice(0, 5).split(':').map(Number);
+  if (!Number.isFinite(h) || !Number.isFinite(m)) return null;
+  return h * 60 + m;
 }
 function naCas(m) {
   if (m == null) return null;
@@ -98,7 +102,8 @@ function upravDen(z, nyni) {
   // Všechny pauzy dne. `breaks` je novější tvar, break_start/2 starší —
   // bereme obojí, ať staré záznamy nevypadnou.
   const pauzy = [];
-  if (Array.isArray(z.breaks)) {
+  // Prázdné pole = pauzy jsou jen ve starších sloupcích (appka to bere stejně).
+  if (Array.isArray(z.breaks) && z.breaks.length) {
     for (const b of z.breaks) if (b && b.bs) pauzy.push({ bs: b.bs, be: b.be });
   } else {
     if (z.break_start) pauzy.push({ bs: z.break_start, be: z.break_end });
@@ -542,6 +547,8 @@ module.exports = async (req, res) => {
 
       const ids = [...new Set((dochazka || []).map(z => z.worker_id))];
       let jmena = {}, sazbaTed = {}, provizeTed = {}, bezProvize = new Set(), historie = {};
+      // Zaměstnanec firmy → id firmy (šéfa), podle které se počítají peníze.
+      const sefPodle = {};
       // Telefon a řidičák — od 23. 9. 2026 na přání SubBau. Odběratel volá
       // lidem na stavbu přímo a potřebuje vědět, koho smí poslat s dodávkou.
       let telefony = {}, ridicaky = {}, ubytovani = {};
@@ -564,7 +571,7 @@ module.exports = async (req, res) => {
         const tise = (popis) => (e) => {
           console.warn('[klient] ' + popis + ':', e.message); return null;
         };
-        const [lidi, dokl, prov, h, ubyt] = await Promise.all([
+        const [lidi, dokl, prov, h, ubyt, zam] = await Promise.all([
           // Jméno, hodinová sazba a telefon. SubBau si přeje, aby odběratel
           // viděl u každého člověka sazbu i provizi — vyžádal si to sám, aby
           // si mohl fakturu překontrolovat. V appce zůstává provize dál jen
@@ -589,7 +596,28 @@ module.exports = async (req, res) => {
           db(`profiles?select=id,accommodation_address,ubytovani_adresa&id=in.(${seznamIds})`, klic)
             .catch(() => db(`profiles?select=id,accommodation_address&id=in.(${seznamIds})`, klic))
             .catch(tise('ubytování se nenačetlo')),
+          // Zaměstnanci firem (s.r.o.) — jejich hodiny fakturuje firma její
+          // sazbou a provize se počítá její provizí. Stejně jako Provize,
+          // report firmy i faktura firmy v appce.
+          db(`profiles?select=id,zamestnavatel_id&id=in.(${seznamIds})`, klic)
+            .catch(tise('zařazení pod firmu se nenačetlo')),
         ]);
+        for (const p of (zam || [])) {
+          if (p.zamestnavatel_id && p.zamestnavatel_id !== p.id) sefPodle[p.id] = p.zamestnavatel_id;
+        }
+        // Šéfové, kteří sami ten týden nedělali, v `ids` nejsou — jejich sazbu,
+        // provizi a historii je potřeba dočíst.
+        const sefove = [...new Set(Object.values(sefPodle))].filter(id => !ids.includes(id));
+        let sefLidi = [], sefProv = [], sefHist = [];
+        if (sefove.length) {
+          const seznamSefu = sefove.map(encodeURIComponent).join(',');
+          [sefLidi, sefProv, sefHist] = await Promise.all([
+            db(`profiles?select=id,hourly_rate_worker&id=in.(${seznamSefu})`, klic).catch(tise('sazba firmy se nenačetla')),
+            db(`worker_commissions?select=worker_id,provize,bez_provize&worker_id=in.(${seznamSefu})`, klic).catch(tise('provize firmy se nenačetla')),
+            db(`worker_rate_history?select=worker_id,druh,hodnota,valid_from&worker_id=in.(${seznamSefu})&order=valid_from.asc`, klic).catch(tise('historie firmy se nenačetla')),
+          ]);
+        }
+        for (const p of (sefLidi || [])) sazbaTed[p.id] = Number(p.hourly_rate_worker) || 0;
 
         for (const p of (lidi || [])) {
           jmena[p.id] = p.full_name;
@@ -609,11 +637,11 @@ module.exports = async (req, res) => {
           // propadlý — proto se prázdno řadí doprostřed, ne na konec.
           if (!stav || doKdy > (stav.do || '')) ridicaky[d.worker_id] = { do: doKdy };
         }
-        for (const p of (prov || [])) {
+        for (const p of (prov || []).concat(sefProv || [])) {
           if (p.bez_provize) { bezProvize.add(p.worker_id); continue; }
           provizeTed[p.worker_id] = Number(p.provize) || 0;
         }
-        for (const r of (h || [])) {
+        for (const r of (h || []).concat(sefHist || [])) {
           const kos = (historie[r.druh] = historie[r.druh] || {});
           (kos[r.worker_id] = kos[r.worker_id] || []).push({
             od: String(r.valid_from).slice(0, 10), hodnota: Number(r.hodnota) || 0,
@@ -664,15 +692,17 @@ module.exports = async (req, res) => {
         if (!u) continue;
         // Den, za který pracovník nedostane zaplaceno, se nefakturuje — sazba
         // je nula. Provize SubBau za něj běží dál, pokud není vypnutá zvlášť.
-        const sazbaZHistorie = Number(kDni('sazba', z.worker_id, zaklad.datum, sazbaTed[z.worker_id] || 0)) || 0;
+        // U zaměstnance firmy platí sazba a provize FIRMY (viz sefPodle výš).
+        const kdoPlati = sefPodle[z.worker_id] || z.worker_id;
+        const sazbaZHistorie = Number(kDni('sazba', kdoPlati, zaklad.datum, sazbaTed[kdoPlati] || 0)) || 0;
         const pevnaCastka = (z.vyplata_castka != null && z.vyplata_castka !== '')
           ? Math.max(0, Number(z.vyplata_castka) || 0) : null;
         const sazbaDne = z.bez_vyplaty
           ? 0
           : (pevnaCastka != null && u.hodiny > 0 ? pevnaCastka / u.hodiny : sazbaZHistorie);
-        const provizeDne = (bezProvize.has(z.worker_id) || z.bez_provize_den)
+        const provizeDne = (bezProvize.has(kdoPlati) || z.bez_provize_den)
           ? 0
-          : Number(kDni('provize', z.worker_id, zaklad.datum, provizeTed[z.worker_id] || 0)) || 0;
+          : Number(kDni('provize', kdoPlati, zaklad.datum, provizeTed[kdoPlati] || 0)) || 0;
         radky.push({
           ...zaklad,
           probiha: false,
