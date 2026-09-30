@@ -16811,11 +16811,22 @@ async function confirmCheckout() {
   let savedRows, error, keptByAdmin = false
   try {
     // Co upravil SubBau, to platí — přečti záznam čerstvě, ať se jeho zápis nepřepíše
-    let rec = null
+    let rec = null, chybaCteni = null
     try {
-      const { data: fresh } = await sb.from('attendance').select('*').eq('id', attId).single()
+      const { data: fresh, error: eFresh } = await sb.from('attendance').select('*').eq('id', attId).single()
       rec = fresh || null
-    } catch (e) { console.warn('[checkout] záznam se nepodařilo načíst:', e?.message) }
+      chybaCteni = eFresh || null
+    } catch (e) { chybaCteni = e; console.warn('[checkout] záznam se nepodařilo načíst:', e?.message) }
+    // Audit 30. 9. 2026: bez čerstvého záznamu se nedá poznat, jestli SubBau
+    // mezitím den neopravil nebo neuzavřel — zápis z mobilu by jeho časy, stavbu
+    // i hodiny přepsal. Radši nic nezapsat; odchod zůstává rozdělaný a pracovník
+    // klepne na Uložit znovu.
+    if (chybaCteni || !rec) {
+      showToast((chybaCteni && chybaCteni.code === 'PGRST116') || (!chybaCteni && !rec)
+        ? '❌ Dnešní záznam už v databázi není (mohl ho upravit nebo smazat SubBau) — ozvěte se prosím do kanceláře.'
+        : '⚠️ Nepodařilo se ověřit dnešní záznam — odchod se zatím neuložil. Klepněte prosím na Uložit znovu.')
+      return
+    }
 
     if (rec && rec.check_out) {
       // SubBau směnu mezitím uzavřel sám — jeho časy mají přednost před našimi
