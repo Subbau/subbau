@@ -7386,12 +7386,17 @@ async function ulozSazbuSHistorii(workerId, druh, puvodni, nova, odKdy) {
 // vrací se všude výchozí hodnota — tedy přesně stav, jaký byl před historií.
 async function sazbyPracovnika(workerId, druh, vychozi) {
   let h = []
-  try {
-    const { data } = await sb.from('worker_rate_history')
-      .select('hodnota, valid_from').eq('worker_id', workerId).eq('druh', druh)
-      .order('valid_from', { ascending: true })
+  const { data, error } = await sb.from('worker_rate_history')
+    .select('hodnota, valid_from').eq('worker_id', workerId).eq('druh', druh)
+    .order('valid_from', { ascending: true })
+  if (error) {
+    // Chybějící tabulka (neproběhlá migrace) = žádná historie, počítá se jako dřív.
+    // Jiná chyba se ale NESMÍ tvářit jako „historie není" — všechny dny by se
+    // spočítaly dnešní sazbou a faktura by vyšla jinak (audit 30. 9. 2026).
+    if (!/does not exist|schema cache|could not find the table|PGRST205|42P01/i.test((error.message || '') + ' ' + (error.code || ''))) throw error
+  } else {
     h = (data || []).map(r => ({ od: String(r.valid_from).slice(0, 10), hodnota: Number(r.hodnota) || 0 }))
-  } catch (e) { console.warn('[sazby] historie:', e?.message) }
+  }
   const fn = den => {
     let v = null
     for (let i = 0; i < h.length; i++) { if (h[i].od <= den) v = h[i].hodnota; else break }
@@ -7433,13 +7438,13 @@ async function dochazkaProFakturu(workerId, week, year) {
 // aby obě vyšly na stejnou částku.
 async function rozpisTydne(workerId, radky, sazbaVPoli) {
   let sazbaKDni = () => sazbaVPoli
-  try {
-    const { data: p } = await sb.from('profiles').select('hourly_rate_worker').eq('id', workerId).maybeSingle()
-    const zProfilu = parseFloat(p && p.hourly_rate_worker) || 0
-    if (zProfilu > 0 && Math.abs(sazbaVPoli - zProfilu) < 0.005) {
-      sazbaKDni = await sazbyPracovnika(workerId, 'sazba', sazbaVPoli)
-    }
-  } catch (e) { console.warn('[faktura] sazba z profilu:', e?.message) }
+  // Chyba čtení se předá dál — volající radši neukáže žádnou částku než špatnou.
+  const { data: p, error } = await sb.from('profiles').select('hourly_rate_worker').eq('id', workerId).maybeSingle()
+  if (error) throw error
+  const zProfilu = parseFloat(p && p.hourly_rate_worker) || 0
+  if (zProfilu > 0 && Math.abs(sazbaVPoli - zProfilu) < 0.005) {
+    sazbaKDni = await sazbyPracovnika(workerId, 'sazba', sazbaVPoli)
+  }
   return hodinyPodleSazeb(radky, sazbaKDni)
 }
 
@@ -14252,8 +14257,15 @@ async function syncInvoicePaidFromProvizeDavka(ids, periodKey, paid) {
 async function setInvoiceStatus(id, status) {
   const row = _invCache.find(r => r.id === id)
   const prev = row ? (row.status || 'new') : null
-  const { error } = await sb.from('worker_invoices').update({ status }).eq('id', id)
+  const { data: zmeneno, error } = await sb.from('worker_invoices').update({ status }).eq('id', id).select('id')
   if (error) { showToast('❌ Chyba: ' + error.message); return }
+  // Netrefilo to fakturu (mezitím smazaná, zastaralý seznam) → nic nepropisovat
+  // do Provizí, jinak by se „zaplaceno" rozjelo mezi fakturou a Provizemi.
+  if (!zmeneno || !zmeneno.length) {
+    showToast('❌ Stav faktury se nezměnil — faktura se možná mezitím změnila. Načítám znovu.')
+    if (typeof loadWorkerInvoices === 'function') loadWorkerInvoices()
+    return
+  }
   if (row) row.status = status
   renderWorkerInvoices()
   refreshInvoiceBadge()
@@ -20405,13 +20417,17 @@ async function predvyplnitCisloFaktury(workerId, rok, pre = 'inv', tyden = null)
   // Za týden, který už fakturovaný byl, drží faktura svoje původní číslo —
   // jde o opravu, ne o nový doklad.
   if (tyden != null) {
+    let data = null, error = null
     try {
-      const { data } = await sb.from('worker_invoices')
+      ;({ data, error } = await sb.from('worker_invoices')
         .select('invoice_number').eq('worker_id', workerId)
-        .eq('kw', parseInt(tyden)).eq('kw_year', parseInt(rok)).limit(1)
-      const stare = String((data || [])[0]?.invoice_number || '').trim()
-      if (stare) { poleEl.value = stare; return }
-    } catch (e) { /* neva, spadne se na další volné číslo */ }
+        .eq('kw', parseInt(tyden)).eq('kw_year', parseInt(rok)).limit(1))
+    } catch (e) { error = e }
+    // Nevíme, jestli týden už fakturu má → nové číslo nevymýšlet (vznikla by
+    // druhá faktura za týž týden). Vystavení to ještě jednou ověří.
+    if (error) { poleEl.value = ''; return }
+    const stare = String((data || [])[0]?.invoice_number || '').trim()
+    if (stare) { poleEl.value = stare; return }
   }
 
   poleEl.value = await dalsiCisloFaktury(workerId, rok)
@@ -20452,7 +20468,15 @@ async function onInvoiceWeekChange() {
     const zaklad = Number.isFinite(sazba) ? sazba : 0
     // Když SubBau změnil sazbu uprostřed týdne, počítá se každý den svou sazbou —
     // jinak by faktura zvedla i dny odpracované za starou sazbu.
-    const castka = (await rozpisTydne(currentUser?.id, att, zaklad)).castka
+    let castka
+    try { castka = (await rozpisTydne(currentUser?.id, att, zaklad)).castka }
+    catch (e) {
+      if (sel.value !== v) return
+      window._invTydenniCastka = 0
+      rozpocitatCastku('inv')
+      showToast('⚠️ Sazby se nepodařilo načíst — částka faktury se nespočítala. Vyberte týden znovu.')
+      return
+    }
     // Než se docházka a historie načetly, mohl pracovník přepnout na jiný týden.
     // Bez téhle kontroly by se mu do faktury dosadila částka za týden předchozí.
     if (sel.value !== v) return
@@ -23143,12 +23167,19 @@ async function exportWorkerKW(workerId, workerName, week, year, lang, foreman, r
   const endDate = new Date(startDate); endDate.setDate(endDate.getDate() + 6)
   const fmt = d => localDateStr(d)
 
-  const { data: att } = await sb.from('attendance')
+  const { data: att, error: attErr } = await sb.from('attendance')
     .select('*')
     .eq('worker_id', workerId)
     .gte('work_date', fmt(startDate))
     .lte('work_date', fmt(endDate))
     .order('work_date')
+  // Audit 30. 9. 2026: selhané čtení dalo výkaz „No records" s 0 h — a s podpisem
+  // vedoucího se uložil jako podepsaný doklad. Bez docházky se nic nevytváří.
+  if (attErr) {
+    showToast('❌ Docházku se nepodařilo načíst — výkaz se nevytvořil ani neuložil. Zkuste to prosím znovu.')
+    if (returnHtmlOnly) throw attErr
+    return
+  }
 
   // Směna, co ještě běží (chybí check_out) — hlavně dnešek: spočti hodiny živě
   // k tomuto okamžiku, ať může vedoucí na stavbě podepsat výkaz i dřív, než
@@ -23313,7 +23344,8 @@ async function exportWorkerKW(workerId, workerName, week, year, lang, foreman, r
             .update({ foreman_signature: foreman.signature }).eq('id', savedId)
           console.log('[hour-sheet] dodatečný update podpisu | chyba:', updErr?.message || 'žádná')
         }
-        showToast('✅ Výkaz uložen' + (foreman.name ? ' (vedoucí: ' + foreman.name + ')' : ''))
+        showToast('✅ Výkaz uložen' + (foreman.name ? ' (vedoucí: ' + foreman.name + ')' : '')
+          + (pdfUrl ? '' : ' — ale soubor výkazu se nenahrál, v kanceláři bude vidět jen podpis'))
       }
     } catch(e) { console.error('[hour-sheet] insert výjimka:', e?.message) }
   }
@@ -24793,9 +24825,12 @@ async function generateInvoiceMob(lang = 'en', override = null) {
   // Když se ale fakturuje sazbou z profilu, můžou v tom týdnu platit dvě různé
   // (změna od středy). Pak se každý den počítá svou a na fakturu jdou dva řádky.
   const profilovaSazba = parseFloat(prof.hourly_rate_worker) || 0
-  const sazbaKDni = (profilovaSazba > 0 && Math.abs(rate - profilovaSazba) < 0.005)
-    ? await sazbyPracovnika(workerId, 'sazba', rate)
-    : (() => { const f = () => rate; f.maHistorii = false; return f })()
+  let sazbaKDni
+  try {
+    sazbaKDni = (profilovaSazba > 0 && Math.abs(rate - profilovaSazba) < 0.005)
+      ? await sazbyPracovnika(workerId, 'sazba', rate)
+      : (() => { const f = () => rate; f.maHistorii = false; return f })()
+  } catch (e) { showToast('⚠️ Historii sazeb se nepodařilo načíst — faktura se nevystavila. Zkuste to prosím znovu.'); return }
   const rozpis = hodinyPodleSazeb(att, sazbaKDni)
   const totalHours = rozpis.hodiny
   // Položky faktury. Jsou zdrojem částky — když existují, hodiny × sazba se
@@ -24887,6 +24922,23 @@ async function generateInvoiceMob(lang = 'en', override = null) {
       return
     }
     const jinyTyden = (kolize || []).some(r => String(r.kw) !== String(week) || String(r.kw_year) !== String(year))
+    // Týden už má fakturu s JINÝM číslem → vznikla by druhá faktura za týž
+    // týden (a SubBau by platil dvakrát). Dřív to hlídalo jen předvyplnění
+    // čísla — a když jeho čtení selhalo, nabídlo nové číslo (audit 30. 9. 2026).
+    const { data: tydenFaktury, error: chybaTydne } = await sb.from('worker_invoices')
+      .select('invoice_number').eq('worker_id', workerId).eq('kw', parseInt(week)).eq('kw_year', parseInt(year))
+    if (chybaTydne) {
+      showToast('❌ Nepodařilo se ověřit, jestli už za týden faktura není — zkuste to prosím znovu')
+      return
+    }
+    const puvodniCislo = (tydenFaktury || []).map(r => String(r.invoice_number || '').trim()).find(c => c && c !== invoiceNum)
+    if (puvodniCislo) {
+      const pole = document.getElementById(override ? 'wd-inv-num-full' : 'inv-num-full')
+      if (pole) { pole.value = puvodniCislo; pole.dataset.rucne = '' }
+      alert('Za týden ' + week + '/' + year + ' už je faktura č. ' + puvodniCislo + '.\n\n'
+        + 'Opravuje se pod stejným číslem — číslo jsem do formuláře vrátil. Vystavte ji prosím znovu.')
+      return
+    }
     if (jinyTyden) {
       let volne = ''
       try { volne = await dalsiCisloFaktury(workerId, year) } catch (e) { volne = '' }
@@ -31732,7 +31784,14 @@ async function loadMobVacations() {
 async function deleteVacation(id, type) {
   const info = ABSENCE[type === 'nemoc' ? 'nemoc' : 'dovolena']
   if (!confirm('Smazat tento záznam (' + info.label.toLowerCase() + ')?')) return
-  await sb.from('vacations').delete().eq('id', id)
+  // Mazání, které databáze nepustí, vrátí úspěch bez chyby a 0 řádků —
+  // dřív se pokaždé hlásilo „smazána" a záznam se po obnovení vrátil.
+  const { data: smazano, error } = await sb.from('vacations').delete().eq('id', id).select('id')
+  if (error || !smazano || !smazano.length) {
+    showToast('❌ ' + info.label + ' se nesmazala' + (error ? ': ' + error.message : ' — nemáte na to oprávnění, ozvěte se prosím do kanceláře'))
+    loadMobVacations()
+    return
+  }
   showToast('🗑 ' + info.label + ' smazána')
   loadMobVacations()
 }
@@ -31895,12 +31954,14 @@ async function wdDeleteVacation(id, type) {
   if (!id) return
   const info = ABSENCE[type === 'nemoc' ? 'nemoc' : 'dovolena']
   if (!confirm('Opravdu smazat tento záznam (' + info.label.toLowerCase() + ')?')) return
-  const { error } = await sb.from('vacations').delete().eq('id', id)
-  if (error) {
-    const jeOpravneni = /row-level security|policy|permission/i.test(error.message || '')
+  const { data: smazano, error } = await sb.from('vacations').delete().eq('id', id).select('id')
+  // Mazání bez práv v Postgresu nechybuje — jen nesmaže nic. Proto počet řádků.
+  if (error || !smazano || !smazano.length) {
+    const jeOpravneni = !error || /row-level security|policy|permission/i.test(error.message || '')
     showToast(jeOpravneni
       ? '❌ Databáze mazání nepovolila — v Supabase chybí oprávnění pro admina'
       : '❌ Chyba: ' + error.message)
+    loadWdVacations()
     return
   }
   showToast('🗑 ' + info.label + ' smazána')
@@ -32841,10 +32902,11 @@ async function odecistSrazku(workerId, den, jmeno) {
   }
   let sazba = 0
   try {
-    const { data: p } = await sb.from('profiles').select('hourly_rate_worker').eq('id', workerId).maybeSingle()
+    const { data: p, error: chybaProfilu } = await sb.from('profiles').select('hourly_rate_worker').eq('id', workerId).maybeSingle()
+    if (chybaProfilu) throw chybaProfilu
     const kDni = await sazbyPracovnika(workerId, 'sazba', parseFloat(p?.hourly_rate_worker) || 0)
     sazba = Number(kDni(den)) || 0
-  } catch (e) { sazba = 0 }
+  } catch (e) { showToast('❌ Sazbu se nepodařilo načíst — srážka se nezapsala. Zkuste to prosím znovu.'); return false }
   if (!(sazba > 0)) { showToast('⚠️ Pracovník nemá hodinovou sazbu — srážku nejde spočítat'); return false }
   const h = Number(r.total_hours) || 0
   const hPo = Math.max(0, Math.round((h - SRAZKA_HODIN) * 100) / 100)
@@ -34231,7 +34293,15 @@ async function updateWdInvoiceHours() {
   // Stejně jako u faktury pracovníka: pokud sazba v poli odpovídá té z profilu,
   // platí historie a každý den se počítá svou sazbou. Když sis sazbu přepsal
   // ručně, platí tvoje číslo na celý týden.
-  const rozpis = await rozpisTydne(currentWorkerId, data, rate)
+  let rozpis
+  try { rozpis = await rozpisTydne(currentWorkerId, data, rate) }
+  catch (e) {
+    if (sel.value !== `${week}/${year}` || currentWorkerId !== workerIdPriStartu) return
+    box.innerHTML = '<span style="color:var(--red)">⚠️ Sazby se nepodařilo načíst — částka se nespočítala. Zkuste týden vybrat znovu.</span>'
+    window._invTydenniCastka = 0
+    rozpocitatCastku('wd-inv')
+    return
+  }
   // Mezi načtením a zápisem mohl admin přepnout týden nebo otevřít jiného
   // pracovníka — pak by tu zůstala viset částka, která k ničemu nepatří.
   if (sel.value !== `${week}/${year}` || currentWorkerId !== workerIdPriStartu) return
