@@ -7739,7 +7739,7 @@ async function generateProvizeFirmReport(firmName, mode) {
     // a mezitím přešel jinam, se jinak do vyúčtování vůbec nedostal a firmě by
     // jeho odpracované hodiny propadly.
     const [{ data: workers }, { data: provRows }, { data: teams }, { data: companies }, { data: att }] = await Promise.all([
-      sb.from('profiles').select('id, full_name, hourly_rate_worker, team_id, is_active').in('role', ['osvec', 'partak']).order('full_name'),
+      sb.from('profiles').select('id, full_name, hourly_rate_worker, team_id, is_active, zamestnavatel_id, company_name').in('role', ['osvec', 'partak']).order('full_name'),
       sb.from('worker_commissions').select('worker_id, provize, bez_provize'),
       sb.from('teams').select('id, name, company_id'),
       sb.from('companies').select('id, name'),
@@ -7774,7 +7774,20 @@ async function generateProvizeFirmReport(firmName, mode) {
       return provizeFirmOf(z ? { ...w, team_id: z.team } : w, teamById, companyNameById)
     }
 
-    const members = (workers || []).filter(w => firmaObdobi(w) === firmName)
+    // Zaměstnanec firmy (s.r.o.): provize za jeho hodiny se počítá sazbou FIRMY
+    // (i s jejím „bez provize") a patří do vyúčtování té firmy, kde je šéf —
+    // přesně jako v tabulce Provizí. Dřív se tu brala jeho vlastní sazba, kterou
+    // zaměstnanec nemá, takže report ukázal míň, než kolik firma dluží.
+    const podleId = {}
+    ;(workers || []).forEach(w => { podleId[w.id] = w })
+    const sefOf = (id) => {
+      const f = podleId[id] && podleId[id].zamestnavatel_id
+      return (f && f !== id && podleId[f]) ? f : null
+    }
+    const members = (workers || []).filter(w => {
+      const sef = sefOf(w.id)
+      return firmaObdobi(sef ? podleId[sef] : w) === firmName
+    })
     if (!members.length) { showToast('❌ Firma nemá v tomto období žádné pracovníky'); return }
 
     const nowStr2 = new Date().toTimeString().slice(0, 8)
@@ -7824,14 +7837,23 @@ async function generateProvizeFirmReport(firmName, mode) {
       hoursByWorker[a.worker_id] = (hoursByWorker[a.worker_id] || 0) + h
       if (a.bez_provize_den) { if (h) dnuBezProvize++; return }
       provHoursByWorker[a.worker_id] = (provHoursByWorker[a.worker_id] || 0) + h
-      commByWorker[a.worker_id] = (commByWorker[a.worker_id] || 0) + h * provKDni(a.worker_id, a.work_date)
+      commByWorker[a.worker_id] = (commByWorker[a.worker_id] || 0) + h * provKDni(sefOf(a.worker_id) || a.worker_id, a.work_date)
     })
 
     // Bývalý pracovník patří do vyúčtování jen za období, kdy opravdu pracoval.
     // Kdyby se brali jen aktivní, chyběly by ve vyúčtování hodiny odpracované
     // těsně před odebráním přístupu — a firmě bychom je nevyfakturovali.
-    const uctovani = members.filter(w => w.is_active !== false || (hoursByWorker[w.id] || 0) > 0)
-    if (!uctovani.length) { showToast('❌ Za toto období nemá firma odpracované hodiny'); return }
+    const uctovaniVse = members.filter(w => w.is_active !== false || (hoursByWorker[w.id] || 0) > 0)
+    if (!uctovaniVse.length) { showToast('❌ Za toto období nemá firma odpracované hodiny'); return }
+    // Zaměstnanci hned pod svým šéfem, stejně jako v Provizích.
+    const uctovani = [], _hotovo = new Set()
+    const _pridej = (w) => {
+      if (_hotovo.has(w.id)) return
+      _hotovo.add(w.id); uctovani.push(w)
+      uctovaniVse.filter(z => sefOf(z.id) === w.id).forEach(_pridej)
+    }
+    uctovaniVse.forEach(w => { if (!(sefOf(w.id) && uctovaniVse.some(x => x.id === sefOf(w.id)))) _pridej(w) })
+    uctovaniVse.forEach(_pridej)
 
     const eur = n => n.toLocaleString('cs-CZ', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + ' €'
     let total = 0
@@ -7841,10 +7863,10 @@ async function generateProvizeFirmReport(firmName, mode) {
       // Když se sazba během období změnila, není jedno číslo — ukážeme průměr
       // na hodinu, ať sloupec „provize" pořád dává smysl s výslednou částkou.
       const provHrs = provHoursByWorker[w.id] || 0
-      const prov = provHrs > 0 ? comm / provHrs : (provMap[w.id] || 0)
+      const prov = provHrs > 0 ? comm / provHrs : (provMap[sefOf(w.id) || w.id] || 0)
       total += comm
       return `<tr>
-        <td style="padding:8px 10px;border:1px solid #ccc">${escAttr(w.full_name)}${w.is_active === false ? ' (bývalý)' : ''}</td>
+        <td style="padding:8px 10px;border:1px solid #ccc${sefOf(w.id) ? ';padding-left:24px' : ''}">${sefOf(w.id) ? '↳ ' : ''}${escAttr(w.full_name)}${w.is_active === false ? ' (bývalý)' : ''}${sefOf(w.id) ? ' <span style="color:#777;font-size:11px">(zaměstnanec — ' + escAttr(podleId[sefOf(w.id)].company_name || podleId[sefOf(w.id)].full_name) + ')</span>' : ''}</td>
         <td style="padding:8px 10px;border:1px solid #ccc;text-align:right">${hrs.toFixed(2)} h</td>
         <td style="padding:8px 10px;border:1px solid #ccc;text-align:right">${prov ? prov.toFixed(2) + ' €/h' : '—'}</td>
         <td style="padding:8px 10px;border:1px solid #ccc;text-align:right;font-weight:700">${eur(comm)}</td>
@@ -8106,7 +8128,9 @@ async function renderProvizeContent() {
   workersAll.forEach(w => {
     byWorker[w.id] = { dnes: 0, day: 0, week: 0, month: 0, year: 0,
                        pDnes: 0, pDay: 0, pWeek: 0, pMonth: 0, pYear: 0,
-                       vDay: 0, vWeek: 0 }
+                       vDay: 0, vWeek: 0,
+                       // podíl zaměstnance na provizi firmy — jen k zobrazení
+                       zDay: 0, zWeek: 0, zMonth: 0 }
   })
 
   // Zaměstnanci firem (s.r.o.). Hodiny si zapisují sami, ale peníze se u nich
@@ -8150,6 +8174,13 @@ async function renderProvizeContent() {
     if (den >= wStartStr && den <= wEndStr) { bucket.week += h; penize.pWeek += h * provDen; bucket.vWeek += h * sazbaDen }
     if (den >= mStartStr && den <= mEndStr) { bucket.month += h; penize.pMonth += h * provDen }
     if (den >= yStartStr && den <= yEndStr) { bucket.year += h; penize.pYear += h * provDen }
+    // Podíl zaměstnance na provizi firmy — JEN pro zobrazení v jeho řádku.
+    // Nikam se nesčítá: peníze už jsou v řádku firmy (`penize` výš).
+    if (firmaId) {
+      if (den >= dStartStr && den <= dEndStr) bucket.zDay += h * provDen
+      if (den >= wStartStr && den <= wEndStr) bucket.zWeek += h * provDen
+      if (den >= mStartStr && den <= mEndStr) bucket.zMonth += h * provDen
+    }
   })
 
   // DNEŠNÍ PROVIZE — kolik SubBau vydělá za každou odpracovanou hodinu dnešního dne.
@@ -8253,6 +8284,12 @@ async function renderProvizeContent() {
            || (workersAll.find(x => x.id === w.zamestnavatel_id) || {}).full_name || 'firma')
         : '',
       jeFirma: w.supplier_type === 'sro',
+      // Zaměstnanec, jehož peníze se OPRAVDU počítají firmě (viz firmaZamestnance).
+      zamestnavatelId: firmaZamestnance[w.id] || null,
+      // Zapsaný pod firmou, která tu mezi aktivními není — peníze se mu pak
+      // počítají jako OSVČ a to musí být vidět.
+      sefChybi: !!(w.zamestnavatel_id && !firmaZamestnance[w.id]),
+      podilDay: hrs.zDay || 0, podilWeek: hrs.zWeek || 0, podilMonth: hrs.zMonth || 0,
       prov, provUlozena, bezProvize: bezProvize.has(w.id), byvaly: !!w._byvaly,
       sazbaNenastavena, provizeNenastavena,
       // Do přehledu patří jen ten, jehož skupina je přiřazená k nějaké firmě.
@@ -8309,14 +8346,54 @@ async function renderProvizeContent() {
   const cekaNaNastaveni = r => r.maFirmu && !r.byvaly && !r.zamestnavatel
     && (r.sazbaNenastavena || r.provizeNenastavena)
   const patriDoPrehledu = r => odpracoval(r) || cekaNaNastaveni(r)
-  const rowsZobrazit = rows.filter(patriDoPrehledu)
+  const radekPodleId = {}
+  rows.forEach(r => { radekPodleId[r.id] = r })
+  const pocetLidiPodFirmou = {}
+  rows.forEach(r => { if (r.zamestnavatelId) pocetLidiPodFirmou[r.zamestnavatelId] = (pocetLidiPodFirmou[r.zamestnavatelId] || 0) + 1 })
+  const zobrazene = new Set(rows.filter(patriDoPrehledu).map(r => r.id))
+  // ZAMĚSTNANCI POD ŠÉFEM. Majitel 30. 9. 2026: „ať je ten zaměstnanec ukázaný
+  // hned pod tím, kdo je vedoucí, šéf." Šéf (firma) se proto ukáže vždycky, když
+  // se ukáže někdo z jeho lidí — i když sám ten týden nepracoval. Provize za
+  // jejich hodiny je v JEHO řádku; bez něj by v seznamu nebyla vidět vůbec.
+  rows.forEach(r => {
+    if (r.zamestnavatelId && zobrazene.has(r.id) && radekPodleId[r.zamestnavatelId]) zobrazene.add(r.zamestnavatelId)
+  })
+  const rowsZobrazit = rows.filter(r => zobrazene.has(r.id))
   const skrytoLidi = rows.length - rowsZobrazit.length
 
+  // Zaměstnanec jde do karty firmy svého šéfa, i kdyby sám dělal jinde —
+  // faktura firmy obsahuje hodiny všech jejích lidí a provize z nich je v jejím
+  // řádku. Na součtech to nic nemění: zaměstnanec sám žádné peníze nemá.
+  const skupinaRadku = r => (r.zamestnavatelId && zobrazene.has(r.zamestnavatelId))
+    ? radekPodleId[r.zamestnavatelId].firm : r.firm
   const byFirm = new Map()
   rowsZobrazit.forEach(r => {
-    if (!byFirm.has(r.firm)) byFirm.set(r.firm, [])
-    byFirm.get(r.firm).push(r)
+    const k = skupinaRadku(r)
+    if (!byFirm.has(k)) byFirm.set(k, [])
+    byFirm.get(k).push(r)
   })
+  // Uvnitř firmy: šéf a hned pod ním jeho lidé (v pořadí podle abecedy).
+  const podSefy = members => {
+    const ids = new Set(members.map(m => m.id))
+    const lide = new Map()
+    members.forEach(m => {
+      if (m.zamestnavatelId && ids.has(m.zamestnavatelId)) {
+        if (!lide.has(m.zamestnavatelId)) lide.set(m.zamestnavatelId, [])
+        lide.get(m.zamestnavatelId).push(m)
+      }
+    })
+    const out = [], hotovo = new Set()
+    const pridej = (m, hloubka) => {
+      if (hotovo.has(m.id)) return
+      hotovo.add(m.id); m.podSefem = hloubka > 0; out.push(m)
+      ;(lide.get(m.id) || []).forEach(z => pridej(z, hloubka + 1))
+    }
+    members.forEach(m => { if (!(m.zamestnavatelId && ids.has(m.zamestnavatelId))) pridej(m, 0) })
+    // Pojistka: zacyklené zařazení (A pod B, B pod A) nesmí nikoho schovat.
+    members.forEach(m => pridej(m, 0))
+    return out
+  }
+  byFirm.forEach((v, k) => byFirm.set(k, podSefy(v)))
 
   // "Bez firmy" vždy nakonec, ostatní podle abecedy
   const firmNames = [...byFirm.keys()].sort((a, b) => a.localeCompare(b, 'cs'))
@@ -8353,8 +8430,11 @@ async function renderProvizeContent() {
       : null
     const dnesekProvize = new Date(); dnesekProvize.setHours(0, 0, 0, 0)
     const firmaPoSplatnosti = !firmaUhrazena && !!firmaSplatnost && firmaSplatnost < dnesekProvize
+    // Zaměstnanec firmy nemá vlastní provizi ani fakturu — „uhrazeno" se vede
+    // u firmy, jeho řádek se do počtu nepočítá.
+    const platici = members.filter(m => !m.zamestnavatelId)
     const memberRows = members.map(r => {
-      fDay += r.commDay; fWeek += r.commWeek; fMonth += r.commMonth; fYear += r.commYear; fEarn += r.earnWeek; fEarnDay += r.earnDay; if (r.paid) fPaidCount++
+      fDay += r.commDay; fWeek += r.commWeek; fMonth += r.commMonth; fYear += r.commYear; fEarn += r.earnWeek; fEarnDay += r.earnDay; if (r.paid && !r.zamestnavatelId) fPaidCount++
       window._provizeIndex[r.id] = { hoursDay: r.hoursDay, hoursWeek: r.hoursWeek, hoursMonth: r.hoursMonth, hoursYear: r.hoursYear, prov: r.prov, rate: r.rate, firmIdx }
       // Prázdná hodnota = „nemá vlastní, jede podle firmy". Díky tomu stačí
     // nastavit splatnost jednou u firmy a u lidí se nemusí nic proklikávat.
@@ -8367,33 +8447,36 @@ async function renderProvizeContent() {
         ? '<div style="font-size:10px;margin-top:3px;color:var(--amber)">⚠️ neukládá se (chybí migrace)</div>'
         : `<div style="font-size:10px;margin-top:3px;font-weight:${r.overdue ? '700' : '400'};color:${r.overdue ? 'var(--red)' : 'var(--text3)'}">${r.overdue ? '⚠️ po splatnosti ' : 'splatnost '}${r.dueDate.toLocaleDateString('cs-CZ')}</div>`
       return `<tr style="${rowBg}">
-        <td style="font-size:${isNoFirm ? '16px' : '14.5px'};font-weight:600">${r.name}${r.overdue ? ' <span style="font-size:11px;color:var(--red);font-weight:700">⚠️ nezaplaceno</span>' : ''}${
+        <td style="font-size:${isNoFirm ? '16px' : '14.5px'};font-weight:600${r.podSefem ? ';padding-left:30px;border-left:3px solid #c7d6e4' : ''}">${r.podSefem ? '<span style="color:var(--text3);font-weight:400;margin-left:-16px;margin-right:4px">↳</span>' : ''}${escAttr(r.name)}${r.overdue ? ' <span style="font-size:11px;color:var(--red);font-weight:700">⚠️ nezaplaceno</span>' : ''}${
           // Podskupina pod jménem — stejná barva jako v Týmech, ať se to dá
           // spárovat pohledem. U větších firem je bez toho nepoznat, kdo kde dělá.
-          (r.podskupina || r.zamestnavatel || r.jeFirma) ? (() => {
+          (r.podskupina || r.zamestnavatel || r.jeFirma || r.sefChybi) ? (() => {
             let out = '<div style="margin-top:3px;display:flex;gap:4px;flex-wrap:wrap">'
             if (r.podskupina) {
               const c = groupColor(r.podskupina, 'sub')
               out += `<span class="pill" style="background:#fff;color:${c.text};border:1.5px solid ${c.border};white-space:nowrap;font-size:10.5px;font-weight:700">👥 ${escAttr(r.podskupina)}</span>`
             }
             if (r.jeFirma) {
-              out += `<span class="pill" title="Firma (s.r.o.) — fakturuje za své lidi a provizi počítáme u ní" style="background:var(--blue-l);color:var(--blue);border:1.5px solid var(--blue);white-space:nowrap;font-size:10.5px;font-weight:700">🏢 firma</span>`
+              out += `<span class="pill" title="Firma (s.r.o.) — fakturuje za své lidi a provizi počítáme u ní" style="background:var(--blue-l);color:var(--blue);border:1.5px solid var(--blue);white-space:nowrap;font-size:10.5px;font-weight:700">🏢 firma${(() => { const n = pocetLidiPodFirmou[r.id] || 0; return n ? ' · ' + n + (n === 1 ? ' zaměstnanec' : n < 5 ? ' zaměstnanci' : ' zaměstnanců') : '' })()}</span>`
             }
-            if (r.zamestnavatel) {
-              out += `<span class="pill" title="Zaměstnanec firmy — sazbu ani výdělek nemá, za jeho hodiny fakturuje firma a provize se počítá u ní" style="background:#eef3f8;color:#2c4257;border:1.5px solid #c7d6e4;white-space:nowrap;font-size:10.5px;font-weight:700">🏢 pod ${escAttr(r.zamestnavatel)}</span>`
+            if (r.zamestnavatel && !r.sefChybi) {
+              out += `<span class="pill" title="Zaměstnanec firmy — sazbu ani výdělek nemá, za jeho hodiny fakturuje firma a provize se počítá u ní" style="background:#eef3f8;color:#2c4257;border:1.5px solid #c7d6e4;white-space:nowrap;font-size:10.5px;font-weight:700">👔 zaměstnanec · ${escAttr(r.zamestnavatel)}</span>`
+            }
+            if (r.sefChybi) {
+              out += `<span class="pill" title="Je zapsaný jako zaměstnanec firmy, která tu mezi aktivními není. Dokud se to nevyřeší, počítá se jako OSVČ — vlastní sazbou a provizí." style="background:var(--amber-l, #fff4dc);color:#8a5a00;border:1.5px solid #e8c77a;white-space:nowrap;font-size:10.5px;font-weight:700">⚠️ jeho firma není aktivní — počítá se jako OSVČ</span>`
             }
             return out + '</div>'
           })() : ''
         }</td>
-        <td style="text-align:right"><input id="pv-rate-${r.id}" type="number" step="0.01" value="${r.rate || ''}" placeholder="chybí" title="${r.rate ? '' : 'Chybí hodinová sazba — dokud ji nezadáte, počítá se pracovníkovi nula'}" onchange="saveProvizeRate(this,'${r.id}')" style="width:80px;padding:6px 8px;border:${r.rate ? '1.5px solid var(--brd)' : '2px solid var(--red)'};background:${r.rate ? '' : 'var(--red-l)'};border-radius:7px;font-size:14px;text-align:right;font-family:inherit"> €/h</td>
-        <td style="text-align:right"><input id="pv-prov-${r.id}" type="number" step="0.01" value="${r.provUlozena || ''}" placeholder="chybí" title="${r.provUlozena ? (r.bezProvize ? 'Sazba zůstává uložená, ale nepočítá se — pracovník je označený „bez provize“' : '') : 'Chybí provize — dokud ji nezadáte, počítá se nula'}" onchange="saveProvizeCommission(this,'${r.id}')" style="width:80px;padding:6px 8px;border:${r.provUlozena ? '1.5px solid var(--amber)' : '2px solid var(--red)'};background:${r.provUlozena ? '' : 'var(--red-l)'};border-radius:7px;font-size:14px;text-align:right;font-family:inherit;background:#faf6ee"> €/h</td>
-        <td style="text-align:center;padding:0"><label title="Pracovník odešel dřív, než za něj přijdou peníze — nepočítat mu provizi" style="display:flex;align-items:center;justify-content:center;width:100%;height:100%;min-height:44px;padding:8px;cursor:pointer"><input type="checkbox" ${r.bezProvize ? 'checked' : ''} onchange="toggleBezProvize(this,'${r.id}')" style="width:20px;height:20px;cursor:pointer;accent-color:var(--red)"></label></td>
-        <td style="text-align:right;background:#f2f8f4"><b id="pv-e-${r.id}" style="font-size:14px;color:var(--green)">${eur(r.earnWeek)}</b><div style="font-size:11px;color:var(--text3)">${r.hoursWeek.toFixed(2)} h</div></td>
-        <td style="text-align:right"><b id="pv-d-${r.id}" style="font-size:14px">${eur(r.commDay)}</b><div style="font-size:11px;color:var(--text3)">${r.hoursDay.toFixed(2)} h</div></td>
-        <td style="text-align:right"><b id="pv-w-${r.id}" style="font-size:14px">${eur(r.commWeek)}</b><div style="font-size:11px;color:var(--text3)">${r.hoursWeek.toFixed(2)} h</div></td>
-        <td style="text-align:right"><b id="pv-m-${r.id}" style="font-size:14px">${eur(r.commMonth)}</b><div style="font-size:11px;color:var(--text3)">${r.hoursMonth.toFixed(2)} h</div></td>
-        <td style="text-align:center;padding:0"><label style="display:flex;align-items:center;justify-content:center;width:100%;height:100%;min-height:44px;padding:8px;cursor:${paymentsTableMissing ? 'not-allowed' : 'pointer'}"><input type="checkbox" ${r.paid ? 'checked' : ''} ${escAttr(paymentsTableMissing ? 'disabled title="Nejdřív spusťte migraci supabase-migrace-provize-platby.sql"' : '')} onchange="toggleProvizePaid(this,'${r.id}','week','${weekKey}')" style="width:21px;height:21px;cursor:${paymentsTableMissing ? 'not-allowed' : 'pointer'};accent-color:var(--green)"></label></td>
-        <td><select onchange="saveProvizeTerms(this,'${r.id}','${r.firemniTerms}')" style="padding:6px 8px;border:1.5px solid var(--brd);border-radius:7px;font-size:13px;font-family:inherit">${termsOpts}</select>${dueLabel}</td>
+        <td style="text-align:right">${r.zamestnavatelId ? `<button onclick="vyberSefa('${r.id}')" title="Zaměstnanec firmy — sazbu nemá. Klepnutím změníte, pod kým pracuje, nebo ho vrátíte mezi OSVČ." style="padding:6px 10px;font-size:12.5px;font-weight:700;border:1.5px solid #c7d6e4;border-radius:7px;background:#eef3f8;color:#2c4257;cursor:pointer;font-family:inherit;white-space:nowrap">👔 zaměstnanec</button><div style="font-size:10.5px;color:var(--text3);margin-top:3px">sazbu nemá</div>` : `<input id="pv-rate-${r.id}" type="number" step="0.01" value="${r.rate || ''}" placeholder="chybí" title="${r.rate ? '' : 'Chybí hodinová sazba — dokud ji nezadáte, počítá se pracovníkovi nula'}" onchange="saveProvizeRate(this,'${r.id}')" style="width:80px;padding:6px 8px;border:${r.rate ? '1.5px solid var(--brd)' : '2px solid var(--red)'};background:${r.rate ? '' : 'var(--red-l)'};border-radius:7px;font-size:14px;text-align:right;font-family:inherit"> €/h${(!r.jeFirma && !r.byvaly) ? `<div><button onclick="vyberSefa('${r.id}')" title="Pracuje pod firmou (s.r.o.)? Označte ho jako zaměstnance — sazbu mít nebude, ukáže se pod šéfem a provize půjde firmě." style="margin-top:4px;padding:2px 7px;font-size:10.5px;font-weight:700;border:1px solid var(--brd);border-radius:6px;background:#fff;color:var(--text2);cursor:pointer;font-family:inherit;white-space:nowrap">👔 zaměstnanec?</button></div>` : ''}`}</td>
+        <td style="text-align:right">${r.zamestnavatelId ? `<span title="Provize za jeho hodiny se počítá sazbou firmy, pod kterou pracuje" style="font-size:11.5px;color:var(--text3)">sazbou firmy</span>` : `<input id="pv-prov-${r.id}" type="number" step="0.01" value="${r.provUlozena || ''}" placeholder="chybí" title="${r.provUlozena ? (r.bezProvize ? 'Sazba zůstává uložená, ale nepočítá se — pracovník je označený „bez provize“' : '') : 'Chybí provize — dokud ji nezadáte, počítá se nula'}" onchange="saveProvizeCommission(this,'${r.id}')" style="width:80px;padding:6px 8px;border:${r.provUlozena ? '1.5px solid var(--amber)' : '2px solid var(--red)'};background:${r.provUlozena ? '' : 'var(--red-l)'};border-radius:7px;font-size:14px;text-align:right;font-family:inherit;background:#faf6ee"> €/h`}</td>
+        <td style="text-align:center;padding:0">${r.zamestnavatelId ? '<span title="Řídí se firmou, pod kterou pracuje" style="color:var(--text3)">—</span>' : `<label title="Pracovník odešel dřív, než za něj přijdou peníze — nepočítat mu provizi" style="display:flex;align-items:center;justify-content:center;width:100%;height:100%;min-height:44px;padding:8px;cursor:pointer"><input type="checkbox" ${r.bezProvize ? 'checked' : ''} onchange="toggleBezProvize(this,'${r.id}')" style="width:20px;height:20px;cursor:pointer;accent-color:var(--red)"></label>`}</td>
+        <td style="text-align:right;background:#f2f8f4">${r.zamestnavatelId ? '<span style="font-size:11.5px;color:var(--text3)">platí ho firma</span>' : `<b id="pv-e-${r.id}" style="font-size:14px;color:var(--green)">${eur(r.earnWeek)}</b>`}<div style="font-size:11px;color:var(--text3)">${r.hoursWeek.toFixed(2)} h</div></td>
+        <td style="text-align:right">${r.zamestnavatelId ? `<b id="pv-d-${r.id}" title="Podíl na provizi firmy — je už sečtený v jejím řádku, nepřičítá se znovu" style="font-size:13px;font-weight:600;color:var(--text3)">(${eur(r.podilDay)})</b><div style="font-size:11px;color:var(--text3)">${r.hoursDay.toFixed(2)} h · u firmy</div>` : `<b id="pv-d-${r.id}" style="font-size:14px">${eur(r.commDay)}</b><div style="font-size:11px;color:var(--text3)">${r.hoursDay.toFixed(2)} h</div>`}</td>
+        <td style="text-align:right">${r.zamestnavatelId ? `<b id="pv-w-${r.id}" title="Podíl na provizi firmy — je už sečtený v jejím řádku, nepřičítá se znovu" style="font-size:13px;font-weight:600;color:var(--text3)">(${eur(r.podilWeek)})</b><div style="font-size:11px;color:var(--text3)">${r.hoursWeek.toFixed(2)} h · u firmy</div>` : `<b id="pv-w-${r.id}" style="font-size:14px">${eur(r.commWeek)}</b><div style="font-size:11px;color:var(--text3)">${r.hoursWeek.toFixed(2)} h</div>`}</td>
+        <td style="text-align:right">${r.zamestnavatelId ? `<b id="pv-m-${r.id}" title="Podíl na provizi firmy — je už sečtený v jejím řádku, nepřičítá se znovu" style="font-size:13px;font-weight:600;color:var(--text3)">(${eur(r.podilMonth)})</b><div style="font-size:11px;color:var(--text3)">${r.hoursMonth.toFixed(2)} h · u firmy</div>` : `<b id="pv-m-${r.id}" style="font-size:14px">${eur(r.commMonth)}</b><div style="font-size:11px;color:var(--text3)">${r.hoursMonth.toFixed(2)} h</div>`}</td>
+        <td style="text-align:center;padding:0">${r.zamestnavatelId ? '<span title="Uhrazení se vede u firmy" style="color:var(--text3)">—</span>' : `<label style="display:flex;align-items:center;justify-content:center;width:100%;height:100%;min-height:44px;padding:8px;cursor:${paymentsTableMissing ? 'not-allowed' : 'pointer'}"><input type="checkbox" ${r.paid ? 'checked' : ''} ${escAttr(paymentsTableMissing ? 'disabled title="Nejdřív spusťte migraci supabase-migrace-provize-platby.sql"' : '')} onchange="toggleProvizePaid(this,'${r.id}','week','${weekKey}')" style="width:21px;height:21px;cursor:${paymentsTableMissing ? 'not-allowed' : 'pointer'};accent-color:var(--green)"></label>`}</td>
+        <td>${r.zamestnavatelId ? '<span title="Splatnost se řídí firmou" style="color:var(--text3)">—</span>' : `<select onchange="saveProvizeTerms(this,'${r.id}','${r.firemniTerms}')" style="padding:6px 8px;border:1.5px solid var(--brd);border-radius:7px;font-size:13px;font-family:inherit">${termsOpts}</select>${dueLabel}`}</td>
       </tr>`
     }).join('')
     // Do firemního součtu jde jen to, co je v tabulce vidět. Celkové souhrny
@@ -8405,7 +8488,7 @@ async function renderProvizeContent() {
       .filter(t => provizeFirmOf({ team_id: t.id }, teamById, companyNameById) === firm)
       .map(t => String(t.id))
     const firmaSplatnostKod = firmaTymy.map(id => firmaTermsMap[id]).find(Boolean) || ''
-    window._provizeFirmy[firmIdx] = { nazev: firm, weekKey, ids: members.map(m => m.id),
+    window._provizeFirmy[firmIdx] = { nazev: firm, weekKey, ids: platici.map(m => m.id),
       // VŠECHNY skupiny té firmy, ne jen ty, kde někdo ten týden pracoval.
       // Jedna firma může mít víc staveb — kdyby se schovaly jen některé,
       // zbytek by zůstal v Pracovnících, Kalendáři a Týmech.
@@ -8452,7 +8535,7 @@ async function renderProvizeContent() {
             </select>
             ${firmaTermsChybi ? '<span style="font-size:11px;color:var(--amber);font-weight:700">⚠️ chybí migrace</span>' : ''}
           </label>`}
-          <span style="font-size:13px;color:var(--text3)">${members.length} lidí · ${fPaidCount}/${members.length} uhrazeno (týden)</span>
+          <span style="font-size:13px;color:var(--text3)">${members.length} lidí · ${fPaidCount}/${platici.length} uhrazeno (týden)</span>
           <button onclick="generateProvizeFirmReport('${safeFirm}','week')" style="font-size:12px;padding:6px 11px;border:1px solid var(--brd);border-radius:7px;cursor:pointer;background:#fff;font-family:inherit">📄 Týdenní provize</button>
           <button onclick="generateProvizeFirmReport('${safeFirm}','month')" style="font-size:12px;padding:6px 11px;border:1px solid var(--brd);border-radius:7px;cursor:pointer;background:#fff;font-family:inherit">📄 Měsíční provize</button>
         </div>
@@ -8465,7 +8548,7 @@ async function renderProvizeContent() {
           <th style="text-align:right;font-size:13px">Odměna den</th><th style="text-align:right;font-size:13px">Odměna týden</th><th style="text-align:right;font-size:13px">Odměna měsíc</th>
           <th style="text-align:center;font-size:14px">Uhrazeno
             ${paymentsTableMissing ? '' : `<label title="Zaškrtnutím označíte jako uhrazené všechny lidi v téhle firmě najednou — ať se nemusí proklikávat po jednom" style="display:flex;align-items:center;justify-content:center;gap:5px;font-weight:400;font-size:10.5px;color:var(--text3);margin-top:3px;cursor:pointer">
-              <input type="checkbox" ${fPaidCount === members.length && members.length ? 'checked' : ''} onchange="oznacVsechnyUhrazeno(this,${firmIdx})" style="width:17px;height:17px;cursor:pointer;accent-color:var(--green)">všem
+              <input type="checkbox" ${fPaidCount === platici.length && platici.length ? 'checked' : ''} onchange="oznacVsechnyUhrazeno(this,${firmIdx})" style="width:17px;height:17px;cursor:pointer;accent-color:var(--green)">všem
             </label>`}
           </th><th style="font-size:14px">Splatnost</th>
         </tr></thead>
@@ -31706,30 +31789,98 @@ function vykresliInfoZamestnavatele(profil, firmy) {
     : '<span style="color:var(--text3)">Pracuje sám na sebe — sazba i fakturace jako dosud.</span>'
 }
 
+// Jediné místo, které zapisuje zařazení pod firmu — volá ho karta pracovníka
+// i Provize, ať se obě obrazovky chovají stejně.
+async function zapisZamestnavatele(workerId, firmaId) {
+  const { data, error } = await sb.from('profiles')
+    .update({ zamestnavatel_id: firmaId || null }).eq('id', workerId).select('id, zamestnavatel_id')
+  if (error) {
+    return { ok: false, zprava: /zamestnavatel_id|column|schema cache/i.test(error.message || '')
+      ? '❌ Chybí sloupec zamestnavatel_id — spusťte migraci supabase-migrace-firma-zamestnanci.sql'
+      : '❌ Chyba: ' + error.message }
+  }
+  // Zápis, který kvůli právům netrefí ani jeden řádek, vrací úspěch bez chyby.
+  if (!data || !data.length || (data[0].zamestnavatel_id || null) !== (firmaId || null)) {
+    return { ok: false, zprava: '❌ Změna se neuložila — zařazení pod firmu mění jen správce' }
+  }
+  return { ok: true }
+}
+
 async function ulozZamestnavatele(el) {
   const id = currentWorkerId
   if (!id) return
   const firmaId = (el && el.value) || null
   el.disabled = true
-  const { data, error } = await sb.from('profiles')
-    .update({ zamestnavatel_id: firmaId }).eq('id', id).select('id, zamestnavatel_id')
+  const v = await zapisZamestnavatele(id, firmaId)
   el.disabled = false
-  if (error) {
-    showToast(/zamestnavatel_id|column|schema cache/i.test(error.message || '')
-      ? '❌ Chybí sloupec zamestnavatel_id — spusťte migraci supabase-migrace-firma-zamestnanci.sql'
-      : '❌ Chyba: ' + error.message)
-    if (currentWorkerProfile) el.value = currentWorkerProfile.zamestnavatel_id || ''
-    return
-  }
-  // Zápis, který kvůli právům netrefí ani jeden řádek, vrací úspěch bez chyby.
-  if (!data || !data.length || (data[0].zamestnavatel_id || null) !== (firmaId || null)) {
-    showToast('❌ Změna se neuložila — zařazení pod firmu mění jen správce')
+  if (!v.ok) {
+    showToast(v.zprava)
     if (currentWorkerProfile) el.value = currentWorkerProfile.zamestnavatel_id || ''
     return
   }
   if (currentWorkerProfile) currentWorkerProfile.zamestnavatel_id = firmaId
   showToast(firmaId ? '✅ Zařazen pod firmu' : '✅ Pracuje sám na sebe')
   naplnVyberZamestnavatele(currentWorkerProfile)
+}
+
+// ZAMĚSTNANEC PŘÍMO Z PROVIZÍ. Majitel 30. 9. 2026: „u sazby v Provizích musí
+// být tlačítko, že je to zaměstnanec, a musí se to k tomu přizpůsobit — ať je
+// ukázaný hned pod tím, kdo je šéf." Nabízí stejné firmy jako karta pracovníka
+// (profil označený jako s.r.o.). Okno se staví z JavaScriptu — viz past se </body>.
+async function vyberSefa(workerId) {
+  if (!workerId) return
+  const [{ data: prof, error: e1 }, { data: firmy, error: e2 }, { data: podNim, error: e3 }] = await Promise.all([
+    sb.from('profiles').select('id, full_name, zamestnavatel_id, supplier_type').eq('id', workerId).maybeSingle(),
+    sb.from('profiles').select('id, full_name, company_name').eq('supplier_type', 'sro').eq('is_active', true).order('full_name'),
+    sb.from('profiles').select('id').eq('zamestnavatel_id', workerId).limit(1)
+  ])
+  const chyba = e1 || e2 || e3
+  if (chyba) {
+    showToast(/zamestnavatel_id|column|schema cache/i.test(chyba.message || '')
+      ? '❌ Chybí sloupec zamestnavatel_id — spusťte migraci supabase-migrace-firma-zamestnanci.sql'
+      : '❌ Nepodařilo se načíst: ' + chyba.message)
+    return
+  }
+  if (!prof) { showToast('❌ Pracovník se nenašel'); return }
+  const jmeno = prof.full_name || 'Pracovník'
+  if (prof.supplier_type === 'sro') { showToast('🏢 ' + jmeno + ' je sám firma (s.r.o.) — zaměstnancem být nemůže'); return }
+  if (podNim && podNim.length) { showToast('🏢 ' + jmeno + ' má pod sebou vlastní lidi — zaměstnancem být nemůže'); return }
+  const nabidka = (firmy || []).filter(f => f.id !== workerId)
+  const ted = prof.zamestnavatel_id || ''
+  document.getElementById('sef-overlay')?.remove()
+  const ov = document.createElement('div')
+  ov.id = 'sef-overlay'
+  ov.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:10050;display:flex;align-items:center;justify-content:center;padding:16px'
+  const volba = (hodnota, popis, pod) => `<label style="display:flex;gap:10px;align-items:flex-start;padding:10px 12px;border:1.5px solid var(--brd);border-radius:10px;margin-top:8px;cursor:pointer">
+      <input type="radio" name="sef-volba" value="${escAttr(hodnota)}" ${hodnota === ted ? 'checked' : ''} style="width:19px;height:19px;margin-top:1px;accent-color:var(--blue)">
+      <span><b style="font-size:14px">${popis}</b>${pod ? `<div style="font-size:11.5px;color:var(--text3);margin-top:2px">${pod}</div>` : ''}</span></label>`
+  ov.innerHTML = `<div style="background:#fff;border-radius:14px;max-width:440px;width:100%;max-height:86vh;overflow:auto;padding:18px">
+    <div style="font-size:16px;font-weight:800">👔 Pod kým pracuje ${escAttr(jmeno)}?</div>
+    <div style="font-size:12px;color:var(--text3);margin-top:6px;line-height:1.5">Zaměstnanec nemá sazbu ani výdělek — za jeho hodiny fakturuje firma a provize se počítá sazbou firmy. V Provizích se ukáže hned pod ní. Platí to i pro už odpracované týdny.</div>
+    ${volba('', 'Nikdo — pracuje sám na sebe (OSVČ)', 'vlastní sazba a vlastní faktura jako dosud')}
+    ${nabidka.map(f => volba(f.id, '🏢 ' + escAttr(f.company_name || f.full_name), f.company_name && f.full_name && f.company_name !== f.full_name ? escAttr(f.full_name) : '')).join('')}
+    ${nabidka.length ? '' : '<div style="font-size:12px;color:var(--amber);margin-top:10px;line-height:1.5">Zatím tu není žádná firma. Šéfa označte v jeho kartě → Finance → „Fakturace — dodavatel" jako s.r.o. a pak se tu objeví.</div>'}
+    <div style="display:flex;gap:10px;justify-content:flex-end;margin-top:16px">
+      <button type="button" data-zrusit style="padding:10px 16px;border:1.5px solid var(--brd);border-radius:9px;background:#fff;font-size:14px;font-weight:700;cursor:pointer;font-family:inherit">Zrušit</button>
+      <button type="button" data-ulozit style="padding:10px 16px;border:none;border-radius:9px;background:var(--blue);color:#fff;font-size:14px;font-weight:800;cursor:pointer;font-family:inherit">Uložit</button>
+    </div></div>`
+  document.body.appendChild(ov)
+  const zavri = () => ov.remove()
+  ov.addEventListener('click', e => { if (e.target === ov) zavri() })
+  ov.querySelector('[data-zrusit]').onclick = zavri
+  ov.querySelector('[data-ulozit]').onclick = async (e) => {
+    const vybrano = ov.querySelector('input[name="sef-volba"]:checked')
+    const firmaId = vybrano ? vybrano.value : ''
+    if (firmaId === ted) { zavri(); return }
+    e.target.disabled = true
+    const v = await zapisZamestnavatele(workerId, firmaId || null)
+    if (!v.ok) { e.target.disabled = false; showToast(v.zprava); return }
+    zavri()
+    if (currentWorkerProfile && currentWorkerProfile.id === workerId) currentWorkerProfile.zamestnavatel_id = firmaId || null
+    const firma = nabidka.find(f => f.id === firmaId)
+    showToast(firmaId ? '✅ ' + jmeno + ' je zaměstnanec — ' + (firma ? (firma.company_name || firma.full_name) : 'firmy') : '✅ ' + jmeno + ' pracuje sám na sebe')
+    if (document.getElementById('provize-content')) prekresliProvize()
+  }
 }
 
 function wdTab(name, btn) {
