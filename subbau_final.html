@@ -7391,6 +7391,31 @@ async function sazbyPracovnika(workerId, druh, vychozi) {
   return fn
 }
 
+// DOCHÁZKA PRO ČÁSTKU FAKTURY — jedno místo pro mobil i kartu správce.
+// Audit 30. 9. 2026 našel dvě chyby, které se tu sešly:
+//  • čtení bralo jen hodiny a datum, takže výpočet NEVIDĚL „bez výplaty"
+//    ani ručně nastavenou částku dne (a tím ani srážku za puntíky) —
+//    faktura pak přeplácela;
+//  • u firmy (s.r.o.) se částka počítala jen z hodin šéfa, zatímco hodiny
+//    na faktuře zahrnovaly i jeho zaměstnance (faktura za 93,5 h na 255 €).
+// Stejné lidi a stejné sloupce jako generateInvoiceMob. Chyba čtení se
+// nezamlčí — radši žádné číslo než špatné.
+async function dochazkaProFakturu(workerId, week, year) {
+  let kdo = [workerId]
+  const { data: prof, error: eProf } = await sb.from('profiles').select('supplier_type').eq('id', workerId).maybeSingle()
+  if (eProf) throw eProf
+  if (prof && prof.supplier_type === 'sro') {
+    const { data: lide, error: eLide } = await sb.from('profiles').select('id').eq('zamestnavatel_id', workerId)
+    if (eLide) throw eLide
+    kdo = kdo.concat((lide || []).map(x => x.id).filter(Boolean))
+  }
+  const { data, error } = await sb.from('attendance')
+    .select('worker_id, total_hours, work_date, bez_vyplaty, vyplata_castka')
+    .in('worker_id', kdo).eq('kw', parseInt(week)).eq('kw_year', parseInt(year))
+  if (error) throw error
+  return data || []
+}
+
 // Spočítá týden pro fakturu: kolik hodin, za kolik peněz a na kolik řádků.
 // `sazbaVPoli` je to, co je na obrazovce — když se rovná sazbě z profilu,
 // nikdo ji ručně nepřepsal a platí historie. Jinak platí zadané číslo na celý
@@ -20336,8 +20361,17 @@ async function onInvoiceWeekChange() {
     if (qtyEl) qtyEl.value = '1'
     // Celková částka faktury je daná: odpracované hodiny × sazba. Pracovník ji
     // nemění, jen si volí, na kolik položek si ji rozepíše.
-    const { data: att } = await sb.from('attendance').select('total_hours, work_date')
-      .eq('worker_id', currentUser?.id).eq('kw', parseInt(week)).eq('kw_year', parseInt(year))
+    let att
+    try { att = await dochazkaProFakturu(currentUser?.id, week, year) }
+    catch (e) {
+      // Bez docházky se částka spočítat nedá. Nesmí ale zůstat viset ta
+      // z předchozího týdne — radši nula a říct to.
+      if (sel.value !== v) return
+      window._invTydenniCastka = 0
+      rozpocitatCastku('inv')
+      showToast('⚠️ Docházku se nepodařilo načíst — částka faktury se nespočítala. Vyberte týden znovu.')
+      return
+    }
     const sazba = isRateFromProvize(currentProfile)
       ? parseFloat(currentProfile?.hourly_rate_worker)
       : parseFloat(document.getElementById('inv-rate')?.value)
@@ -34083,9 +34117,15 @@ async function updateWdInvoiceHours() {
   if (!box || !sel?.value || !currentWorkerId) return
   const [week, year] = sel.value.split('/').map(Number)
   const workerIdPriStartu = currentWorkerId
-  const { data } = await sb.from('attendance')
-    .select('total_hours, work_date')
-    .eq('worker_id', currentWorkerId).eq('kw', week).eq('kw_year', year)
+  let data
+  try { data = await dochazkaProFakturu(currentWorkerId, week, year) }
+  catch (e) {
+    if (sel.value !== `${week}/${year}` || currentWorkerId !== workerIdPriStartu) return
+    box.innerHTML = '<span style="color:var(--red)">⚠️ Docházku se nepodařilo načíst — částka se nespočítala. Zkuste týden vybrat znovu.</span>'
+    window._invTydenniCastka = 0
+    rozpocitatCastku('wd-inv')
+    return
+  }
   const rate = parseFloat(document.getElementById('wd-inv-rate')?.value) || 0
   // Stejně jako u faktury pracovníka: pokud sazba v poli odpovídá té z profilu,
   // platí historie a každý den se počítá svou sazbou. Když sis sazbu přepsal
@@ -34273,6 +34313,12 @@ async function generateInvoiceAdmin() {
   // Profil načti čerstvý — ať faktura obsahuje aktuální fakturační údaje i odběratele
   const { data: prof } = await sb.from('profiles').select('*').eq('id', currentWorkerId).maybeSingle()
   if (!prof) { showToast('❌ Profil pracovníka se nepodařilo načíst'); return }
+  // Zaměstnanec firmy sám nefakturuje — jeho hodiny jsou na faktuře firmy.
+  // Faktura tady by ty hodiny zaplatila podruhé (a jeho starou sazbou).
+  if (jeZamestnanecFirmy(prof)) {
+    showToast('⚠️ ' + (prof.full_name || 'Pracovník') + ' je zaměstnanec firmy — jeho hodiny fakturuje firma. Fakturu vystavte v kartě firmy.')
+    return
+  }
 
   await generateInvoiceMob('en', {
     profile: prof,
