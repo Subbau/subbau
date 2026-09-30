@@ -17835,25 +17835,40 @@ async function mobCheckin(type) {
           // Musí se dopsat i do pole `breaks` — attBreakMinutes mu dává přednost před
           // break_start/break_end, takže pauza zapsaná jen do sloupců by se u dne
           // s víc pauzami vůbec neodečetla a den by vyšel o půl hodiny delší.
+          // Audit 30. 9. 2026: když se pauzu nepodařilo uzavřít, zůstala v databázi
+          // otevřená, hodiny se spočítaly bez ní a den vyšel o celou pauzu delší.
+          // Teď se odchod bez uzavřené pauzy nezapíše — pracovník to zkusí znovu.
+          const zavri = async (plne, zaloha) => {
+            const r1 = await sb.from('attendance').update(plne).eq('id', todayAttId).select('id')
+            if (!r1.error && r1.data && r1.data.length) return 'plne'
+            const r2 = await sb.from('attendance').update(zaloha).eq('id', todayAttId).select('id')
+            return (!r2.error && r2.data && r2.data.length) ? 'zaloha' : null
+          }
+          let pauzaUzavrena = true
           try {
             if (current.break_start && !current.break_end) {
               const bl = Array.isArray(current.breaks) ? current.breaks.slice() : []
               bl.push({ bs: current.break_start.slice(0,5), be: timeStr.slice(0,5) })
-              const { error: bErr } = await sb.from('attendance').update({ break_end: timeStr, breaks: bl }).eq('id', todayAttId)
-              if (bErr) await sb.from('attendance').update({ break_end: timeStr }).eq('id', todayAttId)
-              else updated.breaks = bl
-              updated.break_end = timeStr
+              const jak = await zavri({ break_end: timeStr, breaks: bl }, { break_end: timeStr })
+              if (!jak) pauzaUzavrena = false
+              else { if (jak === 'plne') updated.breaks = bl; updated.break_end = timeStr }
             }
-            if (current.break2_start && !current.break2_end) {
+            if (pauzaUzavrena && current.break2_start && !current.break2_end) {
               const bl2 = Array.isArray(updated.breaks) ? updated.breaks.slice()
                         : (Array.isArray(current.breaks) ? current.breaks.slice() : [])
               bl2.push({ bs: current.break2_start.slice(0,5), be: timeStr.slice(0,5) })
-              const { error: b2Err } = await sb.from('attendance').update({ break2_end: timeStr, breaks: bl2 }).eq('id', todayAttId)
-              if (b2Err) await sb.from('attendance').update({ break2_end: timeStr }).eq('id', todayAttId)
-              else updated.breaks = bl2
-              updated.break2_end = timeStr
+              const jak2 = await zavri({ break2_end: timeStr, breaks: bl2 }, { break2_end: timeStr })
+              if (!jak2) pauzaUzavrena = false
+              else { if (jak2 === 'plne') updated.breaks = bl2; updated.break2_end = timeStr }
             }
-          } catch(e) { /* i kdyby se nepovedlo, pokračuj s odchodem */ }
+          } catch(e) { pauzaUzavrena = false }
+          if (!pauzaUzavrena) {
+            showToast('❌ Odchod se NEZAPSAL — nepodařilo se ukončit rozdělanou pauzu. Zkuste to prosím znovu.')
+            updateMobStav(current, [current])
+            checkinInProgress = false
+            window.zapisProbiha = false
+            return
+          }
         }
         // Spočítej hodiny podle pravidel směny (včetně 2. pauzy!)
         // Načti aktuální pauzy ze serveru, ať se nespoléháme na možná neúplnou lokální kopii.
