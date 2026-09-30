@@ -17609,15 +17609,16 @@ async function mobCheckin(type) {
         const zapisT = { breaks: poleT }
         if (poleT.length === 1) { zapisT.break_start = bsT + ':00'; zapisT.break_end = beT + ':00' }
         else if (poleT.length === 2) { zapisT.break2_start = bsT + ':00'; zapisT.break2_end = beT + ':00' }
-        let { error: chybaT } = await withTimeout(sb.from('attendance').update(zapisT).eq('id', todayAttId), 12000)
+        let { data: radkyT, error: chybaT } = await withTimeout(sb.from('attendance').update(zapisT).eq('id', todayAttId).select('id'), 12000)
         if (chybaT) {
           // Starší databáze nemusí mít sloupec `breaks` — pauzu ulož aspoň do časů.
           console.warn('[pauza] zápis s polem breaks selhal, zkouším bez něj:', chybaT.message)
           const bezPole = { ...zapisT }; delete bezPole.breaks
-          const r2 = await withTimeout(sb.from('attendance').update(bezPole).eq('id', todayAttId), 12000)
-          chybaT = r2.error
+          const r2 = await withTimeout(sb.from('attendance').update(bezPole).eq('id', todayAttId).select('id'), 12000)
+          chybaT = r2.error; radkyT = r2.data
         }
         if (chybaT) { showToast(chybaText(chybaT, 'Přestávka se nezapsala')); checkinInProgress = false; return }
+        if (!radkyT || !radkyT.length) { pauzaNetrefila(); return }
         Object.assign(updated, zapisT)
         todayRecord = { ...updated }
         showToast('☕ Přestávka ' + nastT.minut + ' min zapsaná — ' + bsT + '–' + beT)
@@ -17630,8 +17631,9 @@ async function mobCheckin(type) {
           checkinInProgress = false
           return
         }
-        const { error } = await withTimeout(sb.from('attendance').update({ break_start: timeStr, break_end: null }).eq('id', todayAttId), 12000)
+        const { data: radkyZ, error } = await withTimeout(sb.from('attendance').update({ break_start: timeStr, break_end: null }).eq('id', todayAttId).select('id'), 12000)
         if (error) { showToast(chybaText(error, 'Začátek pauzy se nezapsal')); checkinInProgress = false; return }
+        if (!radkyZ || !radkyZ.length) { pauzaNetrefila(); return }
         updated.break_start = timeStr
         updated.break_end = null
         todayRecord = { ...updated }  // Aktualizuj lokální kopii
@@ -17648,13 +17650,15 @@ async function mobCheckin(type) {
         // Přidej dokončenou pauzu do pole breaks (kvůli více pauzám za směnu)
         const existingBreaks = Array.isArray(current.breaks) ? current.breaks.slice() : []
         existingBreaks.push({ bs: current.break_start.slice(0,5), be: timeStr.slice(0,5) })
-        const { error } = await withTimeout(sb.from('attendance').update({ break_end: timeStr, breaks: existingBreaks }).eq('id', todayAttId), 12000)
+        let { data: radkyK, error } = await withTimeout(sb.from('attendance').update({ break_end: timeStr, breaks: existingBreaks }).eq('id', todayAttId).select('id'), 12000)
         if (error) {
           // Kdyby sloupec breaks neexistoval, ulož aspoň break_end (zpětná kompatibilita)
           console.warn('[break-end] update s breaks selhal, zkouším bez:', error.message)
-          const { error: e2 } = await withTimeout(sb.from('attendance').update({ break_end: timeStr }).eq('id', todayAttId), 12000)
-          if (e2) { showToast(chybaText(e2, 'Konec pauzy se nezapsal')); checkinInProgress = false; return }
+          const r2 = await withTimeout(sb.from('attendance').update({ break_end: timeStr }).eq('id', todayAttId).select('id'), 12000)
+          if (r2.error) { showToast(chybaText(r2.error, 'Konec pauzy se nezapsal')); checkinInProgress = false; return }
+          radkyK = r2.data
         }
+        if (!radkyK || !radkyK.length) { pauzaNetrefila(); return }
         updated.break_end = timeStr
         updated.breaks = existingBreaks
         todayRecord = { ...updated }  // Aktualizuj lokální kopii
@@ -21345,6 +21349,15 @@ async function adresaZeSouradnic(lat, lng) {
 // zapisuje se jako dřív: výpadek nesmí nikomu zablokovat příchod.
 const GPS_PRAVIDLO_PLATI_MS = 10 * 60 * 1000
 let _gpsPravidlo = { hodnota: null, kdy: 0 }
+// Zápis pauzy netrefil dnešní záznam (správce ho mezitím přepsal nebo smazal).
+// Audit 30. 9. 2026: dřív appka hlásila „Přestávka zapsaná" a pracovník celý
+// den viděl stav, který v databázi nebyl. Teď to řekne a načte den znovu.
+function pauzaNetrefila() {
+  checkinInProgress = false
+  showToast('⚠️ Přestávka se nezapsala — dnešní záznam se mezitím změnil. Načítám ho znovu, zkuste to prosím ještě jednou.')
+  try { getTodayRecord() } catch (e) {}
+}
+
 async function mojeFirmaChcePolohu(obnovit) {
   if (!obnovit && _gpsPravidlo.hodnota !== null && Date.now() - _gpsPravidlo.kdy < GPS_PRAVIDLO_PLATI_MS) {
     return _gpsPravidlo.hodnota
@@ -24339,11 +24352,15 @@ async function saveManualAttendance() {
 
   // Zkontroluj jestli záznam pro tento den a pracovníka už existuje
   // Načti všechny záznamy pro daný den (může být více směn)
-  const { data: existingAll } = await sb.from('attendance')
+  const { data: existingAll, error: chybaCteni } = await sb.from('attendance')
     .select('id,check_in,check_out')
     .eq('worker_id', workerId)
     .eq('work_date', date)
     .order('check_in')
+  // Audit 30. 9. 2026: bez tohohle vypadal selhaný dotaz jako „den je prázdný"
+  // — otázka „Přepsat?" se neukázala a založil se DRUHÝ záznam téhož dne,
+  // takže týden, výkaz, faktura i provize ten den sečetly dvakrát.
+  if (chybaCteni) { showToast('❌ Docházku dne se nepodařilo načíst — nic se nezapsalo. Zkuste to prosím znovu.'); return }
 
   // Ruční zápis je pro daný den KONEČNÝ. Dřív se přepsal jen nejstarší záznam
   // a druhá směna dne si nechala svoje hodiny — den se pak sčítal dvakrát.
@@ -24357,9 +24374,9 @@ async function saveManualAttendance() {
       : ''
     if (!confirm(`Pro tento den již existuje záznam (${existing.check_in?.slice(0,5)} → ${existing.check_out?.slice(0,5)||'?'})${countMsg}. Přepsat?`)) return
     window.zapisProbiha = true
-    let error
+    let error, zapsano
     try {
-      ;({ error } = await sb.from('attendance').update({
+      ;({ data: zapsano, error } = await sb.from('attendance').update({
         check_in: ci+':00',
         check_out: co+':00',
         break_start: bs ? bs+':00' : null,
@@ -24379,16 +24396,20 @@ async function saveManualAttendance() {
         // Sobotu dopisujeme i při úpravě — dřív se nastavila jen u nového záznamu,
         // takže po opravě datumu zůstal příznak podle původního dne.
         is_saturday: isSaturdayDate(date)
-      }).eq('id', existing.id))
+      }).eq('id', existing.id).select('id'))
     } finally {
       window.zapisProbiha = false
     }
     if (error) { showToast('❌ Chyba: ' + error.message); return }
+    // Zápis, který kvůli právům netrefí řádek, projde bez chyby — neříkat „aktualizováno".
+    if (!zapsano || !zapsano.length) { showToast('❌ Záznam se nepřepsal — zkontrolujte oprávnění'); return }
     // Bez tohohle by duplicitní směna dne „přepsání“ přežila a její hodiny by se
     // dál sčítaly do týdne, do výkazu i do faktury.
     if (duplicity.length) {
-      const { error: delErr } = await sb.from('attendance').delete().in('id', duplicity.map(d => d.id))
-      if (delErr) showToast('⚠️ Duplicitní záznamy dne se nepodařilo smazat: ' + delErr.message)
+      const { data: smazano, error: delErr } = await sb.from('attendance').delete().in('id', duplicity.map(d => d.id)).select('id')
+      if (delErr || (smazano || []).length !== duplicity.length) {
+        showToast('⚠️ Duplicitní záznamy dne se nepodařilo smazat' + (delErr ? ': ' + delErr.message : ' — den se může počítat dvakrát, zkontrolujte ho'))
+      }
     }
     showToast('✅ Záznam aktualizován — ' + hours + 'h')
   } else {
