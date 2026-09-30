@@ -52,9 +52,16 @@ comment on column public.teams.prac_doba_od is
 comment on column public.teams.prac_doba_do is
   'Běžný konec pracovní doby firmy.';
 
--- Funkce pro pracovníka: „chce moje firma docházku jen s polohou?"
--- Vrací JEN ano/ne o firmě přihlášeného — pracovník tak nepotřebuje právo
--- číst tabulku firem. security definer, proto pevná search_path.
+-- „Jen s polohou" jde od 30. 9. zapnout i pro celou firmu (companies) a pro
+-- podskupinu (subteams) — viz supabase-migrace-gps-firmy-podskupiny.sql.
+-- Sloupce i funkce jsou tu STEJNÉ jako tam: kdyby se tahle migrace pustila
+-- znovu až po té druhé, nesmí funkci vrátit jen na skupiny.
+alter table public.companies add column if not exists zapis_jen_gps boolean not null default false;
+alter table public.subteams  add column if not exists zapis_jen_gps boolean not null default false;
+
+-- Funkce pro pracovníka: „mám zapisovat jen s polohou?"
+-- Vrací JEN ano/ne o přihlášeném — pracovník tak nepotřebuje právo číst
+-- firmy ani skupiny. security definer, proto pevná search_path.
 create or replace function public.muj_zapis_jen_gps()
 returns boolean
 language sql
@@ -63,9 +70,15 @@ security definer
 set search_path = public
 as $$
   select coalesce((
-    select t.zapis_jen_gps
-      from public.teams t
-      join public.profiles p on p.team_id = t.id
+    select coalesce(t.zapis_jen_gps, false)
+        or coalesce(c.zapis_jen_gps, false)
+        or coalesce(s.zapis_jen_gps
+                    and s.team_id::text = p.team_id::text
+                    and coalesce((to_jsonb(s) ->> 'is_active')::boolean, true), false)
+      from public.profiles p
+      left join public.teams t     on t.id = p.team_id
+      left join public.companies c on c.id::text = t.company_id::text
+      left join public.subteams s  on s.id::text = p.subteam_id::text
      where p.id = auth.uid()
   ), false)
 $$;

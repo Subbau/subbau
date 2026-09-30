@@ -1578,6 +1578,7 @@ setTimeout(function () {
       <button class="sb-a" id="admin-sound-toggle-mob" onclick="toggleAdminSound()" style="display:flex;align-items:center;gap:8px"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:16px;height:16px;flex-shrink:0"><path d="M11 5L6 9H2v6h4l5 4V5z"/><path d="M15.54 8.46a5 5 0 0 1 0 7.07M19.07 4.93a10 10 0 0 1 0 14.14"/></svg><span>Zvuk zapnutý</span></button>
       <div style="border-top:1px solid #333;margin-top:12px;padding-top:12px">
         <button onclick="doLogout();closeAdminDrawer()" style="width:100%;padding:10px;background:none;border:1px solid var(--red);color:var(--red);border-radius:8px;cursor:pointer;font-family:inherit;font-size:13px">Odhlásit se</button>
+        <div class="sb-verze" style="font-size:10px;color:#8a8178;text-align:center;margin-top:8px"></div>
       </div>
     </div>
   </div>
@@ -1612,7 +1613,7 @@ setTimeout(function () {
       </div>
       <div class="sb-foot">
         <div class="av" id="sb-av">BK</div>
-        <div><div class="sb-fn" id="sb-name">—</div><div class="sb-fr" id="sb-role">—</div></div>
+        <div><div class="sb-fn" id="sb-name">—</div><div class="sb-fr" id="sb-role">—</div><div class="sb-verze" style="font-size:10px;color:#8a8178;margin-top:2px"></div></div>
       </div>
     </div>
     <div class="main">
@@ -5332,8 +5333,17 @@ async function submitAdminSignatureWithPlacement() {
 // Po nahrání nové verze se snadno pozná, jestli se opravdu nasadila: otevřete
 // appku, zmáčkněte F12 (na Macu ⌥⌘I) a v konzoli je vypsané tohle datum. Když
 // tam svítí starší, prohlížeč nebo GitHub drží starou verzi.
-const SUBBAU_VERZE = '2026-09-21 y — KW jde upravit, stažené PDF je Rechnung'
+const SUBBAU_VERZE = '2026-09-30 b — GPS i pro firmu a podskupinu, ostré faktury'
 console.log('StavKo docházka — verze ' + SUBBAU_VERZE)
+// Verze i dole v menu správce. Když někdo novinku „nevidí", podle ní se hned
+// pozná, jestli nemá otevřenou starou kopii appky — bez hledání v konzoli.
+;(() => {
+  const napis = () => document.querySelectorAll('.sb-verze').forEach(el => {
+    el.textContent = 'verze ' + SUBBAU_VERZE.split(' — ')[0]
+  })
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', napis)
+  else napis()
+})()
 
 // ============ SUPABASE CONFIG ============
 // Bezpečné obaly pro localStorage (na iOS Safari v privátním režimu setItem hází výjimku)
@@ -16117,7 +16127,8 @@ async function loadTeams() {
     sb.from('teams').select('*').eq('is_active', true).order('name'),
     sb.from('profiles').select(SLOUPCE_LIDI).in('role', ['osvec', 'partak']).order('full_name'),
     sb.from('subteams').select('*').eq('is_active', true).order('name'),
-    sb.from('companies').select('id, name').order('name')
+    // '*' kvůli zapis_jen_gps — dokud migrace neběží, sloupec tu prostě není
+    sb.from('companies').select('*').order('name')
   ])
 
   const teams = rTeams.data
@@ -16232,17 +16243,24 @@ function renderTeamMembers(t, members, qWorker, profLabels) {
 
   let html = '<div style="display:flex;flex-direction:column;gap:10px">'
 
+  // „Jen s polohou" u podskupiny — a jestli už neplatí shora (skupina, firma)
+  const gpsFirmy = !!(firmaSkupiny(t) || {}).zapis_jen_gps
+  const gpsShora = gpsFirmy || !!t.zapis_jen_gps
+
   // Každá podskupina jako blok
   subs.forEach(s => {
     const ms = inSub(s.id)
     html += `<div style="border:1px dashed var(--blue);border-radius:10px;padding:8px 10px;background:var(--blue-l)">
-      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:2px">
         <span style="font-size:12px;font-weight:800;color:var(--blue)">👥 ${escAttr(s.name)}</span>
         <div style="display:flex;gap:4px">
           <button onclick="renameSubteam('${s.id}','${jsStr(s.name||'')}')" title="Přejmenovat" style="padding:2px 7px;font-size:11px;border:1px solid var(--brd);border-radius:6px;cursor:pointer;background:#fff;font-family:inherit">✎</button>
           <button onclick="deleteSubteam('${s.id}','${jsStr(s.name||'')}')" title="Smazat podskupinu" style="padding:2px 7px;font-size:11px;border:1px solid var(--red);border-radius:6px;cursor:pointer;background:#fff;color:var(--red);font-family:inherit"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:1em;height:1em;flex-shrink:0;vertical-align:-2px"><path d="M3 6h18M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/></svg></button>
         </div>
       </div>
+      ${gpsVolbaHtml(`nastavGpsPodskupiny('${s.id}', this)`, !!s.zapis_jen_gps, 'zapis_jen_gps' in s,
+        '📍 jen s polohou (GPS)', gpsShora ? 'už platí z celé ' + (gpsFirmy ? 'firmy' : 'skupiny') : '',
+        'Zapnuto = lidi v téhle podskupině zapíšou příchod i odchod jen s povolenou polohou.', true)}
       <div style="display:flex;flex-direction:column;gap:6px">
         ${ms.length ? ms.map(memberRow).join('') : '<div style="font-size:11px;color:var(--text3);text-align:center;padding:6px">Zatím nikdo — přesuňte sem člena rozbalovátkem</div>'}
       </div>
@@ -16486,18 +16504,46 @@ function ukazVsechnyTymy() {
 // Sloupce jsou v supabase-migrace-tymy-oznameni-puntiky.sql. Dokud neběží,
 // v objektu firmy prostě nejsou (select('*')) — ovládání se ukáže zašedlé
 // s poznámkou, místo aby tvrdilo, že se něco uloží.
+// „Jen s polohou" jde zapnout pro celou firmu (odběratele, ke kterému je
+// skupina v Týmech přiřazená), pro skupinu, nebo pro podskupinu — majitel
+// 30. 9. 2026: „po celých firmách nebo skupinách nebo podskupinách". Platí,
+// kde je zapnuto aspoň jedno; pracovníkovi to spočítá funkce
+// muj_zapis_jen_gps() v databázi (supabase-migrace-gps-firmy-podskupiny.sql).
+function firmaSkupiny(t) {
+  if (!t || t.company_id == null || t.company_id === '') return null
+  return (_teamCompaniesCache || []).find(c => String(c.id) === String(t.company_id)) || null
+}
+
+function gpsVolbaHtml(onchange, zapnuto, maSloupec, text, poznamka, napoveda, maly) {
+  return `<label onclick="event.stopPropagation()" title="${escAttr(napoveda)}"
+      style="display:flex;align-items:center;gap:${maly ? 6 : 9}px;min-height:44px;cursor:${maSloupec ? 'pointer' : 'not-allowed'};font-size:${maly ? 11.5 : 12.5}px;font-weight:700;color:${maly ? 'var(--blue)' : 'var(--text2)'}">
+      <input type="checkbox" ${zapnuto ? 'checked' : ''} ${maSloupec ? '' : 'disabled'} onchange="${onchange}"
+        style="width:${maly ? 18 : 20}px;height:${maly ? 18 : 20}px;flex-shrink:0;cursor:inherit;accent-color:var(--blue)">
+      <span>${text}${poznamka ? ` <span style="font-weight:600;color:var(--text3)">— ${poznamka}</span>` : ''}</span>
+    </label>`
+}
+
 function pravidlaFirmyHtml(t) {
   const maSloupce = t && ('zapis_jen_gps' in t)
   const hhmm = (v) => (v ? String(v).slice(0, 5) : '')
   const vyp = maSloupce ? '' : 'disabled'
   const migrace = maSloupce ? '' : `<span style="font-size:11px;color:var(--amber);font-weight:700">⚠️ spusťte migraci supabase-migrace-tymy-oznameni-puntiky.sql</span>`
-  return `<div style="margin-top:10px;padding-top:10px;border-top:1px dashed var(--brd);display:flex;flex-direction:column;gap:8px">
-    <label onclick="event.stopPropagation()" title="Zapnuto = lidi z téhle firmy zapíšou příchod i odchod jen s povolenou polohou. Bez polohy se nezapíše nic a ruční adresa se nenabídne."
-      style="display:flex;align-items:center;gap:9px;min-height:44px;cursor:${maSloupce ? 'pointer' : 'not-allowed'};font-size:12.5px;font-weight:700;color:var(--text2)">
-      <input type="checkbox" ${t.zapis_jen_gps ? 'checked' : ''} ${vyp} onchange="nastavZapisJenGps('${t.id}', this)"
-        style="width:20px;height:20px;cursor:inherit;accent-color:var(--blue)">
-      📍 Příchod a odchod jen s polohou (GPS)
-    </label>
+  const firma = firmaSkupiny(t)
+  const firmaMaSloupec = !!(firma && ('zapis_jen_gps' in firma))
+  const gpsFirmy = !!(firma && firma.zapis_jen_gps)
+  const podskupiny = (_subteamsCache || []).filter(s => String(s.team_id) === String(t.id))
+  const maPodskupiny = podskupiny.length > 0
+  const migrace2 = (maSloupce && ((firma && !firmaMaSloupec) || podskupiny.some(s => !('zapis_jen_gps' in s))))
+    ? `<span style="font-size:11px;color:var(--amber);font-weight:700">⚠️ pro celou firmu a podskupiny spusťte migraci supabase-migrace-gps-firmy-podskupiny.sql</span>` : ''
+  return `<div style="margin-top:10px;padding-top:10px;border-top:1px dashed var(--brd);display:flex;flex-direction:column;gap:2px">
+    <div style="font-size:12.5px;font-weight:800;color:var(--text2)">📍 Příchod a odchod jen s polohou (GPS)</div>
+    ${firma ? gpsVolbaHtml(`nastavGpsFirmy('${firma.id}', this)`, gpsFirmy, firmaMaSloupec,
+        'celá firma ' + escAttr(firma.name || ''), 'všechny její skupiny i podskupiny',
+        'Zapnuto = lidi ve všech skupinách a podskupinách téhle firmy zapíšou příchod i odchod jen s povolenou polohou.') : ''}
+    ${gpsVolbaHtml(`nastavZapisJenGps('${t.id}', this)`, !!t.zapis_jen_gps, maSloupce,
+        'celá skupina ' + escAttr(cleanTeamName(t.name)), gpsFirmy ? 'už platí z celé firmy' : '',
+        'Zapnuto = lidi z téhle skupiny zapíšou příchod i odchod jen s povolenou polohou. Bez polohy se nezapíše nic a ruční adresa se nenabídne.')}
+    ${maPodskupiny ? `<div style="font-size:11.5px;color:var(--text3);margin-bottom:4px">Jen jednu podskupinu zapnete přímo u ní výš.</div>` : ''}
     <div style="display:flex;align-items:center;gap:7px;flex-wrap:wrap;font-size:12.5px;font-weight:700;color:var(--text2)"
       title="Kdo přijde nebo odejde mimo tuhle dobu, bude ve výkazu svítit modře, dokud to neopravíte nebo neoznačíte jako v pořádku. Na hodiny ani faktury to vliv nemá.">
       <span>⏰ Běžná pracovní doba</span>
@@ -16509,26 +16555,63 @@ function pravidlaFirmyHtml(t) {
       ${t.prac_doba_od || t.prac_doba_do ? `<button onclick="event.stopPropagation();nastavPracDobuTymu('${t.id}', true)" ${vyp}
         style="min-height:40px;padding:6px 10px;border:1px solid var(--brd);border-radius:8px;background:#fff;cursor:pointer;font-family:inherit;font-size:12px">zrušit</button>` : ''}
     </div>
-    ${migrace}
+    ${migrace}${migrace2}
   </div>`
 }
 
-async function nastavZapisJenGps(teamId, el) {
+// Uloží „jen s polohou" u firmy (companies), skupiny (teams) nebo podskupiny
+// (subteams). Vrací uložený řádek, nebo null — pak je zaškrtnutí vrácené
+// a správce ví proč.
+async function ulozGpsPravidlo(tabulka, id, el, migrace) {
   const zapnout = !!(el && el.checked)
   if (el) el.disabled = true
-  const { data, error } = await sb.from('teams')
-    .update({ zapis_jen_gps: zapnout }).eq('id', teamId).select('id, zapis_jen_gps')
+  const { data, error } = await sb.from(tabulka)
+    .update({ zapis_jen_gps: zapnout }).eq('id', id).select('id, zapis_jen_gps')
   if (el) el.disabled = false
   if (error || !data || !data.length || data[0].zapis_jen_gps !== zapnout) {
     if (el) el.checked = !zapnout
     showToast(error && /zapis_jen_gps|column|schema cache/i.test(error.message || '')
-      ? '❌ Chybí sloupec — spusťte migraci supabase-migrace-tymy-oznameni-puntiky.sql'
+      ? '❌ Chybí sloupec — spusťte migraci ' + migrace
       : '❌ Nastavení se neuložilo' + (error ? ': ' + error.message : ' — zkontrolujte oprávnění'))
-    return
+    return null
   }
-  const t = (_teamsCache || []).find(x => x.id === teamId)
-  if (t) t.zapis_jen_gps = zapnout
-  showToast(zapnout ? '📍 Tahle firma teď zapisuje docházku jen s polohou' : '✅ Tahle firma zapisuje jako dřív (i ručně)')
+  const cache = tabulka === 'companies' ? _teamCompaniesCache : tabulka === 'subteams' ? _subteamsCache : _teamsCache
+  const r = (cache || []).find(x => String(x.id) === String(id))
+  if (r) r.zapis_jen_gps = zapnout
+  return r || { id, zapis_jen_gps: zapnout }
+}
+
+async function nastavZapisJenGps(teamId, el) {
+  const t = await ulozGpsPravidlo('teams', teamId, el, 'supabase-migrace-tymy-oznameni-puntiky.sql')
+  if (!t) return
+  const zapnout = !!t.zapis_jen_gps
+  const zFirmy = !!(firmaSkupiny(t) || {}).zapis_jen_gps
+  showToast(zapnout ? '📍 Tahle skupina teď zapisuje docházku jen s polohou'
+    : zFirmy ? '⚠️ U skupiny vypnuto, ale poloha dál platí z celé firmy'
+    : '✅ Tahle skupina zapisuje jako dřív (i ručně)')
+  renderTeams()
+}
+
+async function nastavGpsFirmy(companyId, el) {
+  const c = await ulozGpsPravidlo('companies', companyId, el, 'supabase-migrace-gps-firmy-podskupiny.sql')
+  if (!c) return
+  const jmeno = c.name ? ' ' + c.name : ''
+  showToast(c.zapis_jen_gps
+    ? '📍 Celá firma' + jmeno + ' teď zapisuje docházku jen s polohou — všechny její skupiny i podskupiny'
+    : '✅ Firma' + jmeno + ' už polohu celá nevyžaduje (skupiny a podskupiny se zapnutou polohou ji vyžadují dál)')
+  renderTeams()
+}
+
+async function nastavGpsPodskupiny(subteamId, el) {
+  const s = await ulozGpsPravidlo('subteams', subteamId, el, 'supabase-migrace-gps-firmy-podskupiny.sql')
+  if (!s) return
+  const t = (_teamsCache || []).find(x => String(x.id) === String(s.team_id))
+  const shora = !!(t && (t.zapis_jen_gps || (firmaSkupiny(t) || {}).zapis_jen_gps))
+  const jmeno = s.name ? ' ' + s.name : ''
+  showToast(s.zapis_jen_gps ? '📍 Podskupina' + jmeno + ' teď zapisuje docházku jen s polohou'
+    : shora ? '⚠️ U podskupiny vypnuto, ale poloha dál platí z celé skupiny nebo firmy'
+    : '✅ Podskupina' + jmeno + ' zapisuje jako dřív (i ručně)')
+  renderTeams()
 }
 
 async function nastavPracDobuTymu(teamId, zrusit) {
