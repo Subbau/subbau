@@ -5400,6 +5400,8 @@ async function _initAppInner(user) {
     showAdmin(profile)
   } else if (role === 'osvec' || role === 'partak') {
     showOsvec(profile)
+    // Pravidlo „jen s polohou" dopředu, ať na něj příchod nečeká.
+    mojeFirmaChcePolohu(true)
   } else {
     console.warn('[initApp] Neznámá role, pouštím jen pracovnickou část:', role)
     showOsvec(profile)
@@ -21265,15 +21267,26 @@ async function adresaZeSouradnic(lat, lng) {
 // tak nepotřebuje právo číst tabulku firem (a nepotřebuje o nich vědět nic víc).
 // Bez migrace funkce neexistuje → false = chování jako dosud. Stejně tak při
 // výpadku sítě: bez sítě se docházka stejně nezapíše.
-async function mojeFirmaChcePolohu() {
+// Odpověď se pamatuje 10 minut a zjišťuje se už při spuštění appky
+// (showOsvec) — příchod pak na dotaz do databáze nečeká. Pravidlo se mění
+// zřídka; správcova změna se k lidem dostane nejpozději do deseti minut.
+// Když dotaz selže, platí poslední známá odpověď, a když žádná není,
+// zapisuje se jako dřív: výpadek nesmí nikomu zablokovat příchod.
+const GPS_PRAVIDLO_PLATI_MS = 10 * 60 * 1000
+let _gpsPravidlo = { hodnota: null, kdy: 0 }
+async function mojeFirmaChcePolohu(obnovit) {
+  if (!obnovit && _gpsPravidlo.hodnota !== null && Date.now() - _gpsPravidlo.kdy < GPS_PRAVIDLO_PLATI_MS) {
+    return _gpsPravidlo.hodnota
+  }
   try {
     const r = await Promise.race([
       sb.rpc('muj_zapis_jen_gps'),
-      new Promise((_, ne) => setTimeout(() => ne(new Error('timeout')), 8000))
+      new Promise((_, ne) => setTimeout(() => ne(new Error('timeout')), 5000))
     ])
-    if (r?.error) return false
-    return r?.data === true
-  } catch (e) { return false }
+    if (r?.error) return _gpsPravidlo.hodnota === true
+    _gpsPravidlo = { hodnota: r?.data === true, kdy: Date.now() }
+    return _gpsPravidlo.hodnota
+  } catch (e) { return _gpsPravidlo.hodnota === true }
 }
 
 // Poloha, BEZ KTERÉ SE NEZAPISUJE. Vrací { lat, lng, adresa }, nebo null.
