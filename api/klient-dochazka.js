@@ -13,9 +13,16 @@
 // řidičák. Odběratel lidem volá přímo na stavbu a potřebuje vědět, koho
 // smí poslat s dodávkou.
 //
-// CO VEN NEJDE ANI TEĎ: e-maily, samotné doklady a jejich čísla, fotka
-// řidičáku, adresy bydliště ani GPS souřadnice (attendance.location_lat/lng).
-// Nejsou v dotazech do databáze, takže je funkce vůbec nemá.
+// OD 30. 9. 2026 I ADRESA UBYTOVÁNÍ (profiles.accommodation_address) —
+// odběratel ubytování zajišťuje, takže ji vidí a smí ji i zapsat. Majitel:
+// „na tom odkazu nebudou kódy ubytování — to budeme dávat my OSVČ a OSVČ to
+// uvidí u sebe — ale na odkazu bude, kde mají ubytování."
+//
+// CO VEN NEJDE ANI TEĎ: KÓDY A POKYNY K UBYTOVÁNÍ (tabulka ubytovani_kody,
+// dřív sloupec ubytovani_poznamka — ani jedno se tu nečte), e-maily, samotné
+// doklady a jejich čísla, fotka řidičáku, adresa bydliště ani GPS souřadnice
+// (attendance.location_lat/lng). Nejsou v dotazech do databáze, takže je
+// funkce vůbec nemá.
 //
 // OBDOBÍ: jen aktuální týden. Týden si klient nevybírá, počítá ho server.
 // =====================================================================
@@ -44,6 +51,7 @@ const PRODLEVA_PO_ODCHODU_MIN = 20;
 // jen s odkazem — takže na velikost i tvar musí být server přísný.
 const MAX_FOTKA = 250 * 1024;    // znaků data URI ≈ 180 kB obrázku
 const MAX_POZNAMKA = 1000;
+const MAX_UBYTOVANI = 300;       // adresa ubytování — jeden řádek textu
 // Den, u kterého ještě neuplynulo zdržení, se z přehledu nevyhazuje —
 // klient u něj vidí jméno a adresu stavby, ale místo časů a hodin nápis
 // „Stundenerfassung läuft". Ví tedy, kdo mu na stavbě je, ale hodiny uvidí,
@@ -319,6 +327,55 @@ module.exports = async (req, res) => {
       }
       if (!patriSem) { res.status(403).json({ ok: false, chyba: 'cizi_pracovnik' }); return; }
 
+      // ADRESA UBYTOVÁNÍ — jde přímo do profilu pracovníka, ne k odkazu.
+      // Tutéž adresu vidí SubBau v Pracovnících a pracovník u sebe v appce,
+      // a co tam zapíše SubBau, uvidí odběratel tady. Kódy od ubytování sem
+      // nechodí a tahle funkce je ani nečte.
+      if ('ubytovani' in telo) {
+        const text = String(telo.ubytovani == null ? '' : telo.ubytovani)
+          .replace(/[\u0000-\u001f\u007f]+/g, ' ').replace(/\s+/g, ' ').trim();
+        if (text.length > MAX_UBYTOVANI) {
+          res.status(413).json({ ok: false, chyba: 'adresa_prilis_dlouha' }); return;
+        }
+        // `select=id` — zpátky jen počet trefených řádků, nic z profilu.
+        const zapis = (data) => fetch(`${SUPABASE_URL}/rest/v1/profiles` +
+                                      `?id=eq.${encodeURIComponent(workerId)}&select=id`, {
+          method: 'PATCH',
+          headers: { apikey: klic, Authorization: `Bearer ${klic}`,
+                     'Content-Type': 'application/json', Prefer: 'return=representation' },
+          body: JSON.stringify(data),
+        });
+        try {
+          // Druhý, starší sloupec se srovná na prázdno — jinak by v appce
+          // mohla zůstat viset stará adresa vedle nové.
+          let r = await zapis({ accommodation_address: text || null, ubytovani_adresa: null });
+          if (!r.ok) {
+            const t = await r.text().catch(() => '');
+            if (/ubytovani_adresa/.test(t) && /42703|PGRST204|does not exist|schema cache/i.test(t)) {
+              r = await zapis({ accommodation_address: text || null });
+            } else {
+              console.error('[klient] zápis ubytování:', r.status, t.slice(0, 300));
+              res.status(500).json({ ok: false, chyba: 'nelze_ulozit' }); return;
+            }
+          }
+          if (!r.ok) {
+            const t = await r.text().catch(() => '');
+            console.error('[klient] zápis ubytování:', r.status, t.slice(0, 300));
+            res.status(500).json({ ok: false, chyba: 'nelze_ulozit' }); return;
+          }
+          // Zápis, který netrefí řádek, projde bez chyby — musí se to poznat.
+          const trefeno = await r.json().catch(() => null);
+          if (!Array.isArray(trefeno) || trefeno.length !== 1) {
+            console.error('[klient] zápis ubytování: trefených řádků', trefeno && trefeno.length);
+            res.status(500).json({ ok: false, chyba: 'nelze_ulozit' }); return;
+          }
+        } catch (e) {
+          console.error('[klient] zápis ubytování:', e);
+          res.status(500).json({ ok: false, chyba: 'nelze_ulozit' }); return;
+        }
+        res.status(200).json({ ok: true, ubytovani: text }); return;
+      }
+
       const zmena = { link_id: odkaz.id, worker_id: workerId, upraveno: new Date().toISOString() };
 
       if ('foto' in telo) {
@@ -487,7 +544,7 @@ module.exports = async (req, res) => {
       let jmena = {}, sazbaTed = {}, provizeTed = {}, bezProvize = new Set(), historie = {};
       // Telefon a řidičák — od 23. 9. 2026 na přání SubBau. Odběratel volá
       // lidem na stavbu přímo a potřebuje vědět, koho smí poslat s dodávkou.
-      let telefony = {}, ridicaky = {};
+      let telefony = {}, ridicaky = {}, ubytovani = {};
       if (ids.length) {
         const seznamIds = ids.map(encodeURIComponent).join(',');
 
@@ -507,7 +564,7 @@ module.exports = async (req, res) => {
         const tise = (popis) => (e) => {
           console.warn('[klient] ' + popis + ':', e.message); return null;
         };
-        const [lidi, dokl, prov, h] = await Promise.all([
+        const [lidi, dokl, prov, h, ubyt] = await Promise.all([
           // Jméno, hodinová sazba a telefon. SubBau si přeje, aby odběratel
           // viděl u každého člověka sazbu i provizi — vyžádal si to sám, aby
           // si mohl fakturu překontrolovat. V appce zůstává provize dál jen
@@ -526,12 +583,22 @@ module.exports = async (req, res) => {
           // spočítal celý novou sazbou a nesedělo by to s fakturou.
           db(`worker_rate_history?select=worker_id,druh,hodnota,valid_from&worker_id=in.(${seznamIds})` +
              `&order=valid_from.asc`, klic).catch(tise('historie sazeb se nenačetla')),
+          // Adresa ubytování (od 30. 9. 2026). Zvlášť a s vlastním ošetřením —
+          // bez ní se stránka obejde. Starší sloupec ubytovani_adresa nemusí
+          // existovat, proto záloha jen s hlavním. KÓDY SE NEČTOU NIKDY.
+          db(`profiles?select=id,accommodation_address,ubytovani_adresa&id=in.(${seznamIds})`, klic)
+            .catch(() => db(`profiles?select=id,accommodation_address&id=in.(${seznamIds})`, klic))
+            .catch(tise('ubytování se nenačetlo')),
         ]);
 
         for (const p of (lidi || [])) {
           jmena[p.id] = p.full_name;
           sazbaTed[p.id] = Number(p.hourly_rate_worker) || 0;
           telefony[p.id] = (p.phone || '').trim();
+        }
+        for (const p of (ubyt || [])) {
+          const a = String(p.accommodation_address || p.ubytovani_adresa || '').trim();
+          if (a) ubytovani[p.id] = a.slice(0, MAX_UBYTOVANI);
         }
         for (const d of (dokl || [])) {
           if (d.status === 'rejected' || d.status === 'unreadable') continue;
@@ -553,13 +620,15 @@ module.exports = async (req, res) => {
           });
         }
 
-        // Jedna položka na člověka. Kdo telefon ani řidičák nemá, do mapy
-        // se nedostane — stránka pak pod jménem prostě nic nenakreslí.
+        // Jedna položka na člověka. Kdo nemá telefon, řidičák ani adresu
+        // ubytování, do mapy se nedostane — stránka pak u něj ukáže jen
+        // prázdné políčko pro adresu.
         for (const id of ids) {
           const tel = telefony[id] || '';
           const rp = ridicaky[id] || null;
-          if (!tel && !rp) continue;
-          lide[id] = { telefon: tel, ridicak: rp ? { do: rp.do || '' } : null };
+          const ub = ubytovani[id] || '';
+          if (!tel && !rp && !ub) continue;
+          lide[id] = { telefon: tel, ridicak: rp ? { do: rp.do || '' } : null, ubytovani: ub };
         }
       }
       // Kolik platilo v konkrétní den. Když u člověka historie není, platí dnešní.

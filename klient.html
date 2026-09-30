@@ -123,6 +123,18 @@
                 border-radius:9px;font-family:inherit;font-size:13.5px;resize:vertical;
                 box-sizing:border-box;background:#fff;color:var(--tmava)}
   @media print{.znamka,textarea.pozn{display:none}}
+  /* Adresa ubytování (30. 9. 2026) — odběratel ubytování zajišťuje, vidí ji
+     a smí ji opravit. Jeden řádek; na tisku jen text bez rámečku. */
+  .ubyt{display:flex;align-items:center;gap:8px;margin-top:6px;flex-wrap:wrap}
+  .ubyt-popis{font-size:12px;font-weight:700;color:var(--seda2);white-space:nowrap}
+  .ubyt-pole{flex:1;min-width:180px;padding:7px 10px;border:1.5px solid var(--ram);
+             border-radius:9px;font-family:inherit;font-size:13.5px;background:#fff;
+             color:var(--tmava);box-sizing:border-box}
+  .ubyt-pole:placeholder-shown{background:#fbf9f6}
+  @media print{
+    .ubyt-pole{border:none;padding:0;background:none}
+    .ubyt-pole:placeholder-shown{display:none}
+  }
   .penize{font-size:12.5px;color:var(--seda2);margin-top:3px;line-height:1.5}
   .penize b{color:var(--tmava);font-variant-numeric:tabular-nums}
   .souhrn{display:flex;gap:14px;flex-wrap:wrap;font-size:12.5px;color:var(--seda2);
@@ -293,6 +305,41 @@ function kontaktHtml(wid){
   return '<div class="kontakt">' + kusy.join('') + '</div>';
 }
 
+// ADRESA UBYTOVÁNÍ. Ukládá se k pracovníkovi, ne k odkazu — vidí ji i SubBau
+// a pracovník u sebe v appce, a co zapíše SubBau, je vidět tady. KÓDY od
+// ubytování sem nechodí: ty dostává jen pracovník.
+function ubytovaniHtml(wid){
+  var o = (DATA.lide && DATA.lide[wid]) || {};
+  return '<div class="ubyt">'
+    + '<span class="ubyt-popis">🏠 Unterkunft · ubytování</span>'
+    + '<input class="ubyt-pole" type="text" maxlength="300" data-w="' + esc(wid) + '"'
+    + ' value="' + esc(o.ubytovani || '') + '"'
+    + ' placeholder="Adresse der Unterkunft eintragen · zapsat adresu ubytování"'
+    + ' title="Die Adresse sehen auch SubBau und der Mitarbeiter · adresu vidí i SubBau a pracovník"'
+    + ' onchange="ulozUbytovani(this)">'
+    + '</div>';
+}
+
+function ulozUbytovani(pole){
+  var wid = pole.getAttribute('data-w');
+  if (!wid) return;
+  var puvodni = ((DATA.lide && DATA.lide[wid]) || {}).ubytovani || '';
+  var text = String(pole.value || '').replace(/\s+/g, ' ').trim().slice(0, 300);
+  if (text === puvodni) { pole.value = puvodni; return; }
+  pole.disabled = true;
+  ulozPoznamkuNaServer({ worker_id: wid, ubytovani: text }, function(){
+    pole.disabled = false;
+    if (!DATA.lide) DATA.lide = {};
+    DATA.lide[wid] = DATA.lide[wid] || { telefon: '', ridicak: null };
+    DATA.lide[wid].ubytovani = text;   // ať se po obnovení nevrátí staré
+    pole.value = text;
+  }, function(){
+    // Neuložilo se → v políčku nesmí zůstat, co v databázi není.
+    pole.disabled = false;
+    pole.value = puvodni;
+  });
+}
+
 function vykreslit(d, preklady){
   preklady = preklady || {};
   var podle = {};
@@ -405,6 +452,7 @@ function vykreslit(d, preklady){
             : '')
       +   '</div>'
       +   kontaktHtml(wid)
+      +   ubytovaniHtml(wid)
       +   absenceHtml(wid)
       +   '<div class="penize">' + rozpis(podleSazby, 'Std.')
       +     '<div style="margin-top:2px">Provision ' + rozpis(podleProvize, 'Std.') + '</div>'
@@ -572,7 +620,9 @@ function ulozPoznamkuNaServer(data, hotovo, selhalo){
             ? 'Ungültiges Datum · neplatné datum'
             : (j && j.chyba === 'funkce_neni_pripravena')
               ? 'Funktion noch nicht verfügbar · funkce ještě není připravená'
-              : 'Nicht gespeichert · neuloženo';
+              : (j && j.chyba === 'adresa_prilis_dlouha')
+                ? 'Adresse zu lang · adresa je moc dlouhá'
+                : 'Nicht gespeichert · neuloženo';
         stav(duvod);
         selhalo && selhalo(duvod);
       }
@@ -871,15 +921,22 @@ function stahnoutCsv(){
 // smysl a jen by to zbytečně zatěžovalo.
 var PRODLEVA_MS = 60000;
 var casovac = null;
+// Píše zrovna odběratel do poznámky nebo do adresy ubytování? Pak se stránka
+// NEOBNOVUJE. Obnovení by políčko překreslilo, vzalo mu kurzor — a rozepsaný
+// text by se už neuložil, protože uložení běží až při opuštění políčka.
+function pisePrave(){
+  var a = document.activeElement;
+  return !!(a && a.matches && a.matches('textarea.pozn, input.ubyt-pole'));
+}
 function naplanuj(){
   if (casovac) clearTimeout(casovac);
   casovac = setTimeout(function(){
-    if (document.visibilityState === 'visible') nacti(false); else naplanuj();
+    if (document.visibilityState === 'visible' && !pisePrave()) nacti(false); else naplanuj();
   }, PRODLEVA_MS);
 }
 document.addEventListener('visibilitychange', function(){
   // Návrat k oknu = načti hned, ať klient nekouká na zastaralá čísla.
-  if (document.visibilityState === 'visible') nacti(false);
+  if (document.visibilityState === 'visible' && !pisePrave()) nacti(false);
 });
 
 function stav(text){
