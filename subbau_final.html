@@ -7815,7 +7815,12 @@ async function saveFirmaTerms(select, firmIdx) {
   const f = (window._provizeFirmy || [])[firmIdx]
   if (!f || !f.tymy?.length) { showToast('⚠️ Tahle firma nemá žádnou skupinu, kam splatnost uložit'); return }
   const terms = select.value || null
-  const { error } = await sb.from('teams').update({ payment_terms: terms }).in('id', f.tymy)
+  const { data: zapsaneTymy, error } = await sb.from('teams').update({ payment_terms: terms }).in('id', f.tymy).select('id')
+  if (!error && (zapsaneTymy || []).length !== f.tymy.length) {
+    showToast('❌ Splatnost firmy se neuložila' + ((zapsaneTymy || []).length ? ' u všech jejích skupin' : '') + ' — zkontrolujte oprávnění')
+    renderProvizeContent()
+    return
+  }
   if (error) {
     showToast(/payment_terms|column|schema cache/i.test(error.message || '')
       ? '❌ Chybí sloupec u firem — spusťte migraci supabase-migrace-splatnost-firmy.sql'
@@ -7825,13 +7830,19 @@ async function saveFirmaTerms(select, firmIdx) {
   // Propsat do profilů těch, kdo nemají vlastní. Faktura si bere dny z profilu,
   // takže bez tohohle by se změna u firmy na fakturách neprojevila.
   try {
-    const { data: vyjimky } = await sb.from('worker_commissions')
+    // Audit 30. 9. 2026: čtení výjimek ani zápis do profilů nečetly chybu —
+    // firemní splatnost pak dostali i lidé s vlastní, nebo se nepropsala nikomu,
+    // a appka stejně hlásila „platí pro N lidí".
+    const { data: vyjimky, error: chybaVyjimek } = await sb.from('worker_commissions')
       .select('worker_id, payment_terms').in('worker_id', f.ids || [])
+    if (chybaVyjimek) throw chybaVyjimek
     const maVlastni = new Set((vyjimky || []).filter(v => v.payment_terms).map(v => v.worker_id))
     const bezVlastni = (f.ids || []).filter(id => !maVlastni.has(id))
     const days = parseInt((terms || '7/14').split('/')[1], 10)
     if (bezVlastni.length && !isNaN(days)) {
-      await sb.from('profiles').update({ invoice_due_days: days }).in('id', bezVlastni)
+      const { data: propsano, error: chybaProfilu } = await sb.from('profiles').update({ invoice_due_days: days }).in('id', bezVlastni).select('id')
+      if (chybaProfilu) throw chybaProfilu
+      if ((propsano || []).length !== bezVlastni.length) throw new Error('propsalo se jen ' + (propsano || []).length + ' z ' + bezVlastni.length + ' lidí')
     }
     showToast(terms
       ? '✅ Splatnost firmy ' + terms + ' — platí pro ' + bezVlastni.length + ' lidí'
@@ -13357,6 +13368,8 @@ async function loadZalohoveFaktury() {
 
 // Kolik z té zálohy je už odečteno a kterými fakturami.
 function zfOdecteno(z) {
+  // Přehled odečtů se nenačetl (null) → radši „nevíme" než „nic odečteno".
+  if (_zfOdecteno === null) return { castka: 0, faktury: [], neznamo: true }
   return _zfOdecteno[z.worker_id + '|' + String(z.cislo || '')] || { castka: 0, faktury: [] }
 }
 function zfZbyva(z) {
@@ -13377,6 +13390,7 @@ function renderZalohoveFaktury() {
   const odznak = z => {
     if (z.stav === 'stornovana') return '<span class="pill pr">Stornovaná</span>'
     const o = zfOdecteno(z)
+    if (o.neznamo) return '<span class="pill pr" title="Přehled odečtů se nenačetl — obnovte stránku">? odečteno nevím</span>'
     if (zfZbyva(z) <= 0.005 && o.castka > 0)
       return '<span class="pill pg">Zúčtovaná' + (o.faktury.length ? ' — ' + escAttr(o.faktury.join(', ')) : '') + '</span>'
     if (o.castka > 0)
@@ -13794,6 +13808,7 @@ function nahledUlozeneZalohy(id) {
 async function stornoZalohy(id) {
   const z = _zfSeznam.find(x => x.id === id)
   if (!z) return
+  if (zfOdecteno(z).neznamo) { showToast('⚠️ Nepodařilo se ověřit, jestli je záloha odečtená — načtěte zálohy znovu'); return }
   if (zfOdecteno(z).castka > 0) {
     showToast('⚠️ Tuhle zálohu už si pracovník odečetl z faktury — stornovat ji nejde')
     return
@@ -13817,14 +13832,18 @@ async function obnovZalohu(id) {
 async function smazZalohu(id) {
   const z = _zfSeznam.find(x => x.id === id)
   if (!z) return
+  if (zfOdecteno(z).neznamo) { showToast('⚠️ Nepodařilo se ověřit, jestli je záloha odečtená — načtěte zálohy znovu'); return }
   if (zfOdecteno(z).castka > 0) {
     showToast('⚠️ Tuhle zálohu si pracovník odečetl z faktury — smazat ji nejde, jen stornovat')
     return
   }
   if (!confirm('Opravdu smazat zálohovou fakturu ' + z.cislo + '?\n\nTato akce je nevratná.')) return
-  if (z.pdf_path) { try { await sb.storage.from('documents').remove([z.pdf_path]) } catch (e) {} }
-  const { error } = await sb.from('zalohove_faktury').delete().eq('id', id)
+  // Nejdřív řádek, AŽ POTOM soubor — dřív se mazal soubor první a když řádek
+  // smazat nešel, zůstala záloha bez PDF.
+  const { data: smazano, error } = await sb.from('zalohove_faktury').delete().eq('id', id).select('id')
   if (error) { showToast('❌ Smazání selhalo: ' + error.message); return }
+  if (!smazano || !smazano.length) { showToast('❌ Zálohová faktura se nesmazala — databáze to nepovolila'); return }
+  if (z.pdf_path) { try { await sb.storage.from('documents').remove([z.pdf_path]) } catch (e) {} }
   showToast('🗑️ Zálohová faktura smazána')
   await loadZalohoveFaktury()
 }
@@ -13911,7 +13930,11 @@ async function odectenoZeZaloh(workerIds) {
         if (!mapa[k].faktury.includes(f.invoice_number)) mapa[k].faktury.push(f.invoice_number)
       })
     })
-  } catch (e) { console.warn('[záloha] přehled odečtů:', e?.message) }
+  } catch (e) {
+    // Nevíme, co je odečtené → pojistky storna a smazání musí zůstat zavřené.
+    console.warn('[záloha] přehled odečtů:', e?.message)
+    return null
+  }
   return mapa
 }
 
@@ -14840,13 +14863,16 @@ async function deleteWorkerInvoice(id) {
   if (!confirm('Smazat fakturu ' + (r?.invoice_number || '') + (kdo ? ' od ' + kdo : '') + '?\nTato akce je nevratná.')) return
   // Smazat obě verze — přepsanou i tu původní od pracovníka, ať po faktuře
   // nezůstane ve složce osiřelý soubor, na který se už nikdo nedostane.
+  // Nejdřív řádek, AŽ POTOM soubory (audit 30. 9. 2026). Dřív se mazaly soubory
+  // první — a když řádek smazat nešel, zůstala faktura v přehledu bez PDF.
+  const { data: smazano, error } = await sb.from('worker_invoices').delete().eq('id', id).select('id')
+  if (error) { showToast('❌ Chyba: ' + error.message); return }
+  if (!smazano || !smazano.length) { showToast('❌ Faktura se nesmazala — databáze to nepovolila'); return }
   const kSmazani = [r?.pdf_path, r?.original_pdf_path].filter(p => p && typeof p === 'string')
   if (kSmazani.length) {
     try { await sb.storage.from('documents').remove([...new Set(kSmazani)]) }
     catch (e) { console.warn('[faktury] PDF ze Storage nešlo smazat:', e?.message) }
   }
-  const { error } = await sb.from('worker_invoices').delete().eq('id', id)
-  if (error) { showToast('❌ Chyba: ' + error.message); return }
   _invCache = _invCache.filter(x => x.id !== id)
   renderWorkerInvoices()
   refreshInvoiceBadge()
@@ -15350,10 +15376,18 @@ async function ulozNovyOdkaz() {
       id = data.id
     }
     // Skupiny nastavíme vždycky znovu — ať se dají i ubírat, nejen přidávat.
-    await sb.from('client_link_teams').delete().eq('link_id', id)
+    // Audit 30. 9. 2026: mazání se nekontrolovalo. Když ho databáze nepustila,
+    // odebraná skupina v odkazu zůstala — a odběratel dál viděl její lidi.
+    const { error: chybaMazani } = await sb.from('client_link_teams').delete().eq('link_id', id)
+    if (chybaMazani) throw chybaMazani
     const { error: chybaVazeb } = await sb.from('client_link_teams')
       .insert(tymy.map(t => ({ link_id: id, team_id: t })))
     if (chybaVazeb) throw chybaVazeb
+    // Kontrola, že odkaz má PŘESNĚ zaškrtnuté skupiny — nic navíc.
+    const { data: vazby, error: chybaKontroly } = await sb.from('client_link_teams').select('team_id').eq('link_id', id)
+    if (chybaKontroly) throw chybaKontroly
+    const navic = (vazby || []).map(v => String(v.team_id)).filter(t => !tymy.map(String).includes(t))
+    if (navic.length) throw new Error('odebrané skupiny v odkazu zůstaly (' + navic.length + ') — odkaz zatím NEPOSÍLEJTE, zkuste uložit znovu')
 
     // Odkaz bez skupin by neukazoval nic a jen mátl — proto se vazby ukládají
     // hned po založení a při chybě se nový odkaz zase smaže.
@@ -15362,7 +15396,7 @@ async function ulozNovyOdkaz() {
     loadKlientOdkazy()
   } catch (e) {
     const m = e?.message || ''
-    showToast(/client_link|does not exist|schema cache/i.test(m)
+    showToast(/does not exist|schema cache|could not find the table|PGRST205|42P01/i.test(m + ' ' + (e?.code || ''))
       ? '❌ Chybí tabulky odkazů — spusťte migraci supabase-migrace-odkaz-pro-odberatele.sql'
       : '❌ Nepovedlo se uložit: ' + m)
   } finally {
@@ -15678,12 +15712,17 @@ async function skrytiLideIds() {
   if (!tymy.length) return new Set()
   const klic = tymy.slice().sort().join(',')
   if (_skrytiCache.klic === klic && Date.now() - _skrytiCache.cas < 30000) return _skrytiCache.ids
+  // Chyba čtení se NESMÍ zapamatovat jako „nikdo schovaný" — schovaná firma by
+  // se na půl minuty ukázala (třeba zrovna při předvádění zákazníkovi).
+  // Při chybě platí poslední známý seznam, i když je starší.
+  const naposled = _skrytiCache.klic === klic ? _skrytiCache.ids : new Set()
   try {
-    const { data } = await sb.from('profiles').select('id').in('team_id', tymy)
+    const { data, error } = await sb.from('profiles').select('id').in('team_id', tymy)
+    if (error) return naposled
     const ids = new Set((data || []).map(x => x.id))
     _skrytiCache = { klic, ids, cas: Date.now() }
     return ids
-  } catch (e) { return new Set() }
+  } catch (e) { return naposled }
 }
 
 // Po schování nebo odkrytí firmy překresli tu sekci, kde správce zrovna je —
