@@ -23205,7 +23205,7 @@ async function exportWorkerKW(workerId, workerName, week, year, lang, foreman, r
   const nowStrExp = new Date().toTimeString().slice(0,8)
   const liveHours = (r) => {
     if (!r.check_out && r.check_in && r.work_date === todayStrExp) {
-      return calcHours(r.check_in, nowStrExp, r.break_start, r.break_end, r.break2_start, r.break2_end)
+      return hodinyKdybyOdeselTed(r, nowStrExp)
     }
     return r.total_hours || 0
   }
@@ -30959,28 +30959,41 @@ const _komuVybrano = new Set()
 // Poslední načtený seznam lidí, firem a part — z něj se kreslí strom
 // a počítá souhrn „Vybráno: N lidí".
 let _komuNabidka = null
+// Kdo výběr dělal — viz loadNotifWorkers (výběr se nedědí mezi správci).
+let _komuKdo = null
 
 async function loadNotifWorkers() {
   // Majitel: „potřebuju, aby bylo možno si vybrat, komu to oznámení jde —
   // že to nebude všem, kdo má aplikaci, ale jenom pro jednu firmu."
   // Proto přibyla mezi „jednomu" a „všem" ještě celá firma.
-  const [{ data }, { data: tymy }, { data: party }] = await Promise.all([
+  const [{ data }, vysledekFirem, vysledekPart] = await Promise.all([
     sb.from('profiles').select('id,full_name,team_id,subteam_id').in('role',['osvec','partak']).eq('is_active',true).order('full_name'),
     sb.from('teams').select('id,name').order('name'),
     // Parta (skupina) — majitel 29. 9. 2026: „ať se to netýká všech, ale
     // třeba skupiny, člověka, nebo všech lidí pod jednou firmou."
-    // Bez nasazené migrace podskupin se sem vrátí prázdno a volba se prostě
-    // nenabídne; zbytek nabídky funguje dál.
-    sb.from('subteams').select('id,name,team_id').order('name').then(r => r, () => ({ data: [] }))
+    // Bez nasazené migrace podskupin se sem vrátí chyba a volba se prostě
+    // nenabídne; zbytek nabídky funguje dál. Odmítnutí je taky chyba, ne
+    // prázdný seznam — prázdný by níž smazal zaškrtnuté party z výběru.
+    sb.from('subteams').select('id,name,team_id').order('name').then(r => r, e => ({ data: null, error: e }))
   ])
   const box = document.getElementById('notif-komu-seznam')
   if (!box) return
+  // Po odhlášení a přihlášení jiného správce (appka se znovu nenačítá) nesmí
+  // zůstat zaškrtnutí příjemci toho předchozího.
+  const kdoVybira = currentUser?.id || null
+  if (_komuKdo !== kdoVybira) { _komuVybrano.clear(); _komuKdo = kdoVybira }
   if (!data) {
     // Lidi se nenačetli (výpadek sítě). Vykreslený seznam i rozpracovaný
     // výběr zůstanou; jen napoprvé se to řekne místo věčného „Načítám…".
     if (!_komuNabidka) box.innerHTML = '<div class="ozk-prazdno">Seznam lidí se nenačetl — otevřete Zprávy znovu.</div>'
     return
   }
+  // Nenačtou-li se jen firmy nebo jen party, platí jejich seznam z minula.
+  // Obnova běží na pozadí skoro po každé změně v databázi; firma či parta,
+  // která by v nabídce chyběla, by níž tiše vypadla z výběru a zpráva by
+  // odešla jen zbytku. Napoprvé žádný seznam z minula není — pak jako dřív.
+  const tymy = (vysledekFirem.error || !vysledekFirem.data) ? _komuNabidka?.vsechnyFirmy : vysledekFirem.data
+  const party = (vysledekPart.error || !vysledekPart.data) ? _komuNabidka?.vsechnyParty : vysledekPart.data
   // Jména ze schovaných firem v nabídce nejsou. „VŠEM" ale dál ukazuje
   // skutečný počet — zpráva všem půjde opravdu všem, schování je jen
   // zobrazení a nesmí měnit, komu se co pošle.
@@ -31009,6 +31022,7 @@ async function loadNotifWorkers() {
     + (nazvyFirem[p.team_id] ? ' (' + nazvyFirem[p.team_id] + ')' : '')))
   vidt.forEach(w => nazvy.set(String(w.id), w.full_name || '(bez jména)'))
   _komuNabidka = { vsichni: data.length, lide: vidt, firmy, party: skupiny, pocty, poctyPart, nazvy,
+    vsechnyFirmy: tymy, vsechnyParty: party,
     lidePodleId: new Map(vidt.map(w => [String(w.id), w])),
     partyPodleId: new Map(skupiny.map(p => [String(p.id), p])) }
 
@@ -32493,6 +32507,27 @@ function runningHours(record, nowStr) {
   if (worked <= 0) return 0
   const net = worked - attBreakMinutes(record, now)
   return net > 0 ? Math.round(net / 60 * 100) / 100 : 0
+}
+
+// HODINY BĚŽÍCÍ SMĚNY PRO VÝKAZ K PODPISU — kolik se vyfakturuje, kdyby
+// pracovník odešel právě teď. Stejná pravidla jako skutečný odchod
+// (applyAttendanceRules: zaokrouhlení příchodu, všechny pauzy, krátká pauza
+// = 30 min, konec dolů na půlhodinu); rozdělaná pauza se počítá do teď.
+// Audit 30. 9. 2026: dřív se tu počítalo calcHours bez těchhle pravidel —
+// vedoucí podepsal 7,97 h a vyfakturovalo se 7,00 h.
+function hodinyKdybyOdeselTed(r, nowStr) {
+  const ted = String(nowStr || '').slice(0, 8)
+  const rec = { ...r, check_out: ted }
+  const bezi = r.break_start && !r.break_end
+  if (Array.isArray(r.breaks) && r.breaks.length) {
+    // Rozdělaná pauza v poli ještě není (mobil ji tam dá až při jejím konci).
+    rec.breaks = r.breaks.map(b => (b && b.bs && !b.be) ? { ...b, be: ted.slice(0, 5) } : b)
+    if (bezi && !r.breaks.some(b => b && b.bs && String(b.bs).slice(0, 5) === String(r.break_start).slice(0, 5))) {
+      rec.breaks.push({ bs: String(r.break_start).slice(0, 5), be: ted.slice(0, 5) })
+    }
+  }
+  if (bezi) rec.break_end = ted
+  return applyAttendanceRules(rec).hours
 }
 
 // Je to datum sobota? Bere se z řetězce YYYY-MM-DD jako místní den, ať se
