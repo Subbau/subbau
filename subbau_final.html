@@ -16227,13 +16227,38 @@ async function generateTeamAttendancePdf(teamId, teamName) {
   // a kolik hodin dohromady). Zabalený do značek RATES-START/END — v liště
   // náhledu se dá zaškrtávátkem přidat, nebo vynechat.
   // Provize (marže SubBau) — jen pro admina, jinak se nenačítají ani nezobrazí.
-  const _provMap = {}
+  // Audit 30. 9. 2026: přehled provizí tu bral jen dnešní provizi člověka —
+  // bez historie, bez „bez provize" a u zaměstnance firmy jeho vlastní místo
+  // firemní (Provize 280,50 € proti výkazu 467,50 €). Teď STEJNĚ jako Provize:
+  // po dnech, provizí platnou ten den, „bez provize" přebíjí vše a zaměstnanec
+  // se počítá provizí své firmy.
+  const _provMap = {}, _bezProvizeLidi = new Set(), _histProv = {}, _sefPodle = {}
   if (smiVidetProvize()) {
     try {
-      let pv = await sb.from('worker_commissions').select('worker_id, provize').in('worker_id', ids)
+      let pv = await sb.from('worker_commissions').select('worker_id, provize, bez_provize')
       if (pv.error) pv = await sb.from('worker_commissions').select('worker_id, provize')
-      ;(pv.data || []).forEach(p => { if (p.provize != null) _provMap[p.worker_id] = Number(p.provize) })
+      ;(pv.data || []).forEach(p => {
+        if (p.bez_provize) _bezProvizeLidi.add(p.worker_id)
+        if (p.provize != null) _provMap[p.worker_id] = Number(p.provize)
+      })
+      const [hist, zam] = await Promise.all([
+        sb.from('worker_rate_history').select('worker_id, hodnota, valid_from').eq('druh', 'provize').order('valid_from', { ascending: true }),
+        sb.from('profiles').select('id, zamestnavatel_id').in('id', ids)
+      ])
+      ;(hist.data || []).forEach(h => {
+        ;(_histProv[h.worker_id] = _histProv[h.worker_id] || []).push({ od: String(h.valid_from).slice(0, 10), hodnota: Number(h.hodnota) || 0 })
+      })
+      ;(zam.data || []).forEach(z => { if (z.zamestnavatel_id && z.zamestnavatel_id !== z.id) _sefPodle[z.id] = z.zamestnavatel_id })
     } catch(e) { console.warn('[team-pdf] provize:', e?.message) }
+  }
+  // Provize za hodinu v konkrétní den — komu (zaměstnanec → firma), „bez provize", historie.
+  const _provizeDne = (wid, den) => {
+    const komu = _sefPodle[wid] || wid
+    if (_bezProvizeLidi.has(komu)) return 0
+    const h = _histProv[komu]
+    let v = null
+    if (h) for (let i = 0; i < h.length; i++) { if (h[i].od <= den) v = h[i].hodnota; else break }
+    return v == null ? (_provMap[komu] || 0) : v
   }
 
   const _rateMap = new Map()
@@ -16277,28 +16302,41 @@ async function generateTeamAttendancePdf(teamId, teamName) {
   if (smiVidetProvize()) {
     const _commMap = new Map()
     Object.entries(byWorker).forEach(([wid, w]) => {
-      const pv = Number(_provMap[wid]) || 0
-      const key = pv.toFixed(2)
-      if (!_commMap.has(key)) _commMap.set(key, { provize: pv, people: 0, hours: 0, profs: {} })
+      // Po dnech: hodiny dne × provize platná ten den. Den „bez provize" a člověk
+      // (nebo jeho firma) „bez provize" dají nulu. Skupina podle průměrné sazby
+      // — kdyby se sazba v týdnu měnila, hodiny × sazba pořád dají částku.
+      let castka = 0, hodiny = 0, bezProvizeH = w.bezProvize || 0
+      w.rows.forEach(r => {
+        const h = Number(r.total_hours) || 0
+        if (!h || !denMaProvizi(r)) return
+        const pvDen = _provizeDne(wid, String(r.work_date).slice(0, 10))
+        if (!(pvDen > 0) && _bezProvizeLidi.has(_sefPodle[wid] || wid)) { bezProvizeH += h; return }
+        castka += h * pvDen; hodiny += h
+      })
+      const pv = hodiny > 0 ? Math.round(castka / hodiny * 100) / 100 : (Number(_provizeDne(wid, startStr)) || 0)
+      const celyBezProvize = _bezProvizeLidi.has(_sefPodle[wid] || wid)
+      const key = celyBezProvize ? 'bez' : pv.toFixed(2)
+      if (!_commMap.has(key)) _commMap.set(key, { provize: celyBezProvize ? 0 : pv, bez: celyBezProvize, people: 0, hours: 0, castka: 0, profs: {} })
       const g = _commMap.get(key)
       g.people++
       // Jen hodiny, ze kterých provize běží — ne všechny odpracované.
-      g.hours += (w.hodinyProvize || 0)
-      g.bezProvize = (g.bezProvize || 0) + (w.bezProvize || 0)
+      g.hours += hodiny
+      g.castka += castka
+      g.bezProvize = (g.bezProvize || 0) + bezProvizeH
       const pl = profLabel(w.prof) || 'Bez zařazení'
       g.profs[pl] = (g.profs[pl] || 0) + 1
     })
     const _commGroups = [..._commMap.values()].sort((a, b) => b.provize - a.provize)
-    const _commTotal = _commGroups.reduce((s, g) => s + g.provize * (g.hours || 0), 0)
+    const _commTotal = _commGroups.reduce((s, g) => s + (g.castka || 0), 0)
     const _commHours = _commGroups.reduce((s, g) => s + (g.hours || 0), 0)
     const _commPeople = _commGroups.reduce((s, g) => s + g.people, 0)
     const _bezProvizeHodin = _commGroups.reduce((s, g) => s + (g.bezProvize || 0), 0)
     const _commRows = _commGroups.map(g => `<tr>
-        <td style="padding:5px 8px;border:1px solid #ddd;font-weight:800;color:#1d6b3f;white-space:nowrap">${g.provize ? _eur(g.provize) + ' / h' : 'Provize neuvedena'}</td>
+        <td style="padding:5px 8px;border:1px solid #ddd;font-weight:800;color:#1d6b3f;white-space:nowrap">${g.bez ? 'Bez provize' : (g.provize ? _eur(g.provize) + ' / h' : 'Provize neuvedena')}</td>
         <td style="padding:5px 8px;border:1px solid #ddd;text-align:center;font-weight:800;font-size:14px">${g.people}</td>
         <td style="padding:5px 8px;border:1px solid #ddd;color:#555">${Object.entries(g.profs).sort((x, y) => y[1] - x[1]).map(([pl, c]) => c + '\u00d7 ' + pl).join(' · ')}</td>
         <td style="padding:5px 8px;border:1px solid #ddd;text-align:center;font-weight:700;white-space:nowrap">${g.hours.toFixed(2)} h</td>
-        <td style="padding:5px 8px;border:1px solid #ddd;text-align:right;font-weight:800;white-space:nowrap;color:#1d6b3f">${_eur(g.provize * (g.hours || 0))}</td>
+        <td style="padding:5px 8px;border:1px solid #ddd;text-align:right;font-weight:800;white-space:nowrap;color:#1d6b3f">${_eur(g.castka || 0)}</td>
       </tr>`).join('')
     const _commLine = _commGroups.map(g => g.people + '\u00d7 ' + (g.provize ? _eur(g.provize) : 'bez provize')).join('  ·  ')
     commSummary = `<!--COMM-START--><div style="margin-top:14px;padding-top:12px;border-top:1px solid #eee;page-break-inside:avoid;break-inside:avoid">
