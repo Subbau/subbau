@@ -2451,6 +2451,7 @@ setTimeout(function () {
       <div class="mob-card" style="margin-top:0">
         <div class="mob-card-title"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:18px;height:18px;flex-shrink:0;vertical-align:-3px;margin-right:7px"><path d="M3 9.5L12 3l9 6.5"/><path d="M5 10v10a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V10"/></svg>Moje ubytování</div>
         <p style="font-size:12px;color:var(--text2);margin-bottom:10px">Adresa ubytování. Může vyplnit i admin.</p>
+        <div id="mob-acc-kody"></div>
         <div class="fg" style="margin-bottom:8px">
           <label style="font-size:12px">Adresa ubytování *</label>
           <input type="text" id="mob-acc-address" placeholder="Ulice, město, PSČ" style="width:100%;font-size:16px;padding:10px;border:1px solid var(--brd);border-radius:8px">
@@ -9561,6 +9562,8 @@ async function loadWorkers() {
 
   // Zjisti, kdo má nezavřenou směnu > 11 h (pro červený odznáček)
   await computeLongDayAlerts()
+  // Kdo má kódy k ubytování (🔑 ve sloupci Ubytování) — jedním dotazem pro všechny.
+  await nactiKodyUbytovani()
 
   const sortedWorkers = sortByGroup((data || []).filter(w => !jeSkrytaFirmaPracovnika(w)), teamNameById, subteamById)
 
@@ -9601,20 +9604,46 @@ async function loadWorkers() {
 // Bez migrace supabase-migrace-ubytovani.sql sloupce nejsou; čtení je přes
 // select('*'), takže se nic nerozbije — jen se nic neukáže a uložení řekne,
 // kterou migraci spustit.
+// KÓDY A POKYNY K UBYTOVÁNÍ jsou v tabulce ubytovani_kody — vidí je jen správce
+// a ten jeden pracovník (RLS), NIKDY odběratel. Majitel 30. 9. 2026: „na tom odkazu
+// nebudou kódy ubytování — to budeme my dávat těm OSVČ a OSVČ to uvidí u sebe."
+// Do 30. 9. ležely v profiles.ubytovani_poznamka — jenže profily si přečte každý
+// přihlášený (profiles_select = true), takže kódy od domu by vyčetl i kolega.
+// Migrace je z profilu přestěhuje. Do profilu se kódy už NIKDY nezapisují, ani
+// jako náhrada, když nová tabulka ještě není.
+//
+// Kdo má kódy, drží _kodyUbytovani (Set worker_id) — plní ho loadWorkers JEDNÍM
+// dotazem pro všechny. Starý zápis v profilu (před migrací) se počítá taky, ať
+// správce nepřijde o přehled, co už zadal.
+let _kodyUbytovani = new Set()
+const _jeChybejiciTabulka = (e) =>
+  /ubytovani_kody|does not exist|schema cache|PGRST205|42P01/i.test((e && (e.message || e.code)) || '')
+
 function ubytovaniBunka(w) {
-  const adr = (w?.ubytovani_adresa || '').trim()
-  const pozn = (w?.ubytovani_poznamka || '').trim()
-  if (!adr && !pozn) {
+  // ADRESA JE accommodation_address — stávající sloupec, do kterého píše
+  // i pracovník sám v mobilu („Ubytování OSVČ") a správce v kartě pracovníka.
+  // 29. 9. jsem omylem založil vedle něj druhý (ubytovani_adresa); migrace
+  // z něj data přestěhuje. Do té doby se bere jako náhrada, ať nic nezmizí.
+  const adr = (w?.accommodation_address || w?.ubytovani_adresa || '').trim()
+  const maKody = _kodyUbytovani.has(w?.id) || !!(w?.ubytovani_poznamka || '').trim()
+  if (!adr && !maKody) {
     return '<span style="color:var(--text3)">+ doplnit</span>'
   }
-  // Když je adresa prázdná, ale poznámka ne, ať to není vidět jako prázdný
-  // řádek — jinak by se zdálo, že o tom člověku nic nemáme.
-  const hlavni = adr || '(jen poznámka)'
-  const znacka = pozn
-    ? ' <span title="Jsou tu i poznámky — kódy, patro, pokoj" style="font-size:11px">🔑</span>'
+  // Když chybí adresa, ale kódy jsou, ať to není vidět jako prázdný řádek —
+  // jinak by se zdálo, že o tom člověku nic nemáme.
+  const hlavni = adr || '(jen kódy)'
+  const znacka = maKody
+    ? ' <span title="Jsou zadané kódy a pokyny — uvidí je jen tenhle pracovník" style="font-size:11px">🔑</span>'
     : ''
   return '<span style="display:inline-block;max-width:175px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;vertical-align:bottom">'
     + escAttr(hlavni) + '</span>' + znacka
+}
+
+async function nactiKodyUbytovani() {
+  try {
+    const { data, error } = await sb.from('ubytovani_kody').select('worker_id')
+    _kodyUbytovani = new Set(error ? [] : (data || []).map(r => r.worker_id))
+  } catch (e) { _kodyUbytovani = new Set() }
 }
 
 async function otevriUbytovani(workerId) {
@@ -9624,18 +9653,28 @@ async function otevriUbytovani(workerId) {
   // mezitím udělal někdo jiný.
   let w = null
   try {
-    const { data, error } = await sb.from('profiles')
-      .select('id, full_name, ubytovani_adresa, ubytovani_poznamka')
-      .eq('id', workerId).maybeSingle()
+    // select('*'): jeden řádek, a přežije i to, až se zdvojený sloupec
+    // ubytovani_adresa jednou smaže.
+    const { data, error } = await sb.from('profiles').select('*').eq('id', workerId).maybeSingle()
     if (error) throw error
     w = data
   } catch (e) {
-    // Chybí sloupce (nenasazená migrace)? Ukaž okno aspoň prázdné a uložení
-    // pak samo řekne, kterou migraci spustit.
     w = (_workersCache || []).find(x => x.id === workerId) || null
     if (!w) { showToast('❌ Pracovníka se nepodařilo načíst: ' + (e?.message || e)); return }
   }
   if (!w) { showToast('⚠️ Pracovníka se nepodařilo najít'); return }
+
+  // Kódy z chráněné tabulky. Bez migrace tabulka není → pole se zamkne
+  // a řekne se proč; do profilu se jako náhrada NEZAPISUJE.
+  let kody = '', tabulkaJe = true
+  try {
+    const { data, error } = await sb.from('ubytovani_kody').select('kody').eq('worker_id', workerId).maybeSingle()
+    if (error) { if (_jeChybejiciTabulka(error)) tabulkaJe = false; else throw error }
+    else kody = data?.kody || ''
+  } catch (e) { showToast('❌ Kódy k ubytování se nepodařilo načíst: ' + (e?.message || e)); return }
+  const stareKody = (w.ubytovani_poznamka || '').trim()
+  const meloKody = !!kody.trim()
+
   // Okno se staví z JavaScriptu, ne vkládáním HTML — v tomhle souboru je osm
   // „</body>" a sedm z nich je uvnitř skriptu.
   const ov = document.createElement('div')
@@ -9651,12 +9690,17 @@ async function otevriUbytovani(workerId) {
         <button id="ubyt-zavri" style="background:rgba(255,255,255,.2);border:none;color:#fff;width:34px;height:34px;border-radius:50%;cursor:pointer;font-family:inherit;font-size:18px;line-height:1">×</button>
       </div>
       <div style="padding:18px 20px">
-        <label style="display:block;font-size:12px;font-weight:700;color:#6b6157;margin-bottom:6px">Adresa ubytování</label>
-        <input id="ubyt-adresa" type="text" placeholder="Bahnhofstraße 12, 85276 Pfaffenhofen"
+        <label style="display:block;font-size:12px;font-weight:700;color:#6b6157;margin-bottom:6px">Adresa ubytování
+          <span style="font-weight:500;color:var(--text3)">— uvidí ji i odběratel na svém odkazu</span></label>
+        <input id="ubyt-adresa" type="text" maxlength="300" placeholder="Bahnhofstraße 12, 85276 Pfaffenhofen"
           style="width:100%;padding:11px;border:1.5px solid var(--brd);border-radius:10px;font-size:14px;font-family:inherit;margin-bottom:14px">
-        <label style="display:block;font-size:12px;font-weight:700;color:#6b6157;margin-bottom:6px">Poznámky — kódy, patro, pokoj, kontakt</label>
-        <textarea id="ubyt-poznamka" rows="6" placeholder="Kód od domu: 4721#&#10;Patro 3, pokoj 12&#10;Majitel: Herr Müller, +49 170 1234567"
+        <label style="display:block;font-size:12px;font-weight:700;color:#6b6157;margin-bottom:6px">🔑 Kódy a pokyny k ubytování
+          <span style="font-weight:500;color:var(--text3)">— uvidí je jen tenhle pracovník a správce, nikdy odběratel</span></label>
+        <textarea id="ubyt-poznamka" rows="6" maxlength="2000" ${tabulkaJe ? '' : 'disabled'}
+          placeholder="Kód od domu: 4721#&#10;Patro 3, pokoj 12&#10;Majitel: Herr Müller, +49 170 1234567"
           style="width:100%;padding:11px;border:1.5px solid var(--brd);border-radius:10px;font-size:14px;font-family:inherit;resize:vertical"></textarea>
+        ${tabulkaJe ? '' : `<div style="margin-top:6px;font-size:12px;color:var(--amber);font-weight:700">⚠️ Kódy půjdou uložit po spuštění migrace
+          supabase-migrace-tymy-oznameni-puntiky.sql${stareKody ? ' — to, co je tu napsané, se tou migrací přestěhuje, nic se neztratí.' : '.'}</div>`}
         <div style="display:flex;gap:10px;margin-top:16px">
           <button id="ubyt-zrus" style="flex:1;min-height:44px;padding:12px;border-radius:12px;border:2px solid var(--brd);background:#fff;color:#211D1A;font-size:15px;font-weight:700;font-family:inherit;cursor:pointer">Zrušit</button>
           <button id="ubyt-uloz" class="btn-pri" style="flex:1;min-height:44px;font-size:15px;font-weight:800">Uložit</button>
@@ -9666,8 +9710,8 @@ async function otevriUbytovani(workerId) {
   document.body.appendChild(ov)
   const adr = ov.querySelector('#ubyt-adresa')
   const pozn = ov.querySelector('#ubyt-poznamka')
-  adr.value = w.ubytovani_adresa || ''
-  pozn.value = w.ubytovani_poznamka || ''
+  adr.value = w.accommodation_address || w.ubytovani_adresa || ''
+  pozn.value = tabulkaJe ? kody : stareKody
   const zavri = () => ov.remove()
   ov.querySelector('#ubyt-zavri').onclick = zavri
   ov.querySelector('#ubyt-zrus').onclick = zavri
@@ -9676,21 +9720,29 @@ async function otevriUbytovani(workerId) {
   ov.querySelector('#ubyt-uloz').onclick = async () => {
     const btn = ov.querySelector('#ubyt-uloz')
     btn.disabled = true; btn.textContent = 'Ukládám…'
-    const ok = await ulozUbytovani(workerId, adr.value.trim(), pozn.value.trim())
+    const ok = await ulozUbytovani(workerId, adr.value.trim(), pozn.value.trim(), { tabulkaJe, meloKody })
     btn.disabled = false; btn.textContent = 'Uložit'
     if (ok) zavri()
   }
 }
 
-async function ulozUbytovani(workerId, adresa, poznamka) {
+async function ulozUbytovani(workerId, adresa, kody, opt) {
+  const { tabulkaJe = true, meloKody = false } = opt || {}
   try {
-    const { data, error } = await sb.from('profiles')
-      .update({ ubytovani_adresa: adresa || null, ubytovani_poznamka: poznamka || null })
-      .eq('id', workerId).select('id, ubytovani_adresa, ubytovani_poznamka')
+    // 1) ADRESA — do stávajícího accommodation_address. Zdvojený ubytovani_adresa
+    //    se zároveň vynuluje: jinak by po smazání adresy vylezla v seznamu ta stará
+    //    (buňka bere zdvojený sloupec jako náhradu). Kódy se do profilu nepíšou.
+    let { data, error } = await sb.from('profiles')
+      .update({ accommodation_address: adresa || null, ubytovani_adresa: null })
+      .eq('id', workerId).select('id, accommodation_address')
+    if (error && /ubytovani_adresa/i.test(error.message || '')) {
+      // Zdvojený sloupec už není (smazaný) — to je v pořádku, uložit bez něj.
+      ;({ data, error } = await sb.from('profiles')
+        .update({ accommodation_address: adresa || null })
+        .eq('id', workerId).select('id, accommodation_address'))
+    }
     if (error) {
-      showToast(/ubytovani_|column|schema cache/i.test(error.message || '')
-        ? '❌ Chybí sloupce ubytování — spusťte migraci supabase-migrace-ubytovani.sql'
-        : '❌ Chyba: ' + error.message)
+      showToast('❌ Chyba: ' + error.message)
       return false
     }
     // Zápis může projít bez chyby a NEZMĚNIT žádný řádek (odmítnou ho práva) —
@@ -9700,7 +9752,35 @@ async function ulozUbytovani(workerId, adresa, poznamka) {
       return false
     }
     const w = (_workersCache || []).find(x => x.id === workerId)
-    if (w) { w.ubytovani_adresa = data[0].ubytovani_adresa; w.ubytovani_poznamka = data[0].ubytovani_poznamka }
+    if (w) { w.accommodation_address = data[0].accommodation_address; w.ubytovani_adresa = null }
+    if (currentWorkerProfile && currentWorkerProfile.id === workerId) currentWorkerProfile.accommodation_address = data[0].accommodation_address
+
+    // 2) KÓDY — do chráněné tabulky.
+    if (!tabulkaJe) {
+      showToast('✅ Adresa uložena — kódy půjdou uložit po spuštění migrace supabase-migrace-tymy-oznameni-puntiky.sql')
+      loadWorkers()
+      return true
+    }
+    if (kody) {
+      const { data: k, error: ek } = await sb.from('ubytovani_kody')
+        .upsert({ worker_id: workerId, kody, upraveno_v: new Date().toISOString(), upravil: currentUser?.id || null },
+                { onConflict: 'worker_id' })
+        .select('worker_id, kody')
+      if (ek || !k || !k.length) {
+        showToast('❌ Adresa se uložila, ale kódy NE' + (ek ? ': ' + ek.message : ' — zkontrolujte oprávnění'))
+        return false
+      }
+      _kodyUbytovani.add(workerId)
+    } else if (meloKody) {
+      // Vymazané pole = kódy pryč. Smaže se celý řádek, ať 🔑 v seznamu zhasne.
+      const { data: k, error: ek } = await sb.from('ubytovani_kody')
+        .delete().eq('worker_id', workerId).select('worker_id')
+      if (ek || !k || !k.length) {
+        showToast('❌ Adresa se uložila, ale kódy se nesmazaly' + (ek ? ': ' + ek.message : ' — zkontrolujte oprávnění'))
+        return false
+      }
+      _kodyUbytovani.delete(workerId)
+    }
     showToast('✅ Ubytování uloženo')
     loadWorkers()
     return true
@@ -9708,6 +9788,25 @@ async function ulozUbytovani(workerId, adresa, poznamka) {
     showToast('❌ Chyba: ' + (e?.message || e))
     return false
   }
+}
+
+// KÓDY K UBYTOVÁNÍ U PRACOVNÍKA — ve stávající kartě „Ubytování OSVČ" v jeho
+// profilu (adresu tam už vidí i upravuje). Čte jen vlastní řádek ubytovani_kody;
+// RLS mu jiný ani nevydá. Když kódy nejsou (nebo tabulka ještě není), blok se
+// neukáže — prázdný rámeček by jen mátl.
+async function nactiMojeKody(profile) {
+  const el = document.getElementById('mob-acc-kody')
+  if (!el || !profile?.id) return
+  let kody = ''
+  try {
+    const { data } = await sb.from('ubytovani_kody').select('kody').eq('worker_id', profile.id).maybeSingle()
+    kody = (data?.kody || '').trim()
+  } catch (e) { /* bez spojení prostě nic */ }
+  if (!kody) { el.innerHTML = ''; return }
+  el.innerHTML = `<div style="margin:0 0 12px;padding:12px 13px;border-radius:12px;background:#f4efe7;border:1px solid var(--brd)">
+    <div style="font-size:13px;font-weight:800;color:#211D1A;margin-bottom:6px">🔑 Kódy a pokyny od SubBau</div>
+    <div style="font-size:14px;color:#211D1A;white-space:pre-wrap;line-height:1.5">${escAttr(kody)}</div>
+  </div>`
 }
 
 function openAddWorker() {
@@ -22136,6 +22235,8 @@ function loadMobAccommodation(profile) {
   if (ph) ph.value = profile?.accommodation_phone || ''
   const em = document.getElementById('mob-acc-email')
   if (em) em.value = profile?.accommodation_email || ''
+  // Kódy od SubBau — jen ke čtení, dotáhnou se zvlášť.
+  nactiMojeKody(profile)
 }
 
 // -- UBYTOVÁNÍ PRACOVNÍKA --

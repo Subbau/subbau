@@ -24,9 +24,16 @@
 --    přihlášený, takže kódy v profilu by vyčetl i kolega. Adresa ubytování
 --    v profilu zůstává (tu smí vidět i odběratel).
 --
--- DATA SE NEMAŽOU. Jediná změna v existujících datech: případné kódy
--- zapsané do profilu se PŘESTĚHUJÍ do nové tabulky a v profilu se vymažou
--- (aby tam nezůstaly čitelné). Spustit se dá klidně víckrát.
+-- 6) ADRESA UBYTOVÁNÍ JEN V JEDNOM SLOUPCI
+--    29. 9. vznikl omylem druhý sloupec na adresu ubytování (ubytovani_adresa)
+--    vedle stávajícího accommodation_address, do kterého píše i pracovník
+--    v mobilu. Co se do nového stihlo zapsat, se přestěhuje do stávajícího.
+--
+-- DATA SE NEMAŽOU, JEN STĚHUJÍ: kódy z profilu do nové chráněné tabulky
+-- (a z profilu se vymažou, aby tam nezůstaly čitelné) a adresa ze
+-- zdvojeného sloupce do stávajícího. Kde by se stěhováním něco přepsalo
+-- (obě adresy vyplněné a jiné), NESTĚHUJE se nic a výpis to ukáže.
+-- Spustit se dá klidně víckrát.
 --
 -- Jak spustit: Supabase → SQL Editor → vložit → Run.
 -- =====================================================================
@@ -161,12 +168,28 @@ update public.profiles p
 comment on column public.profiles.ubytovani_poznamka is
   'NEPOUŽÍVÁ SE. Kódy k ubytování jsou v tabulce ubytovani_kody.';
 
+-- ── 6. Adresa ubytování jen v accommodation_address ─────────────────
+-- Stěhuje se jen tam, kde stávající adresa chybí — nic se nepřepíše.
+update public.profiles
+   set accommodation_address = btrim(ubytovani_adresa)
+ where coalesce(btrim(ubytovani_adresa), '') <> ''
+   and coalesce(btrim(accommodation_address), '') = '';
+-- Zdvojený sloupec vynulovat tam, kde už je totéž ve stávajícím.
+-- Kde se obě adresy LIŠÍ, zůstává zdvojený sloupec vyplněný — to rozhodne
+-- správce (výpis níž řekne kolik), appka mezitím ukazuje tu stávající.
+update public.profiles
+   set ubytovani_adresa = null
+ where coalesce(btrim(ubytovani_adresa), '') <> ''
+   and btrim(ubytovani_adresa) = btrim(coalesce(accommodation_address, ''));
+comment on column public.profiles.ubytovani_adresa is
+  'NEPOUŽÍVÁ SE. Adresa ubytování je v accommodation_address.';
+
 commit;
 
 -- ── Co se má vypsat ──────────────────────────────────────────────────
 -- Pošlete mi ten výpis celý. Řádky „sloupec:" musí být ŠEST, „funkce"
--- jedna, tabulky puntiky a ubytovani_kody po DVOU pravidlech a „kódy
--- zbylé v profilech" musí být 0. Poslední řádky ukážou, jak jsou
+-- jedna, tabulky puntiky a ubytovani_kody po DVOU pravidlech, „kódy
+-- zbylé v profilech" 0 a „adresy: zdvojené, které se LIŠÍ" ideálně 0. Poslední řádky ukážou, jak jsou
 -- nastavená pravidla ČTENÍ profilů — to potřebuju vidět.
 select 'sloupec: ' || table_name || '.' || column_name as co, data_type as podrobnost
   from information_schema.columns
@@ -186,6 +209,9 @@ select 'kódy přestěhované do ubytovani_kody', count(*)::text from public.uby
 union all
 select 'kódy zbylé v profilech', count(*)::text
   from public.profiles where coalesce(btrim(ubytovani_poznamka), '') <> ''
+union all
+select 'adresy: zdvojené, které se LIŠÍ od stávající (nechané být)', count(*)::text
+  from public.profiles where coalesce(btrim(ubytovani_adresa), '') <> ''
 union all
 select 'ČTENÍ profilů: ' || policyname, coalesce(qual, '(bez podmínky)')
   from pg_policies where schemaname = 'public' and tablename = 'profiles' and cmd in ('SELECT','ALL')
