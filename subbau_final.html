@@ -673,10 +673,14 @@ setTimeout(function () {
 </script>
 
 <!-- SYSTÉMOVÉ OZNÁMENÍ BANNER -->
-<div id="announcement-banner" style="display:none;flex-wrap:wrap;position:fixed;top:0;left:0;right:0;z-index:9999;padding:calc(12px + env(safe-area-inset-top)) calc(16px + env(safe-area-inset-right)) 12px calc(16px + env(safe-area-inset-left));align-items:center;justify-content:space-between;gap:12px;box-shadow:0 2px 12px rgba(0,0,0,0.15)">
-  <div style="display:flex;align-items:center;gap:10px;flex:1">
-    <span id="announcement-icon" style="font-size:18px;flex-shrink:0">📢</span>
-    <span id="announcement-text" style="font-size:14px;font-weight:600;line-height:1.4"></span>
+<div id="announcement-banner" style="display:none;flex-wrap:wrap;position:fixed;top:0;left:0;right:0;z-index:9999;padding:calc(12px + env(safe-area-inset-top)) calc(16px + env(safe-area-inset-right)) 12px calc(16px + env(safe-area-inset-left));align-items:center;justify-content:flex-end;gap:10px 12px;box-shadow:0 2px 12px rgba(0,0,0,0.15)">
+  <!-- Text má základ 260 px: na telefonu se tlačítka vejdou až POD něj a text
+       jde přes celou šířku (dřív se tlačil do úzkého sloupce vedle tlačítka).
+       Dlouhý text se roluje uvnitř lišty — jinak lišta přetekla pod okraj
+       obrazovky a konec se nedal dočíst. Zalomení řádků z oznámení zůstává. -->
+  <div style="display:flex;align-items:flex-start;gap:10px;flex:1 1 260px;min-width:0">
+    <span id="announcement-icon" style="font-size:18px;flex-shrink:0;line-height:1.4">📢</span>
+    <span id="announcement-text" style="flex:1;min-width:0;font-size:14px;font-weight:600;line-height:1.4;white-space:pre-line;overflow-wrap:anywhere;max-height:min(55vh,440px);overflow-y:auto"></span>
   </div>
   <!-- Červené oznámení se křížkem zavřít nedá — jen tímhle (showBanner). -->
   <button id="announcement-ok" onclick="potvrdOznameni()" style="display:none;flex-shrink:0;min-height:44px;padding:8px 16px;border:none;border-radius:10px;background:#c0392b;color:#fff;font-size:14px;font-weight:800;font-family:inherit;cursor:pointer;margin-left:auto">Porozuměl jsem</button>
@@ -1751,8 +1755,8 @@ setTimeout(function () {
                   <span id="ann-preview-text" style="font-size:13px;font-weight:600"></span>
                 </div>
                 <div style="display:flex;gap:8px">
-                  <button class="btn-pri" onclick="publishAnnouncement()" style="flex:1;padding:11px"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:1em;height:1em;flex-shrink:0;vertical-align:-2px"><path d="M3 11l18-5v12L3 14v-3z"/><path d="M11.6 16.8a3 3 0 1 1-5.8-1.6"/></svg> Zveřejnit oznámení</button>
-                  <button class="btn-sec" onclick="clearAnnouncement()" style="padding:11px 16px">Smazat aktivní</button>
+                  <button class="btn-pri" onclick="publishAnnouncement()" style="flex:1;padding:11px;min-height:44px"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:1em;height:1em;flex-shrink:0;vertical-align:-2px"><path d="M3 11l18-5v12L3 14v-3z"/><path d="M11.6 16.8a3 3 0 1 1-5.8-1.6"/></svg> Zveřejnit oznámení</button>
+                  <button class="btn-sec" onclick="clearAnnouncement()" style="padding:11px 16px;min-height:44px">Smazat aktivní</button>
                 </div>
               </div>
             </div>
@@ -4646,7 +4650,7 @@ async function submitAdminSignatureWithPlacement() {
 // Po nahrání nové verze se snadno pozná, jestli se opravdu nasadila: otevřete
 // appku, zmáčkněte F12 (na Macu ⌥⌘I) a v konzoli je vypsané tohle datum. Když
 // tam svítí starší, prohlížeč nebo GitHub drží starou verzi.
-const SUBBAU_VERZE = '2026-09-30 c — Oznámení komu a Porozuměl jsem, Zprávy jako dřív'
+const SUBBAU_VERZE = '2026-09-30 d — lišta oznámení na telefonu, červené nejde zavřít'
 console.log('SubBau docházka — verze ' + SUBBAU_VERZE)
 // Verze i dole v menu správce. Když někdo novinku „nevidí", podle ní se hned
 // pozná, jestli nemá otevřenou starou kopii appky — bez hledání v konzoli.
@@ -31115,15 +31119,20 @@ async function loadAnnouncement() {
     if (!moje.length) { hideBanner(); return }
     // Co už odklikl — i na jiném zařízení. Bez migrace tabulka není a platí
     // jen zavření v tomhle prohlížeči, jako dřív.
-    let odkliknuto = new Set()
+    let odkliknuto = new Set(), potvrzeno = new Set()
     if (currentUser?.id) {
       const { data: prec, error: ePrec } = await sb.from('oznameni_precteno')
-        .select('oznameni_id').eq('worker_id', currentUser.id).in('oznameni_id', moje.map(a => a.id))
-      if (!ePrec) odkliknuto = new Set((prec || []).map(r => String(r.oznameni_id)))
+        .select('oznameni_id, potvrzeno').eq('worker_id', currentUser.id).in('oznameni_id', moje.map(a => a.id))
+      if (!ePrec) (prec || []).forEach(r => {
+        odkliknuto.add(String(r.oznameni_id))
+        if (r.potvrzeno) potvrzeno.add(String(r.oznameni_id))
+      })
     }
     // Červené, na které se čeká s „Porozuměl jsem", jdou první a křížkem
-    // se zavřít nedají.
-    const ceka = moje.find(a => a.vyzaduje_potvrzeni && !odkliknuto.has(String(a.id)))
+    // se zavřít nedají. Vyřízené je jen POTVRZENÍM — pouhé zavření (šlo
+    // omylem 30. 9., než se schoval křížek) se nepočítá.
+    const ceka = moje.find(a => a.vyzaduje_potvrzeni && !potvrzeno.has(String(a.id))
+      && !lsGet('ann_potvrzeno_' + a.id))
     if (ceka) { showBanner(ceka, true); return }
     // Jinak jen to nejnovější — po jeho zavření nemá vyskočit předchozí.
     const a = moje[0]
@@ -31147,11 +31156,18 @@ function showBanner(ann, musiPotvrdit) {
   text.style.color = colors.color
   icon.textContent = colors.icon
   banner.dataset.annId = ann.id
-  // Červené se křížkem zavřít nedá — jen „Porozuměl jsem".
+  text.scrollTop = 0
+  // Červené se křížkem zavřít nedá — jen „Porozuměl jsem". Křížek má třídu
+  // .x-close s display:…!important, takže obyčejné style.display = 'none'
+  // na něj NESTAČÍ (30. 9. tak byl u červeného vidět a šlo ho zavřít).
+  banner.dataset.musiPotvrdit = musiPotvrdit ? '1' : ''
   const ok = document.getElementById('announcement-ok')
   const x = document.getElementById('announcement-x')
-  if (ok) { ok.style.display = musiPotvrdit ? '' : 'none'; ok.disabled = false; ok.textContent = 'Porozuměl jsem' }
-  if (x) x.style.display = musiPotvrdit ? 'none' : ''
+  // „Porozuměl jsem" vždycky DOLE pod textem přes celou šířku (majitel: „ať
+  // tam není křížek, ale dole je ten text, a když ho zmáčkne, nám se to ukáže").
+  if (ok) { ok.style.display = musiPotvrdit ? '' : 'none'; ok.style.flex = musiPotvrdit ? '1 1 100%' : ''
+    ok.disabled = false; ok.textContent = 'Porozuměl jsem' }
+  if (x) { if (musiPotvrdit) x.style.setProperty('display', 'none', 'important'); else x.style.removeProperty('display') }
   // Posun obsahu dolů
   const offset = banner.offsetHeight + 'px'
   document.getElementById('login')?.style.setProperty('padding-top', offset)
@@ -31171,6 +31187,9 @@ function hideBanner() {
 
 function dismissAnnouncement() {
   const banner = document.getElementById('announcement-banner')
+  // Červené se zavřít nesmí — musí se potvrdit. Křížek je u něj schovaný;
+  // kdyby se sem přesto dostalo (Escape, starý kód), nic se nezapíše.
+  if (banner?.dataset.musiPotvrdit === '1') return
   const annId = banner?.dataset.annId
   if (annId) {
     lsSet('ann_dismissed_' + annId, '1')
@@ -31191,11 +31210,28 @@ async function potvrdOznameni() {
   const btn = document.getElementById('announcement-ok')
   if (!annId || !currentUser?.id) return
   if (btn) { btn.disabled = true; btn.textContent = 'Ukládám…' }
-  const { data, error } = await sb.from('oznameni_precteno')
+  let { data, error } = await sb.from('oznameni_precteno')
     .insert({ oznameni_id: annId, worker_id: currentUser.id, potvrzeno: true }).select('oznameni_id')
-  // Už potvrzené (třeba z druhého telefonu) je v pořádku.
-  const uzBylo = !!error && (error.code === '23505' || /duplicate key/i.test(error.message || ''))
-  if ((error && !uzBylo) || (!error && (!data || !data.length))) {
+  // Řádek už je: potvrzené z druhého telefonu (v pořádku), nebo jen „zavřel"
+  // z doby, kdy šlo červené omylem zavřít křížkem — to se přepne na potvrzené.
+  if (error && (error.code === '23505' || /duplicate key/i.test(error.message || ''))) {
+    ;({ data, error } = await sb.from('oznameni_precteno')
+      .update({ potvrzeno: true, kdy: new Date().toISOString() })
+      .eq('oznameni_id', annId).eq('worker_id', currentUser.id).select('oznameni_id'))
+    if (error || !data || !data.length) {
+      // Přepnout nejde (chybí migrace supabase-migrace-oznameni-potvrzeni.sql).
+      // Když už potvrzené je, v pořádku; jinak si potvrzení zapamatuje aspoň
+      // tenhle telefon, ať pracovník nezůstane u lišty, která nejde zavřít.
+      const { data: r } = await sb.from('oznameni_precteno').select('potvrzeno')
+        .eq('oznameni_id', annId).eq('worker_id', currentUser.id)
+      if (!(r && r[0] && r[0].potvrzeno)) {
+        console.warn('[oznámení] potvrzení se do databáze nepřepsalo:', error?.message || '0 řádků')
+        lsSet('ann_potvrzeno_' + annId, '1')
+      }
+      data = [{ oznameni_id: annId }]; error = null
+    }
+  }
+  if (error || !data || !data.length) {
     if (btn) { btn.disabled = false; btn.textContent = 'Porozuměl jsem' }
     showToast(chybiMigraceOznameni(error)
       ? '❌ Potvrzení zatím nejde uložit — dejte vědět SubBau'
@@ -31237,7 +31273,11 @@ async function zverejniOznameniTed() {
   const message = document.getElementById('ann-message')?.value?.trim()
   if (!_komuVybrano.size) { showToast('⚠️ Vyberte, kdo oznámení uvidí'); return }
   if (!message) { showToast('⚠️ Napište text oznámení'); return }
+  // Výběr i jeho popis se berou TEĎ, v okamžiku klepnutí. Zjištění lidí chvíli
+  // trvá a správce mezitím může zaškrtat něco jiného — otázka i uložený popis
+  // by pak mluvily o jiných lidech, než kterým oznámení opravdu patří.
   const { vse, firmy, party, lide } = rozdelVyberOznameni()
+  const popis = popisVyberuOznameni()
   const musiPotvrdit = type === 'danger'
   let ids = null   // null = všem, i těm, kdo přibude později
   if (!vse) {
@@ -31245,7 +31285,6 @@ async function zverejniOznameniTed() {
     catch (e) { showToast('❌ Nepodařilo se zjistit, komu oznámení patří: ' + (e?.message || e)); return }
     if (!ids.length) { showToast('⚠️ V tomhle výběru není nikdo aktivní'); return }
   }
-  const popis = popisVyberuOznameni()
   if (!confirm('Zveřejnit oznámení? Uvidí ho ' + (vse ? 'VŠICHNI' : kolikLidiOznameni(ids.length) + ' — ' + popis) + '.'
       + (musiPotvrdit ? '\n\nČervené: každý musí odkliknout „Porozuměl jsem".' : '')
       + (vse && _komuVybrano.size > 1 ? '\n\nZaškrtnuté firmy, party a lidé nic neomezují — uvidí ho všichni.' : ''))) return
@@ -31357,27 +31396,48 @@ async function loadActiveAnnouncements() {
   ])
   ;[...(rIds.data || []), ...(rVse.data || [])].forEach(p => jmena.set(String(p.id), p.full_name || '(bez jména)'))
   vsichni = rVse.error ? null : (rVse.data || []).map(p => String(p.id))
-  div.innerHTML = data.map(a => kartaOznameniHtml(a, odkliky.get(String(a.id)) || new Map(), jmena, vsichni, !ePrec)).join('')
+  // Schované firmy (Týmy → schovat) v seznamu nejsou vidět ani tady: jména
+  // jejich lidí se vynechají a oznámení jen pro ně se neukáže. Je to jen
+  // zobrazení — komu oznámení patří, se tím nemění.
+  const skryti = await skrytiLideIds()
+  const skryteFirmy = skryteTymy()
+  const vidim = id => !skryti.has(id) && !skryti.has(String(id))
+  const karty = data.filter(a => !(Array.isArray(a.pro_lidi) && a.pro_lidi.length && !a.pro_lidi.some(vidim)))
+  div.innerHTML = karty.length
+    ? karty.map(a => kartaOznameniHtml(a, odkliky.get(String(a.id)) || new Map(), jmena,
+        vsichni && vsichni.filter(vidim), !ePrec, vidim, skryteFirmy)).join('')
+    : '<div style="color:var(--text3);font-size:13px">Žádná oznámení</div>'
 }
 
 // Jedno oznámení v seznamu: komu patří a u koho je fajfka.
-function kartaOznameniHtml(a, odkl, jmena, vsichni, maFajfky) {
+function kartaOznameniHtml(a, odkl, jmena, vsichni, maFajfky, vidim = () => true, skryteFirmy = new Set()) {
   const colors = annColors[a.type] || annColors.info
   const proVsechny = a.pro_lidi == null
-  const komuText = proVsechny ? '📢 všem' : ((a.komu && a.komu.popis) || kolikLidiOznameni((a.pro_lidi || []).length))
-  const adresati = proVsechny ? vsichni : (a.pro_lidi || []).map(String)
+  const adresati = proVsechny ? vsichni : (a.pro_lidi || []).map(String).filter(vidim)
+  // Uložený popis jmenuje firmy a lidi. Je-li mezi nimi schovaná firma nebo
+  // člověk z ní, ukáže se místo popisu jen počet lidí.
+  const k = a.komu || {}
+  const popisProzradi = (k.firmy || []).some(id => skryteFirmy.has(String(id)))
+    || (k.lide || []).some(id => !vidim(String(id)))
+    || (Array.isArray(a.pro_lidi) && a.pro_lidi.some(id => !vidim(String(id))))
+  const komuText = proVsechny ? '📢 všem'
+    : ((!popisProzradi && k.popis) || kolikLidiOznameni((adresati || []).length))
   let fajfky = ''
   if (maFajfky && adresati) {
     const lide = adresati.map(id => ({ id, jm: jmena.get(id) || '(už tu nepracuje)', r: odkl.get(id) }))
       .sort((x, y) => (x.r ? 1 : 0) - (y.r ? 1 : 0) || x.jm.localeCompare(y.jm, 'cs'))
-    const hotovo = lide.filter(x => x.r).length
+    // U červeného se počítá jen „Porozuměl jsem". Kdo ho jen zavřel (šlo
+    // omylem 30. 9.), má u jména „jen zavřel" a fajfku nedostane.
+    const ok = x => !!x.r && (!a.vyzaduje_potvrzeni || !!x.r.potvrzeno)
+    lide.sort((x, y) => (ok(x) ? 1 : 0) - (ok(y) ? 1 : 0) || x.jm.localeCompare(y.jm, 'cs'))
+    const hotovo = lide.filter(ok).length
     const co = a.vyzaduje_potvrzeni ? 'potvrdilo „Porozuměl jsem"' : 'si ho zavřelo'
     fajfky = `<details style="margin-top:6px">
         <summary style="cursor:pointer;font-size:12px;font-weight:800;color:${hotovo === lide.length && lide.length ? 'var(--green)' : 'var(--text2)'};min-height:32px;display:flex;align-items:center">✓ ${hotovo} z ${lide.length} ${co}</summary>
         <div style="margin-top:4px;max-height:260px;overflow-y:auto">${lide.map(x => `
           <div style="display:flex;justify-content:space-between;gap:8px;padding:3px 0;font-size:12px;border-bottom:1px solid var(--brd)">
             <span>${escAttr(x.jm)}</span>
-            <span style="font-weight:800;white-space:nowrap;color:${x.r ? 'var(--green)' : 'var(--text3)'}">${x.r ? '✓ ' + escAttr(String(x.r.kdy || '').slice(0, 16).replace('T', ' ')) : '—'}</span>
+            <span style="font-weight:800;white-space:nowrap;color:${ok(x) ? 'var(--green)' : (x.r ? 'var(--red)' : 'var(--text3)')}">${ok(x) ? '✓ ' + escAttr(String(x.r.kdy || '').slice(0, 16).replace('T', ' ')) : (x.r ? 'jen zavřel, nepotvrdil' : '—')}</span>
           </div>`).join('')}</div>
       </details>`
   }
