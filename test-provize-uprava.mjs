@@ -20,9 +20,12 @@ const ok = (p, t) => { console.log((p ? '  ✅ ' : '  ❌ ') + t); if (!p) chyby
 stejnaVerze()
 
 console.log('\n1) Kód')
-ok(/const poprve = \(puvodni == null \|\| puvodni === ''\) && rate != null/.test(zdroj),
+// Od 29. 9. 2026 rozhoduje jediná funkce sazbaJeZadana (nula = nezadáno) —
+// dřív byla podmínka na třech místech rozdílná (viz dochazka-sazby-nula).
+ok(/function sazbaJeZadana\(v\)/.test(zdroj), 'o „zadaná / nezadaná" rozhoduje jedna funkce')
+ok(/const poprve = !sazbaJeZadana\(puvodni\) && rate != null/.test(zdroj),
    'u sazby se pozná první zadání')
-ok(/const poprve = \(puvodni == null \|\| puvodni === ''\) && provize != null/.test(zdroj),
+ok(/const poprve = !sazbaJeZadana\(puvodni\) && provize != null/.test(zdroj),
    'u provize taky')
 ok((zdroj.match(/poprve \? 'zpetne'/g) || []).length === 2,
    'a poprvé platí na všechno — dny odpracované předtím nezůstanou za nulu')

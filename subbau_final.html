@@ -1986,10 +1986,10 @@ setTimeout(function () {
              člověk to čte ve chvíli, kdy ho ta otázka napadne. -->
         <div style="margin-top:12px;padding:10px 12px;background:var(--bg,#f4efe7);border:1px solid var(--brd);border-radius:10px;font-size:11.5px;color:var(--text2);line-height:1.55">
           <b style="color:var(--text)">📍 Kdy se zapisuje vaše poloha?</b><br>
-          Jen ve chvíli, kdy si zapisujete <b>příchod</b>. A proč? Abyste nemuseli zapisovat přesnou adresu ručně.
-          <b>Během dne vás nesledujeme!</b> U pauzy ani u odchodu se poloha nezjišťuje.
-          Jakmile je stavba jednou zapsaná, GPS se ten den už nespustí.<br>
+          Jen ve chvíli, kdy si zapisujete <b>příchod</b> a <b>odchod</b> — abyste nemuseli psát adresu ručně
+          a kancelář viděla, kde se začalo a skončilo. <b>Během dne vás nesledujeme!</b> U pauzy se poloha nezjišťuje.<br>
           GPS mít zapnutou <b>nemusíte</b> — pak ale musíte vypsat celou adresu stavby ručně.
+          Některé firmy zapisují docházku <b>jen s polohou</b> — tam bez ní příchod ani odchod nejde.
           <b>Bez vypsané přesné adresy nelze fakturovat!</b>
         </div>
         <div style="text-align:center;margin-top:12px">
@@ -5526,10 +5526,11 @@ function showAdmin(profile) {
   }
   const man = document.getElementById('mob-admin-user-name')
   if (man) man.textContent = profile?.full_name || ''
-  document.getElementById('sb-name').textContent = profile.full_name
+  document.getElementById('sb-name').textContent = profile.full_name || profile.email || ''
   const roleLabels = {admin:'Admin',osvec:'OSVČ',partak:'Parťák',klient:'Klient'}
   document.getElementById('sb-role').textContent = roleLabels[profile.role] || profile.role
-  document.getElementById('sb-av').textContent = profile.full_name.split(' ').map(n=>n[0]).join('').slice(0,2)
+  // Profil bez jména nesmí shodit start správce (audit 30. 9. 2026).
+  document.getElementById('sb-av').textContent = String(profile.full_name || profile.email || '?').split(' ').filter(Boolean).map(n=>n[0]).join('').slice(0,2)
   loadDashboard()
   // Vrátit správce tam, kde skončil. Až po načtení nástěnky, ať se nepřepíše.
   setTimeout(obnovPosledniSekci, 0)
@@ -6216,6 +6217,8 @@ function toggleRegCheck(field) {
 function showRegForm() {
   document.getElementById('form-login').style.display = 'none'
   document.getElementById('form-register').style.display = 'block'
+  // Obnova hesla mohla zůstat otevřená — pak by byly vidět dva formuláře naráz.
+  const ff = document.getElementById('form-forgot'); if (ff) ff.style.display = 'none'
   document.getElementById('reg-err').style.display = 'none'
   document.getElementById('reg-ok').style.display = 'none'
 }
@@ -6223,6 +6226,7 @@ function showRegForm() {
 function showLoginForm() {
   document.getElementById('form-login').style.display = 'block'
   document.getElementById('form-register').style.display = 'none'
+  const ff = document.getElementById('form-forgot'); if (ff) ff.style.display = 'none'
 }
 
 // mode: 'pending' = čeká na schválení registrace, 'removed' = admin odebral přístup do aplikace
@@ -6670,6 +6674,11 @@ async function deleteAccountFully(workerId, workerName, email) {
 }
 
 async function showWorkerActivity(workerId, workerName) {
+  // Okno se otevírá HNED při klepnutí: Safari okno otevřené až po čekání na
+  // databázi zablokuje. Obsah se do něj doplní, až se načte (audit 30. 9. 2026 —
+  // dřív se kvůli „noopener" hlásilo „Povolte vyskakovací okna", i když se otevřelo).
+  const okno = window.open('', '_blank')
+  try { if (okno) okno.document.write('<p style="font-family:sans-serif;padding:24px;color:#666">Načítám aktivitu…</p>') } catch (e) {}
   // Načti online stav pracovníka
   const { data: prof } = await sb.from('profiles').select('last_seen_at, last_login_at').eq('id', workerId).maybeSingle()
   const online = isOnline(prof?.last_seen_at)
@@ -6724,7 +6733,7 @@ async function showWorkerActivity(workerId, workerName) {
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Aktivita — ${workerName}</title>
+<title>Aktivita — ${escAttr(workerName)}</title>
 <style>
   * { box-sizing:border-box; margin:0; padding:0 }
   body { font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif; background:#f5f5f5; color:#211D1A; padding:24px }
@@ -6744,7 +6753,7 @@ async function showWorkerActivity(workerId, workerName) {
 </style>
 </head>
 <body>
-<h1>Aktivita — ${workerName}</h1>
+<h1>Aktivita — ${escAttr(workerName)}</h1>
 <div class="sub">Přihlášení za posledních 30 dní · Vygenerováno ${new Date().toLocaleString('cs-CZ')}</div>
 <div style="display:inline-flex;align-items:center;gap:9px;padding:8px 16px;border-radius:10px;margin-bottom:20px;background:${online ? '#e1f5ee' : '#fdf0ee'};border:1.5px solid ${online ? '#1d9e75' : '#c0392b'}">
   <span style="display:inline-block;width:11px;height:11px;border-radius:50%;background:${online ? '#1d9e75' : '#c0392b'};box-shadow:0 0 0 3px ${online ? 'rgba(29,158,117,.2)' : 'rgba(192,57,43,.15)'}"></span>
@@ -6761,8 +6770,8 @@ ${rows || '<div class="empty">Žádná přihlášení za posledních 30 dní</di
 
   const blob = new Blob([html], {type:'text/html;charset=utf-8'})
   const url = URL.createObjectURL(blob)
-  const w2 = window.open(url, '_blank', 'noopener,noreferrer')
-  if (!w2) { showToast('⚠️ Povolte vyskakovací okna v prohlížeči'); return }
+  if (okno && !okno.closed) okno.location.href = url
+  else if (!window.open(url, '_blank')) { showToast('⚠️ Povolte vyskakovací okna v prohlížeči'); return }
   setTimeout(() => URL.revokeObjectURL(url), 60000)
 }
 
@@ -12407,11 +12416,11 @@ async function loadAdminChatList() {
     return `<div onclick="openAdminChat('${w.id}','${jsStr(w.full_name)}')"
       style="padding:12px 16px;border-bottom:1px solid var(--brd);cursor:pointer;background:${isActive?'var(--blue-l)':u>0?'#fff8cc':'#fff'};display:flex;align-items:center;gap:10px;transition:background .1s">
       <div style="width:36px;height:36px;border-radius:50%;background:${u>0?'#E8A13A':'var(--bg)'};display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:700;color:${u>0?'#211D1A':'var(--text2)'};flex-shrink:0">
-        ${escAttr(w.full_name.split(' ').map(n=>n[0]).join('').slice(0,2))}
+        ${escAttr(String(w.full_name || '?').split(' ').filter(Boolean).map(n=>n[0]).join('').slice(0,2))}
       </div>
       <div style="flex:1;min-width:0">
         <div style="font-size:13px;font-weight:${u>0?'800':'600'};display:flex;justify-content:space-between;align-items:center">
-          <span>${escAttr(w.full_name)}</span>
+          <span>${escAttr(w.full_name || '(bez jména)')}</span>
           ${u > 0 ? `<span style="background:var(--red);color:#fff;border-radius:10px;font-size:10px;padding:1px 7px">${u}</span>` : ''}
         </div>
         <div style="font-size:11px;color:var(--text3);margin-top:1px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">
@@ -12624,7 +12633,7 @@ const tutorialSteps = [
         <div style="font-size:20px">▶</div>
         <div>
           <div class="tut-flow-title" style="color:#1d9e75">1. Ráno na stavbě — Začít směnu</div>
-          <div class="tut-flow-desc">Zelené tlačítko <b style="color:#fff">Začít směnu</b>. Zapíše se čas i adresa stavby.<br><span style="color:#9ad9bf">Poloha se zapisuje jen teď, při příchodu — abyste nemuseli psát adresu ručně. Během dne vás nesledujeme. Bez GPS to jde taky, ale pak vypište celou adresu stavby: bez přesné adresy nelze fakturovat.</span><br>Klepněte hned, jak dorazíte — klidně pár minut před sedmou, o nic nepřijdete (proč, vysvětlíme v dalším kroku).</div>
+          <div class="tut-flow-desc">Zelené tlačítko <b style="color:#fff">Začít směnu</b>. Zapíše se čas i adresa stavby.<br><span style="color:#9ad9bf">Poloha se zapisuje jen při příchodu a při odchodu — abyste nemuseli psát adresu ručně. Během dne vás nesledujeme. Bez GPS to jde taky, ale pak vypište celou adresu stavby: bez přesné adresy nelze fakturovat.</span><br>Klepněte hned, jak dorazíte — klidně pár minut před sedmou, o nic nepřijdete (proč, vysvětlíme v dalším kroku).</div>
         </div>
       </div>
 
@@ -20311,6 +20320,19 @@ async function translateToEn(text) {
 // předponou v id a vlastním seznamem dalších položek.
 window._polozkyFaktury = { 'inv': [], 'wd-inv': [] }
 
+// Další položky patří JEDNÉ faktuře — jednomu člověku a jednomu týdnu.
+// Audit 30. 9. 2026: položka přidaná v kartě Jana („Materiál 120 €") zůstala
+// v paměti a objevila se na faktuře Petra; u pracovníka se položka z faktury
+// za KW 39 objevila i na KW 40. Při změně člověka nebo týdne se proto vynulují.
+// Změna sazby (stejný člověk i týden) je nechá být.
+const _polozkyPro = { 'inv': '', 'wd-inv': '' }
+function hlidejDalsiPolozky(pre, klic) {
+  if (_polozkyPro[pre] === klic) return
+  _polozkyPro[pre] = klic
+  window._polozkyFaktury[pre] = []
+  vykreslitDalsiPolozky(pre)
+}
+
 function _polozky(pre) { return window._polozkyFaktury[pre] || (window._polozkyFaktury[pre] = []) }
 function _cislo(v) { const n = parseFloat(String(v ?? '').replace(',', '.')); return Number.isFinite(n) ? n : 0 }
 function _pole(pre, jmeno) { return document.getElementById(pre + '-' + jmeno) }
@@ -20586,6 +20608,7 @@ async function onInvoiceWeekChange() {
   if (!sel || !itemEl) return
   const v = sel.value || ''
   if (!v) return
+  hlidejDalsiPolozky('inv', (currentUser?.id || '') + '|' + v)
   const [week, year] = v.split('/')
 
   // Množství se předvyplní odpracovanými hodinami za ten týden a cena sazbou —
@@ -29800,15 +29823,14 @@ function datumCas(ts) {
 // Otevřít PDF - spolehlivé i v Safari anonymous okně
 function openPdfUrl(url) {
   if (!url) { showToast('⚠️ PDF URL není dostupná'); return }
-  // Pokus 1: window.open
-  const w = window.open(url, '_blank', 'noopener,noreferrer')
-  if (!w || w.closed) {
-    // Pokus 2: iframe download
-    const a = document.createElement('a')
-    a.href = url; a.target = '_blank'; a.rel = 'noopener'
-    document.body.appendChild(a); a.click()
-    setTimeout(() => document.body.removeChild(a), 500)
-  }
+  // JEDNÍM způsobem. Audit 30. 9. 2026: window.open s „noopener" podle
+  // specifikace vždycky vrací null, takže se spustila i záloha a každé PDF
+  // se otevřelo dvakrát. Odkaz s rel=noopener to udělá jednou a cizí stránka
+  // se k appce nedostane.
+  const a = document.createElement('a')
+  a.href = url; a.target = '_blank'; a.rel = 'noopener noreferrer'
+  document.body.appendChild(a); a.click()
+  setTimeout(() => { try { document.body.removeChild(a) } catch (e) {} }, 500)
 }
 
 // Otevři uložený HTML výkaz VYKRESLENÝ (ne jako zdrojový kód).
@@ -32246,6 +32268,8 @@ function closeWorkerModal() {
   document.getElementById('worker-modal').style.display = 'none'
   document.body.style.overflow = ''
   currentWorkerId = null
+  // Rozpracované další položky faktury patří tomuhle člověku — ne dalšímu.
+  hlidejDalsiPolozky('wd-inv', '')
 }
 
 // ============ FIRMY (s.r.o.) SE ZAMĚSTNANCI ============
@@ -34483,6 +34507,7 @@ async function updateWdInvoiceHours() {
   const box = document.getElementById('wd-inv-hours')
   const sel = document.getElementById('wd-inv-week')
   if (!box || !sel?.value || !currentWorkerId) return
+  hlidejDalsiPolozky('wd-inv', currentWorkerId + '|' + sel.value)
   const [week, year] = sel.value.split('/').map(Number)
   const workerIdPriStartu = currentWorkerId
   let data
@@ -34689,6 +34714,8 @@ async function generateInvoiceAdmin() {
   // Profil načti čerstvý — ať faktura obsahuje aktuální fakturační údaje i odběratele
   const { data: prof } = await sb.from('profiles').select('*').eq('id', currentWorkerId).maybeSingle()
   if (!prof) { showToast('❌ Profil pracovníka se nepodařilo načíst'); return }
+  // Položky, které patří jinému člověku nebo týdnu, na tuhle fakturu nesmí.
+  hlidejDalsiPolozky('wd-inv', currentWorkerId + '|' + sel.value)
   // Zaměstnanec firmy sám nefakturuje — jeho hodiny jsou na faktuře firmy.
   // Faktura tady by ty hodiny zaplatila podruhé (a jeho starou sazbou).
   if (jeZamestnanecFirmy(prof)) {
@@ -35255,7 +35282,9 @@ function tichaObnovaDat() {
       // a realtime aktualizaci; časté 60s obnovování jen zbytečně bliká tabulkou.
     }
     // OSVČ (mobil): která obrazovka je otevřená (.mob-view.on → id "mob-v-<nazev>")
-    const mobView = document.querySelector('.mob-view.on')
+    // Jen u pracovníka — u správce je pracovnická obrazovka ve stránce taky
+    // (schovaná) a každou minutu se kvůli ní zbytečně ptalo databáze.
+    const mobView = (currentProfile && currentProfile.role !== 'admin') ? document.querySelector('.mob-view.on') : null
     if (mobView && mobView.id && mobView.id.indexOf('mob-v-') === 0) {
       const mname = mobView.id.slice(6)
       if (mname === 'dochazka') {
@@ -35894,8 +35923,8 @@ document.addEventListener('visibilitychange', () => {
       <!-- Vysvětlení k poloze i tady, protože právě tady se stavba zapisuje ručně
            a je namístě říct, co to znamená pro GPS. -->
       <div style="margin-top:8px;font-size:11.5px;color:#6b6157;line-height:1.5">
-        📍 Poloha se zapisuje <b>jen při příchodu</b>, během dne vás nesledujeme. Když stavbu vypíšete sem sami,
-        GPS se ten den už nespustí — mít ji zapnutou tedy nemusíte. Adresu ale vypište celou:
+        📍 Poloha se zapisuje <b>jen při příchodu a odchodu</b>, během dne vás nesledujeme. Když stavbu vypíšete
+        sem sami, mít GPS zapnutou nemusíte. Adresu ale vypište celou:
         <b>bez přesné adresy nelze fakturovat.</b>
       </div>
     </div>

@@ -65,7 +65,8 @@ ok(/a\.bez_vyplaty\s*\n?\s*\?\s*0/.test(src) || /a\.bez_vyplaty[\s\S]{0,40}\?\s*
    'výdělek pracovníka je u dne „bez výplaty" nulový')
 ok(/bez_vyplaty,bez_provize_den,vyplata_castka/.test(api),
    'odkaz pro odběratele si ty příznaky vůbec načte')
-ok(/bezProvize\.has\(z\.worker_id\) \|\| z\.bez_provize_den/.test(api), 'a nepočítá u takového dne provizi')
+// Od 30. 9. 2026 se u zaměstnance firmy bere „bez provize" FIRMY (kdoPlati).
+ok(/bezProvize\.has\(kdoPlati\) \|\| z\.bez_provize_den/.test(api), 'a nepočítá u takového dne provizi')
 ok(/z\.bez_vyplaty/.test(api), 'a nefakturuje den bez výplaty')
 ok(/provHoursByWorker/.test(src), 'report pro firmu počítá průměrnou sazbu jen z hodin s provizí')
 

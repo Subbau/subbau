@@ -31,8 +31,18 @@ ok(/function odchodPolohaHtml/.test(zdroj), 'a ukazuje ji')
 
 console.log('\n2) NESMÍ TO NIKAM UNIKNOUT')
 ok(!/odchod_/.test(API), 'odkaz pro odběratele o té poloze vůbec neví')
-ok((zdroj.match(/odchodPolohaHtml\(/g) || []).length === 2,
-   'zobrazuje se jen na JEDNOM místě (definice + jediné volání)')
+{
+  // Od 29. 9. 2026 ji na přání majitele ukazuje i Dnešní docházka (loadTodayTimeline),
+  // pořád jen správci. Každé volání musí ležet v jedné z povolených funkcí.
+  const povolene = ['odchodPolohaHtml', 'loadWdAttendance', 'loadTodayTimeline']
+  const mista = [...zdroj.matchAll(/odchodPolohaHtml\(/g)].map(m => {
+    const pred = zdroj.slice(0, m.index)
+    const f = [...pred.matchAll(/(?:async\s+)?function\s+([A-Za-z0-9_$]+)\s*\(/g)].pop()
+    return f ? f[1] : '?'
+  })
+  ok(mista.length >= 2 && mista.every(f => povolene.includes(f)),
+     'zobrazuje se jen správci — v kartě pracovníka a v Dnešní docházce (' + mista.join(', ') + ')')
+}
 {
   // PDF výkazy staví HTML kolem attDisplaySite — tam se to volat nesmí
   const mistaPDF = ['async function generateTeamAttendancePdf', 'async function exportWorkerKW']

@@ -25,7 +25,9 @@ ok(/podskupina: w\.subteam_id/.test(zdroj), 'a přiřadí je k lidem')
 // přehodit rovnou v přehledu, bez otvírání faktury.
 ok(/🎨 vzhled \$\{Number\(r\.design_idx\) \|\| 1\}/.test(zdroj),
    'u čísla faktury je vidět, v jakém vzhledu je VYSTAVENÁ (údaj, ne nastavení)')
-ok(/<th style="white-space:nowrap" title="Vzhled, ve kterém bude tenhle člověk fakturovat příště/.test(zdroj),
+// Hlavička se od 30. 9. 2026 zalamuje („Vzhled<br>příště") — přehled faktur
+// jinak na MacBooku roloval do stran.
+ok(/<th style="line-height:1\.2" title="Vzhled, ve kterém bude tenhle člověk fakturovat příště/.test(zdroj),
    'a vedle je vlastní sloupec „Vzhled příště"')
 ok(/ulozVzhledZPrehledu\(this,'\$\{r\.worker_id\}'\)/.test(zdroj),
    'v tom sloupci se dá vzhled přepnout')
