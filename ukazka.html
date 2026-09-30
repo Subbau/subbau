@@ -29393,6 +29393,46 @@ window.addEventListener('afterprint', () => {
   fitInvoicePreview()
 })
 
+// Rozlišení faktury v PDF. Faktura jde do PDF jako obrázek: ve 2× (asi 200 dpi)
+// a jako JPEG vypadala na obrazovce dobře, ale po vytištění nebo přiblížení —
+// typicky u účetní — byla rozmazaná. 3× dává přes 300 dpi jako běžný tisk.
+const FAKTURA_PDF_MERITKO = 3
+// iPhone větší plátno než asi 16,7 Mpx nevykreslí (vyjde prázdné nebo chyba).
+// Dlouhá faktura se proto vykreslí v menším měřítku, nejmíň ale ve 2×.
+const FAKTURA_PDF_MAX_PX = 12e6
+
+// Prázdné plátno = telefon ho kvůli velikosti nevykreslil. Stačí zmenšenina,
+// na faktuře je vždycky nějaký text.
+function platnoJePrazdne(c) {
+  try {
+    if (!c || !c.width || !c.height) return true
+    const m = document.createElement('canvas')
+    m.width = 200; m.height = 283
+    const ctx = m.getContext('2d')
+    ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, m.width, m.height)
+    ctx.drawImage(c, 0, 0, m.width, m.height)
+    const d = ctx.getImageData(0, 0, m.width, m.height).data
+    for (let i = 0; i < d.length; i += 4) if (d[i] < 240 || d[i + 1] < 240 || d[i + 2] < 240) return false
+    return true
+  } catch (e) { return false }   // nečitelné plátno neznamená prázdné — chybu ohlásí až PDF
+}
+
+async function vykresliFakturuDoPlatna(el) {
+  const plocha = Math.max(1, (el.offsetWidth || INVOICE_PAGE_W) * (el.offsetHeight || 1123))
+  const meritko = Math.max(2, Math.min(FAKTURA_PDF_MERITKO,
+    Math.floor(Math.sqrt(FAKTURA_PDF_MAX_PX / plocha) * 10) / 10))
+  const kresli = s => html2canvas(el, { scale: s, backgroundColor: '#ffffff', useCORS: true, logging: false })
+  let c = null
+  try { c = await kresli(meritko) }
+  catch (e) {
+    if (meritko <= 2) throw e
+    console.warn('[faktura] vykreslení ve ' + meritko + '× selhalo, zkouším 2×:', e?.message)
+  }
+  if (c && (meritko <= 2 || !platnoJePrazdne(c))) return c
+  if (c) { console.warn('[faktura] plátno ve ' + meritko + '× vyšlo prázdné, zkouším 2×'); c.width = 0; c.height = 0 }
+  return kresli(2)
+}
+
 // Vykreslí fakturu do PDF (vždy jedna strana A4) a vrátí ji jako soubor.
 // Používá to uložení do telefonu, odeslání do StavKo i odeslání e-mailem —
 // všechny tři cesty tak posílají naprosto stejný dokument.
@@ -29420,7 +29460,7 @@ async function buildInvoicePdf() {
 
   try {
     await new Promise(r => setTimeout(r, 100))   // ať se stihne vykreslit
-    const canvas = await html2canvas(clone, { scale: 2, backgroundColor: '#ffffff', useCORS: true, logging: false })
+    const canvas = await vykresliFakturuDoPlatna(clone)
 
     const pdf = new JsPDF('p', 'mm', 'a4')
     const pageW = 210, pageH = 297, margin = 8
@@ -29432,7 +29472,12 @@ async function buildInvoicePdf() {
     let h = canvas.height * usableW / canvas.width
     if (h > usableH) { const k = usableH / h; h = usableH; w = w * k }
     const x = margin + (usableW - w) / 2
-    pdf.addImage(canvas.toDataURL('image/jpeg', 0.94), 'JPEG', x, margin, w, h)
+    // PNG, ne JPEG: komprese JPEG dělá kolem písmen šmouhy a u barevného písma
+    // barevný lem. Faktura je skoro celá bílá, takže PNG vyjde i menší.
+    pdf.addImage(canvas, 'PNG', x, margin, w, h, undefined, 'FAST')
+    // iPhone drží paměť plátna, dokud se nezmenší — další PDF by pak mohlo
+    // vyjít prázdné.
+    canvas.width = 0; canvas.height = 0
 
     return { pdf, blob: pdf.output('blob'), filename: invoiceFileName() }
   } finally {
