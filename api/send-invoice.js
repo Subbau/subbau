@@ -19,6 +19,14 @@
 // proti Supabase Auth) a jen sám za sebe. Adresa příjemce je pevně daná
 // serverem — z prohlížeče ji přepsat nejde, aby se z endpointu nedal udělat
 // rozesílač pošty.
+//
+// Od 30. 9. 2026 navíc (audit): posílat smí jen AKTIVNÍ pracovník nebo
+// správce — dřív stačil jakýkoli platný přihlašovací token, tedy i čerstvá
+// neschválená registrace (registrace je otevřená). A adresa pro odpověď
+// (replyTo) se u pracovníka bere jen jeho vlastní: dřív šla z těla
+// požadavku, takže šlo poslat „fakturu" z domény SubBau s odpovědí
+// směřující kamkoli (podvod na účetní). Správce posílá i za pracovníka,
+// proto u něj adresa z těla zůstává.
 
 const SUPABASE_URL = 'https://ceefzlkjnrclfpmhgdmr.supabase.co';
 const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImNlZWZ6bGtqbnJjbGZwbWhnZG1yIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzY3MTkxODYsImV4cCI6MjA5MjI5NTE4Nn0.fIewYds5zd3AICHWSpbcfOKk_SfGHuP1I-YR1yKW4NI';
@@ -123,6 +131,8 @@ module.exports = async function handler(req, res) {
     res.status(401).json({ sent: false, reason: 'missing_token' });
     return;
   }
+  let caller = null;
+  let profil = null;
   try {
     const callerResp = await fetch(`${SUPABASE_URL}/auth/v1/user`, {
       headers: { apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${callerToken}` },
@@ -131,13 +141,31 @@ module.exports = async function handler(req, res) {
       res.status(401).json({ sent: false, reason: 'invalid_session' });
       return;
     }
-    const caller = await callerResp.json();
+    caller = await callerResp.json();
     if (!caller?.id) {
       res.status(401).json({ sent: false, reason: 'invalid_session' });
       return;
     }
+    // Profil se čte TOKENEM VOLAJÍCÍHO (ne serverovým klíčem) — vlastní profil
+    // si přečíst smí každý, a funkce tak nepotřebuje nic navíc nastaveného.
+    const profResp = await fetch(`${SUPABASE_URL}/rest/v1/profiles` +
+      `?select=id,role,is_active,email&id=eq.${encodeURIComponent(caller.id)}&limit=1`, {
+      headers: { apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${callerToken}`, Accept: 'application/json' },
+    });
+    const radky = profResp.ok ? await profResp.json() : null;
+    profil = Array.isArray(radky) ? radky[0] : null;
   } catch {
     res.status(401).json({ sent: false, reason: 'invalid_session' });
+    return;
+  }
+  const role = String(profil?.role || '').trim().toLowerCase();
+  if (!profil || profil.is_active !== true || !['osvec', 'partak', 'admin'].includes(role)) {
+    res.status(403).json({ sent: false, reason: 'not_allowed' });
+    return;
+  }
+  // Brzda i podle člověka, ne jen podle IP adresy (tu si volající napíše sám).
+  if (rateLimited(`send-invoice-u:${caller.id}`, 20)) {
+    res.status(429).json({ sent: false, reason: 'rate_limited' });
     return;
   }
 
@@ -175,9 +203,14 @@ module.exports = async function handler(req, res) {
       htmlContent: invoiceEmailHtml(body),
       attachment: [{ content: pdfBase64, name: safeFileName(body.fileName) }],
     };
-    // Odpověď ať jde rovnou pracovníkovi, ne na formulářovou adresu
-    if (isEmail(body.replyTo)) {
-      payload.replyTo = { email: String(body.replyTo).trim(), name: String(body.workerName || '').slice(0, 100) };
+    // Odpověď ať jde rovnou pracovníkovi, ne na formulářovou adresu. Pracovník
+    // smí jen SVOU adresu (přihlašovací nebo z profilu); cokoli jiného se
+    // tiše vynechá a odpověď půjde na odesílatele. Správce posílá i za
+    // pracovníka, u něj se bere adresa z těla.
+    const vlastni = [caller?.email, profil?.email].filter(Boolean).map(e => String(e).trim().toLowerCase());
+    const chceOdpoved = String(body.replyTo || '').trim();
+    if (isEmail(chceOdpoved) && (role === 'admin' || vlastni.includes(chceOdpoved.toLowerCase()))) {
+      payload.replyTo = { email: chceOdpoved, name: String(body.workerName || '').slice(0, 100) };
     }
 
     const resp = await fetch(BREVO_API_URL, {
