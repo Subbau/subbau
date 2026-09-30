@@ -59,7 +59,13 @@
       id: pid, full_name: l[0], profession: l[1], team_id: l[2], role: 'osvec',
       hourly_rate_worker: l[3], is_active: true, registration_status: 'approved',
       email: 'pracovnik' + (i + 1) + '@ukazka.cz', phone: '+420 6' + (10000000 + i * 111111),
-      business_type: 'osvec', is_osvec: true, german_level: i % 3 === 0 ? 'B1' : 'A2',
+      business_type: 'osvec', is_osvec: true,
+      // Úroveň němčiny v hodnotách, které appka zná (DE obdélníček za jménem),
+      // národnost pro vlaječku u fotky. Bez sloupce narodnost by karta v ukázce
+      // hlásila „spusťte migraci" — to zákazník vidět nemá.
+      german_level: ['intermediate', 'basic', 'none', 'advanced'][i % 4],
+      narodnost: ['CZ', 'SK', 'CZ', 'PL', 'UA', 'CZ', 'RO', 'SK', 'CZ', 'PL', 'CZ', 'UA'][i % 12],
+      zamestnavatel_id: null,
       has_car: i % 4 === 0, ic: String(60000000 + i * 137), is_vat_payer: false,
       invoice_address: 'Nádražní ' + (10 + i) + ', 370 01 České Budějovice',
       // Fakturační údaje — ať jde v ukázce projít i vystavení faktury

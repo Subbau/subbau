@@ -568,7 +568,13 @@
       id: pid, full_name: l[0], profession: l[1], team_id: l[2], role: 'osvec',
       hourly_rate_worker: l[3], is_active: true, registration_status: 'approved',
       email: 'pracovnik' + (i + 1) + '@ukazka.cz', phone: '+420 6' + (10000000 + i * 111111),
-      business_type: 'osvec', is_osvec: true, german_level: i % 3 === 0 ? 'B1' : 'A2',
+      business_type: 'osvec', is_osvec: true,
+      // Úroveň němčiny v hodnotách, které appka zná (DE obdélníček za jménem),
+      // národnost pro vlaječku u fotky. Bez sloupce narodnost by karta v ukázce
+      // hlásila „spusťte migraci" — to zákazník vidět nemá.
+      german_level: ['intermediate', 'basic', 'none', 'advanced'][i % 4],
+      narodnost: ['CZ', 'SK', 'CZ', 'PL', 'UA', 'CZ', 'RO', 'SK', 'CZ', 'PL', 'CZ', 'UA'][i % 12],
+      zamestnavatel_id: null,
       has_car: i % 4 === 0, ic: String(60000000 + i * 137), is_vat_payer: false,
       invoice_address: 'Nádražní ' + (10 + i) + ', 370 01 České Budějovice',
       // Fakturační údaje — ať jde v ukázce projít i vystavení faktury
@@ -3460,6 +3466,12 @@ setTimeout(function () {
 
       <!-- PROFIL -->
       <div id="wdt-profil" class="wdt on">
+        <!-- ZAMĚSTNANEC A ZAMĚSTNAVATEL hned nahoře. Majitel 1. 10. 2026: „neumím
+             zadat roli zaměstnance, nemůžu nikde najít… s.r.o. nebo živnostník
+             klidně, ale že ten člověk zaměstnává dalšího člověka". Dřív to bylo
+             jen v záložce Fakturace a šéfem mohla být jen s.r.o. Plní ho
+             vykresliRadekZamestnance. -->
+        <div id="wd-zam-radek" style="display:none"></div>
         <div class="g2">
           <div><div style="font-size:11px;color:var(--text3);margin-bottom:3px">Jméno</div>
             <input type="text" id="wd-fullname-input" placeholder="Celé jméno" style="width:100%;padding:6px 10px;border:1.5px solid var(--brd);border-radius:7px;font-size:13px;font-weight:700">
@@ -3715,11 +3727,11 @@ setTimeout(function () {
              ti si zapisují docházku, ale nemají sazbu ani fakturaci — za
              všechny fakturuje firma a provizi máme napsanou u ní. -->
         <div style="border:1.5px solid var(--brd);border-radius:10px;padding:14px;margin-bottom:16px">
-          <div style="font-size:13px;font-weight:700;margin-bottom:4px">🏢 Zaměstnanec firmy</div>
+          <div style="font-size:13px;font-weight:700;margin-bottom:4px">👔 Zaměstnanec — pod kým pracuje</div>
           <div style="font-size:11.5px;color:var(--text3);margin-bottom:10px;line-height:1.5">
-            Když tenhle člověk pracuje pod nějakou firmou (s.r.o.), vyberte ji.
-            Zapisuje si pak jen docházku — sazbu, fakturaci ani nic kolem živnosti
-            mít nebude. Za jeho hodiny fakturuje ta firma a provizi počítáme u ní.
+            Když tenhle člověk pracuje pod někým — firmou (s.r.o.) nebo živnostníkem —,
+            vyberte ho. Zapisuje si pak jen docházku — sazbu, fakturaci ani nic kolem
+            živnosti mít nebude. Za jeho hodiny fakturuje šéf a provizi počítáme u něj.
           </div>
           <select id="wd-zamestnavatel" onchange="ulozZamestnavatele(this)"
                   style="width:100%;padding:9px;border:1.5px solid var(--brd);border-radius:8px;font-size:14px;font-family:inherit">
@@ -5344,7 +5356,7 @@ async function submitAdminSignatureWithPlacement() {
 // Po nahrání nové verze se snadno pozná, jestli se opravdu nasadila: otevřete
 // appku, zmáčkněte F12 (na Macu ⌥⌘I) a v konzoli je vypsané tohle datum. Když
 // tam svítí starší, prohlížeč nebo GitHub drží starou verzi.
-const SUBBAU_VERZE = '2026-10-01 b — fotky z PDF, otáčení a přiblížení; tisk soupisu faktur'
+const SUBBAU_VERZE = '2026-10-01 c — zaměstnanec i pod živnostníkem, fotky na odkazu'
 console.log('StavKo docházka — verze ' + SUBBAU_VERZE)
 // Verze i dole v menu správce. Když někdo novinku „nevidí", podle ní se hned
 // pozná, jestli nemá otevřenou starou kopii appky — bez hledání v konzoli.
@@ -8139,13 +8151,12 @@ async function sazbyPracovnika(workerId, druh, vychozi) {
 // nezamlčí — radši žádné číslo než špatné.
 async function dochazkaProFakturu(workerId, week, year) {
   let kdo = [workerId]
-  const { data: prof, error: eProf } = await sb.from('profiles').select('supplier_type').eq('id', workerId).maybeSingle()
-  if (eProf) throw eProf
-  if (prof && prof.supplier_type === 'sro') {
-    const { data: lide, error: eLide } = await sb.from('profiles').select('id').eq('zamestnavatel_id', workerId)
-    if (eLide) throw eLide
-    kdo = kdo.concat((lide || []).map(x => x.id).filter(Boolean))
-  }
+  // Zaměstnance může mít firma (s.r.o.) i živnostník (majitel 1. 10. 2026) —
+  // za jejich hodiny fakturuje ten, pod kým pracují. Chybějící sloupec
+  // (neproběhlá migrace) = nikdo pod ním není.
+  const { data: lide, error: eLide } = await sb.from('profiles').select('id').eq('zamestnavatel_id', workerId)
+  if (eLide && !/zamestnavatel_id|42703/.test((eLide.code || '') + ' ' + (eLide.message || ''))) throw eLide
+  kdo = kdo.concat((lide || []).map(x => x.id).filter(x => x && x !== workerId))
   const { data, error } = await sb.from('attendance')
     .select('worker_id, total_hours, work_date, bez_vyplaty, vyplata_castka')
     .in('worker_id', kdo).eq('kw', parseInt(week)).eq('kw_year', parseInt(year))
@@ -9350,7 +9361,7 @@ async function renderProvizeContent() {
         <td style="font-size:${isNoFirm ? '16px' : '14.5px'};font-weight:600${r.podSefem ? ';padding-left:30px;border-left:3px solid #c7d6e4' : ''}">${r.podSefem ? '<span style="color:var(--text3);font-weight:400;margin-left:-16px;margin-right:4px">↳</span>' : ''}${escAttr(r.name)}${r.overdue ? ' <span style="font-size:11px;color:var(--red);font-weight:700">⚠️ nezaplaceno</span>' : ''}${
           // Podskupina pod jménem — stejná barva jako v Týmech, ať se to dá
           // spárovat pohledem. U větších firem je bez toho nepoznat, kdo kde dělá.
-          (r.podskupina || r.zamestnavatel || r.jeFirma || r.sefChybi) ? (() => {
+          (r.podskupina || r.zamestnavatel || r.jeFirma || r.sefChybi || pocetLidiPodFirmou[r.id]) ? (() => {
             let out = '<div style="margin-top:3px;display:flex;gap:4px;flex-wrap:wrap">'
             if (r.podskupina) {
               const c = groupColor(r.podskupina, 'sub')
@@ -9358,6 +9369,10 @@ async function renderProvizeContent() {
             }
             if (r.jeFirma) {
               out += `<span class="pill" title="Firma (s.r.o.) — fakturuje za své lidi a provizi počítáme u ní" style="background:var(--blue-l);color:var(--blue);border:1.5px solid var(--blue);white-space:nowrap;font-size:10.5px;font-weight:700">🏢 firma${(() => { const n = pocetLidiPodFirmou[r.id] || 0; return n ? ' · ' + n + (n === 1 ? ' zaměstnanec' : n < 5 ? ' zaměstnanci' : ' zaměstnanců') : '' })()}</span>`
+            }
+            if (!r.jeFirma && pocetLidiPodFirmou[r.id]) {
+              const n = pocetLidiPodFirmou[r.id]
+              out += `<span class="pill" title="Živnostník, který zaměstnává další lidi — fakturuje za ně a provizi počítáme u něj" style="background:var(--blue-l);color:var(--blue);border:1.5px solid var(--blue);white-space:nowrap;font-size:10.5px;font-weight:700">👔 zaměstnává ${n} ${n === 1 ? 'člověka' : n < 5 ? 'lidi' : 'lidí'}</span>`
             }
             if (r.zamestnavatel && !r.sefChybi) {
               out += `<span class="pill" title="Zaměstnanec firmy — sazbu ani výdělek nemá, za jeho hodiny fakturuje firma a provize se počítá u ní" style="background:#eef3f8;color:#2c4257;border:1.5px solid #c7d6e4;white-space:nowrap;font-size:10.5px;font-weight:700">👔 zaměstnanec · ${escAttr(r.zamestnavatel)}</span>`
@@ -9368,7 +9383,7 @@ async function renderProvizeContent() {
             return out + '</div>'
           })() : ''
         }</td>
-        <td style="text-align:right">${r.zamestnavatelId ? `<button onclick="vyberSefa('${r.id}')" title="Zaměstnanec firmy — sazbu nemá. Klepnutím změníte, pod kým pracuje, nebo ho vrátíte mezi OSVČ." style="padding:6px 10px;font-size:12.5px;font-weight:700;border:1.5px solid #c7d6e4;border-radius:7px;background:#eef3f8;color:#2c4257;cursor:pointer;font-family:inherit;white-space:nowrap">👔 zaměstnanec</button><div style="font-size:10.5px;color:var(--text3);margin-top:3px">sazbu nemá</div>` : `<input id="pv-rate-${r.id}" type="number" step="0.01" value="${r.sazbaPole == null ? '' : r.sazbaPole}" placeholder="chybí" title="${r.sazbaPole == null ? 'Chybí hodinová sazba — dokud ji nezadáte, počítá se pracovníkovi nula' : (r.sazbaPole === 0 ? 'Sazba je nula — pracovník za hodiny nedostane nic' : '')}" onchange="saveProvizeRate(this,'${r.id}')" style="width:80px;padding:6px 8px;border:${r.sazbaPole != null ? '1.5px solid var(--brd)' : '2px solid var(--red)'};background:${r.sazbaPole != null ? '' : 'var(--red-l)'};border-radius:7px;font-size:14px;text-align:right;font-family:inherit"> €/h${(!r.jeFirma && !r.byvaly) ? `<div><button onclick="vyberSefa('${r.id}')" title="Pracuje pod firmou (s.r.o.)? Označte ho jako zaměstnance — sazbu mít nebude, ukáže se pod šéfem a provize půjde firmě." style="margin-top:4px;padding:2px 7px;font-size:10.5px;font-weight:700;border:1px solid var(--brd);border-radius:6px;background:#fff;color:var(--text2);cursor:pointer;font-family:inherit;white-space:nowrap">👔 zaměstnanec?</button></div>` : ''}`}</td>
+        <td style="text-align:right">${r.zamestnavatelId ? `<button onclick="vyberSefa('${r.id}')" title="Zaměstnanec firmy — sazbu nemá. Klepnutím změníte, pod kým pracuje, nebo ho vrátíte mezi OSVČ." style="padding:6px 10px;font-size:12.5px;font-weight:700;border:1.5px solid #c7d6e4;border-radius:7px;background:#eef3f8;color:#2c4257;cursor:pointer;font-family:inherit;white-space:nowrap">👔 zaměstnanec</button><div style="font-size:10.5px;color:var(--text3);margin-top:3px">sazbu nemá</div>` : `<input id="pv-rate-${r.id}" type="number" step="0.01" value="${r.sazbaPole == null ? '' : r.sazbaPole}" placeholder="chybí" title="${r.sazbaPole == null ? 'Chybí hodinová sazba — dokud ji nezadáte, počítá se pracovníkovi nula' : (r.sazbaPole === 0 ? 'Sazba je nula — pracovník za hodiny nedostane nic' : '')}" onchange="saveProvizeRate(this,'${r.id}')" style="width:80px;padding:6px 8px;border:${r.sazbaPole != null ? '1.5px solid var(--brd)' : '2px solid var(--red)'};background:${r.sazbaPole != null ? '' : 'var(--red-l)'};border-radius:7px;font-size:14px;text-align:right;font-family:inherit"> €/h${(!r.jeFirma && !r.byvaly && !pocetLidiPodFirmou[r.id]) ? `<div><button onclick="vyberSefa('${r.id}')" title="Pracuje pod někým (firma nebo živnostník)? Označte ho jako zaměstnance — sazbu mít nebude, ukáže se pod šéfem a provize půjde šéfovi." style="margin-top:4px;padding:2px 7px;font-size:10.5px;font-weight:700;border:1px solid var(--brd);border-radius:6px;background:#fff;color:var(--text2);cursor:pointer;font-family:inherit;white-space:nowrap">👔 zaměstnanec?</button></div>` : ''}`}</td>
         <td style="text-align:right">${r.zamestnavatelId ? `<span title="Provize za jeho hodiny se počítá sazbou firmy, pod kterou pracuje" style="font-size:11.5px;color:var(--text3)">sazbou firmy</span>` : `<input id="pv-prov-${r.id}" type="number" step="0.01" value="${r.provPole == null ? '' : r.provPole}" placeholder="chybí" title="${r.provPole != null ? (r.bezProvize ? 'Sazba zůstává uložená, ale nepočítá se — pracovník je označený „bez provize“' : (r.provPole === 0 ? 'Provize je nula — StavKo na něm nevydělává' : '')) : 'Chybí provize — dokud ji nezadáte, počítá se nula'}" onchange="saveProvizeCommission(this,'${r.id}')" style="width:80px;padding:6px 8px;border:${r.provPole != null ? '1.5px solid var(--amber)' : '2px solid var(--red)'};background:${r.provPole != null ? '' : 'var(--red-l)'};border-radius:7px;font-size:14px;text-align:right;font-family:inherit;background:#faf6ee"> €/h`}</td>
         <td style="text-align:center;padding:0">${r.zamestnavatelId ? '<span title="Řídí se firmou, pod kterou pracuje" style="color:var(--text3)">—</span>' : `<label title="Pracovník odešel dřív, než za něj přijdou peníze — nepočítat mu provizi" style="display:flex;align-items:center;justify-content:center;width:100%;height:100%;min-height:44px;padding:8px;cursor:pointer"><input type="checkbox" ${r.bezProvize ? 'checked' : ''} onchange="toggleBezProvize(this,'${r.id}')" style="width:20px;height:20px;cursor:pointer;accent-color:var(--red)"></label>`}</td>
         <td style="text-align:right;background:#f2f8f4">${r.zamestnavatelId ? '<span style="font-size:11.5px;color:var(--text3)">platí ho firma</span>' : `<b id="pv-e-${r.id}" style="font-size:14px;color:var(--green)">${eur(r.earnWeek)}</b>`}<div style="font-size:11px;color:var(--text3)">${r.hoursWeek.toFixed(2)} h</div></td>
@@ -26031,9 +26046,10 @@ async function generateInvoiceMob(lang = 'en', override = null) {
   // zaměstnanců — firma fakturuje za všechny své lidi dohromady, sami za sebe
   // nefakturují a sazbu nemají.
   let kohoFakturovat = [workerId]
-  if (prof && prof.supplier_type === 'sro') {
+  {
+    // Šéfem může být i živnostník (1. 10. 2026), ne jen s.r.o.
     const { data: lide } = await sb.from('profiles').select('id').eq('zamestnavatel_id', workerId)
-    const ids = (lide || []).map(x => x.id).filter(Boolean)
+    const ids = (lide || []).map(x => x.id).filter(x => x && x !== workerId)
     if (ids.length) kohoFakturovat = kohoFakturovat.concat(ids)
   }
   const { data: att, error: attErr } = await sb.from('attendance')
@@ -33504,6 +33520,7 @@ async function openWorkerModal(id) {
   const { data: w } = await sb.from('profiles').select('*').eq('id', id).maybeSingle()
   if (!w) return
   currentWorkerProfile = w  // Ulož pro použití v dalších tabech
+  vykresliRadekZamestnance(w)
 
   document.getElementById('wd-name').textContent = w.full_name
   const hlVl = document.getElementById('wd-avatar-vlajka'); if (hlVl) hlVl.innerHTML = vlajkaHtml(w.id, w.narodnost || null, false)
@@ -33790,32 +33807,170 @@ async function naplnVyberZamestnavatele(profil) {
   const info = document.getElementById('wd-zamestnavatel-info')
   if (!sel) return
   const vybrany = (profil && profil.zamestnavatel_id) || ''
-  let { data: firmy, error } = await sb.from('profiles')
-    .select('id, full_name, company_name')
-    .eq('supplier_type', 'sro').eq('is_active', true).order('full_name')
+  const { data: lide, error } = await nactiMozneSefy()
   if (error) {
     sel.innerHTML = '<option value="">— nepodařilo se načíst firmy —</option>'
     if (info) info.innerHTML = '<span style="color:var(--amber)">⚠️ ' + escAttr(error.message) + '</span>'
     return
   }
   // Sám sebe si za zaměstnavatele nastavit nemůže.
-  firmy = (firmy || []).filter(f => !profil || f.id !== profil.id)
+  const firmy = mozniSefove(lide, profil && profil.id)
+  // Kdo má pod sebou vlastní lidi, zaměstnancem být nemůže — řetěz „šéf pod
+  // šéfem" by rozhodil, kdo za koho fakturuje.
+  const podNim = profil ? (lide || []).filter(l => l.zamestnavatel_id === profil.id) : []
   sel.innerHTML = '<option value="">— není zaměstnanec, pracuje sám na sebe (OSVČ) —</option>'
-    + firmy.map(f => `<option value="${f.id}"${f.id === vybrany ? ' selected' : ''}>${escAttr(f.company_name || f.full_name)}</option>`).join('')
+    + firmy.map(f => `<option value="${f.id}"${f.id === vybrany ? ' selected' : ''}>${escAttr(popisSefa(f))}</option>`).join('')
   sel.value = vybrany ? String(vybrany) : ''
-  vykresliInfoZamestnavatele(profil, firmy)
+  sel.disabled = podNim.length > 0 && !vybrany
+  vykresliInfoZamestnavatele(profil, firmy, podNim)
 }
 
-function vykresliInfoZamestnavatele(profil, firmy) {
+// Kdo může být šéf (zaměstnavatel): firma (s.r.o.) i živnostník — majitel
+// 1. 10. 2026: „s.r.o. ten člověk nebo živnostník klidně". Jen aktivní
+// pracovníci a nikdo, kdo je sám zaměstnanec.
+function nactiMozneSefy() {
+  return sb.from('profiles')
+    .select('id, full_name, company_name, supplier_type, zamestnavatel_id')
+    .in('role', ['osvec', 'partak']).eq('is_active', true).order('full_name')
+}
+function mozniSefove(lide, krome) {
+  return (lide || []).filter(l => l.id !== krome && !l.zamestnavatel_id)
+    // firmy napřed, pak živnostníci — obojí podle abecedy
+    .sort((a, b) => ((b.supplier_type === 'sro') - (a.supplier_type === 'sro'))
+      || popisSefa(a).localeCompare(popisSefa(b), 'cs'))
+}
+function popisSefa(l) {
+  return l.supplier_type === 'sro' ? '🏢 ' + (l.company_name || l.full_name || 'firma') : '👤 ' + (l.full_name || '') + ' · živnostník'
+}
+
+// Řádek „Pracuje pod… / Zaměstnává…" nahoře v Profilu karty pracovníka.
+// Jen pro správce a jen u pracovníků (OSVČ, parťák).
+async function vykresliRadekZamestnance(profil) {
+  const el = document.getElementById('wd-zam-radek')
+  if (!el) return
+  el.style.display = 'none'
+  if (!profil || !['osvec', 'partak'].includes(profil.role)) return
+  if (!(currentProfile && currentProfile.role === 'admin')) return
+  if (!('zamestnavatel_id' in profil)) return   // neproběhlá migrace — není co ukázat
+  const id = profil.id
+  const [{ data: podNim }, { data: sef }] = await Promise.all([
+    sb.from('profiles').select('id, full_name').eq('zamestnavatel_id', id).eq('is_active', true).order('full_name'),
+    profil.zamestnavatel_id
+      ? sb.from('profiles').select('id, full_name, company_name, supplier_type').eq('id', profil.zamestnavatel_id).maybeSingle()
+      : Promise.resolve({ data: null })
+  ])
+  // Karta mezitím mohla přepnout na jiného člověka
+  if (!currentWorkerProfile || String(currentWorkerProfile.id) !== String(id)) return
+  const tl = (text, fn) => `<button type="button" onclick="${fn}('${jsStr(String(id))}')" style="padding:6px 12px;min-height:34px;font-size:12.5px;font-weight:700;border:1.5px solid #c7d6e4;border-radius:8px;background:#fff;color:#2c4257;cursor:pointer;font-family:inherit;white-space:nowrap">${text}</button>`
+  const lide = podNim || []
+  const n = lide.length
+  let obsah
+  if (n) {
+    obsah = `<span style="flex:1;min-width:200px">👔 <b>Zaměstnává ${n} ${n === 1 ? 'člověka' : n < 5 ? 'lidi' : 'lidí'}:</b> ${lide.map(l => escAttr(l.full_name || '')).join(', ')}</span>`
+      + tl('Upravit zaměstnance', 'vyberZamestnance')
+  } else if (profil.zamestnavatel_id) {
+    obsah = `<span style="flex:1;min-width:200px">👔 <b>Zaměstnanec</b> — pracuje pod: <b>${escAttr(sef ? popisSefa(sef) : 'šéf, který už není v aplikaci')}</b></span>`
+      + tl('Změnit', 'vyberSefa')
+  } else {
+    obsah = `<span style="flex:1;min-width:200px;color:var(--text2)">👤 Pracuje sám na sebe — nikoho nezaměstnává</span>`
+      + tl('👔 Pracuje pod někým', 'vyberSefa') + tl('👔 Zaměstnává někoho', 'vyberZamestnance')
+  }
+  el.innerHTML = obsah
+  el.style.cssText = 'display:flex;align-items:center;gap:8px 10px;flex-wrap:wrap;padding:10px 12px;border:1.5px solid #c7d6e4;background:#f4f8fb;border-radius:10px;margin-bottom:14px;font-size:13px;line-height:1.45;color:#2c4257'
+}
+
+// Opačný směr: z karty šéfa vybrat, koho zaměstnává (majitel 1. 10. 2026:
+// „…že ten člověk zaměstnává dalšího člověka"). Zapisuje se stejně jako
+// z karty zaměstnance — přes zapisZamestnavatele.
+async function vyberZamestnance(sefId) {
+  if (!sefId) return
+  const [{ data: sef, error: e1 }, { data: lide, error: e2 }] = await Promise.all([
+    sb.from('profiles').select('id, full_name, company_name, supplier_type, zamestnavatel_id, role').eq('id', sefId).maybeSingle(),
+    nactiMozneSefy()
+  ])
+  const chyba = e1 || e2
+  if (chyba) {
+    showToast(/zamestnavatel_id|column|schema cache/i.test(chyba.message || '')
+      ? '❌ Chybí sloupec zamestnavatel_id — spusťte migraci supabase-migrace-firma-zamestnanci.sql'
+      : '❌ Nepodařilo se načíst: ' + chyba.message)
+    return
+  }
+  if (!sef) { showToast('❌ Pracovník se nenašel'); return }
+  const jmenoSefa = sef.supplier_type === 'sro' ? (sef.company_name || sef.full_name) : sef.full_name
+  if (sef.zamestnavatel_id) { showToast('👔 ' + jmenoSefa + ' je sám zaměstnanec — nejdřív ho v kartě vraťte na „pracuje sám na sebe"'); return }
+  const vsichni = lide || []
+  const podleId = {}
+  vsichni.forEach(l => { podleId[l.id] = l })
+  const maLidi = new Set(vsichni.map(l => l.zamestnavatel_id).filter(Boolean))
+  // Zaměstnanec nemůže být firma (s.r.o.) ani nikdo, kdo má pod sebou vlastní lidi.
+  const nabidka = vsichni.filter(l => l.id !== sefId && l.supplier_type !== 'sro' && !maLidi.has(l.id))
+  // Lidi jiného šéfa v nabídce zůstávají — zaškrtnutím se přeřadí (viz `jinde`).
+  const puvodne = new Set(nabidka.filter(l => l.zamestnavatel_id === sefId).map(l => l.id))
+  nabidka.sort((a, b) => (puvodne.has(b.id) - puvodne.has(a.id)) || String(a.full_name || '').localeCompare(String(b.full_name || ''), 'cs'))
+  document.getElementById('zam-overlay')?.remove()
+  const ov = document.createElement('div')
+  ov.id = 'zam-overlay'
+  ov.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:10050;display:flex;align-items:center;justify-content:center;padding:16px'
+  const jinde = l => {
+    if (!l.zamestnavatel_id || l.zamestnavatel_id === sefId) return ''
+    const s2 = podleId[l.zamestnavatel_id]
+    return `<div style="font-size:11.5px;color:var(--amber);margin-top:2px">teď pracuje pod: ${escAttr(s2 ? popisSefa(s2) : 'někým jiným')} — zaškrtnutím se přeřadí</div>`
+  }
+  ov.innerHTML = `<div style="background:#fff;border-radius:14px;max-width:460px;width:100%;max-height:86vh;display:flex;flex-direction:column;padding:18px">
+    <div style="font-size:16px;font-weight:800">👔 Koho zaměstnává ${escAttr(jmenoSefa)}?</div>
+    <div style="font-size:12px;color:var(--text3);margin-top:6px;line-height:1.5">Zaškrtnutí lidé budou jeho zaměstnanci: zapisují si jen docházku, sazbu ani fakturu nemají — za jejich hodiny fakturuje ${escAttr(jmenoSefa)} a provize se počítá jeho sazbou. Platí to i pro už odpracované týdny.</div>
+    <input type="text" data-hledat placeholder="Hledat jméno…" style="margin-top:12px;padding:9px 11px;border:1.5px solid var(--brd);border-radius:9px;font-size:14px;font-family:inherit">
+    <div data-seznam style="overflow-y:auto;margin-top:6px;flex:1;min-height:80px">
+      ${nabidka.map(l => `<label data-jmeno="${escAttr(String(l.full_name || '').toLowerCase())}" style="display:flex;gap:10px;align-items:flex-start;padding:9px 12px;border:1.5px solid var(--brd);border-radius:10px;margin-top:6px;cursor:pointer">
+        <input type="checkbox" value="${escAttr(l.id)}" ${puvodne.has(l.id) ? 'checked' : ''} style="width:19px;height:19px;margin-top:1px;accent-color:var(--blue);flex-shrink:0">
+        <span><b style="font-size:14px">${escAttr(l.full_name || '')}</b>${jinde(l)}</span></label>`).join('')}
+      ${nabidka.length ? '' : '<div style="font-size:12px;color:var(--text3);margin-top:10px">Není koho vybrat — všichni ostatní jsou firma nebo mají vlastní lidi.</div>'}
+    </div>
+    <div style="display:flex;gap:10px;justify-content:flex-end;margin-top:14px">
+      <button type="button" data-zrusit style="padding:10px 16px;border:1.5px solid var(--brd);border-radius:9px;background:#fff;font-size:14px;font-weight:700;cursor:pointer;font-family:inherit">Zrušit</button>
+      <button type="button" data-ulozit style="padding:10px 16px;border:none;border-radius:9px;background:var(--blue);color:#fff;font-size:14px;font-weight:800;cursor:pointer;font-family:inherit">Uložit</button>
+    </div></div>`
+  document.body.appendChild(ov)
+  const zavri = () => ov.remove()
+  ov.addEventListener('click', e => { if (e.target === ov) zavri() })
+  ov.querySelector('[data-zrusit]').onclick = zavri
+  ov.querySelector('[data-hledat]').oninput = (e) => {
+    const q = e.target.value.trim().toLowerCase()
+    ov.querySelectorAll('[data-seznam] label').forEach(l => { l.style.display = !q || l.dataset.jmeno.includes(q) ? 'flex' : 'none' })
+  }
+  ov.querySelector('[data-ulozit]').onclick = async (e) => {
+    const vybrane = new Set([...ov.querySelectorAll('[data-seznam] input:checked')].map(x => x.value))
+    const pridat = [...vybrane].filter(x => !puvodne.has(x))
+    const odebrat = [...puvodne].filter(x => !vybrane.has(x))
+    if (!pridat.length && !odebrat.length) { zavri(); return }
+    e.target.disabled = true; e.target.textContent = 'Ukládám…'
+    const chyby = []
+    for (const pid of pridat) { const v = await zapisZamestnavatele(pid, sefId); if (!v.ok) chyby.push(v.zprava) }
+    for (const pid of odebrat) { const v = await zapisZamestnavatele(pid, null); if (!v.ok) chyby.push(v.zprava) }
+    if (chyby.length) { e.target.disabled = false; e.target.textContent = 'Uložit'; showToast(chyby[0]); return }
+    zavri()
+    const n = puvodne.size + pridat.length - odebrat.length
+    showToast('✅ ' + jmenoSefa + (n ? ' zaměstnává ' + n + (n === 1 ? ' člověka' : n < 5 ? ' lidi' : ' lidí') : ' teď nikoho nezaměstnává'))
+    if (currentWorkerProfile) vykresliRadekZamestnance(currentWorkerProfile)
+    if (document.getElementById('provize-content')) prekresliProvize()
+  }
+}
+
+function vykresliInfoZamestnavatele(profil, firmy, podNim) {
   const info = document.getElementById('wd-zamestnavatel-info')
   if (!info) return
+  if (podNim && podNim.length && !jeZamestnanecFirmy(profil)) {
+    info.innerHTML = '<span style="color:var(--blue);font-weight:700">👔 Zaměstnává: ' + podNim.map(l => escAttr(l.full_name || '')).join(', ') + '</span>'
+      + '<br>Fakturuje za ně a provizi počítáme u něj. Sám zaměstnancem být nemůže.'
+    return
+  }
   if (jeFirmaSeZamestnanci(profil)) {
     info.innerHTML = '<span style="color:var(--blue);font-weight:700">🏢 Tenhle profil je firma (s.r.o.)</span>'
       + '<br>Fakturuje za své lidi dohromady a provizi počítáme u ní.'
     return
   }
   if (!firmy || !firmy.length) {
-    info.innerHTML = '<span style="color:var(--text3)">Zatím žádná firma — označte ji v jejím profilu jako s.r.o. v části „Fakturace — dodavatel".</span>'
+    info.innerHTML = '<span style="color:var(--text3)">Zatím tu není nikdo, kdo by mohl být šéf.</span>'
     return
   }
   info.innerHTML = jeZamestnanecFirmy(profil)
@@ -33853,8 +34008,9 @@ async function ulozZamestnavatele(el) {
     return
   }
   if (currentWorkerProfile) currentWorkerProfile.zamestnavatel_id = firmaId
-  showToast(firmaId ? '✅ Zařazen pod firmu' : '✅ Pracuje sám na sebe')
+  showToast(firmaId ? '✅ Zařazen pod šéfa' : '✅ Pracuje sám na sebe')
   naplnVyberZamestnavatele(currentWorkerProfile)
+  vykresliRadekZamestnance(currentWorkerProfile)
 }
 
 // ZAMĚSTNANEC PŘÍMO Z PROVIZÍ. Majitel 30. 9. 2026: „u sazby v Provizích musí
@@ -33865,7 +34021,7 @@ async function vyberSefa(workerId) {
   if (!workerId) return
   const [{ data: prof, error: e1 }, { data: firmy, error: e2 }, { data: podNim, error: e3 }] = await Promise.all([
     sb.from('profiles').select('id, full_name, zamestnavatel_id, supplier_type').eq('id', workerId).maybeSingle(),
-    sb.from('profiles').select('id, full_name, company_name').eq('supplier_type', 'sro').eq('is_active', true).order('full_name'),
+    nactiMozneSefy(),
     sb.from('profiles').select('id').eq('zamestnavatel_id', workerId).limit(1)
   ])
   const chyba = e1 || e2 || e3
@@ -33879,7 +34035,7 @@ async function vyberSefa(workerId) {
   const jmeno = prof.full_name || 'Pracovník'
   if (prof.supplier_type === 'sro') { showToast('🏢 ' + jmeno + ' je sám firma (s.r.o.) — zaměstnancem být nemůže'); return }
   if (podNim && podNim.length) { showToast('🏢 ' + jmeno + ' má pod sebou vlastní lidi — zaměstnancem být nemůže'); return }
-  const nabidka = (firmy || []).filter(f => f.id !== workerId)
+  const nabidka = mozniSefove(firmy, workerId)
   const ted = prof.zamestnavatel_id || ''
   document.getElementById('sef-overlay')?.remove()
   const ov = document.createElement('div')
@@ -33890,10 +34046,12 @@ async function vyberSefa(workerId) {
       <span><b style="font-size:14px">${popis}</b>${pod ? `<div style="font-size:11.5px;color:var(--text3);margin-top:2px">${pod}</div>` : ''}</span></label>`
   ov.innerHTML = `<div style="background:#fff;border-radius:14px;max-width:440px;width:100%;max-height:86vh;overflow:auto;padding:18px">
     <div style="font-size:16px;font-weight:800">👔 Pod kým pracuje ${escAttr(jmeno)}?</div>
-    <div style="font-size:12px;color:var(--text3);margin-top:6px;line-height:1.5">Zaměstnanec nemá sazbu ani výdělek — za jeho hodiny fakturuje firma a provize se počítá sazbou firmy. V Provizích se ukáže hned pod ní. Platí to i pro už odpracované týdny.</div>
+    <div style="font-size:12px;color:var(--text3);margin-top:6px;line-height:1.5">Zaměstnanec nemá sazbu ani výdělek — za jeho hodiny fakturuje šéf (firma nebo živnostník) a provize se počítá sazbou šéfa. V Provizích se ukáže hned pod ním. Platí to i pro už odpracované týdny.</div>
     ${volba('', 'Nikdo — pracuje sám na sebe (OSVČ)', 'vlastní sazba a vlastní faktura jako dosud')}
-    ${nabidka.map(f => volba(f.id, '🏢 ' + escAttr(f.company_name || f.full_name), f.company_name && f.full_name && f.company_name !== f.full_name ? escAttr(f.full_name) : '')).join('')}
-    ${nabidka.length ? '' : '<div style="font-size:12px;color:var(--amber);margin-top:10px;line-height:1.5">Zatím tu není žádná firma. Šéfa označte v jeho kartě → Finance → „Fakturace — dodavatel" jako s.r.o. a pak se tu objeví.</div>'}
+    <div style="max-height:46vh;overflow-y:auto">
+    ${nabidka.map(f => volba(f.id, escAttr(popisSefa(f)), f.supplier_type === 'sro' && f.company_name && f.full_name && f.company_name !== f.full_name ? escAttr(f.full_name) : '')).join('')}
+    </div>
+    ${nabidka.length ? '' : '<div style="font-size:12px;color:var(--amber);margin-top:10px;line-height:1.5">Zatím tu není nikdo, kdo by mohl být šéf.</div>'}
     <div style="display:flex;gap:10px;justify-content:flex-end;margin-top:16px">
       <button type="button" data-zrusit style="padding:10px 16px;border:1.5px solid var(--brd);border-radius:9px;background:#fff;font-size:14px;font-weight:700;cursor:pointer;font-family:inherit">Zrušit</button>
       <button type="button" data-ulozit style="padding:10px 16px;border:none;border-radius:9px;background:var(--blue);color:#fff;font-size:14px;font-weight:800;cursor:pointer;font-family:inherit">Uložit</button>
@@ -33912,7 +34070,8 @@ async function vyberSefa(workerId) {
     zavri()
     if (currentWorkerProfile && currentWorkerProfile.id === workerId) currentWorkerProfile.zamestnavatel_id = firmaId || null
     const firma = nabidka.find(f => f.id === firmaId)
-    showToast(firmaId ? '✅ ' + jmeno + ' je zaměstnanec — ' + (firma ? (firma.company_name || firma.full_name) : 'firmy') : '✅ ' + jmeno + ' pracuje sám na sebe')
+    showToast(firmaId ? '✅ ' + jmeno + ' je zaměstnanec — ' + (firma ? (firma.supplier_type === 'sro' ? (firma.company_name || firma.full_name) : firma.full_name) : 'šéfa') : '✅ ' + jmeno + ' pracuje sám na sebe')
+    if (currentWorkerProfile) vykresliRadekZamestnance(currentWorkerProfile)
     if (document.getElementById('provize-content')) prekresliProvize()
   }
 }
@@ -35766,9 +35925,10 @@ async function loadWdInvoiceForm(profile) {
   // fakturuje za všechny dohromady, takže by jinak viděla „bez docházky"
   // i v týdnu, kdy jí lidé odpracovali stovky hodin.
   let kohoPocitat = [currentWorkerId]
-  if (profile && profile.supplier_type === 'sro') {
+  {
+    // Šéfem může být i živnostník (1. 10. 2026), ne jen s.r.o.
     const { data: lide } = await sb.from('profiles').select('id').eq('zamestnavatel_id', currentWorkerId)
-    const ids = (lide || []).map(x => x.id).filter(Boolean)
+    const ids = (lide || []).map(x => x.id).filter(x => x && x !== currentWorkerId)
     if (ids.length) kohoPocitat = kohoPocitat.concat(ids)
   }
   const { data } = await sb.from('attendance')
@@ -36637,8 +36797,12 @@ async function ulozFotkuPracovnika(workerId, blob) {
       return false
     }
     const { data: url } = sb.storage.from('avatars').getPublicUrl(cesta)
+    // Soubor má pořád stejné jméno (avatar.jpg), takže bez `?v=` by prohlížeče
+    // i odkaz pro odběratele ještě hodinu ukazovaly starou fotku z paměti —
+    // třeba neotočenou (1. 10. 2026, otáčení ve výřezu).
+    const nova = url.publicUrl + '?v=' + Date.now()
     const { data: radky, error: chybaDb } = await sb.from('profiles')
-      .update({ avatar_url: url.publicUrl }).eq('id', workerId).select('id')
+      .update({ avatar_url: nova }).eq('id', workerId).select('id')
     if (chybaDb) { showToast('❌ Fotka se nahrála, ale k člověku se nepřiřadila: ' + chybaDb.message); return false }
     // `.select('id')` není navíc: zápis může projít bez chyby a NEZMĚNIT řádek
     // (politika ho odmítne) — a admin by viděl „uloženo" nad nezměněným profilem.
@@ -36646,11 +36810,10 @@ async function ulozFotkuPracovnika(workerId, blob) {
       showToast('❌ Fotka se nahrála, ale profil se nezměnil — zkontrolujte oprávnění')
       return false
     }
-    const cache = url.publicUrl + '?t=' + Date.now()
     const im = document.getElementById('wd-avatar-img'), ini = document.getElementById('wd-avatar-init')
-    if (im) { im.src = cache; im.style.display = 'block' }
+    if (im) { im.src = nova; im.style.display = 'block' }
     if (ini) ini.style.display = 'none'
-    if (currentWorkerProfile && currentWorkerProfile.id === workerId) currentWorkerProfile.avatar_url = url.publicUrl
+    if (currentWorkerProfile && currentWorkerProfile.id === workerId) currentWorkerProfile.avatar_url = nova
     showToast('✅ Fotka uložena')
     return true
   } catch (e) { showToast('❌ Chyba: ' + (e?.message || e)); return false }
@@ -36669,10 +36832,12 @@ async function uploadAvatar(input) {
     const { error: upErr } = await sb.storage.from('avatars').upload(filePath, compressed, { contentType:'image/jpeg', upsert:true })
     if (upErr) throw new Error(upErr.message)
     const { data: urlData } = sb.storage.from('avatars').getPublicUrl(filePath)
-    const url = urlData.publicUrl + '?t=' + Date.now()
-    await sb.from('profiles').update({ avatar_url: urlData.publicUrl }).eq('id', userId)
+    // `?v=` ukládáme i do profilu — jméno souboru je pořád stejné a bez něj by
+    // se jinde (seznamy u správce, odkaz pro odběratele) držela stará fotka.
+    const url = urlData.publicUrl + '?v=' + Date.now()
+    await sb.from('profiles').update({ avatar_url: url }).eq('id', userId)
     document.querySelectorAll('#mob-avatar-img').forEach(img => { img.src = url; img.style.display='block' })
-    if (currentProfile) currentProfile.avatar_url = urlData.publicUrl
+    if (currentProfile) currentProfile.avatar_url = url
     input.value = ''
     showToast('Fotka uložena ✓')
     loadMobProfil(currentProfile)

@@ -18,6 +18,10 @@
 // „na tom odkazu nebudou kódy ubytování — to budeme dávat my OSVČ a OSVČ to
 // uvidí u sebe — ale na odkazu bude, kde mají ubytování."
 //
+// OD 1. 10. 2026 I FOTKA PRACOVNÍKA z appky (profiles.avatar_url, jen odkaz
+// do našeho úložiště fotek). Majitel: „aby se ty fotky propsaly i do toho
+// odkazu." Když si odběratel nahraje vlastní, na odkazu platí ta jeho.
+//
 // CO VEN NEJDE ANI TEĎ: KÓDY A POKYNY K UBYTOVÁNÍ (tabulka ubytovani_kody,
 // dřív sloupec ubytovani_poznamka — ani jedno se tu nečte), e-maily, samotné
 // doklady a jejich čísla, fotka řidičáku, adresa bydliště ani GPS souřadnice
@@ -28,6 +32,16 @@
 // =====================================================================
 
 const SUPABASE_URL = 'https://ceefzlkjnrclfpmhgdmr.supabase.co';
+
+// Fotka pracovníka jde na odkaz, jen když je to odkaz do NAŠEHO úložiště
+// fotek (bucket avatars). Profil si pracovník upravuje sám, takže do
+// avatar_url by si mohl dát cokoli — cizí adresa by odběrateli načetla
+// obrázek odkudkoli.
+function bezpecnaFotka(url) {
+  const u = String(url || '').trim();
+  if (!u || u.length > 400) return '';
+  return u.startsWith(SUPABASE_URL + '/storage/v1/object/public/avatars/') && !/["'<>\s\\]/.test(u) ? u : '';
+}
 
 // Tvar tokenu — 64 hex znaků. Kontrola je tu proto, aby se do dotazu na
 // databázi nedostalo nic jiného než to, co jsme sami vyrobili.
@@ -551,7 +565,7 @@ module.exports = async (req, res) => {
       const sefPodle = {};
       // Telefon a řidičák — od 23. 9. 2026 na přání SubBau. Odběratel volá
       // lidem na stavbu přímo a potřebuje vědět, koho smí poslat s dodávkou.
-      let telefony = {}, ridicaky = {}, ubytovani = {};
+      let telefony = {}, ridicaky = {}, ubytovani = {}, fotky = {};
       if (ids.length) {
         const seznamIds = ids.map(encodeURIComponent).join(',');
 
@@ -571,7 +585,7 @@ module.exports = async (req, res) => {
         const tise = (popis) => (e) => {
           console.warn('[klient] ' + popis + ':', e.message); return null;
         };
-        const [lidi, dokl, prov, h, ubyt, zam] = await Promise.all([
+        const [lidi, dokl, prov, h, ubyt, zam, fot] = await Promise.all([
           // Jméno, hodinová sazba a telefon. SubBau si přeje, aby odběratel
           // viděl u každého člověka sazbu i provizi — vyžádal si to sám, aby
           // si mohl fakturu překontrolovat. V appce zůstává provize dál jen
@@ -601,6 +615,11 @@ module.exports = async (req, res) => {
           // report firmy i faktura firmy v appce.
           db(`profiles?select=id,zamestnavatel_id&id=in.(${seznamIds})`, klic)
             .catch(tise('zařazení pod firmu se nenačetlo')),
+          // Fotka pracovníka z appky (majitel 1. 10. 2026: „aby se ty fotky
+          // propsaly i do toho odkazu"). Zvlášť a potichu — bez fotky se
+          // stránka obejde. Ven jde jen odkaz do našeho úložiště fotek.
+          db(`profiles?select=id,avatar_url&id=in.(${seznamIds})`, klic)
+            .catch(tise('fotky se nenačetly')),
         ]);
         for (const p of (zam || [])) {
           if (p.zamestnavatel_id && p.zamestnavatel_id !== p.id) sefPodle[p.id] = p.zamestnavatel_id;
@@ -623,6 +642,10 @@ module.exports = async (req, res) => {
           jmena[p.id] = p.full_name;
           sazbaTed[p.id] = Number(p.hourly_rate_worker) || 0;
           telefony[p.id] = (p.phone || '').trim();
+        }
+        for (const p of (fot || [])) {
+          const f = bezpecnaFotka(p.avatar_url);
+          if (f) fotky[p.id] = f;
         }
         for (const p of (ubyt || [])) {
           const a = String(p.accommodation_address || p.ubytovani_adresa || '').trim();
@@ -655,8 +678,9 @@ module.exports = async (req, res) => {
           const tel = telefony[id] || '';
           const rp = ridicaky[id] || null;
           const ub = ubytovani[id] || '';
-          if (!tel && !rp && !ub) continue;
-          lide[id] = { telefon: tel, ridicak: rp ? { do: rp.do || '' } : null, ubytovani: ub };
+          const fo = fotky[id] || '';
+          if (!tel && !rp && !ub && !fo) continue;
+          lide[id] = { telefon: tel, ridicak: rp ? { do: rp.do || '' } : null, ubytovani: ub, fotka: fo };
         }
       }
       // Kolik platilo v konkrétní den. Když u člověka historie není, platí dnešní.
