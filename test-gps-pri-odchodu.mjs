@@ -89,7 +89,8 @@ try {
   ok(!/⚠️/.test(v.blizko) && !/var\(--red\)/.test(v.blizko), 'o 300 m vedle (pod kilometr) taky ne')
   ok(/⚠️/.test(v.jinde) && /var\(--red\)/.test(v.jinde),
      'když odešel JINDE, svítí to červeně s vykřičníkem')
-  ok(/google\.com\/maps\?q=50\.08,14\.43/.test(v.jinde), 'a jde kliknout na mapu')
+  // Od 30. 9. 2026 klik na odchod ukáže TRASU z příchodu na odchod (majitel).
+  ok(/google\.com\/maps\/dir\/\?api=1&amp;origin=[^"]+&amp;destination=50\.08,14\.43/.test(v.jinde), 'a jde kliknout na trasu z příchodu na odchod')
   ok(padky.length === 0, 'stránka nevyhodila chybu' + (padky.length ? ': ' + padky[0] : ''))
 } finally { await b.close() }
 

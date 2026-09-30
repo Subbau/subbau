@@ -5333,7 +5333,7 @@ async function submitAdminSignatureWithPlacement() {
 // Po nahrání nové verze se snadno pozná, jestli se opravdu nasadila: otevřete
 // appku, zmáčkněte F12 (na Macu ⌥⌘I) a v konzoli je vypsané tohle datum. Když
 // tam svítí starší, prohlížeč nebo GitHub drží starou verzi.
-const SUBBAU_VERZE = '2026-09-30 d — lišta oznámení na telefonu, červené nejde zavřít'
+const SUBBAU_VERZE = '2026-09-30 e — trasa příchod→odchod, návod k poloze, červeně nad 1 km'
 console.log('StavKo docházka — verze ' + SUBBAU_VERZE)
 // Verze i dole v menu správce. Když někdo novinku „nevidí", podle ní se hned
 // pozná, jestli nemá otevřenou starou kopii appky — bez hledání v konzoli.
@@ -8023,7 +8023,13 @@ function zeptejSeOdKdy(popis, puvodni, nova, jmeno) {
 // mě to ptalo — je to od prvopočátku, od prvního zaznamenání hodin."
 //
 // Kdo tohle pravidlo mění, musí projít všechna volání sazbaJeZadana().
-function sazbaJeZadana(v) { return v != null && v !== '' && Number(v) > 0 }
+// NULA JE ZADANÁ HODNOTA (majitel 30. 9. 2026: „v Provizích nejde zadat 0 €").
+// Do 30. 9. se nula brala jako „nezadáno": políčko ji ukazovalo prázdné
+// s nápisem „chybí" a při změně z nuly se neptalo „od kdy" — nová sazba by
+// pak zpětně přepsala i týdny, kdy vědomě platila nula. Nezadané je jen
+// PRÁZDNO (null) — to mají noví lidé (registraci nulu nedovolí, viz
+// supabase-migrace-zamek-roli.sql), takže u prvního zadání se dál neptá.
+function sazbaJeZadana(v) { return v != null && v !== '' && Number.isFinite(Number(v)) && Number(v) >= 0 }
 
 // Uloží novou hodnotu a podle odpovědi k ní doplní historii.
 // Vrací true, když se uložilo.
@@ -9140,6 +9146,9 @@ async function renderProvizeContent() {
     const rate = w.hourly_rate_worker || 0
     const prov = provUcinna(w.id)           // do peněz; nula u „bez provize"
     const provUlozena = provMap[w.id] || 0  // do políčka, ať jde příznak vrátit
+    // Do políček surově: nula je nula, jen prázdno je „chybí".
+    const sazbaPole = (w.hourly_rate_worker == null || w.hourly_rate_worker === '') ? null : Number(w.hourly_rate_worker)
+    const provPole = (w.id in provMap) ? provMap[w.id] : null
     // POZOR: `|| 0` výš zahodí rozdíl mezi „nastaveno na nulu" a „vůbec
     // nenastaveno". Právě kvůli tomu se nově přidaný člověk v přehledu vůbec
     // neobjevil — vypadal, že sazbu má (nulovou). Proto si to držíme zvlášť.
@@ -9170,7 +9179,7 @@ async function renderProvizeContent() {
       // počítají jako OSVČ a to musí být vidět.
       sefChybi: !!(w.zamestnavatel_id && !firmaZamestnance[w.id]),
       podilDay: hrs.zDay || 0, podilWeek: hrs.zWeek || 0, podilMonth: hrs.zMonth || 0,
-      prov, provUlozena, bezProvize: bezProvize.has(w.id), byvaly: !!w._byvaly,
+      prov, provUlozena, sazbaPole, provPole, bezProvize: bezProvize.has(w.id), byvaly: !!w._byvaly,
       sazbaNenastavena, provizeNenastavena,
       // Do přehledu patří jen ten, jehož skupina je přiřazená k nějaké firmě.
       // Samotná skupina bez firmy nestačí — za takového člověka není komu
@@ -9348,8 +9357,8 @@ async function renderProvizeContent() {
             return out + '</div>'
           })() : ''
         }</td>
-        <td style="text-align:right">${r.zamestnavatelId ? `<button onclick="vyberSefa('${r.id}')" title="Zaměstnanec firmy — sazbu nemá. Klepnutím změníte, pod kým pracuje, nebo ho vrátíte mezi OSVČ." style="padding:6px 10px;font-size:12.5px;font-weight:700;border:1.5px solid #c7d6e4;border-radius:7px;background:#eef3f8;color:#2c4257;cursor:pointer;font-family:inherit;white-space:nowrap">👔 zaměstnanec</button><div style="font-size:10.5px;color:var(--text3);margin-top:3px">sazbu nemá</div>` : `<input id="pv-rate-${r.id}" type="number" step="0.01" value="${r.rate || ''}" placeholder="chybí" title="${r.rate ? '' : 'Chybí hodinová sazba — dokud ji nezadáte, počítá se pracovníkovi nula'}" onchange="saveProvizeRate(this,'${r.id}')" style="width:80px;padding:6px 8px;border:${r.rate ? '1.5px solid var(--brd)' : '2px solid var(--red)'};background:${r.rate ? '' : 'var(--red-l)'};border-radius:7px;font-size:14px;text-align:right;font-family:inherit"> €/h${(!r.jeFirma && !r.byvaly) ? `<div><button onclick="vyberSefa('${r.id}')" title="Pracuje pod firmou (s.r.o.)? Označte ho jako zaměstnance — sazbu mít nebude, ukáže se pod šéfem a provize půjde firmě." style="margin-top:4px;padding:2px 7px;font-size:10.5px;font-weight:700;border:1px solid var(--brd);border-radius:6px;background:#fff;color:var(--text2);cursor:pointer;font-family:inherit;white-space:nowrap">👔 zaměstnanec?</button></div>` : ''}`}</td>
-        <td style="text-align:right">${r.zamestnavatelId ? `<span title="Provize za jeho hodiny se počítá sazbou firmy, pod kterou pracuje" style="font-size:11.5px;color:var(--text3)">sazbou firmy</span>` : `<input id="pv-prov-${r.id}" type="number" step="0.01" value="${r.provUlozena || ''}" placeholder="chybí" title="${r.provUlozena ? (r.bezProvize ? 'Sazba zůstává uložená, ale nepočítá se — pracovník je označený „bez provize“' : '') : 'Chybí provize — dokud ji nezadáte, počítá se nula'}" onchange="saveProvizeCommission(this,'${r.id}')" style="width:80px;padding:6px 8px;border:${r.provUlozena ? '1.5px solid var(--amber)' : '2px solid var(--red)'};background:${r.provUlozena ? '' : 'var(--red-l)'};border-radius:7px;font-size:14px;text-align:right;font-family:inherit;background:#faf6ee"> €/h`}</td>
+        <td style="text-align:right">${r.zamestnavatelId ? `<button onclick="vyberSefa('${r.id}')" title="Zaměstnanec firmy — sazbu nemá. Klepnutím změníte, pod kým pracuje, nebo ho vrátíte mezi OSVČ." style="padding:6px 10px;font-size:12.5px;font-weight:700;border:1.5px solid #c7d6e4;border-radius:7px;background:#eef3f8;color:#2c4257;cursor:pointer;font-family:inherit;white-space:nowrap">👔 zaměstnanec</button><div style="font-size:10.5px;color:var(--text3);margin-top:3px">sazbu nemá</div>` : `<input id="pv-rate-${r.id}" type="number" step="0.01" value="${r.sazbaPole == null ? '' : r.sazbaPole}" placeholder="chybí" title="${r.sazbaPole == null ? 'Chybí hodinová sazba — dokud ji nezadáte, počítá se pracovníkovi nula' : (r.sazbaPole === 0 ? 'Sazba je nula — pracovník za hodiny nedostane nic' : '')}" onchange="saveProvizeRate(this,'${r.id}')" style="width:80px;padding:6px 8px;border:${r.sazbaPole != null ? '1.5px solid var(--brd)' : '2px solid var(--red)'};background:${r.sazbaPole != null ? '' : 'var(--red-l)'};border-radius:7px;font-size:14px;text-align:right;font-family:inherit"> €/h${(!r.jeFirma && !r.byvaly) ? `<div><button onclick="vyberSefa('${r.id}')" title="Pracuje pod firmou (s.r.o.)? Označte ho jako zaměstnance — sazbu mít nebude, ukáže se pod šéfem a provize půjde firmě." style="margin-top:4px;padding:2px 7px;font-size:10.5px;font-weight:700;border:1px solid var(--brd);border-radius:6px;background:#fff;color:var(--text2);cursor:pointer;font-family:inherit;white-space:nowrap">👔 zaměstnanec?</button></div>` : ''}`}</td>
+        <td style="text-align:right">${r.zamestnavatelId ? `<span title="Provize za jeho hodiny se počítá sazbou firmy, pod kterou pracuje" style="font-size:11.5px;color:var(--text3)">sazbou firmy</span>` : `<input id="pv-prov-${r.id}" type="number" step="0.01" value="${r.provPole == null ? '' : r.provPole}" placeholder="chybí" title="${r.provPole != null ? (r.bezProvize ? 'Sazba zůstává uložená, ale nepočítá se — pracovník je označený „bez provize“' : (r.provPole === 0 ? 'Provize je nula — StavKo na něm nevydělává' : '')) : 'Chybí provize — dokud ji nezadáte, počítá se nula'}" onchange="saveProvizeCommission(this,'${r.id}')" style="width:80px;padding:6px 8px;border:${r.provPole != null ? '1.5px solid var(--amber)' : '2px solid var(--red)'};background:${r.provPole != null ? '' : 'var(--red-l)'};border-radius:7px;font-size:14px;text-align:right;font-family:inherit;background:#faf6ee"> €/h`}</td>
         <td style="text-align:center;padding:0">${r.zamestnavatelId ? '<span title="Řídí se firmou, pod kterou pracuje" style="color:var(--text3)">—</span>' : `<label title="Pracovník odešel dřív, než za něj přijdou peníze — nepočítat mu provizi" style="display:flex;align-items:center;justify-content:center;width:100%;height:100%;min-height:44px;padding:8px;cursor:pointer"><input type="checkbox" ${r.bezProvize ? 'checked' : ''} onchange="toggleBezProvize(this,'${r.id}')" style="width:20px;height:20px;cursor:pointer;accent-color:var(--red)"></label>`}</td>
         <td style="text-align:right;background:#f2f8f4">${r.zamestnavatelId ? '<span style="font-size:11.5px;color:var(--text3)">platí ho firma</span>' : `<b id="pv-e-${r.id}" style="font-size:14px;color:var(--green)">${eur(r.earnWeek)}</b>`}<div style="font-size:11px;color:var(--text3)">${r.hoursWeek.toFixed(2)} h</div></td>
         <td style="text-align:right">${r.zamestnavatelId ? `<b id="pv-d-${r.id}" title="Podíl na provizi firmy — je už sečtený v jejím řádku, nepřičítá se znovu" style="font-size:13px;font-weight:600;color:var(--text3)">(${eur(r.podilDay)})</b><div style="font-size:11px;color:var(--text3)">${r.hoursDay.toFixed(2)} h · u firmy</div>` : `<b id="pv-d-${r.id}" style="font-size:14px">${eur(r.commDay)}</b><div style="font-size:11px;color:var(--text3)">${r.hoursDay.toFixed(2)} h</div>`}</td>
@@ -12591,8 +12600,10 @@ function startOsvecRealtime() {
     .on('postgres_changes', { event: '*', schema: 'public', table: 'notifications' }, () => {
       _debouncedRefreshMob('notif', () => { if (typeof loadMobNotifications==='function') loadMobNotifications() })
     })
+    // Oznámení (lišta nahoře). Do 30. 9. 2026 tu omylem stálo obnovení Zpráv,
+    // takže nové oznámení se ukázalo až po znovunačtení appky.
     .on('postgres_changes', { event: '*', schema: 'public', table: 'announcements' }, () => {
-      _debouncedRefreshMob('notif', () => { if (typeof loadMobNotifications==='function') loadMobNotifications() })
+      _debouncedRefreshMob('ann', () => { if (typeof loadAnnouncement==='function') loadAnnouncement() })
     })
     // Profil pracovníka (změna týmu, lokace…)
     .on('postgres_changes', { event: '*', schema: 'public', table: 'profiles', filter: 'id=eq.' + uid }, (payload) => {
@@ -18393,7 +18404,8 @@ async function mobCheckin(type) {
         checkinInProgress = false
         window.zapisProbiha = false
         showToast('📍 ' + (type === 'in' ? 'Příchod' : 'Odchod') + ' se NEZAPSAL — vaše firma zapisuje '
-          + 'docházku jen s polohou. Povolte polohu (Nastavení → Soukromí → Polohové služby) a zkuste to znovu.')
+          + 'docházku jen s polohou.')
+        ukazNavodPolohy(type, window._chybaPolohy)
         return
       }
       zapniPojistku()
@@ -22046,7 +22058,10 @@ function fillKWSelect(autoLoad) {
 // Sleduje polohu a vezme nejpřesnější — skončí při ≤50 m, nebo po 10 s vezme nejlepší dosud.
 function captureLocationNow() {
   return new Promise((resolve) => {
-    if (!navigator.geolocation) { resolve(''); return }
+    // Proč se poloha nezjistila (1 zakázaná, 2 nedostupná, 3 nestihla se,
+    // 'nepodporuje') — podle toho návod pracovníkovi (ukazNavodPolohy).
+    window._chybaPolohy = null
+    if (!navigator.geolocation) { window._chybaPolohy = 'nepodporuje'; resolve(''); return }
 
     let bestAcc = Infinity
     let bestLat = null, bestLng = null
@@ -22062,7 +22077,7 @@ function captureLocationNow() {
       if (done) return
       done = true
       stopWatch()
-      if (bestLat === null) { resolve(''); return }
+      if (bestLat === null) { if (window._chybaPolohy == null) window._chybaPolohy = 3; resolve(''); return }
       gpsLat = bestLat; gpsLng = bestLng
       _gpsAccuracy = bestAcc
       let resolved = ''
@@ -22106,8 +22121,9 @@ function captureLocationNow() {
         bestLng = p.coords.longitude
       }
       if (bestAcc <= 50) finish()   // dost přesné → hotovo
-    }, () => {
+    }, (err) => {
       // chyba měření — když nemáme vůbec nic, vrať prázdné (zůstane ruční zadání)
+      window._chybaPolohy = (err && err.code != null) ? err.code : 3
       if (!done && bestLat === null) { done = true; stopWatch(); resolve('') }
     }, { enableHighAccuracy: true, timeout: 10000, maximumAge: 0 })
 
@@ -22372,6 +22388,66 @@ async function mojeFirmaChcePolohu(obnovit) {
   } catch (e) { return _gpsPravidlo.hodnota === true }
 }
 
+// NÁVOD, JAK ZAPNOUT POLOHU. Firma „jen s polohou" ruční zápis nemá, takže
+// pracovník bez polohy nezapíše nic — majitel 30. 9. 2026: „ať ho to klidně
+// navede nějak", a „hodně lidí má i Android". Návod podle toho, PROČ poloha
+// nevyšla (zakázaná / vypnutá / nestihla se) a na čem je (iPhone, Android).
+function ukazNavodPolohy(type, kod) {
+  const co = type === 'out' ? 'Odchod' : 'Příchod'
+  const ios = typeof isIOS === 'function' && isIOS()
+  const android = /android/i.test(navigator.userAgent || '')
+  const zPlochy = typeof isAppInstalled === 'function' && isAppInstalled()
+  const krok = (t) => `<li style="margin:0 0 8px">${t}</li>`
+  let proc, kroky
+  if (kod === 'nepodporuje') {
+    proc = 'Tenhle prohlížeč polohu neumí.'
+    kroky = [krok(ios ? 'Otevřete appku v <b>Safari</b>.' : 'Otevřete appku v <b>Chromu</b>.')]
+  } else if (kod === 1) {
+    proc = 'Telefon appce polohu <b>nedovolil</b>.'
+    kroky = ios ? [
+      krok('Otevřete <b>Nastavení</b> → <b>Soukromí a zabezpečení</b> → <b>Polohové služby</b> a zapněte je.'),
+      krok('V tom seznamu dole ťukněte na <b>' + (zPlochy ? 'Webové stránky Safari' : 'Safari') + '</b> → <b>Při používání aplikace</b> a zapněte <b>Přesnou polohu</b>.'),
+      krok('V Safari ještě: <b>aA</b> vlevo v adresním řádku → <b>Nastavení webu</b> → <b>Poloha</b> → <b>Povolit</b>.')
+    ] : android ? [
+      krok('Stáhněte horní lištu a zapněte <b>Polohu</b>.'),
+      krok('V Chromu ťukněte na ikonu <b>vlevo od adresy</b> → <b>Oprávnění</b> (nebo Nastavení webu) → <b>Poloha</b> → <b>Povolit</b>.'),
+      krok('Máte-li appku na ploše: <b>Nastavení</b> → <b>Aplikace</b> → <b>Chrome</b> → <b>Oprávnění</b> → <b>Poloha</b> → <b>Povolit při používání</b>.')
+    ] : [
+      krok('Povolte polohu pro tuhle stránku v nastavení prohlížeče (ikona vlevo od adresy).')
+    ]
+  } else {
+    proc = kod === 2 ? 'Telefon teď polohu <b>nezjistil</b> — nejspíš je vypnutá.' : 'Poloha se <b>nestihla zjistit</b>.'
+    kroky = [
+      krok(ios ? 'Zkontrolujte <b>Nastavení</b> → <b>Soukromí a zabezpečení</b> → <b>Polohové služby</b> — musí být zapnuté.'
+        : android ? 'Stáhněte horní lištu a zkontrolujte, že je zapnutá <b>Poloha</b>.'
+        : 'Zkontrolujte, že má počítač nebo telefon zapnutou polohu.'),
+      krok('Uvnitř budovy to trvá déle — zkuste to u okna nebo venku.')
+    ]
+  }
+  kroky.push(krok('Pak zmáčkněte <b>Zkusit znovu</b>.'))
+  let dlg = document.getElementById('navod-polohy')
+  if (!dlg) {
+    dlg = document.createElement('div')
+    dlg.id = 'navod-polohy'
+    dlg.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:10001;display:flex;align-items:center;justify-content:center;padding:16px'
+    dlg.onclick = (e) => { if (e.target === dlg) dlg.style.display = 'none' }
+    document.body.appendChild(dlg)
+  }
+  dlg.innerHTML = `<div role="dialog" aria-modal="true" style="background:#fff;border-radius:16px;padding:20px;width:100%;max-width:440px;max-height:88vh;overflow-y:auto;box-shadow:0 8px 32px rgba(0,0,0,.3);color:#211D1A">
+      <div style="font-size:18px;font-weight:800;margin-bottom:6px">📍 ${co} se nezapsal</div>
+      <div style="font-size:14px;line-height:1.45;margin-bottom:12px">Vaše firma zapisuje docházku <b>jen s polohou</b> — ručně to nejde. ${proc}</div>
+      <ol style="font-size:14px;line-height:1.45;padding-left:20px;margin:0 0 16px">${kroky.join('')}</ol>
+      <button id="navod-polohy-znovu"
+        style="width:100%;min-height:48px;border:none;border-radius:12px;background:#1d9e75;color:#fff;font-size:16px;font-weight:800;font-family:inherit;cursor:pointer">Zkusit znovu</button>
+      <button onclick="document.getElementById('navod-polohy').style.display='none'"
+        style="width:100%;min-height:44px;margin-top:8px;border:1px solid #ddd;border-radius:12px;background:#fff;color:#555;font-size:14px;font-weight:700;font-family:inherit;cursor:pointer">Zavřít</button>
+    </div>`
+  // Zkusit znovu = tentýž zápis (příchod, nebo odchod) ještě jednou.
+  const typZapisu = type === 'out' ? 'out' : 'in'
+  dlg.querySelector('#navod-polohy-znovu').onclick = () => { dlg.style.display = 'none'; mobCheckin(typZapisu) }
+  dlg.style.display = 'flex'
+}
+
 // Poloha, BEZ KTERÉ SE NEZAPISUJE. Vrací { lat, lng, adresa }, nebo null.
 // captureLocationNow() při neúspěchu vrací '' a globální gpsLat/gpsLng NECHÁ
 // z minula — proto se úspěch pozná jen podle vrácené adresy, ne podle nich.
@@ -22474,9 +22550,21 @@ function odchodPolohaHtml(r) {
   // Když souřadnice chybí, vzdálenost se spočítat nedá — pak se nezvýrazňuje,
   // protože není podle čeho.
   const daleko = m !== null && m > 1000
-  const odkaz = (la, ln, text) => (la && ln)
-    ? `<a href="https://www.google.com/maps?q=${la},${ln}" target="_blank" rel="noopener" style="color:inherit;text-decoration:underline">${text}</a>`
+  const souradnice = (la, ln) => (la != null && ln != null && la !== '' && ln !== '' && isFinite(la) && isFinite(ln)) ? `${Number(la)},${Number(ln)}` : ''
+  const odkaz = (la, ln, text) => souradnice(la, ln)
+    ? `<a href="https://www.google.com/maps?q=${souradnice(la, ln)}" target="_blank" rel="noopener" style="color:inherit;text-decoration:underline">${text}</a>`
     : text
+  // KLIK NA ODCHOD UKÁŽE TRASU Z PŘÍCHODU NA ODCHOD (majitel 30. 9. 2026:
+  // „když kliknu na tu adresu toho odchodu, ať to udělá trasu mezi příchodem
+  // a odchodem"). Kde chybí souřadnice, vezme se adresa. Bez příchodu
+  // zůstane jen místo odchodu jako dřív. Na telefonu se otevřou Mapy Google.
+  const odkudTrasa = souradnice(r.location_lat, r.location_lng) || prichodAdr
+  const kamTrasa = souradnice(r.odchod_lat, r.odchod_lng) || odchodAdr
+  // Souřadnice zůstávají čitelné (50.08,14.43), kóduje se jen adresa.
+  const doOdkazu = (x) => /^-?\d+(\.\d+)?,-?\d+(\.\d+)?$/.test(x) ? x : encodeURIComponent(x)
+  const odkazOdchod = (text) => (odkudTrasa && kamTrasa)
+    ? `<a href="https://www.google.com/maps/dir/?api=1&amp;origin=${escAttr(doOdkazu(odkudTrasa))}&amp;destination=${escAttr(doOdkazu(kamTrasa))}&amp;travelmode=driving" target="_blank" rel="noopener" title="Trasa z místa příchodu na místo odchodu" style="color:inherit;text-decoration:underline">${text}</a>`
+    : odkaz(r.odchod_lat, r.odchod_lng, text)
 
   let html = ''
   if (prichodAdr && !uzJeNahore) {
@@ -22485,8 +22573,10 @@ function odchodPolohaHtml(r) {
   }
   if (odchodAdr) {
     html += `<div title="Kde pracovník zmáčkl konec směny. Vidí to jen StavKo — do výkazů ani odběrateli se to nedostane.${daleko ? ' Je to víc než kilometr od příchodu.' : ''}" style="font-size:12px;font-weight:${daleko ? '700' : '400'};color:${daleko ? 'var(--red)' : 'var(--text)'};margin-top:2px;display:flex;align-items:center;gap:4px;flex-wrap:wrap">
-      <span>${daleko ? '⚠️' : '🏁'}</span><span>odchod: ${odkaz(r.odchod_lat, r.odchod_lng, escAttr(odchodAdr))}</span>${
-        m !== null ? `<span style="color:var(--text3);font-weight:400">· ${vzdalenostText(m)}</span>` : ''}</div>`
+      <span>${daleko ? '⚠️' : '🏁'}</span><span>odchod: ${odkazOdchod(escAttr(odchodAdr))}</span>${
+        // Nad kilometr červeně i vzdálenost, ne jen adresa (majitel 30. 9. 2026:
+        // „pokud to překročí, bude červeně vzdálenost i ta adresa"). Do 1 km nic.
+        m !== null ? `<span style="color:${daleko ? 'var(--red)' : 'var(--text3)'};font-weight:${daleko ? '700' : '400'}">· ${vzdalenostText(m)}</span>` : ''}</div>`
   }
   return html
 }
@@ -31777,6 +31867,17 @@ const MIGRACE_OZNAMENI = 'supabase-migrace-oznameni-komu.sql'
 const chybiMigraceOznameni = (e) => !!e && (['42703', '42P01', 'PGRST204', 'PGRST205'].includes(e.code)
   || /does not exist|schema cache|could not find/i.test(e.message || ''))
 
+// Co si telefon pamatuje o oznámení (zavřel / potvrdil) — ZVLÁŠŤ pro každého
+// přihlášeného. Dřív platilo pro celé zařízení: když se na jednom telefonu
+// přihlásili dva lidé, druhý po prvním neviděl ani červené oznámení.
+// Staré zavření bez jména (z doby před 30. 9. 2026) se dál bere.
+function annPamet(druh, annId) {
+  return 'ann_' + druh + '_' + (currentUser?.id || 'nikdo') + '_' + annId
+}
+function annZapamatovano(druh, annId) {
+  return !!lsGet(annPamet(druh, annId)) || (druh === 'dismissed' && !!lsGet('ann_dismissed_' + annId))
+}
+
 // Patří oznámení přihlášenému? Po migraci cizí oznámení nepustí už databáze;
 // tady se to hlídá ještě jednou — i kvůli správci, který čte všechna.
 function oznameniJeProMe(a) {
@@ -31809,11 +31910,13 @@ async function loadAnnouncement() {
     // se zavřít nedají. Vyřízené je jen POTVRZENÍM — pouhé zavření (šlo
     // omylem 30. 9., než se schoval křížek) se nepočítá.
     const ceka = moje.find(a => a.vyzaduje_potvrzeni && !potvrzeno.has(String(a.id))
-      && !lsGet('ann_potvrzeno_' + a.id))
+      && !annZapamatovano('potvrzeno', a.id))
     if (ceka) { showBanner(ceka, true); return }
     // Jinak jen to nejnovější — po jeho zavření nemá vyskočit předchozí.
+    // Potvrzené nebo zavřené se už neukáže, dokud StavKo nezveřejní nové
+    // (majitel: „když dá Porozuměl jsem, ať se mu to už neukazuje").
     const a = moje[0]
-    if (odkliknuto.has(String(a.id)) || lsGet('ann_dismissed_' + a.id)) { hideBanner(); return }
+    if (odkliknuto.has(String(a.id)) || annZapamatovano('dismissed', a.id) || annZapamatovano('potvrzeno', a.id)) { hideBanner(); return }
     showBanner(a, false)
   } catch(e) {
     console.log('[announcement] error:', e)
@@ -31825,6 +31928,12 @@ function showBanner(ann, musiPotvrdit) {
   const text = document.getElementById('announcement-text')
   const icon = document.getElementById('announcement-icon')
   if (!banner || !text) return
+  // Tichá obnova se ptá každou minutu. Když už svítí totéž oznámení, nechat
+  // ho být — jinak by rozečtený dlouhý text poskočil nahoru.
+  if (banner.style.display === 'flex' && banner.dataset.annId === String(ann.id)
+      && banner.dataset.musiPotvrdit === (musiPotvrdit ? '1' : '') && text.textContent === ann.message
+      && banner.dataset.typ === (ann.type || '')) return
+  banner.dataset.typ = ann.type || ''
   const colors = annColors[ann.type] || annColors.info
   banner.style.display = 'flex'
   banner.style.background = colors.bg
@@ -31869,7 +31978,7 @@ function dismissAnnouncement() {
   if (banner?.dataset.musiPotvrdit === '1') return
   const annId = banner?.dataset.annId
   if (annId) {
-    lsSet('ann_dismissed_' + annId, '1')
+    lsSet(annPamet('dismissed', annId), '1')
     // Správce v Oznámeních uvidí, kdo si ho zavřel. Když zápis nevyjde,
     // nic se neděje — zavření v tomhle prohlížeči platí tak jako dřív.
     if (currentUser?.id) sb.from('oznameni_precteno')
@@ -31903,7 +32012,7 @@ async function potvrdOznameni() {
         .eq('oznameni_id', annId).eq('worker_id', currentUser.id)
       if (!(r && r[0] && r[0].potvrzeno)) {
         console.warn('[oznámení] potvrzení se do databáze nepřepsalo:', error?.message || '0 řádků')
-        lsSet('ann_potvrzeno_' + annId, '1')
+        lsSet(annPamet('potvrzeno', annId), '1')
       }
       data = [{ oznameni_id: annId }]; error = null
     }
@@ -31915,6 +32024,9 @@ async function potvrdOznameni() {
       : '❌ Potvrzení se neuložilo — zkuste to prosím znovu')
     return
   }
+  // I telefon si potvrzení pamatuje — kdyby se pak nenačetlo, kdo co odklikl
+  // (výpadek sítě), oznámení nesmí vyskočit znovu.
+  lsSet(annPamet('potvrzeno', annId), '1')
   showToast('✅ Potvrzeno')
   loadAnnouncement()
 }
@@ -33242,7 +33354,7 @@ async function openWorkerModal(id) {
   const wdDic = document.getElementById('wd-dic'); if (wdDic) wdDic.value = w.dic || ''
   toggleWdDic()
   document.getElementById('wd-status').innerHTML = `<span class="pill ${w.is_active?'pg':'pr'}">${w.is_active?'Aktivní':'Neaktivní'}</span>`
-  document.getElementById('wd-rate').value = w.hourly_rate_worker || ''
+  document.getElementById('wd-rate').value = w.hourly_rate_worker ?? ''
   // Provize (marže StavKo) se teď spravuje jen v sekci Provize, ne na kartě pracovníka
   document.getElementById('wd-coop-start').value = w.cooperation_start || w.start_date || ''
   document.getElementById('wd-coop-end').value = w.cooperation_end || ''
@@ -35425,7 +35537,7 @@ async function loadWdInvoiceForm(profile) {
   // Předvyplň bankovní údaje a sazbu z profilu pracovníka (admin je může přepsat)
   const ib = document.getElementById('wd-inv-iban'); if (ib) ib.value = profile?.invoice_iban || ''
   const sw = document.getElementById('wd-inv-swift'); if (sw) sw.value = profile?.invoice_swift || ''
-  const rt = document.getElementById('wd-inv-rate'); if (rt) rt.value = profile?.hourly_rate_worker || ''
+  const rt = document.getElementById('wd-inv-rate'); if (rt) rt.value = profile?.hourly_rate_worker ?? ''
   const vz = document.getElementById('wd-inv-design')
   if (vz) naplnVyberVzhledu(vz, (profile || currentWorkerProfile || {}).invoice_design || 1)
   vykresliBarvyPracovnika((profile || currentWorkerProfile || {}).invoice_color)
@@ -36312,6 +36424,14 @@ function tichaObnovaDat() {
       } else if (mname === 'vykaz' && typeof loadMobWeek === 'function') {
         loadMobWeek()
       }
+    }
+    // OZNÁMENÍ: živé spojení v telefonu na pozadí často spadne, a nové
+    // oznámení by se pak ukázalo až po znovunačtení (majitel 30. 9. 2026:
+    // „na telefonech jim to nevyskočí, dokud si to neaktualizují").
+    // Jeden malý dotaz, nejvýš jednou za 15 s.
+    if (typeof loadAnnouncement === 'function' && Date.now() - (window._annKontrolaKdy || 0) > 15000) {
+      window._annKontrolaKdy = Date.now()
+      loadAnnouncement()
     }
   } catch (e) { /* tichá obnova nikdy nesmí shodit appku */ }
 }
