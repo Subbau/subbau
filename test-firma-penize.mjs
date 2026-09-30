@@ -64,6 +64,8 @@ try {
       }
       return {
         zamProvize: cislo(zamId, 'pv-w-'), zamVydelek: cislo(zamId, 'pv-e-'),
+        zamProvizeText: (document.getElementById('pv-w-' + zamId)?.textContent || '').trim(),
+        radekText: (document.getElementById('pv-w-' + zamId)?.closest('tr')?.textContent || '').replace(/\s+/g, ' '),
         firmaProvize: cislo(firmaId, 'pv-w-'),
         zamHodiny: (idx[zamId] || {}).hoursWeek ?? null
       }
@@ -90,8 +92,12 @@ try {
   if (v.chyba) { ok(false, v.chyba) } else {
     ok(v.pred.zamProvize > 0, `kontrolní měření: před zařazením má vlastní provizi (${v.pred.zamProvize} €)`)
     ok(v.pred.zamVydelek > 0, `a vlastní výdělek (${v.pred.zamVydelek} €)`)
-    ok(v.po.zamProvize === 0, `po zařazení pod firmu má provizi 0 (${v.po.zamProvize} €)`)
-    ok(v.po.zamVydelek === 0, `a výdělek 0 — platí ho firma (${v.po.zamVydelek} €)`)
+    // Od 30. 9. 2026 (zaměstnanec v Provizích) se u zaměstnance jeho podíl na
+    // provizi FIRMY ukazuje v závorce „u firmy" — do součtů se nepočítá, peníze
+    // jsou v řádku firmy. Výdělek nemá („platí ho firma").
+    ok(v.po.zamProvizeText.startsWith('(') && Math.abs(v.po.zamProvize - v.pred.zamHodiny * 4) < 0.01 && /u firmy/.test(v.po.radekText),
+       `po zařazení pod firmu je u něj provize jen jako podíl firmy v závorce, sazbou firmy 4 € (${v.po.zamProvizeText})`)
+    ok(v.po.zamVydelek === null && /platí ho firma/.test(v.po.radekText), `a výdělek nemá — platí ho firma`)
     ok(v.po.zamHodiny === v.pred.zamHodiny,
        `ale hodiny mu zůstaly (${v.pred.zamHodiny} → ${v.po.zamHodiny} h)`)
     ok(v.po.firmaProvize > v.pred.firmaProvize,

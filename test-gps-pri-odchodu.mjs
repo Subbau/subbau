@@ -34,13 +34,16 @@ ok(!/odchod_/.test(API), 'odkaz pro odběratele o té poloze vůbec neví')
 {
   // Od 29. 9. 2026 ji na přání majitele ukazuje i Dnešní docházka (loadTodayTimeline),
   // pořád jen správci. Každé volání musí ležet v jedné z povolených funkcí.
-  const povolene = ['odchodPolohaHtml', 'loadWdAttendance', 'loadTodayTimeline']
-  const mista = [...zdroj.matchAll(/odchodPolohaHtml\(/g)].map(m => {
-    const pred = zdroj.slice(0, m.index)
-    const f = [...pred.matchAll(/(?:async\s+)?function\s+([A-Za-z0-9_$]+)\s*\(/g)].pop()
-    return f ? f[1] : '?'
-  })
-  ok(mista.length >= 2 && mista.every(f => povolene.includes(f)),
+  const povolene = ['loadWdAttendance', 'loadTodayTimeline']
+  // Funkce na nejvyšší úrovni (začíná na kraji řádku) — vnořené pomocníky se nepočítají.
+  const mista = [...zdroj.matchAll(/odchodPolohaHtml\(/g)]
+    .filter(m => !/function\s+$/.test(zdroj.slice(Math.max(0, m.index - 20), m.index)))
+    .map(m => {
+      const pred = zdroj.slice(0, m.index)
+      const f = [...pred.matchAll(/\n(?:async\s+)?function\s+([A-Za-z0-9_$]+)\s*\(/g)].pop()
+      return f ? f[1] : '?'
+    })
+  ok(mista.length >= 1 && mista.every(f => povolene.includes(f)),
      'zobrazuje se jen správci — v kartě pracovníka a v Dnešní docházce (' + mista.join(', ') + ')')
 }
 {
@@ -71,14 +74,19 @@ try {
     const bezPolohy = odchodPolohaHtml({ location_address: 'Ahornallee 9, Berlin' })
     const stejne = odchodPolohaHtml({ location_address: 'Ahornallee 9, Berlin',
       odchod_adresa: 'Ahornallee 9, Berlin', odchod_lat: 52.5, odchod_lng: 13.4 })
-    const jinde = odchodPolohaHtml({ location_address: 'Ahornallee 9, Berlin',
+    // Od 29. 9. 2026 (majitel): červeně a s vykřičníkem až NAD JEDEN KILOMETR od
+    // příchodu — vzdálenost se počítá ze souřadnic obou míst.
+    const jinde = odchodPolohaHtml({ location_address: 'Ahornallee 9, Berlin', location_lat: 52.5, location_lng: 13.4,
       odchod_adresa: 'Hlavní 1, Praha', odchod_lat: 50.08, odchod_lng: 14.43 })
-    return { bezPolohy, stejne, jinde }
+    const blizko = odchodPolohaHtml({ location_address: 'Ahornallee 9, Berlin', location_lat: 52.5, location_lng: 13.4,
+      odchod_adresa: 'Ahornallee 12, Berlin', odchod_lat: 52.5027, odchod_lng: 13.4 })
+    return { bezPolohy, stejne, jinde, blizko }
   })
 
   ok(v.bezPolohy === '', 'u dne bez zachycené polohy se nic nepřidává')
   ok(/odchod:/.test(v.stejne) && /Ahornallee 9, Berlin/.test(v.stejne), 'když odešel tam, kde přišel, poloha se ukáže v klidu')
-  ok(/var\(--text3\)/.test(v.stejne) && !/⚠️/.test(v.stejne), 'a není u toho vykřičník')
+  ok(!/⚠️/.test(v.stejne) && !/var\(--red\)/.test(v.stejne), 'a není u toho vykřičník')
+  ok(!/⚠️/.test(v.blizko) && !/var\(--red\)/.test(v.blizko), 'o 300 m vedle (pod kilometr) taky ne')
   ok(/⚠️/.test(v.jinde) && /var\(--red\)/.test(v.jinde),
      'když odešel JINDE, svítí to červeně s vykřičníkem')
   ok(/google\.com\/maps\?q=50\.08,14\.43/.test(v.jinde), 'a jde kliknout na mapu')

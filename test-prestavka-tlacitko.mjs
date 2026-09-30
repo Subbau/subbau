@@ -137,7 +137,9 @@ try {
     return { pred, stavPred, toast1, toast2,
              po1: { bs: po1.break_start, be: po1.break_end, breaks: po1.breaks },
              po2: { bs: po2.break_start, be: po2.break_end, bs2: po2.break2_start, be2: po2.break2_end, breaks: po2.breaks },
-             popisekPo: popisekTlacitka(), stavPo: window._attState }
+             popisekPo: popisekTlacitka(), stavPo: window._attState,
+             hlavniZamcene: !!document.getElementById('att-main-btn')?.disabled,
+             vedlejsi: (document.getElementById('att-secondary')?.textContent || '').replace(/\s+/g, ' ').trim() }
   }, 'fix30')
 
   const delka = (b) => b && b.bs && b.be
@@ -149,7 +151,12 @@ try {
   ok(delka(d.po1.breaks?.[0]) === 30, `a je přesně 30 minut (${delka(d.po1.breaks?.[0])})`)
   ok(!!d.po1.bs && !!d.po1.be, 'zapsal se i začátek a konec do sloupců — starší části appky je čtou')
   ok(d.toast1.some(t => /Přestávka 30 min zapsaná/.test(t)), 'člověku se to potvrdí')
-  ok(/Konec směny/.test(d.popisekPo), `po zapsání nabízí tlačítko konec směny (${d.popisekPo})`)
+  // Od 29. 9. 2026 (skutečný den Martina Chautura): po pevné pauze se z VELKÉHO
+  // tlačítka nesmí stát „Konec směny" — klepl na něj v domnění, že se vrací
+  // do práce, a ukončil si den. Velké tlačítko zešedne a zůstane na místě,
+  // konec směny je dál vedlejším tlačítkem pod ním.
+  ok(/Přestávka 30 min zapsaná/.test(d.popisekPo) && d.hlavniZamcene, `po zapsání velké tlačítko zešedne (${d.popisekPo})`)
+  ok(/Konec směny/.test(d.vedlejsi), `a konec směny je dál vedlejším tlačítkem (${d.vedlejsi})`)
   ok(d.toast2.some(t => /už máte dnes zapsanou/i.test(t)), 'druhý klik se u režimu „jen jednou" odmítne')
   ok((d.po2.breaks || []).length === 1, 'a druhá pauza opravdu nepřibyla')
 

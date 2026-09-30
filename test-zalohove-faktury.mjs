@@ -147,7 +147,8 @@ const v = await p.evaluate(async () => {
     await new Promise(r => setTimeout(r, 1200))
     const hodinyText = (document.getElementById('wd-inv-hours') || {}).textContent || ''
     const cisloPole = document.getElementById('wd-inv-num-full')
-    if (cisloPole && cislo) cisloPole.value = cislo
+    // Číslo „napíše“ člověk — i s událostí, kterou appka pozná jako ruční zadání.
+    if (cisloPole && cislo) { cisloPole.value = cislo; cisloPole.dispatchEvent(new Event('input')) }
     await generateInvoiceAdmin(); await new Promise(r => setTimeout(r, 1500))
     return { vNabidce, hodinyText: hodinyText.trim(), d: window._lastInvoice,
              doklad: (document.getElementById('invoice-page') || {}).textContent || '' }
@@ -200,7 +201,7 @@ const v = await p.evaluate(async () => {
   if (tyd2) { tyd2.value = KW; tyd2.dispatchEvent(new Event('change')) }
   await new Promise(r => setTimeout(r, 900))
   const cislo2 = document.getElementById('wd-inv-num-full')
-  if (cislo2) cislo2.value = 'T202609'
+  if (cislo2) { cislo2.value = 'T202609'; cislo2.dispatchEvent(new Event('input')) }
   await generateInvoiceAdmin(); await new Promise(r => setTimeout(r, 1200))
   out.bezMigrace = { fakturaVznikla: !!document.getElementById('invoice-page') && !!window._lastInvoice,
                      celkem: window._lastInvoice?.totalAmount,
