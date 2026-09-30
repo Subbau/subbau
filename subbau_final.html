@@ -7840,15 +7840,30 @@ async function generateProvizeFirmReport(firmName, mode) {
     // Docházku bereme za VŠECHNY, ne jen za dnešní členy firmy. Kdo u firmy dělal
     // a mezitím přešel jinam, se jinak do vyúčtování vůbec nedostal a firmě by
     // jeho odpracované hodiny propadly.
-    const [{ data: workers }, { data: provRows }, { data: teams }, { data: companies }, { data: att }] = await Promise.all([
+    const vysledky = await Promise.all([
       sb.from('profiles').select('id, full_name, hourly_rate_worker, team_id, is_active, zamestnavatel_id, company_name').in('role', ['osvec', 'partak']).order('full_name'),
       sb.from('worker_commissions').select('worker_id, provize, bez_provize'),
       sb.from('teams').select('id, name, company_id'),
-      sb.from('companies').select('id, name'),
-      sb.from('attendance')
-        .select('worker_id, work_date, check_in, check_out, break_start, break_end, total_hours, team_id, bez_vyplaty, bez_provize_den, vyplata_castka')
-        .gte('work_date', startStr).lte('work_date', endStr)
+      sb.from('companies').select('id, name')
     ])
+    // Audit 30. 9. 2026: žádné z těch čtení nekontrolovalo chybu — výpadek dal
+    // report s nulami, který šel firmě jako vyúčtování. Radši žádný report.
+    const chybaCteni = vysledky.find(r => r && r.error)
+    if (chybaCteni) throw chybaCteni.error
+    const [{ data: workers }, { data: provRows }, { data: teams }, { data: companies }] = vysledky
+    // Docházka PO STRÁNKÁCH. Server vrací nejvýš 1000 řádků; měsíc všech firem
+    // je přesahuje zhruba od 45 lidí — report by pak tiše vynechal hodiny
+    // a firmě se vyfakturovalo méně. Stejně jako tabulka Provizí.
+    const att = []
+    for (let od = 0; od < 200000; od += 1000) {
+      const { data: kus, error: chybaKusu } = await sb.from('attendance')
+        .select('id, worker_id, work_date, check_in, check_out, break_start, break_end, total_hours, team_id, bez_vyplaty, bez_provize_den, vyplata_castka')
+        .gte('work_date', startStr).lte('work_date', endStr)
+        .order('id').range(od, od + 999)
+      if (chybaKusu) throw chybaKusu
+      att.push(...(kus || []))
+      if (!kus || kus.length < 1000) break
+    }
     // Kdo je označený „bez provize", do vyúčtování nepatří — odešel dřív, než za
     // něj přijdou peníze, takže si za jeho hodiny nemá kdo nárokovat provizi.
     const provMap = {}
@@ -8035,7 +8050,7 @@ async function renderProvizeContent() {
   const yStart = new Date(anchor.getFullYear(), 0, 1)
   const yEnd = new Date(anchor.getFullYear(), 11, 31)
 
-  const [{ data: workers }, provResult, { data: teams }, { data: companies }, { data: subteams }] = await Promise.all([
+  const [{ data: workers, error: chybaLidi }, provResult, { data: teams }, { data: companies }, { data: subteams }] = await Promise.all([
     sb.from('profiles').select('id, full_name, hourly_rate_worker, team_id, subteam_id, zamestnavatel_id, supplier_type, company_name').in('role', ['osvec', 'partak']).eq('is_active', true).order('full_name'),
     sb.from('worker_commissions').select('worker_id, provize, payment_terms, bez_provize'),
     // payment_terms u firmy je nepovinné — bez migrace supabase-migrace-splatnost-firmy.sql
@@ -8048,6 +8063,12 @@ async function renderProvizeContent() {
     // jako v Týmech. Bez toho se u větších firem nedá poznat, kdo kde dělá.
     sb.from('subteams').select('id, name').eq('is_active', true)
   ])
+  // Audit 30. 9. 2026: selhané čtení tu dřív vypadalo jako „nikdo nepracoval"
+  // a Provize ukázaly samé nuly. Chyba se musí ukázat jako chyba.
+  const provizeNejdou = (co, e) => {
+    el.innerHTML = `<div style="text-align:center;color:var(--red);padding:30px;font-weight:700">❌ ${co} se nepodařilo načíst — čísla by nebyla správně.<div style="font-weight:400;color:var(--text3);margin-top:6px">${escAttr((e && e.message) || '')}</div><button onclick="renderProvizeContent()" style="margin-top:12px;padding:8px 14px;border:1.5px solid var(--brd);border-radius:8px;background:#fff;cursor:pointer;font-family:inherit">Zkusit znovu</button></div>`
+  }
+  if (chybaLidi) { provizeNejdou('Pracovníky', chybaLidi); return }
   const subteamById = {}
   ;(subteams || []).forEach(st => { subteamById[st.id] = st.name })
 
@@ -8068,6 +8089,12 @@ async function renderProvizeContent() {
   let provRows = provResult.data
   let paymentTermsColumnMissing = false
   let bezProvizeColumnMissing = false
+  // Ustupovat po sloupcích se smí JEN u chybějícího sloupce. Jiná chyba (síť,
+  // práva) by jinak tiše vypnula „bez provize" a provize by se počítala i tam,
+  // kde ji správce vypnul.
+  if (provResult.error && !/42703|PGRST204|column|schema cache/i.test((provResult.error.code || '') + ' ' + (provResult.error.message || ''))) {
+    provizeNejdou('Sazby provizí', provResult.error); return
+  }
   if (provResult.error) {
     // Ustupujeme po jednom sloupci — ať chybějící novinka neshodí i to, co funguje.
     const r2 = await sb.from('worker_commissions').select('worker_id, provize, payment_terms')
@@ -8146,7 +8173,10 @@ async function renderProvizeContent() {
       .select('worker_id, work_date, check_in, check_out, break_start, break_end, total_hours, team_id, bez_vyplaty, bez_provize_den, vyplata_castka')
       .gte('work_date', fetchStart).lte('work_date', fetchEnd)
       .order('id').range(fromRow, fromRow + ATT_PAGE - 1)
-    if (pageErr || !page || !page.length) break
+    // Chyba stránky = neúplná docházka. Dřív se jen přestalo číst a provize
+    // vyšla ze zlomku roku (nebo nula) — bez jediného slova.
+    if (pageErr) { provizeNejdou('Docházku', pageErr); return }
+    if (!page || !page.length) break
     att.push(...page)
     if (page.length < ATT_PAGE) break
   }
@@ -8173,9 +8203,12 @@ async function renderProvizeContent() {
   const _znameIds = new Set(workersAll.map(w => w.id))
   const _chybejici = [...new Set((att || []).map(a => a.worker_id).filter(id => id && !_znameIds.has(id)))]
   if (_chybejici.length) {
-    const { data: _byvali } = await sb.from('profiles')
-      .select('id, full_name, hourly_rate_worker, team_id')
+    // I u bývalých zařazení pod firmu — jinak by se deaktivovaný zaměstnanec
+    // počítal jako OSVČ se svou starou sazbou (tabulka vs. report firmy nesedí).
+    const { data: _byvali, error: chybaByvalych } = await sb.from('profiles')
+      .select('id, full_name, hourly_rate_worker, team_id, zamestnavatel_id, supplier_type, company_name')
       .in('id', _chybejici)
+    if (chybaByvalych) { provizeNejdou('Bývalé pracovníky', chybaByvalych); return }
     workersAll = workersAll.concat((_byvali || []).map(w => ({ ...w, _byvaly: true })))
     workersAll.sort((a, b) => (a.full_name || '').localeCompare(b.full_name || '', 'cs'))
   }
@@ -8302,8 +8335,15 @@ async function renderProvizeContent() {
     if (!firmaVProvizich(firmaPodleId[a.worker_id])) return
     dnesVPraci.add(a.worker_id)
   })
+  // Sazba za hodinu dnes: u zaměstnance firmy je to provize FIRMY (jako všude
+  // jinde v Provizích), a platí ta dnešní z historie. Dřív se brala jeho
+  // vlastní uložená provize, takže dlaždice ukazovala jiné číslo než tabulka.
   let dnesNaHodinu = 0
-  dnesVPraci.forEach(id => { dnesNaHodinu += provUcinna(id) })
+  dnesVPraci.forEach(id => {
+    const komu = firmaZamestnance[id] || id
+    if (bezProvize.has(komu)) return
+    dnesNaHodinu += Number(hodnotaKDni('provize', komu, dnesStrStat, provMap[komu] || 0)) || 0
+  })
   const dnesTedLidi = dnesVPraci.size
 
   // Kolik za dnešek přibylo zatím — u načatých směn se počítá čas do teď.
@@ -8313,8 +8353,12 @@ async function renderProvizeContent() {
   workersAll.forEach(w => {
     if (!firmaVProvizich(firmOf(w))) return
     const b = byWorker[w.id]
-    if (b && b.dnes > 0) {
-      dnesProvize += b.pDnes
+    if (!b) return
+    // Peníze za dnešek sedí u toho, komu patří — u firmy i za její lidi, i když
+    // šéf sám dnes nepracuje. Dřív se sčítalo jen u lidí s vlastními hodinami,
+    // takže provize za zaměstnance z dlaždice „zatím" vypadla.
+    dnesProvize += b.pDnes
+    if (b.dnes > 0) {
       dnesHodin += b.dnes
       const f = firmOf(w)
       dnesPoFirmach.set(f, (dnesPoFirmach.get(f) || 0) + b.dnes)
