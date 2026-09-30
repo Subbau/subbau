@@ -349,6 +349,9 @@ button:not(.x-close) > svg:first-child{margin-right:6px}
    z fotky pracovníka udělalo přívěšek. */
 .foto-zmen::after{content:'';position:absolute;left:50%;top:50%;width:44px;height:44px;transform:translate(-50%,-50%)}
 .foto-zmen:active{background:#d08f2c}
+/* Foťák přesně doprostřed kolečka (majitel 1. 10. 2026). Obecné pravidlo
+   „button > svg:first-child{margin-right:6px}" ho posouvalo doleva. */
+.foto-zmen svg{margin:0!important;display:block;flex-shrink:0}
 .toast{pointer-events:none;position:fixed;bottom:100px;left:50%;transform:translateX(-50%);background:#211D1A;color:#fff;padding:12px 20px;border-radius:12px;font-size:14px;font-weight:700;z-index:999999;opacity:0;transition:opacity .2s;white-space:normal;overflow-wrap:anywhere;line-height:1.35;max-width:90vw;text-align:center;box-shadow:0 4px 20px rgba(0,0,0,0.3)}
 .toast.on{opacity:1}
 
@@ -4658,7 +4661,7 @@ async function submitAdminSignatureWithPlacement() {
 // Po nahrání nové verze se snadno pozná, jestli se opravdu nasadila: otevřete
 // appku, zmáčkněte F12 (na Macu ⌥⌘I) a v konzoli je vypsané tohle datum. Když
 // tam svítí starší, prohlížeč nebo GitHub drží starou verzi.
-const SUBBAU_VERZE = '2026-10-01 a — fotky v řádcích, vlaječky národnosti, DE za jménem'
+const SUBBAU_VERZE = '2026-10-01 b — fotky z PDF, otáčení a přiblížení; tisk soupisu faktur'
 console.log('SubBau docházka — verze ' + SUBBAU_VERZE)
 // Verze i dole v menu správce. Když někdo novinku „nevidí", podle ní se hned
 // pozná, jestli nemá otevřenou starou kopii appky — bez hledání v konzoli.
@@ -14144,6 +14147,53 @@ function firmaFaktury(r) {
   return (t && t.name) || 'Bez firmy'
 }
 
+// TISK SOUPISU FAKTUR ZA TÝDEN. Majitel 1. 10. 2026: „v sekci Faktury je
+// potřeba mít možnost vytisknout ten soupis za celý týden — jak je to tam
+// vypsané, číslo faktury, KW, hodiny —, ať si to můžu porovnat s předchozím
+// týdnem; v hlavičce, kde je KW 39/26, tlačítko Vytisknout."
+// Tiskne se to, co je na obrazovce (hledání i filtry platí), jen ten týden,
+// po firmách jako v přehledu a se součty.
+function tiskSoupisuFaktur(kw, rok) {
+  const rows = (window._invZobrazene || []).filter(r => String(r.kw) === String(kw) && String(r.kw_year) === String(rok))
+  if (!rows.length) { showToast('⚠️ V tomhle týdnu tu žádná faktura není'); return }
+  const e = v => escAttr(v == null ? '' : String(v))
+  const cislo = n => (Number(n) || 0).toFixed(2).replace('.', ',')
+  const stav = { new: 'Nevyřízená', seen: 'Vyřízená', paid: 'Zaplacená' }
+  const datum = iso => { if (!iso) return '—'; const d = new Date(iso); return isNaN(d) ? '—' : d.toLocaleDateString('cs-CZ') }
+  const firmy = new Map()
+  rows.forEach(r => { const f = firmaFaktury(r); if (!firmy.has(f)) firmy.set(f, []); firmy.get(f).push(r) })
+  let hod = 0, kc = 0, zal = 0
+  const telo = [...firmy.entries()].map(([firma, fr]) => {
+    let fh = 0, fk = 0
+    const radky = fr.map(r => {
+      const h = Number(r.total_hours) || 0, c = Number(r.total_amount) || 0, z = Number(r.cash_paid) || 0
+      fh += h; fk += c; hod += h; kc += c; zal += z
+      return `<tr><td>${e(r.worker?.full_name || r.supplier_name || '—')}${r.supplier_name && r.worker?.full_name && r.supplier_name !== r.worker.full_name ? `<div class="m">${e(r.supplier_name)}</div>` : ''}</td>
+        <td><b>${e(r.invoice_number || '—')}</b></td><td>KW ${e(r.kw)}/${e(r.kw_year)}</td><td>${e(r.customer_name || '—')}</td>
+        <td class="c">${cislo(h)} h</td><td class="c"><b>${cislo(c)} €</b>${z > 0 ? `<div class="m">záloha −${cislo(z)} €</div>` : ''}</td>
+        <td>${datum(r.sent_at)}</td><td>${e(stav[r.status || 'new'] || r.status)}</td></tr>`
+    }).join('')
+    return `<tr class="f"><td colspan="8">${e(firma)} <span class="m">· ${fr.length} ${fr.length === 1 ? 'faktura' : (fr.length < 5 ? 'faktury' : 'faktur')} · ${cislo(fh)} h · ${cislo(fk)} €</span></td></tr>${radky}`
+  }).join('')
+  const html = `<!doctype html><html lang="cs"><head><meta charset="utf-8"><title>Soupis faktur KW ${e(kw)}/${e(rok)}</title>
+<style>
+  body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Arial,sans-serif;color:#211D1A;margin:0;padding:24px;font-size:12px}
+  h1{font-size:18px;margin:0 0 2px} .pod{color:#7a7168;margin:0 0 14px;font-size:12px}
+  table{width:100%;border-collapse:collapse} th{text-align:left;font-size:10.5px;text-transform:uppercase;letter-spacing:.04em;color:#7a7168;border-bottom:2px solid #211D1A;padding:6px 6px}
+  td{padding:6px;border-bottom:1px solid #ddd;vertical-align:top} .c{text-align:right;white-space:nowrap} .m{color:#7a7168;font-size:10.5px;font-weight:400}
+  tr.f td{background:#f4efe7;font-weight:800;border-top:1px solid #bbb;padding-top:8px}
+  tfoot td{border-top:2px solid #211D1A;border-bottom:none;font-weight:800;padding-top:8px}
+  @page{size:A4 landscape;margin:12mm} tr{page-break-inside:avoid}
+</style></head><body>
+<h1>Soupis faktur — KW ${e(kw)} / ${e(rok)}</h1>
+<p class="pod">SubBau s.r.o. · vytištěno ${new Date().toLocaleDateString('cs-CZ')} · ${rows.length} ${rows.length === 1 ? 'faktura' : (rows.length < 5 ? 'faktury' : 'faktur')}</p>
+<table><thead><tr><th>Pracovník</th><th>Číslo</th><th>Týden</th><th>Odběratel</th><th class="c">Hodiny</th><th class="c">Částka</th><th>Odesláno</th><th>Stav</th></tr></thead>
+<tbody>${telo}</tbody>
+<tfoot><tr><td colspan="4">Celkem za KW ${e(kw)}/${e(rok)}</td><td class="c">${cislo(hod)} h</td><td class="c">${cislo(kc)} €${zal > 0 ? `<div class="m">zálohy −${cislo(zal)} €</div>` : ''}</td><td colspan="2"></td></tr></tfoot>
+</table></body></html>`
+  showPrintPreview(html, 'soupis-faktur-KW' + kw + '-' + rok + '.html')
+}
+
 function renderWorkerInvoices() {
   const tbody = document.getElementById('inv-table')
   if (!tbody || _invTableMissing) return
@@ -14195,6 +14245,8 @@ function renderWorkerInvoices() {
   })
 
   renderInvoiceStats(rows)
+  // Pro tisk soupisu: přesně to, co je vypsané (hledání a filtry platí).
+  window._invZobrazene = rows
 
   if (!rows.length) {
     tbody.innerHTML = '<tr><td colspan="10" style="text-align:center;color:var(--text3);padding:20px">'
@@ -14233,7 +14285,7 @@ function renderWorkerInvoices() {
     const kwTeto = r.kw ? (r.kw + '/' + r.kw_year) : 'bez týdne'
     let oddelovac = ''
     if (delitTydny && kwTeto !== _poslKw) {
-      oddelovac = `<tr><td colspan="10" style="padding:10px 12px 6px;border-top:2px solid var(--blue,#211D1A);background:var(--bg,#f4efe7);font-size:12.5px;font-weight:800;color:var(--text2)">${r.kw ? 'KW ' + r.kw + ' / ' + r.kw_year : 'Bez týdne'}</td></tr>`
+      oddelovac = `<tr><td colspan="10" style="padding:10px 12px 6px;border-top:2px solid var(--blue,#211D1A);background:var(--bg,#f4efe7);font-size:12.5px;font-weight:800;color:var(--text2)"><div style="display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap"><span>${r.kw ? 'KW ' + r.kw + ' / ' + r.kw_year : 'Bez týdne'}</span>${r.kw ? `<button onclick="event.stopPropagation();tiskSoupisuFaktur('${jsStr(String(r.kw))}','${jsStr(String(r.kw_year))}')" title="Vytisknout soupis faktur za tenhle týden — tak, jak je tady vypsaný" style="min-height:36px;padding:5px 12px;border:1.5px solid var(--brd);border-radius:8px;background:#fff;color:var(--text);font-size:12.5px;font-weight:700;font-family:inherit;cursor:pointer;white-space:nowrap">🖨 Vytisknout</button>` : ''}</div></td></tr>`
       _poslKw = kwTeto
       _poslFirma = null   // nový týden začíná i novou firmou
     }
@@ -20940,17 +20992,80 @@ function openWorkerAvatarPreview() {
 
 // Společné okno se zvětšenou fotkou (zavře se klepnutím kamkoli nebo křížkem)
 function showAvatarPreview(url) {
+  // PŘIBLÍŽENÍ FOTKY. Majitel 1. 10. 2026: „to přiblížení fotky musí fungovat
+  // ještě víc". Kolečkem myši, dvěma prsty, tlačítky + / − nebo dvojklikem,
+  // až 6×; přiblíženou fotku jde táhnout. Zavře se klepnutím vedle nebo křížkem.
   let ov = document.getElementById('avatar-preview-overlay')
   if (!ov) {
     ov = document.createElement('div')
     ov.id = 'avatar-preview-overlay'
-    ov.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.9);z-index:20000;display:flex;align-items:center;justify-content:center;padding:24px'
-    ov.onclick = () => { ov.style.display='none' }
-    ov.innerHTML = `<img id="avatar-preview-img" src="" style="max-width:90vw;max-height:80vh;border-radius:16px;box-shadow:0 8px 40px rgba(0,0,0,.5)">
-      <button class="x-close" onclick="document.getElementById('avatar-preview-overlay').style.display='none'" style="position:absolute;top:20px;right:20px;width:40px;height:40px;border-radius:50%;background:rgba(255,255,255,.15);border:none;color:#fff;cursor:pointer;display:flex;align-items:center;justify-content:center"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:20px;height:20px;display:block"><path d="M18 6L6 18M6 6l12 12"/></svg></button>`
+    ov.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.92);z-index:20000;display:flex;align-items:center;justify-content:center;padding:24px;overflow:hidden;touch-action:none'
+    const tl = 'width:44px;height:44px;border-radius:50%;background:rgba(255,255,255,.18);border:none;color:#fff;cursor:pointer;font-size:22px;font-weight:800;font-family:inherit;display:flex;align-items:center;justify-content:center'
+    ov.innerHTML = `<img id="avatar-preview-img" src="" alt="" draggable="false" style="max-width:90vw;max-height:80vh;border-radius:16px;box-shadow:0 8px 40px rgba(0,0,0,.5);transform-origin:center center;cursor:zoom-in;user-select:none;-webkit-user-drag:none">
+      <div id="avatar-preview-ovladani" style="position:absolute;bottom:24px;left:50%;transform:translateX(-50%);display:flex;gap:10px">
+        <button data-zoom="-" title="Oddálit" style="${tl}">−</button>
+        <button data-zoom="1" title="Původní velikost" style="${tl};font-size:13px">1×</button>
+        <button data-zoom="+" title="Přiblížit" style="${tl}">+</button>
+      </div>
+      <button class="x-close" data-zavrit style="position:absolute;top:20px;right:20px;width:44px;height:44px;border-radius:50%;background:rgba(255,255,255,.15);border:none;color:#fff;cursor:pointer;display:flex;align-items:center;justify-content:center"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:20px;height:20px;display:block"><path d="M18 6L6 18M6 6l12 12"/></svg></button>`
     document.body.appendChild(ov)
+    const img = ov.querySelector('#avatar-preview-img')
+    const st = ov._st = { z: 1, x: 0, y: 0 }
+    const MAX = 6
+    const uplatni = () => {
+      st.z = Math.min(MAX, Math.max(1, st.z))
+      if (st.z === 1) { st.x = 0; st.y = 0 }
+      img.style.transform = `translate(${st.x}px, ${st.y}px) scale(${st.z})`
+      img.style.cursor = st.z > 1 ? 'grab' : 'zoom-in'
+    }
+    ov._uplatni = uplatni
+    // Přiblížení k bodu (kurzor, prsty) — ať to, na co se člověk dívá, neuteče
+    const kBodu = (novy, cx, cy) => {
+      const r = ov.getBoundingClientRect()
+      const bx = cx - (r.left + r.width / 2), by = cy - (r.top + r.height / 2)
+      const n = Math.min(MAX, Math.max(1, novy)), k = n / st.z
+      st.x = bx - (bx - st.x) * k; st.y = by - (by - st.y) * k; st.z = n
+      uplatni()
+    }
+    ov.addEventListener('wheel', (e) => { e.preventDefault(); kBodu(st.z * (e.deltaY < 0 ? 1.2 : 1 / 1.2), e.clientX, e.clientY) }, { passive: false })
+    img.addEventListener('dblclick', (e) => { kBodu(st.z > 1 ? 1 : 2.5, e.clientX, e.clientY) })
+    ov.querySelectorAll('[data-zoom]').forEach(b => b.addEventListener('click', (e) => {
+      e.stopPropagation()
+      const r = ov.getBoundingClientRect(), cx = r.left + r.width / 2, cy = r.top + r.height / 2
+      const z = b.dataset.zoom
+      if (z === '1') { st.z = 1; uplatni() } else kBodu(st.z * (z === '+' ? 1.5 : 1 / 1.5), cx, cy)
+    }))
+    ov.querySelector('[data-zavrit]').addEventListener('click', (e) => { e.stopPropagation(); ov.style.display = 'none' })
+    // Tah (myš i jeden prst) a štípnutí (dva prsty)
+    const prsty = new Map()
+    let tah = null, stip = null, pohnul = false
+    ov.addEventListener('pointerdown', (e) => {
+      if (e.target.closest('button')) return
+      prsty.set(e.pointerId, { x: e.clientX, y: e.clientY }); pohnul = false
+      if (prsty.size === 1) tah = { x: e.clientX, y: e.clientY, sx: st.x, sy: st.y }
+      if (prsty.size === 2) {
+        const [a, c] = [...prsty.values()]
+        stip = { d: Math.hypot(a.x - c.x, a.y - c.y) || 1, z: st.z, cx: (a.x + c.x) / 2, cy: (a.y + c.y) / 2 }; tah = null
+      }
+    })
+    ov.addEventListener('pointermove', (e) => {
+      if (!prsty.has(e.pointerId)) return
+      prsty.set(e.pointerId, { x: e.clientX, y: e.clientY })
+      if (stip && prsty.size === 2) {
+        const [a, c] = [...prsty.values()]
+        kBodu(stip.z * (Math.hypot(a.x - c.x, a.y - c.y) / stip.d), stip.cx, stip.cy); pohnul = true
+      } else if (tah && st.z > 1) {
+        st.x = tah.sx + (e.clientX - tah.x); st.y = tah.sy + (e.clientY - tah.y); uplatni()
+        if (Math.abs(e.clientX - tah.x) + Math.abs(e.clientY - tah.y) > 4) pohnul = true
+      }
+    })
+    const pusti = (e) => { prsty.delete(e.pointerId); if (prsty.size < 2) stip = null; if (!prsty.size) tah = null }
+    ov.addEventListener('pointerup', pusti); ov.addEventListener('pointercancel', pusti)
+    // Klepnutí VEDLE fotky zavře (klepnutí na fotku ani tah ne)
+    ov.addEventListener('click', (e) => { if (!pohnul && e.target === ov) ov.style.display = 'none' })
   }
   document.getElementById('avatar-preview-img').src = url
+  if (ov._st) { ov._st.z = 1; ov._st.x = 0; ov._st.y = 0; ov._uplatni() }
   ov.style.display = 'flex'
 }
 
@@ -35520,7 +35635,73 @@ function smiNastavitFotku() { return currentProfile?.role === 'admin' }
 // než ho nenabídnout vůbec.
 function jeObrazek(d) {
   const t = ((d?.file_name || '') + ' ' + (d?.file_url || '')).toLowerCase()
-  return /\.(jpe?g|png|webp|gif|bmp|heic|heif)(\?|$|#)/.test(t)
+  // Za příponou může být i mezera: jméno souboru stačí, i když odkaz příponu nemá.
+  return /\.(jpe?g|png|webp|gif|bmp|heic|heif)(\?|$|#|\s)/.test(t)
+}
+// Majitel 1. 10. 2026: „musí to umět brát i PDF, někteří doklady nahrávají
+// v PDF" — fotka z dokladu jde vzít i z PDF (stránka se vykreslí na obrázek).
+function jePdf(d) {
+  const t = ((d?.file_name || '') + ' ' + (d?.file_url || '')).toLowerCase()
+  return /\.pdf(\?|$|#|\s)/.test(t)
+}
+// Vykreslí stránku PDF na obrázek (data URL) pro výřez fotky. `zdroj` je
+// odkaz na doklad, nebo soubor (File) z telefonu. U víc stran se nejdřív
+// vybere strana. Vrací data URL, nebo null (zrušeno / nejde načíst).
+async function pdfNaObrazek(zdroj) {
+  try { await ensureLib('pdfjs') } catch (e) { showToast('❌ Čtečka PDF se nenačetla — zkontrolujte připojení'); return null }
+  try { pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js' } catch (e) {}
+  let pdf
+  try {
+    const param = (zdroj instanceof Blob) ? { data: new Uint8Array(await zdroj.arrayBuffer()) } : { url: zdroj }
+    pdf = await pdfjsLib.getDocument(param).promise
+  } catch (e) {
+    // Starší doklady: fotka uložená pod jménem .pdf (viz zadní strana
+    // v uploadDocument). Když to PDF není, zkus to jako obrázek.
+    if (!(zdroj instanceof Blob)) {
+      const jde = await new Promise(ok => { const i = new Image(); i.crossOrigin = 'anonymous'
+        i.onload = () => ok(true); i.onerror = () => ok(false); i.src = zdroj })
+      if (jde) return zdroj
+    }
+    showToast('❌ PDF se nepodařilo otevřít'); return null
+  }
+  const vykresli = async (cislo, sirka) => {
+    const strana = await pdf.getPage(cislo)
+    const vp1 = strana.getViewport({ scale: 1 })
+    const vp = strana.getViewport({ scale: sirka / vp1.width })
+    const c = document.createElement('canvas'); c.width = Math.round(vp.width); c.height = Math.round(vp.height)
+    const cx = c.getContext('2d'); cx.fillStyle = '#fff'; cx.fillRect(0, 0, c.width, c.height)
+    await strana.render({ canvasContext: cx, viewport: vp }).promise
+    return c
+  }
+  let cislo = 1
+  if (pdf.numPages > 1) {
+    cislo = await new Promise(async (hotovo) => {
+      const ov = document.createElement('div')
+      ov.id = 'pdf-strana-overlay'
+      ov.style.cssText = 'position:fixed;inset:0;z-index:100001;background:rgba(20,17,15,.8);display:flex;align-items:flex-start;justify-content:center;overflow-y:auto;padding:20px'
+      ov.innerHTML = `<div style="background:#fff;border-radius:16px;max-width:620px;width:100%;margin:auto;padding:18px 20px">
+          <div style="font-size:16px;font-weight:800;margin-bottom:10px">Ze které strany vzít fotku?</div>
+          <div id="pdf-strany" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(130px,1fr));gap:10px"></div>
+          <button id="pdf-zrus" style="margin-top:14px;width:100%;min-height:44px;border:1.5px solid var(--brd);border-radius:10px;background:#fff;font-size:14px;font-weight:700;font-family:inherit;cursor:pointer">Zrušit</button>
+        </div>`
+      document.body.appendChild(ov)
+      ov.querySelector('#pdf-zrus').onclick = () => { ov.remove(); hotovo(0) }
+      const mriz = ov.querySelector('#pdf-strany')
+      for (let i = 1; i <= Math.min(pdf.numPages, 8); i++) {
+        const b = document.createElement('button')
+        b.style.cssText = 'padding:0;border:2px solid var(--brd);border-radius:10px;background:#fff;cursor:pointer;overflow:hidden;min-height:44px'
+        b.innerHTML = `<div style="padding:6px;font-size:12px;font-weight:700">Strana ${i}</div>`
+        b.onclick = () => { ov.remove(); hotovo(i) }
+        mriz.appendChild(b)
+        try { const c = await vykresli(i, 240); c.style.cssText = 'width:100%;display:block'; b.prepend(c) } catch (e) {}
+      }
+    })
+    if (!cislo) return null
+  }
+  try {
+    const c = await vykresli(cislo, 1800)
+    return c.toDataURL('image/jpeg', 0.92)
+  } catch (e) { showToast('❌ Stranu PDF se nepodařilo vykreslit'); return null }
 }
 
 async function vyberFotkuPracovnika(workerId) {
@@ -35535,10 +35716,12 @@ async function vyberFotkuPracovnika(workerId) {
   try {
     const { data } = await sb.from('documents')
       .select('id, doc_type, file_name, file_url, status').eq('worker_id', id)
-    doklady = (data || []).filter(d => d.file_url && jeObrazek(d)
+    doklady = (data || []).filter(d => d.file_url && (jeObrazek(d) || jePdf(d))
       && d.status !== 'rejected' && d.status !== 'unreadable')
   } catch (e) { /* bez dokladů se prostě nabídne jen soubor */ }
 
+  // Současná fotka — jde ji otevřít znovu a otočit nebo přeříznout.
+  const aktualni = (currentWorkerProfile && String(currentWorkerProfile.id) === String(id) && currentWorkerProfile.avatar_url) || ''
   const ov = document.createElement('div')
   ov.id = 'zdroj-fotky-overlay'
   ov.style.cssText = 'position:fixed;inset:0;z-index:100000;background:rgba(20,17,15,.6);display:flex;align-items:flex-start;justify-content:center;overflow-y:auto;padding:20px'
@@ -35549,16 +35732,17 @@ async function vyberFotkuPracovnika(workerId) {
         <button id="zdroj-zavri" style="background:rgba(255,255,255,.2);border:none;color:#fff;width:34px;height:34px;border-radius:50%;cursor:pointer;font-family:inherit;font-size:18px;line-height:1">×</button>
       </div>
       <div style="padding:18px 20px">
-        <button id="zdroj-soubor" class="btn-pri" style="width:100%;min-height:48px;font-size:15px;font-weight:800;margin-bottom:16px">📁 Nahrát nový soubor</button>
+        <button id="zdroj-soubor" class="btn-pri" style="width:100%;min-height:48px;font-size:15px;font-weight:800;margin-bottom:10px">📁 Nahrát nový soubor (obrázek nebo PDF)</button>
+        ${aktualni ? `<button id="zdroj-aktualni" style="width:100%;min-height:48px;font-size:14px;font-weight:700;margin-bottom:16px;border:1.5px solid var(--brd);border-radius:10px;background:#fff;cursor:pointer;font-family:inherit">✏️ Upravit současnou fotku (otočit, výřez)</button>` : ''}
         <div style="font-size:12px;font-weight:700;color:#6b6157;margin-bottom:8px">
-          ${doklady.length ? 'Nebo z dokladů, které už má nahrané — vyberte a pak si najeďte na obličej:' : 'Nahrané doklady nemá žádné (nebo jsou to PDF).'}
+          ${doklady.length ? 'Nebo z dokladů, které už má nahrané — vyberte a pak si najeďte na obličej:' : 'Nahrané doklady nemá žádné.'}
         </div>
         <div id="zdroj-doklady" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(110px,1fr));gap:10px">
           ${doklady.map(d => `
-            <button class="zdroj-doklad" data-url="${escAttr(d.file_url)}"
+            <button class="zdroj-doklad" data-url="${escAttr(d.file_url)}" data-pdf="${jePdf(d) ? '1' : ''}"
               style="padding:0;border:2px solid var(--brd);border-radius:10px;background:#fff;cursor:pointer;overflow:hidden;text-align:left">
-              <img src="${escAttr(d.file_url)}" alt="" loading="lazy"
-                style="width:100%;height:80px;object-fit:cover;display:block;background:#f4efe7">
+              ${jePdf(d) ? `<div style="width:100%;height:80px;display:flex;align-items:center;justify-content:center;background:#f4efe7;font-size:26px">📄<span style="font-size:12px;font-weight:800;margin-left:4px">PDF</span></div>`
+                : `<img src="${escAttr(d.file_url)}" alt="" loading="lazy" style="width:100%;height:80px;object-fit:cover;display:block;background:#f4efe7">`}
               <span style="display:block;padding:6px 8px;font-size:11px;font-weight:700;color:#211D1A">${escAttr(docLabel(d.doc_type))}</span>
             </button>`).join('')}
         </div>
@@ -35569,8 +35753,19 @@ async function vyberFotkuPracovnika(workerId) {
   ov.querySelector('#zdroj-zavri').onclick = zavri
   ov.onclick = (e) => { if (e.target === ov) zavri() }
   ov.querySelector('#zdroj-soubor').onclick = () => { zavri(); vyberFotkuZeSouboru(id) }
+  const upravit = ov.querySelector('#zdroj-aktualni')
+  if (upravit) upravit.onclick = () => { zavri(); otevriVyrezFotky({ url: aktualni }, id) }
   ov.querySelectorAll('.zdroj-doklad').forEach(b => {
-    b.onclick = () => { zavri(); otevriVyrezFotky({ url: b.dataset.url }, id) }
+    b.onclick = async () => {
+      zavri()
+      if (b.dataset.pdf) {
+        showToast('⏳ Otevírám PDF…')
+        const obrazek = await pdfNaObrazek(b.dataset.url)
+        if (obrazek) otevriVyrezFotky({ url: obrazek }, id)
+        return
+      }
+      otevriVyrezFotky({ url: b.dataset.url }, id)
+    }
   })
 }
 
@@ -35579,8 +35774,18 @@ function vyberFotkuZeSouboru(workerId) {
   if (!id) { showToast('⚠️ Není vybraný pracovník'); return }
   const vstup = document.createElement('input')
   vstup.type = 'file'
-  vstup.accept = 'image/*'
-  vstup.onchange = () => { const f = vstup.files?.[0]; if (f) otevriVyrezFotky(f, id) }
+  vstup.accept = 'image/*,application/pdf,.pdf'
+  vstup.onchange = async () => {
+    const f = vstup.files?.[0]
+    if (!f) return
+    if (f.type === 'application/pdf' || /\.pdf$/i.test(f.name || '')) {
+      showToast('⏳ Otevírám PDF…')
+      const obrazek = await pdfNaObrazek(f)
+      if (obrazek) otevriVyrezFotky({ url: obrazek }, id)
+      return
+    }
+    otevriVyrezFotky(f, id)
+  }
   vstup.click()
 }
 
@@ -35617,11 +35822,18 @@ async function otevriVyrezFotky(zdroj, workerId) {
   ov.style.cssText = 'position:fixed;inset:0;z-index:100000;background:rgba(20,17,15,.94);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:16px;padding:20px'
   ov.innerHTML = `
     <div style="color:#fff;font-size:15px;font-weight:700;text-align:center">Nastavte výřez fotky<br>
-      <span style="font-size:12px;font-weight:400;opacity:.75">Táhněte prstem nebo myší · posuvníkem přiblížíte</span></div>
+      <span style="font-size:12px;font-weight:400;opacity:.75">Táhněte prstem nebo myší · posuvníkem přiblížíte · šikmou fotku otočíte</span></div>
     <canvas id="vyrez-platno" width="${SIRKA}" height="${PLOCHA}"
       style="width:${SIRKA}px;height:${PLOCHA}px;border-radius:10px;touch-action:none;cursor:grab;background:#000;box-shadow:0 0 0 3px rgba(232,161,58,.7)"></canvas>
-    <input id="vyrez-zoom" type="range" min="100" max="400" value="100"
+    <input id="vyrez-zoom" type="range" min="100" max="1000" value="100" aria-label="Přiblížení"
       style="width:${PLOCHA}px;max-width:90vw;accent-color:#E8A13A">
+    <!-- Otočení: šikmo nebo naležato nahraná fotka (majitel 1. 10. 2026). -->
+    <div style="display:flex;gap:8px;align-items:center;width:${PLOCHA}px;max-width:90vw;color:#fff;font-size:12px">
+      <button id="vyrez-vlevo" title="Otočit o 90° doleva" style="min-width:44px;min-height:44px;border-radius:10px;border:2px solid rgba(255,255,255,.6);background:none;color:#fff;font-size:20px;cursor:pointer">↺</button>
+      <input id="vyrez-uhel" type="range" min="-45" max="45" value="0" step="1" aria-label="Narovnat" title="Narovnat šikmou fotku" style="flex:1;accent-color:#E8A13A">
+      <span id="vyrez-uhel-text" style="min-width:34px;text-align:right">0°</span>
+      <button id="vyrez-vpravo" title="Otočit o 90° doprava" style="min-width:44px;min-height:44px;border-radius:10px;border:2px solid rgba(255,255,255,.6);background:none;color:#fff;font-size:20px;cursor:pointer">↻</button>
+    </div>
     <div style="display:flex;gap:10px;width:${PLOCHA}px;max-width:90vw">
       <button id="vyrez-zrus" style="flex:1;min-height:44px;padding:12px;border-radius:12px;border:2px solid #fff;background:none;color:#fff;font-size:15px;font-weight:700;font-family:inherit;cursor:pointer">Zrušit</button>
       <button id="vyrez-uloz" style="flex:1;min-height:44px;padding:12px;border-radius:12px;border:none;background:#E8A13A;color:#211D1A;font-size:15px;font-weight:800;font-family:inherit;cursor:pointer">Uložit fotku</button>
@@ -35633,8 +35845,34 @@ async function otevriVyrezFotky(zdroj, workerId) {
   // Výchozí přiblížení: obrázek musí pokrýt CELÝ výřez, tedy obě jeho strany.
   // U čtverce stačila kratší strana; u obdélníku 3:4 ne — širokou fotku by to
   // na výšku nepokrylo a nahoře i dole by zůstalo prázdno.
-  const zaklad = Math.max(SIRKA / obr.width, PLOCHA / obr.height)
+  // OTOČENÍ: z původního obrázku se kreslí otočená kopie (o 90° tlačítky,
+  // o pár stupňů posuvníkem). Rohy, které otočením vzniknou, jsou bílé —
+  // přiblížením se schovají.
+  const puvodni = obr
+  let otoceni = 0, jemne = 0
+  const otocenyZdroj = () => {
+    const uhel = ((otoceni + jemne) % 360) * Math.PI / 180
+    if (!otoceni && !jemne) return puvodni
+    const cos = Math.abs(Math.cos(uhel)), sin = Math.abs(Math.sin(uhel))
+    const w = puvodni.width, h = puvodni.height
+    const c = document.createElement('canvas')
+    c.width = Math.round(w * cos + h * sin); c.height = Math.round(w * sin + h * cos)
+    const cx = c.getContext('2d')
+    cx.fillStyle = '#fff'; cx.fillRect(0, 0, c.width, c.height)
+    cx.translate(c.width / 2, c.height / 2); cx.rotate(uhel)
+    cx.drawImage(puvodni, -w / 2, -h / 2)
+    return c
+  }
+  let zaklad = Math.max(SIRKA / obr.width, PLOCHA / obr.height)
   const st = { zoom: 1, x: 0, y: 0 }
+  const prekresliOtoceni = () => {
+    obr = otocenyZdroj()
+    zaklad = Math.max(SIRKA / obr.width, PLOCHA / obr.height)
+    // Střed výřezu zůstává na středu obrázku
+    const m = zaklad * st.zoom
+    st.x = (SIRKA - obr.width * m) / 2; st.y = (PLOCHA - obr.height * m) / 2
+    kresli()
+  }
 
   function kresli() {
     const m = zaklad * st.zoom
@@ -35658,6 +35896,13 @@ async function otevriVyrezFotky(zdroj, workerId) {
   window.addEventListener('mousemove', tah);   platno.addEventListener('touchmove', tah, {passive:false})
   window.addEventListener('mouseup', konec);   platno.addEventListener('touchend', konec)
 
+  ov.querySelector('#vyrez-vlevo').onclick = () => { otoceni = (otoceni + 270) % 360; prekresliOtoceni() }
+  ov.querySelector('#vyrez-vpravo').onclick = () => { otoceni = (otoceni + 90) % 360; prekresliOtoceni() }
+  ov.querySelector('#vyrez-uhel').oninput = (e) => {
+    jemne = Number(e.target.value) || 0
+    ov.querySelector('#vyrez-uhel-text').textContent = jemne + '°'
+    prekresliOtoceni()
+  }
   ov.querySelector('#vyrez-zoom').oninput = (e) => {
     const novy = Number(e.target.value) / 100
     // Přibližuje se ke STŘEDU kolečka, ne k levému hornímu rohu — jinak by
@@ -35670,17 +35915,18 @@ async function otevriVyrezFotky(zdroj, workerId) {
     kresli()
   }
 
-  const zavri = () => { try { if (!zUrl) URL.revokeObjectURL(obr.src) } catch(e){}
+  const zavri = () => { try { if (!zUrl) URL.revokeObjectURL(puvodni.src) } catch(e){}
     window.removeEventListener('mousemove', tah); window.removeEventListener('mouseup', konec); ov.remove() }
   ov.querySelector('#vyrez-zrus').onclick = zavri
   ov.querySelector('#vyrez-uloz').onclick = async () => {
     const btn = ov.querySelector('#vyrez-uloz')
     btn.disabled = true; btn.textContent = 'Ukládám…'
-    // 400×533 (3:4). Větší nemá smysl: největší, kde se fotka ukazuje, je
-    // výška řádku v tabulce, tedy řádově 120 px.
-    const cil = document.createElement('canvas'); cil.width = 400; cil.height = 533
+    // 900×1200 (3:4). Do 1. 10. 2026 jen 400×533 — majitel chce fotku
+    // přibližovat („musí fungovat ještě víc") a malá se při přiblížení rozpadla.
+    const cil = document.createElement('canvas'); cil.width = 900; cil.height = 1200
     const c2 = cil.getContext('2d')
-    const mer = 533 / PLOCHA
+    c2.fillStyle = '#fff'; c2.fillRect(0, 0, cil.width, cil.height)
+    const mer = 1200 / PLOCHA
     const m = mer * zaklad * st.zoom
     c2.drawImage(obr, st.x * mer, st.y * mer, obr.width * m, obr.height * m)
     let blob = null
