@@ -282,6 +282,112 @@ module.exports = async (req, res) => {
       return;
     }
 
+    // ---------------------------------------------------------------
+    // ČTENÍ (GET): DOTAZY SOUBĚŽNĚ, NE ZA SEBOU (1. 10. 2026)
+    //
+    // Majitel: „otevření odkazu trvá asi 8 s, přepnutí týdne asi 10 s."
+    // Funkce běží na Vercelu ve Washingtonu (iad1), databáze v Irsku
+    // (eu-west-1) — každý dotaz je cesta přes Atlantik a zpátky, kolem
+    // 0,1 s. Do teď se čekalo na 10–11 dotazů postupně, i když většina
+    // z nich výsledek toho předchozího vůbec nepotřebuje.
+    //
+    // Teď se ptá v pěti kolech (v šestém, jen když chybí sazba šéfa firmy):
+    //   1. odkaz podle tokenu — musí být první, bez platného odkazu nic
+    //   2. party odkazu + kdo je mimo výkaz + poznámky + odškrtnutý týden
+    //   3. lidé v partách + docházka s partou (+ seznam týdnů s partou)
+    //   4. stará docházka bez party (+ seznam týdnů bez party)
+    //   5. jména, sazby, doklady, provize, historie, ubytování, fotky, dovolené
+    //   6. sazba, provize a historie šéfů firem
+    // Dotazy jsou TYTÉŽ jako dřív (stejné tabulky, sloupce i filtry), jen
+    // odcházejí dřív. Ven jde totéž.
+    //
+    // KAŽDÝ DŘÍV PUŠTĚNÝ DOTAZ JE OBALENÝ (`potom`). Slib, který se odmítne
+    // dřív, než na něj kód dojde, by Node jinak vzal jako neošetřenou chybu
+    // a shodil celou funkci. `vybal` chybu vyhodí až tam, kde ji kód čekal
+    // dřív — co dřív končilo chybou 500, končí jí i teď, a co se dřív
+    // potichu přeskočilo, přeskočí se i teď.
+    // ---------------------------------------------------------------
+    const potom = (slib) => slib.then(v => ({ v }), e => ({ e }));
+    const vybal = (x) => { if (x.e) throw x.e; return x.v; };
+
+    // Co si odběratel u lidí poznamenal — fotka, poznámka, známka. Nezávisí
+    // na partách ani na týdnu, proto se na to ptá hned ve druhém kole.
+    // Chybu nikdy nevyhodí: při potížích vrátí prázdno, stejně jako dřív.
+    const nactiPoznamky = async () => {
+      const poznamky = {};
+      try {
+        // Migrace mohla proběhnout jen zčásti — například ukončená spolupráce už
+        // v databázi je, ale barva poznámky ještě ne. Proto se zkouší postupně
+        // od nejúplnějšího dotazu k nejchudšímu. Dřív to bylo všechno-nebo-nic
+        // a chybějící barva zahodila i ukončenou spolupráci, kterou databáze měla.
+        const ZAKLAD = 'worker_id,foto,poznamka,hodnoceni';
+        const varianty = [
+          ZAKLAD + ',spoluprace_ukoncena,spoluprace_do,pozn_tucne,pozn_barva',
+          ZAKLAD + ',spoluprace_ukoncena,spoluprace_do',
+          ZAKLAD + ',pozn_tucne,pozn_barva',
+          ZAKLAD,
+        ];
+        let pz = null, posledniChyba = null;
+        for (const sloupce of varianty) {
+          try {
+            pz = await db(`client_link_workers?select=${sloupce}&link_id=eq.${odkaz.id}`, klic);
+            break;
+          } catch (e) {
+            // POZOR: db() hlásí jen „db 400", podrobnosti jsou v e.kod.
+            // Zkoušet dál smí jen u chybějícího sloupce, ne při výpadku sítě.
+            if (e.kod !== '42703' && e.stav !== 400) throw e;
+            posledniChyba = e;
+          }
+        }
+        if (pz === null) throw posledniChyba;
+        for (const p of (pz || [])) {
+          poznamky[p.worker_id] = { foto: p.foto || null, poznamka: p.poznamka || '',
+                                    hodnoceni: p.hodnoceni || null,
+                                    spoluprace_ukoncena: !!p.spoluprace_ukoncena,
+                                    spoluprace_do: p.spoluprace_do || '',
+                                    pozn_tucne: !!p.pozn_tucne,
+                                    pozn_barva: BARVY_POZNAMKY.includes(p.pozn_barva) ? p.pozn_barva : '' };
+        }
+      } catch (e) { console.warn('[klient] poznámky se nenačetly:', e.message); }
+      return poznamky;
+    };
+
+    const cteni = req.method === 'GET';
+    let nyni = null, kw = 0, rok = 0, od = '', doDne = '', prvniOtevreni = false;
+    let slibMimo = null, slibPoznamky = null, slibUhrazeno = null;
+    if (cteni) {
+      nyni = ted();
+      const dnes = new Date(nyni.den + 'T12:00:00Z');   // poledne, ať posun pásma nikdy nepřehodí den
+      const tedTyden = tydenKDatu(dnes);
+
+      // Odběratel si smí listovat zpátky. Čísla bereme z adresy, ale jen jako
+      // celá čísla v rozumném rozsahu — do dotazu do databáze nesmí jít nic jiného.
+      kw = tedTyden.kw; rok = tedTyden.rok;
+      const zadanyKw = parseInt(String((req.query && req.query.kw) || ''), 10);
+      const zadanyRok = parseInt(String((req.query && req.query.rok) || ''), 10);
+      if (Number.isInteger(zadanyKw) && zadanyKw >= 1 && zadanyKw <= 53 &&
+          Number.isInteger(zadanyRok) && zadanyRok >= 2020 && zadanyRok <= 2100) {
+        // Do budoucna se listovat nedá — nemá to co ukázat.
+        if (zadanyRok < tedTyden.rok || (zadanyRok === tedTyden.rok && zadanyKw <= tedTyden.kw)) {
+          kw = zadanyKw; rok = zadanyRok;
+        }
+      }
+      const po = pondeliTydne(kw, rok);
+      const ne = new Date(po); ne.setUTCDate(ne.getUTCDate() + 6);
+      const iso = d => d.toISOString().slice(0, 10);
+      od = iso(po); doDne = iso(ne);
+
+      // Počítadlo otevření — viz zápis návštěvy níž.
+      prvniOtevreni = String((req.query && req.query.prvni) || '') === '1';
+
+      // Druhé kolo: nic z toho nepotřebuje znát party.
+      slibMimo = potom(db(`profiles?select=id&ve_vykazu=is.false`, klic));
+      slibPoznamky = nactiPoznamky();
+      slibUhrazeno = potom(db(
+        `client_link_weeks?select=uhrazeno&link_id=eq.${odkaz.id}` +
+        `&kw=eq.${kw}&rok=eq.${rok}&limit=1`, klic));
+    }
+
     const vazby = await db(
       `client_link_teams?select=team_id&link_id=eq.${odkaz.id}`, klic);
     const teamIds = (vazby || []).map(v => v.team_id).filter(Boolean);
@@ -470,31 +576,45 @@ module.exports = async (req, res) => {
       return;
     }
 
-    const nyni = ted();
-    const dnes = new Date(nyni.den + 'T12:00:00Z');   // poledne, ať posun pásma nikdy nepřehodí den
-    const tedTyden = tydenKDatu(dnes);
-
-    // Odběratel si smí listovat zpátky. Čísla bereme z adresy, ale jen jako
-    // celá čísla v rozumném rozsahu — do dotazu do databáze nesmí jít nic jiného.
-    let kw = tedTyden.kw, rok = tedTyden.rok;
-    const zadanyKw = parseInt(String((req.query && req.query.kw) || ''), 10);
-    const zadanyRok = parseInt(String((req.query && req.query.rok) || ''), 10);
-    if (Number.isInteger(zadanyKw) && zadanyKw >= 1 && zadanyKw <= 53 &&
-        Number.isInteger(zadanyRok) && zadanyRok >= 2020 && zadanyRok <= 2100) {
-      // Do budoucna se listovat nedá — nemá to co ukázat.
-      if (zadanyRok < tedTyden.rok || (zadanyRok === tedTyden.rok && zadanyKw <= tedTyden.kw)) {
-        kw = zadanyKw; rok = zadanyRok;
-      }
-    }
-    const po = pondeliTydne(kw, rok);
-    const ne = new Date(po); ne.setUTCDate(ne.getUTCDate() + 6);
-    const iso = d => d.toISOString().slice(0, 10);
-    const od = iso(po), doDne = iso(ne);
-
     // Lidé, kteří do vybraných part patří. Potřeba kvůli starší docházce:
     // u záznamů z doby před zavedením part není parta zapsaná, takže by je
     // odkaz nikdy neukázal a odběrateli by chyběly starší týdny.
+    //
+    // Docházka se čte ve dvou kusech: dny s partou z vybraných skupin (k tomu
+    // stačí znát party, proto se pouští HNED, souběžně s dotazem na lidi)
+    // a staré dny BEZ party u lidí, kteří do těch skupin patří (ten musí počkat
+    // na seznam lidí). Dny se zapsanou CIZÍ partou se nepřidávají — ty patří
+    // jinému odběrateli. Seznam týdnů (`tydny`) se čte stejně a ve stejné chvíli.
     let lideVeSkupinach = [];
+    // Adresa: nejdřív ručně zapsaná stavba, a když chybí, adresa z příchodu —
+    // stejné pořadí, jaké má správce v appce (attDisplaySite). Bez té druhé
+    // by u části dnů nebyla adresa žádná.
+    // Ven jde jen TEXT adresy. Souřadnice (location_lat/lng) ani údaj o tom,
+    // jestli ji člověk psal ručně nebo přišla z GPS (address_source), se
+    // nečtou — klient tak nepozná rozdíl a ani ho poznat nemá.
+    const SLOUPCE_DOCHAZKY =
+      'id,worker_id,work_date,check_in,check_out,break_start,break_end,' +
+      'break2_start,break2_end,breaks,total_hours,construction_site,location_address,work_description,' +
+      // Výjimky u jednoho dne. Bez nich by se tady počítalo po staru a nikdo
+      // by se to nedozvěděl — Supabase u chybějícího sloupce v tomhle dotazu
+      // nevrátí chybu, jen by se sem nic nedoneslo.
+      'bez_vyplaty,bez_provize_den,vyplata_castka';
+    const SLOUPCE_TYDNU = 'kw,kw_year,worker_id,work_date';
+    // `poradi` jen u seznamu týdnů: NEJNOVĚJŠÍ NAPŘED. Databáze vrací nejvýš
+    // určitý počet řádků (v Supabase výchozí 1000) — se vzestupným pořadím by
+    // při delší historii v přepínači chyběly právě nejnovější týdny (rozbor
+    // výkonu 1. 10. 2026). Na pořadí v seznamu nezáleží, řadí se níž.
+    const sPartou = (sloupce, odDne, doDne2, poradi = 'asc') => potom(db(`attendance?select=${sloupce}` +
+      `&team_id=in.(${teamIds.map(encodeURIComponent).join(',')})` +
+      `&work_date=gte.${odDne}&work_date=lte.${doDne2}&order=work_date.${poradi}&limit=5000`, klic));
+    const bezParty = (sloupce, odDne, doDne2, poradi = 'asc') => potom(db(`attendance?select=${sloupce}&team_id=is.null` +
+      `&worker_id=in.(${lideVeSkupinach.map(encodeURIComponent).join(',')})` +
+      `&work_date=gte.${odDne}&work_date=lte.${doDne2}&order=work_date.${poradi}&limit=5000`, klic));
+
+    // Třetí kolo: docházka s partou (a týdny s partou) souběžně s lidmi.
+    const dochSPartou = teamIds.length ? sPartou(SLOUPCE_DOCHAZKY, od, doDne) : null;
+    const tydnySPartou = (prvniOtevreni && teamIds.length)
+      ? sPartou(SLOUPCE_TYDNU, '2000-01-01', nyni.den, 'desc') : null;
     if (teamIds.length) {
       try {
         const p = await db(
@@ -505,29 +625,23 @@ module.exports = async (req, res) => {
 
     const mimoVykaz = new Set();
     try {
-      const v = await db(`profiles?select=id&ve_vykazu=is.false`, klic);
+      const v = vybal(await slibMimo);
       (v || []).forEach(x => { if (x.id) mimoVykaz.add(x.id); });
     } catch (e) { console.warn('[klient] ve_vykazu se nenačetlo (migrace?):', e.message); }
     if (mimoVykaz.size) {
       lideVeSkupinach = lideVeSkupinach.filter(id => !mimoVykaz.has(id));
     }
 
-    // Načte docházku pro zadané období: dny s partou z vybraných skupin
-    // a k tomu staré dny BEZ party u lidí, kteří do těch skupin patří.
-    // Dny se zapsanou CIZÍ partou se nepřidávají — ty patří jinému odběrateli.
-    async function nactiDochazku(sloupce, odDne, doDne2) {
-      const kus = [];
-      if (teamIds.length) {
-        kus.push(db(`attendance?select=${sloupce}` +
-          `&team_id=in.(${teamIds.map(encodeURIComponent).join(',')})` +
-          `&work_date=gte.${odDne}&work_date=lte.${doDne2}&order=work_date.asc&limit=5000`, klic));
-      }
-      if (lideVeSkupinach.length) {
-        kus.push(db(`attendance?select=${sloupce}&team_id=is.null` +
-          `&worker_id=in.(${lideVeSkupinach.map(encodeURIComponent).join(',')})` +
-          `&work_date=gte.${odDne}&work_date=lte.${doDne2}&order=work_date.asc&limit=5000`, klic));
-      }
-      const casti = await Promise.all(kus);
+    // Čtvrté kolo: stará docházka bez party (a týdny bez party).
+    const dochBezParty = lideVeSkupinach.length ? bezParty(SLOUPCE_DOCHAZKY, od, doDne) : null;
+    const tydnyBezParty = (prvniOtevreni && lideVeSkupinach.length)
+      ? bezParty(SLOUPCE_TYDNU, '2000-01-01', nyni.den, 'desc') : null;
+
+    // Složí oba kusy v pořadí „s partou, pak bez party" — jako dřív — a vyřadí
+    // lidi mimo výkaz. Když kterýkoli kus selhal, chyba se vyhodí (dřív stejně
+    // z Promise.all).
+    const nactiDochazku = async (sKus, bezKus) => {
+      const casti = (await Promise.all([sKus, bezKus].filter(Boolean))).map(vybal);
       const videno = new Set(), vse = [];
       for (const c of casti) for (const r of (c || [])) {
         if (r.worker_id && mimoVykaz.has(r.worker_id)) continue;
@@ -536,30 +650,53 @@ module.exports = async (req, res) => {
         videno.add(k); vse.push(r);
       }
       return vse;
-    }
+    };
 
     let radky = [];
     // Telefon a řidičák u každého člověka. Sestavuje se uvnitř bloku níž,
     // ale deklaruje se TADY: odpověď se skládá až za ním a `let` uvnitř
     // bloku by z ní udělal nedefinovanou proměnnou.
     let lide = {};
+    let slibDovolene = null;
     if (teamIds.length || lideVeSkupinach.length) {
-      // Adresa: nejdřív ručně zapsaná stavba, a když chybí, adresa z příchodu —
-      // stejné pořadí, jaké má správce v appce (attDisplaySite). Bez té druhé
-      // by u části dnů nebyla adresa žádná.
-      // Ven jde jen TEXT adresy. Souřadnice (location_lat/lng) ani údaj o tom,
-      // jestli ji člověk psal ručně nebo přišla z GPS (address_source), se
-      // nečtou — klient tak nepozná rozdíl a ani ho poznat nemá.
-      const dochazka = await nactiDochazku(
-        'id,worker_id,work_date,check_in,check_out,break_start,break_end,' +
-        'break2_start,break2_end,breaks,total_hours,construction_site,location_address,work_description,' +
-        // Výjimky u jednoho dne. Bez nich by se tady počítalo po staru a nikdo
-        // by se to nedozvěděl — Supabase u chybějícího sloupce v tomhle dotazu
-        // nevrátí chybu, jen by se sem nic nedoneslo.
-        'bez_vyplaty,bez_provize_den,vyplata_castka',
-        od, doDne);
+      const dochazka = await nactiDochazku(dochSPartou, dochBezParty);
 
       const ids = [...new Set((dochazka || []).map(z => z.worker_id))];
+
+      // KTERÉ DNY SE UKÁŽOU — rozhoduje se hned, ne až po jménech a sazbách.
+      // Pravidla jsou tatáž jako dřív a nepotřebují nic z profilů. Díky tomu
+      // je hned známo, kdo v přehledu bude, a dotaz na dovolené (jen pro ty
+      // lidi) může odejít souběžně se jmény a sazbami, ne až po nich.
+      const vybraneDny = [];
+      for (const z of (dochazka || [])) {
+        // Ještě neuplynulo zdržení po odchodu (nebo směna pořád běží):
+        // klient uvidí, kdo a kde je, ale žádné časy ani hodiny.
+        if (!uzSeSmiUkazat(z, nyni)) {
+          const dnesniBezOdchodu = !z.check_out && String(z.work_date).slice(0, 10) === (nyni && nyni.den);
+          // Starý den bez odchodu je zapomenutý zápis, ne práce — ten se
+          // neukazuje vůbec, stejně jako ho přeskakuje appka.
+          if (!z.check_out && !dnesniBezOdchodu) continue;
+          vybraneDny.push({ z, u: null });
+          continue;
+        }
+        const u = upravDen(z, nyni);
+        if (!u) continue;
+        vybraneDny.push({ z, u });
+      }
+
+      // Dovolené a nemoci. Odběratel potřebuje vědět, kdo mu nepřijde a dokdy —
+      // bere se všechno, co ještě neskončilo před začátkem zobrazeného týdne,
+      // tedy i budoucí. Bez toho se to dozví, až ten člověk nedorazí.
+      // Páté kolo — výsledek se zpracuje až níž.
+      const ids2 = [...new Set(vybraneDny.map(d => d.z.worker_id))].filter(Boolean);
+      if (ids2.length) {
+        const seznam2 = ids2.map(encodeURIComponent).join(',');
+        slibDovolene = potom(db(
+          `vacations?select=worker_id,date_from,date_to,type,note` +
+          `&worker_id=in.(${seznam2})&date_to=gte.${od}` +
+          `&order=date_from.asc&limit=300`, klic));
+      }
+
       let jmena = {}, sazbaTed = {}, provizeTed = {}, bezProvize = new Set(), historie = {};
       // Zaměstnanec firmy → id firmy (šéfa), podle které se počítají peníze.
       const sefPodle = {};
@@ -701,7 +838,7 @@ module.exports = async (req, res) => {
         return v == null ? vychozi : v;
       };
 
-      for (const z of (dochazka || [])) {
+      for (const { z, u } of vybraneDny) {
         const zaklad = {
           worker: z.worker_id,
           jmeno: jmena[z.worker_id] || '—',
@@ -710,19 +847,13 @@ module.exports = async (req, res) => {
           prace: (z.work_description || '').trim() || null,
         };
 
-        // Ještě neuplynulo zdržení po odchodu (nebo směna pořád běží):
+        // Den, u kterého ještě neuplynulo zdržení (vybraný výš bez `u`):
         // klient uvidí, kdo a kde je, ale žádné časy ani hodiny.
-        if (!uzSeSmiUkazat(z, nyni)) {
-          const dnesniBezOdchodu = !z.check_out && zaklad.datum === (nyni && nyni.den);
-          // Starý den bez odchodu je zapomenutý zápis, ne práce — ten se
-          // neukazuje vůbec, stejně jako ho přeskakuje appka.
-          if (!z.check_out && !dnesniBezOdchodu) continue;
+        if (!u) {
           radky.push({ ...zaklad, probiha: true, prichod: null, odchod: null, pauzy: [], hodiny: 0 });
           continue;
         }
 
-        const u = upravDen(z, nyni);
-        if (!u) continue;
         // Den, za který pracovník nedostane zaplaceno, se nefakturuje — sazba
         // je nula. Provize SubBau za něj běží dál, pokud není vypnutá zvlášť.
         // U zaměstnance firmy platí sazba a provize FIRMY (viz sefPodle výš).
@@ -760,7 +891,6 @@ module.exports = async (req, res) => {
     // klient okno otevřené, ne kolikrát se přišel podívat. Proto se zvyšuje
     // jen při skutečném otevření — stránka to pozná a pošle `prvni=1`.
     // Čas poslední návštěvy se naopak zapisuje vždycky.
-    const prvniOtevreni = String((req.query && req.query.prvni) || '') === '1';
     const zmena = { posledni_navsteva: new Date().toISOString() };
     if (prvniOtevreni) zmena.pocet_navstev = (odkaz.pocet_navstev || 0) + 1;
     fetch(`${SUPABASE_URL}/rest/v1/client_links?id=eq.${odkaz.id}`, {
@@ -769,18 +899,11 @@ module.exports = async (req, res) => {
       body: JSON.stringify(zmena),
     }).catch(() => {});
 
-    // Dovolené a nemoci. Odběratel potřebuje vědět, kdo mu nepřijde a dokdy —
-    // bere se všechno, co ještě neskončilo před začátkem zobrazeného týdne,
-    // tedy i budoucí. Bez toho se to dozví, až ten člověk nedorazí.
+    // Dovolené — dotaz odešel výš, souběžně se jmény a sazbami.
     let dovolene = {};
     try {
-      const ids2 = [...new Set(radky.map(r => r.worker))].filter(Boolean);
-      if (ids2.length) {
-        const seznam2 = ids2.map(encodeURIComponent).join(',');
-        const abs = await db(
-          `vacations?select=worker_id,date_from,date_to,type,note` +
-          `&worker_id=in.(${seznam2})&date_to=gte.${od}` +
-          `&order=date_from.asc&limit=300`, klic);
+      if (slibDovolene) {
+        const abs = vybal(await slibDovolene);
         for (const a of (abs || [])) {
           // Nemoc se pozná podle sloupce type; starší záznamy ji mají jen
           // v poznámce, proto i ta záloha — stejně jako to dělá appka.
@@ -793,49 +916,13 @@ module.exports = async (req, res) => {
       }
     } catch (e) { console.warn('[klient] dovolené se nenačetly:', e.message); }
 
-    // Co si odběratel u lidí poznamenal — fotka, poznámka, známka.
-    let poznamky = {};
-    try {
-      // Migrace mohla proběhnout jen zčásti — například ukončená spolupráce už
-      // v databázi je, ale barva poznámky ještě ne. Proto se zkouší postupně
-      // od nejúplnějšího dotazu k nejchudšímu. Dřív to bylo všechno-nebo-nic
-      // a chybějící barva zahodila i ukončenou spolupráci, kterou databáze měla.
-      const ZAKLAD = 'worker_id,foto,poznamka,hodnoceni';
-      const varianty = [
-        ZAKLAD + ',spoluprace_ukoncena,spoluprace_do,pozn_tucne,pozn_barva',
-        ZAKLAD + ',spoluprace_ukoncena,spoluprace_do',
-        ZAKLAD + ',pozn_tucne,pozn_barva',
-        ZAKLAD,
-      ];
-      let pz = null, posledniChyba = null;
-      for (const sloupce of varianty) {
-        try {
-          pz = await db(`client_link_workers?select=${sloupce}&link_id=eq.${odkaz.id}`, klic);
-          break;
-        } catch (e) {
-          // POZOR: db() hlásí jen „db 400", podrobnosti jsou v e.kod.
-          // Zkoušet dál smí jen u chybějícího sloupce, ne při výpadku sítě.
-          if (e.kod !== '42703' && e.stav !== 400) throw e;
-          posledniChyba = e;
-        }
-      }
-      if (pz === null) throw posledniChyba;
-      for (const p of (pz || [])) {
-        poznamky[p.worker_id] = { foto: p.foto || null, poznamka: p.poznamka || '',
-                                  hodnoceni: p.hodnoceni || null,
-                                  spoluprace_ukoncena: !!p.spoluprace_ukoncena,
-                                  spoluprace_do: p.spoluprace_do || '',
-                                  pozn_tucne: !!p.pozn_tucne,
-                                  pozn_barva: BARVY_POZNAMKY.includes(p.pozn_barva) ? p.pozn_barva : '' };
-      }
-    } catch (e) { console.warn('[klient] poznámky se nenačetly:', e.message); }
+    // Co si odběratel u lidí poznamenal — dotaz odešel hned ve druhém kole.
+    const poznamky = await slibPoznamky;
 
-    // Je tenhle týden odběratelem odškrtnutý jako uhrazený?
+    // Je tenhle týden odběratelem odškrtnutý jako uhrazený? (taky druhé kolo)
     let uhrazeno = false;
     try {
-      const u = await db(
-        `client_link_weeks?select=uhrazeno&link_id=eq.${odkaz.id}` +
-        `&kw=eq.${kw}&rok=eq.${rok}&limit=1`, klic);
+      const u = vybal(await slibUhrazeno);
       uhrazeno = !!(u && u[0] && u[0].uhrazeno);
     } catch (e) { console.warn('[klient] stav týdne:', e.message); }
 
@@ -848,14 +935,15 @@ module.exports = async (req, res) => {
     // z ní vypadl seznam různých týdnů. Do 23. 9. 2026 běžel pokaždé —
     // i když odběratel jen přepnul týden. Seznam se mezi dvěma obnoveními
     // stejně nezmění, tak si ho drží stránka (`tydny: null` znamená
-    // „nech si ten, co máš").
+    // „nech si ten, co máš"). Od 1. 10. 2026 odchází souběžně s docházkou
+    // týdne (třetí a čtvrté kolo), ne až úplně na konci.
     let tydny = null;
     if (prvniOtevreni && (teamIds.length || lideVeSkupinach.length)) {
       tydny = [];
       try {
         // Od začátku spolupráce až do dneška — odběratel má vidět celou dobu,
         // co pro něj ti lidé dělají, ne jen probíhající týden.
-        const vse = await nactiDochazku('kw,kw_year,worker_id,work_date', '2000-01-01', nyni.den);
+        const vse = await nactiDochazku(tydnySPartou, tydnyBezParty);
         const videno = new Set();
         for (const r of (vse || [])) {
           const k = r.kw_year + '-' + r.kw;

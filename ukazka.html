@@ -837,11 +837,18 @@ input[type=checkbox],input[type=radio]{width:auto;padding:0;border-radius:4px;-w
 /* Čeká nepřečtená zpráva od pracovníka — položka Chat se musí ozvat sama,
    drobného odznaku si nikdo nevšiml. Po otevření chatu se třída sundá
    a položka vypadá přesně jako předtím. Aktivní (zlatá) sekce má přednost. */
-.sb-a.sb-msg:not(.on){background:rgba(196,66,40,.20);color:#fff;font-weight:800;animation:sbMsgPuls 1.8s ease-in-out infinite}
+.sb-a.sb-msg:not(.on){background:rgba(196,66,40,.20);color:#fff;font-weight:800;box-shadow:inset 0 0 0 1.5px rgba(196,66,40,.55)}
+/* Pulz je na vlastní vrstvě (::after) a mění se jen její průhlednost — to obstará
+   grafická karta bez překreslování. Do 1. 10. 2026 se animovala box-shadow přímo
+   na položce a prohlížeč kvůli tomu překresloval 60× za vteřinu, dokud zpráva
+   nebyla přečtená (změřeno v Chromu ~1,2–1,6 s práce hlavního vlákna za 10 s,
+   bez pulzu 0,07 s). Vypadá to stejně: vnitřní linka zesílí a kolem se rozsvítí záře. */
+.sb-a.sb-msg:not(.on)::after{content:"";position:absolute;inset:0;border-radius:inherit;box-shadow:inset 0 0 0 1.5px rgba(196,66,40,1),0 0 14px rgba(196,66,40,.45);opacity:0;pointer-events:none;will-change:opacity;animation:sbMsgPulsO 1.8s ease-in-out infinite}
+@keyframes sbMsgPulsO{0%,100%{opacity:0}50%{opacity:1}}
 .sb-a.sb-msg:not(.on) svg{color:#ff8a70;opacity:1}
 .sb-a.sb-msg:not(.on):hover{background:rgba(196,66,40,.32)}
 @keyframes sbMsgPuls{0%,100%{box-shadow:inset 0 0 0 1.5px rgba(196,66,40,.55)}50%{box-shadow:inset 0 0 0 1.5px rgba(196,66,40,1),0 0 14px rgba(196,66,40,.45)}}
-@media (prefers-reduced-motion:reduce){.sb-a.sb-msg:not(.on){animation:none;box-shadow:inset 0 0 0 1.5px rgba(196,66,40,.9)}}
+@media (prefers-reduced-motion:reduce){.sb-a.sb-msg:not(.on){animation:none;box-shadow:inset 0 0 0 1.5px rgba(196,66,40,.9)}.sb-a.sb-msg:not(.on)::after{animation:none;opacity:0}}
 .sb-foot{padding:14px;border-top:1px solid #3a322b;display:flex;align-items:center;gap:11px;background:rgba(0,0,0,.15);flex-shrink:0}
 .av{width:38px;height:38px;border-radius:11px;display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:800;flex-shrink:0;background:linear-gradient(135deg,#E8A13A,#d8902a);color:#211D1A;box-shadow:0 2px 8px rgba(232,161,58,.3)}
 .sb-fn{font-size:13px;font-weight:700;color:#fff}
@@ -5450,7 +5457,7 @@ async function submitAdminSignatureWithPlacement() {
 // Po nahrání nové verze se snadno pozná, jestli se opravdu nasadila: otevřete
 // appku, zmáčkněte F12 (na Macu ⌥⌘I) a v konzoli je vypsané tohle datum. Když
 // tam svítí starší, prohlížeč nebo GitHub drží starou verzi.
-const SUBBAU_VERZE = '2026-10-01 g — ubytování a auta, kalendář podle Stavbyplánu'
+const SUBBAU_VERZE = '2026-10-01 h — rychlejší appka (méně dotazů, malé fotky v seznamech), týden v Docházce neskáče'
 console.log('StavKo docházka — verze ' + SUBBAU_VERZE)
 // Verze i dole v menu správce. Když někdo novinku „nevidí", podle ní se hned
 // pozná, jestli nemá otevřenou starou kopii appky — bez hledání v konzoli.
@@ -6376,6 +6383,8 @@ function showAdmin(profile) {
   startAdminRealtime()
   // Nastav stav tlačítka zvuku podle uloženého nastavení
   _updateAdminSoundBtn()
+  // Zmenšeniny starších fotek pro seznamy (výkon, viz fotkaDoSeznamu)
+  try { zmenseninyNaPozadi() } catch (e) {}
 }
 
 // ============ ADMIN REALTIME — živá aktualizace bez reloadu ============
@@ -6412,7 +6421,40 @@ function _activeAdminView() {
   return on ? on.id.replace(/^v-/, '') : null
 }
 // Reakce na změnu v dané tabulce
+// ZMĚNA JEN V „PŘÍTOMNOSTI" SE NEPŘEKRESLUJE (výkon, 1. 10. 2026).
+// Každý pracovník zapisuje profiles.last_seen_at při otevření appky a pak každých
+// 5 minut (pingPresence), při přihlášení ještě last_login_at a login_count. Živé
+// spojení to správci hlásí jako změnu profilu — a ta u něj dřív pokaždé spustila
+// znovunačtení Pracovníků, čekajících registrací a celé otevřené sekce (změřeno:
+// 21 dotazů a ~0,55 MB dat za JEDEN takový zápis jednoho pracovníka).
+// Tyhle údaje ukazují jen Přístupy (online, poslední přihlášení) — tam se obnovuje
+// dál jako dřív. Jinde se přeskočí zpráva, která oproti MINULÉ ZPRÁVĚ o tomtéž
+// řádku nemění nic jiného. První zpráva o člověku (není s čím srovnat) a jakákoli
+// jiná změna (jméno, firma, fotka, aktivita, sazba…) obnovu spustí jako dřív.
+const _POLE_PRITOMNOSTI = new Set(['last_seen_at', 'last_login_at', 'login_count', 'updated_at'])
+const _profilOtisky = new Map()   // id → otisk řádku bez polí přítomnosti
+function _otiskProfilu(r) {
+  const o = {}
+  Object.keys(r || {}).sort().forEach(k => {
+    if (_POLE_PRITOMNOSTI.has(k)) return
+    const v = r[k]
+    o[k] = v == null ? null : (typeof v === 'object' ? JSON.stringify(v) : String(v))
+  })
+  return JSON.stringify(o)
+}
+function _jenPritomnostProfilu(payload) {
+  const evt = payload?.eventType || payload?.event || payload?.type || null
+  const n = payload?.new
+  if (!(evt === 'UPDATE' || evt === 'update') || !n || n.id == null) return false
+  const otisk = _otiskProfilu(n)
+  const minule = _profilOtisky.get(String(n.id))
+  _profilOtisky.set(String(n.id), otisk)
+  if (minule === undefined || minule !== otisk) return false
+  return _activeAdminView() !== 'pristupy'
+}
+
 function _onAdminDbChange(table, payload) {
+  if (table === 'profiles' && _jenPritomnostProfilu(payload)) return
   const evt = payload?.eventType || payload?.event || payload?.type || null
   const isInsert = evt === 'INSERT' || evt === 'insert'
   const isUpdate = evt === 'UPDATE' || evt === 'update'
@@ -8953,6 +8995,24 @@ async function renderProvizeContent() {
   const yStart = new Date(anchor.getFullYear(), 0, 1)
   const yEnd = new Date(anchor.getFullYear(), 11, 31)
 
+  // SOUBĚŽNĚ (výkon, 1. 10. 2026): historie sazeb, „uhrazeno" u lidí i u firem
+  // a počet řádků docházky nezávisí na ničem načteném — jdou hned s první dávkou.
+  // Dřív se čekalo na každý zvlášť (8 obrátek za sebou; s rokem docházky přes
+  // 10 000 řádků by to bylo 15). Data i jejich zpracování jsou stejné jako dřív,
+  // mění se jen to, KDY se na ně čeká.
+  const _bezVyjimky = (dotaz) => Promise.resolve(dotaz).then(r => r, e => ({ data: null, error: e || { message: 'chyba' } }))
+  const _tedProvize = new Date()
+  const _predemOd = localDateStr(new Date(Math.min(dStart.getTime(), wStart.getTime(), mStart.getTime(), yStart.getTime(), _tedProvize.getTime())))
+  const _predemDo = localDateStr(new Date(Math.max(dEnd.getTime(), wEnd.getTime(), mEnd.getTime(), yEnd.getTime(), _tedProvize.getTime())))
+  const pHistorie = _bezVyjimky(sb.from('worker_rate_history')
+    .select('worker_id, druh, hodnota, valid_from').order('valid_from', { ascending: true }))
+  const pPlatby = _bezVyjimky(sb.from('provize_payments')
+    .select('worker_id, paid').eq('period_type', 'week').eq('period_key', weekKey))
+  const pPlatbyFirem = _bezVyjimky(sb.from('provize_platby_firem')
+    .select('firma, paid').eq('period_key', weekKey))
+  const pPocetDochazky = _bezVyjimky(sb.from('attendance').select('id', { count: 'exact', head: true })
+    .gte('work_date', _predemOd).lte('work_date', _predemDo))
+
   const [{ data: workers, error: chybaLidi }, provResult, { data: teams }, { data: companies }, { data: subteams }] = await Promise.all([
     sb.from('profiles').select('id, full_name, hourly_rate_worker, team_id, subteam_id, zamestnavatel_id, supplier_type, company_name').in('role', ['osvec', 'partak']).eq('is_active', true).order('full_name'),
     sb.from('worker_commissions').select('worker_id, provize, payment_terms, bez_provize'),
@@ -9019,8 +9079,7 @@ async function renderProvizeContent() {
   // migrace), zůstane prázdná a počítá se dnešními hodnotami jako dřív.
   const historieSazeb = { sazba: {}, provize: {} }
   try {
-    const { data: hist, error: histErr } = await sb.from('worker_rate_history')
-      .select('worker_id, druh, hodnota, valid_from').order('valid_from', { ascending: true })
+    const { data: hist, error: histErr } = await pHistorie
     if (histErr) throw histErr
     ;(hist || []).forEach(h => {
       const kos = historieSazeb[h.druh]
@@ -9074,11 +9133,28 @@ async function renderProvizeContent() {
   // po stránkách — bez toho by roční provize tiše ukazovala jen zlomek odpracovaných hodin.
   const att = []
   const ATT_PAGE = 1000
-  for (let fromRow = 0; fromRow < 200000; fromRow += ATT_PAGE) {
-    const { data: page, error: pageErr } = await sb.from('attendance')
+  const strankaDochazky = (od) => sb.from('attendance')
       .select('worker_id, work_date, check_in, check_out, break_start, break_end, total_hours, team_id, bez_vyplaty, bez_provize_den, vyplata_castka')
       .gte('work_date', fetchStart).lte('work_date', fetchEnd)
-      .order('id').range(fromRow, fromRow + ATT_PAGE - 1)
+      .order('id').range(od, od + ATT_PAGE - 1)
+  // Kolik bude stránek, víme z počtu v první dávce → stáhnou se naráz. Zpracují
+  // se ve stejném pořadí a podle stejných pravidel jako dřív jedna po druhé; když
+  // je poslední stránka plná (mezitím někdo přibyl), čte se dál postaru.
+  let fromRow = 0, cistDal = true
+  const { count: pocetRadku, error: chybaPoctu } = (fetchStart === _predemOd && fetchEnd === _predemDo)
+    ? await pPocetDochazky : { count: null, error: true }
+  if (!chybaPoctu && Number.isFinite(pocetRadku) && pocetRadku > ATT_PAGE) {
+    const stranky = await Promise.all(Array.from({ length: Math.min(200, Math.ceil(pocetRadku / ATT_PAGE)) }, (_, i) => strankaDochazky(i * ATT_PAGE)))
+    for (const { data: page, error: pageErr } of stranky) {
+      if (pageErr) { provizeNejdou('Docházku', pageErr); return }
+      if (!page || !page.length) { cistDal = false; break }
+      att.push(...page)
+      fromRow += ATT_PAGE
+      if (page.length < ATT_PAGE) { cistDal = false; break }
+    }
+  }
+  for (; cistDal && fromRow < 200000; fromRow += ATT_PAGE) {
+    const { data: page, error: pageErr } = await strankaDochazky(fromRow)
     // Chyba stránky = neúplná docházka. Dřív se jen přestalo číst a provize
     // vyšla ze zlomku roku (nebo nula) — bez jediného slova.
     if (pageErr) { provizeNejdou('Docházku', pageErr); return }
@@ -9291,8 +9367,7 @@ async function renderProvizeContent() {
   const payMap = {}
   let paymentsTableMissing = false
   try {
-    const { data: payRows, error: payErr } = await sb.from('provize_payments')
-      .select('worker_id, paid').eq('period_type', 'week').eq('period_key', weekKey)
+    const { data: payRows, error: payErr } = await pPlatby
     if (payErr) throw payErr
     ;(payRows || []).forEach(p => { payMap[p.worker_id] = p })
   } catch (e) { paymentsTableMissing = true }
@@ -9303,8 +9378,7 @@ async function renderProvizeContent() {
   const firmaPay = {}
   let firmaPayTableMissing = false
   try {
-    const { data: fRows, error: fErr } = await sb.from('provize_platby_firem')
-      .select('firma, paid').eq('period_key', weekKey)
+    const { data: fRows, error: fErr } = await pPlatbyFirem
     if (fErr) throw fErr
     ;(fRows || []).forEach(p => { firmaPay[p.firma] = !!p.paid })
   } catch (e) { firmaPayTableMissing = true }
@@ -10207,25 +10281,22 @@ async function loadDashboard() {
   const pChat = loadChatAlerts().catch(e => console.warn('[plocha] zprávy:', e))
   const pVac = loadVacationAlerts().catch(e => console.warn('[plocha] dovolené:', e))
   const pLong = loadLongDayAlert().catch(e => console.warn('[plocha] dlouhé směny:', e))
+  // Výkon (1. 10. 2026): přehled chybějících dokladů a poslední záznamy docházky na
+  // ničem z výše uvedeného nezávisí — pouští se hned. Dřív se na ně čekalo až po
+  // všech upozorněních (7 obrátek k serveru za sebou). Kde se na ně čeká, zůstává.
+  const pDokladyStat = loadDocumentAlertsStat()
+  pDokladyStat.catch(() => {})   // případná chyba se projeví níž při await, jako dřív
+  const pPosledni = Promise.resolve(sb.from('attendance').select('*, worker:profiles(full_name,profession,team_id)').order('created_at',{ascending:false}).limit(30))
 
-  const kw = getKW()
-  const [rWorkers, rPending, rTeams, rAtt] = await Promise.all([
-    sb.from('profiles').select('id').in('role',['osvec','partak']).eq('is_active',true),
-    // Pending registrace = nově registrovaní čekající na schválení (registration_status='pending').
-    // Odebraní pracovníci (is_active=false, ale registration_status≠'pending') sem NEPATŘÍ.
-    sb.from('profiles')
+  // Dřív se tu navíc načítali všichni aktivní lidé, všechny firmy a CELÝ týden
+  // docházky (select *, u 40 lidí ~135 kB) — a nikde se nepoužily (počty se
+  // přestěhovaly do Provizí). Načítal se jen seznam čekajících registrací.
+  const { data: pendingWorkersRaw } = await sb.from('profiles')
       .select('id, full_name, email, created_at')
       .in('role', ['osvec', 'partak'])
       .eq('is_active', false)
       .eq('registration_status', 'pending')
-      .order('created_at', { ascending: false }),
-    sb.from('teams').select('id').eq('is_active',true),
-    sb.from('attendance').select('*').eq('kw',kw.week).eq('kw_year',kw.year)
-  ])
-  const workers = rWorkers.data
-  const pendingWorkersRaw = rPending.data
-  const teams = rTeams.data
-  const att = rAtt.data
+      .order('created_at', { ascending: false })
 
 
   await pDismissals   // co odložili ostatní admini — bez toho by blok blikl a přerovnal se
@@ -10239,10 +10310,10 @@ async function loadDashboard() {
   // podle něj pozná běžící směnu a dopočítá hodiny do teď.
   const todayStrDash = localDateStr()
 
-  // Pracovníci kteří nemají všechny dokumenty schválené
-  await loadDocumentAlertsStat()
+  // Pracovníci kteří nemají všechny dokumenty schválené (běží od začátku, viz výš)
+  await pDokladyStat
 
-  const { data: recentVse } = await sb.from('attendance').select('*, worker:profiles(full_name,profession,team_id)').order('created_at',{ascending:false}).limit(30)
+  const { data: recentVse } = await pPosledni
   // Schované firmy pryč; bere se víc záznamů, ať po vyřazení zůstane deset.
   const recent = (recentVse || []).filter(r => !jeSkrytaFirmaPracovnika(r.worker)).slice(0, 10)
   const tbody = document.getElementById('dash-attendance')
@@ -10509,7 +10580,15 @@ function _nameToHue(name) {
 // Registr přidělených odstínů podle druhu (firma / podskupina), aby žádné dvě
 // firmy (a zvlášť žádné dvě podskupiny) nedostaly stejnou nebo příliš podobnou
 // barvu. Barva se pro dané jméno spočítá jednou a pak zůstává stabilní.
-window._groupColorRegistry = window._groupColorRegistry || { company: {}, sub: {} }
+window._groupColorRegistry = window._groupColorRegistry || (() => {
+  // Zapamatované barvy z minula (1. 10. 2026): firma má pořád stejnou barvu,
+  // i když se data načtou v jiném pořadí (načítají se souběžně).
+  try {
+    const r = JSON.parse(localStorage.getItem('sb_barvy_skupin') || 'null')
+    if (r && typeof r.company === 'object' && typeof r.sub === 'object') return r
+  } catch (e) {}
+  return { company: {}, sub: {} }
+})()
 function _hueDist(a, b) {
   const d = Math.abs(a - b) % 360
   return d > 180 ? 360 - d : d
@@ -10527,6 +10606,7 @@ function _assignedHue(name, kind) {
     attempt++
   }
   reg[key] = hue
+  try { localStorage.setItem('sb_barvy_skupin', JSON.stringify(window._groupColorRegistry)) } catch (e) {}
   return hue
 }
 function groupColor(name, kind) {
@@ -10730,8 +10810,17 @@ async function loadWorkers() {
   // Ukazujeme všechny aktivní pracovníky — i ty se zablokovanou docházkou.
   // (Zablokované je vidět ve sloupci Docházka a právě odtud se dají zase povolit.)
   // Neaktivní lidi tu nejsou, ti se spravují v Přístupech.
-  const { data } = await sb.from('profiles').select('*').in('role',['osvec','partak']).eq('is_active',true)
-    .order('full_name')
+  // VŠECHNO NARÁZ (výkon, 1. 10. 2026): lidé, firmy, podskupiny, nezavřené směny,
+  // vlaječky + puntíky a kódy ubytování na sobě nezávisí. Dřív se na každý dotaz
+  // čekalo zvlášť — šest obrátek k serveru za sebou.
+  const pDalsi = Promise.all([computeLongDayAlerts(), vlajkyNejdyl(Promise.all([nactiVlajky(), nactiPuntikyVsech(), typeof nactiSkupinky === 'function' ? nactiSkupinky() : null])), nactiKodyUbytovani()])
+  pDalsi.catch(() => {})   // při prázdném seznamu se na ně nečeká — ať nevznikne nezachycená chyba
+  const [{ data }, { data: teamsForW }, { data: subteamsForW }] = await Promise.all([
+    sb.from('profiles').select('*').in('role',['osvec','partak']).eq('is_active',true)
+      .order('full_name'),
+    sb.from('teams').select('id,name'),
+    sb.from('subteams').select('id,name,team_id')
+  ])
   const tbody = document.getElementById('workers-table')
   const cntEl = document.getElementById('workers-count')
   // Počet bez schovaných firem — jinak by nadpis ukazoval 12 a tabulka 8.
@@ -10740,19 +10829,15 @@ async function loadWorkers() {
   if (!data?.length) { tbody.innerHTML='<tr><td colspan="9" style="text-align:center;color:var(--text3);padding:20px">Žádní pracovníci</td></tr>'; return }
 
   // Skupiny (firmy) a podskupiny — pro barevné odznaky a řazení podle firmy
-  const { data: teamsForW } = await sb.from('teams').select('id,name')
   const teamNameById = {}
   ;(teamsForW||[]).forEach(t => { teamNameById[t.id] = t.name })
-  const { data: subteamsForW } = await sb.from('subteams').select('id,name,team_id')
   const subteamById = {}
   ;(subteamsForW||[]).forEach(s => { subteamById[s.id] = s })
 
-  // Zjisti, kdo má nezavřenou směnu > 11 h (pro červený odznáček)
-  await computeLongDayAlerts()
-  await vlajkyNejdyl(Promise.all([nactiVlajky(), nactiPuntikyVsech(), nactiSkupinky()]))
+  // Nezavřené směny (červený odznáček), vlaječky + puntíky + skupinky a kódy
+  // ubytování (🔑) běží od začátku souběžně s lidmi — tady se jen počká.
+  await pDalsi
   { const rz = document.getElementById('workers-razeni'); if (rz) rz.innerHTML = _skupinky.chybi ? '' : razeniSkupinHtml() }
-  // Kdo má kódy k ubytování (🔑 ve sloupci Ubytování) — jedním dotazem pro všechny.
-  await nactiKodyUbytovani()
 
   const sortedWorkers = serazeniPodleSkupin(sortByGroup((data || []).filter(w => !jeSkrytaFirmaPracovnika(w)), teamNameById, subteamById), w => w.id)
 
@@ -12041,9 +12126,81 @@ function fotkaHtml(url, jmeno, px, obdelnik, workerId) {
   return `<span data-fotka="obal" onclick="event.stopPropagation();showAvatarPreview('${jsStr(url)}')" title="${zeme ? escAttr(zeme) + ' · k' : 'K'}liknutím zvětšíte"
       style="display:inline-flex;cursor:zoom-in;background:#e9e3d9;${obal}">
     ${iniciraly.replace('display:flex;', 'display:none;')}
-    <img src="${escAttr(url)}" alt="" decoding="async" style="position:absolute;inset:0;width:100%;height:100%;object-fit:cover" onerror="this.style.display='none';if(this.previousElementSibling)this.previousElementSibling.style.display='flex'">
+    <img src="${escAttr(fotkaDoSeznamu(url))}" alt="" decoding="async" style="position:absolute;inset:0;width:100%;height:100%;object-fit:cover" onerror="if(this.src.indexOf('/avatar-mini.jpg')>0){this.src=this.src.replace('/avatar-mini.jpg','/avatar.jpg');return}this.style.display='none';if(this.previousElementSibling)this.previousElementSibling.style.display='flex'">
     ${vlajka}
   </span>`
+}
+// ZMENŠENINA PRO SEZNAMY (výkon, 1. 10. 2026). Fotka se ukládá 900×1200 (~190 kB),
+// v řádcích tabulek je ale 98×130 (u faktur 28×28) — při 30 lidech to bylo ~6 MB
+// za jedno otevření Docházky a Pracovníků. Vedle velké se teď ukládá i
+// avatar-mini.jpg 300×400 (~20 kB, na Retině i na telefonu ostrá) a adresa fotky
+// dostane značku m=1. Seznamy berou malou; zvětšení po kliknutí, karta pracovníka
+// a odkaz pro odběratele dál velkou. Fotka bez značky (uložená dřív) se ukazuje
+// velká jako doteď, dokud se nepřeuloží nebo neproběhne doplnZmenseninyFotek().
+function fotkaDoSeznamu(url) {
+  const u = String(url || '')
+  if (!/[?&]m=1(&|$)/.test(u)) return u
+  return u.replace(/\/avatar\.jpg(\?|$)/, '/avatar-mini.jpg$1')
+}
+// Z hotové fotky udělá 300×400 a uloží ji vedle velké (stejná složka). Vrací true,
+// když se povedlo; jinak se fotka uloží bez značky a seznamy ukážou velkou.
+async function _ulozZmenseninu(slozka, blob) {
+  let adresa = null
+  try {
+    adresa = URL.createObjectURL(blob)
+    const obr = await new Promise((ok, ne) => { const i = new Image(); i.onload = () => ok(i); i.onerror = ne; i.src = adresa })
+    const c = document.createElement('canvas'); c.width = 300; c.height = 400
+    const x = c.getContext('2d')
+    x.imageSmoothingQuality = 'high'
+    x.fillStyle = '#fff'; x.fillRect(0, 0, 300, 400)
+    // Ořez na střed jako object-fit: cover v řádcích (fotky jsou 3:4, takže se nic neusekne)
+    const m = Math.max(300 / obr.naturalWidth, 400 / obr.naturalHeight)
+    const w = obr.naturalWidth * m, h = obr.naturalHeight * m
+    x.drawImage(obr, (300 - w) / 2, (400 - h) / 2, w, h)
+    const mini = await new Promise((ok, ne) => { try { c.toBlob(ok, 'image/jpeg', 0.75) } catch (e) { ne(e) } })
+    if (!mini) return false
+    const { error } = await sb.storage.from('avatars').upload(slozka + '/avatar-mini.jpg', mini, { contentType: 'image/jpeg', upsert: true })
+    return !error
+  } catch (e) { return false } finally { try { if (adresa) URL.revokeObjectURL(adresa) } catch (e) {} }
+}
+// JEDNORÁZOVÉ DOPLNĚNÍ zmenšenin ke starším fotkám. Spouští správce sám (např.
+// z konzole: doplnZmenseninyFotek()). Fotku jen přečte, zmenšeninu uloží vedle
+// a k adrese připíše m=1 — jen když se adresa mezitím nezměnila.
+async function doplnZmenseninyFotek(tise) {
+  const { data, error } = await sb.from('profiles').select('id, avatar_url').not('avatar_url', 'is', null)
+  if (error) { if (!tise) showToast('❌ ' + error.message); return }
+  let hotovo = 0, chyby = 0
+  for (const p of (data || [])) {
+    const u = String(p.avatar_url || '')
+    const slozka = (u.match(/\/avatars\/([^/?#]+)\/avatar\.jpg(\?|$)/) || [])[1]
+    if (!slozka || /[?&]m=1(&|$)/.test(u)) continue
+    try {
+      const r = await fetch(u, { mode: 'cors' })
+      if (!r.ok) throw new Error('HTTP ' + r.status)
+      if (!await _ulozZmenseninu(slozka, await r.blob())) throw new Error('nahrání')
+      const nova = u + (u.includes('?') ? '&' : '?') + 'm=1'
+      const { data: z, error: e } = await sb.from('profiles').update({ avatar_url: nova }).eq('id', p.id).eq('avatar_url', u).select('id')
+      if (e || !z || !z.length) throw new Error(e ? e.message : 'nezměněno')
+      hotovo++
+    } catch (e) { chyby++; console.warn('[zmenšeniny]', p.id, e?.message || e) }
+  }
+  if (!tise) showToast('🖼 Zmenšeniny fotek: ' + hotovo + ' hotovo' + (chyby ? ', ' + chyby + ' se nepovedlo (viz konzole)' : ''))
+  else console.log('[zmenšeniny] hotovo ' + hotovo + ', nepovedlo se ' + chyby)
+  return { hotovo, chyby }
+}
+// Na pozadí u správce: půl minuty po přihlášení, nejvýš jednou za týden v tomhle
+// prohlížeči. Starší fotky (bez zmenšeniny) se tak doplní samy a seznamy přestanou
+// stahovat velké fotky. Nic se nemaže; velká fotka zůstává.
+function zmenseninyNaPozadi() {
+  let kdy = 0
+  try { kdy = Number(localStorage.getItem('sb_zmenseniny_kontrola') || 0) } catch (e) {}
+  if (Date.now() - kdy < 7 * 24 * 3600 * 1000) return
+  setTimeout(async () => {
+    try {
+      const v = await doplnZmenseninyFotek(true)
+      if (v && !v.chyby) { try { localStorage.setItem('sb_zmenseniny_kontrola', String(Date.now())) } catch (e) {} }
+    } catch (e) { console.warn('[zmenšeniny]', e?.message || e) }
+  }, 30000)
 }
 function fotkaIniciraly(jmeno) {
   const c = String(jmeno || '').trim().split(/\s+/).filter(Boolean)
@@ -12239,8 +12396,11 @@ async function loadKWData() {
           ? `<b style="color:var(--red)">${text}</b>`
           : text
       }
-      const b1 = pauzaText(0)
-      const b2 = pauzaText(1)
+      // Pauzy pod sebou (nezávislá kontrola 1. 10. 2026: dvě vedle sebe se v buňce
+      // kreslily přes sebe). Víc než dvě se ukáže jako „+N", celé jsou v úpravě dne.
+      const pocetPauz = (info.breaks || []).length
+      const pauzyHtml = [pauzaText(0), pauzaText(1)].filter(Boolean).join('<br>')
+        + (pocetPauz > 2 ? ' <b>+' + (pocetPauz - 2) + '</b>' : '')
       const hLabel = info.running
         ? `<span style="color:var(--amber)">${h.toFixed(1)}h▶</span>`
         : `${h.toFixed(1)}h`
@@ -12254,15 +12414,14 @@ async function loadKWData() {
         : (info.pevnaCastka != null ? 'Ručně nastavená částka ' + info.pevnaCastka.toFixed(2) + ' €'
            + (info.poznamka ? ' (' + info.poznamka + ')' : '') : '')))
       return `<td class="kw-day" data-date="${dateStr}"${popisVyjimky ? ` title="${escAttr(popisVyjimky)}"` : ''} style="padding:4px 3px;vertical-align:middle${nezaplaceno ? ';background:var(--red-l)' : ''}">
-        <div style="position:relative;min-height:52px;display:flex;align-items:center;justify-content:center${nezaplaceno ? ';text-decoration:line-through;text-decoration-color:var(--red);text-decoration-thickness:2px;opacity:.75' : ''}">
+        <div style="position:relative;min-height:${pocetPauz > 1 ? 66 : 52}px;display:flex;align-items:center;justify-content:center${nezaplaceno ? ';text-decoration:line-through;text-decoration-color:var(--red);text-decoration-thickness:2px;opacity:.75' : ''}">
           ${!nezaplaceno && (info.bezProvize || info.pevnaCastka != null)
             ? '<span style="position:absolute;top:50%;left:3px;transform:translateY(-50%);font-size:13px;line-height:1;color:var(--amber)">•</span>'
             : ''}
           <span style="position:absolute;top:0;left:2px;font-size:11.5px;font-weight:700;color:var(--green)">${info.ci || ''}</span>
           <span style="position:absolute;top:0;right:2px;font-size:11.5px;font-weight:700;color:var(--red)">${info.co || ''}</span>
           <span style="font-size:16px;font-weight:800;color:var(--blue);font-family:'Archivo',-apple-system,sans-serif">${hLabel}</span>
-          <span style="position:absolute;bottom:0;left:2px;font-size:9.5px;color:var(--text3)">${b1}</span>
-          <span style="position:absolute;bottom:0;right:2px;font-size:9.5px;color:var(--text3)">${b2}</span>
+          <span style="position:absolute;bottom:0;left:2px;font-size:9.5px;line-height:1.2;color:var(--text3);text-align:left">${pauzyHtml}</span>
         </div>
       </td>`
     }
@@ -15636,6 +15795,11 @@ async function odectenoZeZaloh(workerIds) {
 
 async function loadWorkerInvoices() {
   const tbody = document.getElementById('inv-table')
+  // Data načtená na pozadí (viz níž) se při otevření složky ukážou hned, než dorazí nová.
+  if (window._invNevykresleno && document.getElementById('v-faktury-archiv')?.classList.contains('on')) {
+    window._invNevykresleno = false
+    renderWorkerInvoices()
+  }
   // Kód z CRM a barvu bereme živě z profilu — barva je vlastnost pracovníka,
   // ne dokladu, takže když se přidělí jinak, projeví se to i u starších faktur.
   let { data, error } = await sb.from('worker_invoices')
@@ -15673,7 +15837,12 @@ async function loadWorkerInvoices() {
   const skrytiFakt = await skrytiLideIds()
   _invCache = (data || []).filter(r => !jeSkrytaFirmaPracovnika(r.worker) && !skrytiFakt.has(r.worker_id))
   fillInvoiceYearFilter()
-  renderWorkerInvoices()
+  // Tabulka faktur má stovky řádků (480 faktur = ~31 000 prvků, ~190 ms zaseknutí).
+  // Kreslí se jen do OTEVŘENÉ složky — při startu a obnově na pozadí se dřív kreslila
+  // naslepo do skryté sekce. Při otevření složky se ukáže hned (z načtených dat)
+  // a po novém načtení se dokreslí, stejně jako dřív (sv → loadAdminViewData).
+  if (document.getElementById('v-faktury-archiv')?.classList.contains('on')) renderWorkerInvoices()
+  else window._invNevykresleno = true
   refreshInvoiceBadge()
 }
 
@@ -15851,7 +16020,7 @@ function renderWorkerInvoices() {
   let _poslKw = null
   let _poslFirma = null
 
-  tbody.innerHTML = rows.map(r => {
+  const _invHtml = rows.map(r => {
     // Barva je vlastnost pracovníka, ne dokladu — proto se bere živě z profilu.
     // Kód naopak z řádku faktury, ten je zmrazený k okamžiku vystavení.
     const barva = invoiceColor(r.worker?.invoice_color)
@@ -15934,6 +16103,14 @@ function renderWorkerInvoices() {
       </td>
     </tr>`
   }).join('')
+  // Obnova každou minutu přináší většinou tytéž faktury — stejnou tabulku znovu
+  // nevkládat (31 000 prvků, fotky by se načítaly znovu). Pozná se i to, že mezitím
+  // tabulku přepsalo něco jiného (hláška „Nic neodpovídá…" apod.).
+  if (tbody._invHtml === _invHtml && tbody.firstElementChild === tbody._invPrvni && tbody.childElementCount === tbody._invPocet) return
+  tbody.innerHTML = _invHtml
+  tbody._invHtml = _invHtml
+  tbody._invPrvni = tbody.firstElementChild
+  tbody._invPocet = tbody.childElementCount
 }
 
 // Hodnota, která jde dovnitř onclick="fn('…')". escAttr apostrof neřeší, a řádek
@@ -22674,7 +22851,10 @@ function loadAdminViewData(name) {
   if(name === 'tymy') { loadTeams() }
   if(name === 'fotky') { loadSitePhotosAdmin() }
   if(name === 'odkazy') { loadKlientOdkazy() }
-  if(name === 'dochazka') { fillKWSelect(true); loadTodayTimeline(); loadAttendanceWorkers() }
+  // loadAttendanceWorkers() denní tabulku načte a vykreslí sama (s výběrem lidí
+  // i bez něj). Dřív se tu volala ještě jednou navíc — 2× čtyři dotazy a dvakrát
+  // překreslená tabulka s fotkami při každém otevření i obnově sekce.
+  if(name === 'dochazka') { fillKWSelect(true); loadAttendanceWorkers() }
   if(name === 'kalendar') { renderCalendar() }
   if(name === 'cekajici-registrace') { loadPendingRegistrationsPage() }
   if(name === 'dashboard') { loadDashboard(); checkDocumentAlerts(); loadDocumentAlertsStat(); refreshPendingRegistrations() }
@@ -23142,7 +23322,10 @@ function fillKWSelect(autoLoad) {
   if(!sel)return
   const kw=getKW()
   const currentVal = `${kw.week}-${kw.year}`
-  sel.innerHTML=''  // vyčisti — zabrání duplikaci a vždy začne aktuálním týdnem
+  // Co měl správce vybrané. Starší týden se při obnově nepřepíše — dřív ho každý
+  // příchod nebo odchod kohokoli (realtime) vrátil na aktuální (1. 10. 2026).
+  const predtim = sel.value, predtimAktualni = sel.dataset.aktualni
+  sel.innerHTML=''  // vyčisti — zabrání duplikaci
   for(let i=0;i<8;i++) {
     let w=kw.week-i,y=kw.year
     if(w<1){y--;w+=isoWeeksInYear(y)}
@@ -23150,8 +23333,10 @@ function fillKWSelect(autoLoad) {
     opt.value=`${w}-${y}`; opt.textContent=`Týden ${w} (${y})`
     sel.appendChild(opt)
   }
-  // Předvyber aktuální týden
-  sel.value = currentVal
+  // Předvyber aktuální týden — nebo starší, který si správce vybral. Kdo měl
+  // vybraný aktuální, zůstane na aktuálním i po přelomu týdne.
+  sel.value = (predtim && predtim !== predtimAktualni && [...sel.options].some(o => o.value === predtim)) ? predtim : currentVal
+  sel.dataset.aktualni = currentVal
   if (autoLoad) loadKWData()
 }
 
@@ -37770,10 +37955,12 @@ async function ulozFotkuPracovnika(workerId, blob) {
       return false
     }
     const { data: url } = sb.storage.from('avatars').getPublicUrl(cesta)
+    // Zmenšenina pro seznamy (viz fotkaDoSeznamu). Nepovede se → bez značky m=1.
+    const maMini = await _ulozZmenseninu(workerId, blob)
     // Soubor má pořád stejné jméno (avatar.jpg), takže bez `?v=` by prohlížeče
     // i odkaz pro odběratele ještě hodinu ukazovaly starou fotku z paměti —
     // třeba neotočenou (1. 10. 2026, otáčení ve výřezu).
-    const nova = url.publicUrl + '?v=' + Date.now()
+    const nova = url.publicUrl + '?v=' + Date.now() + (maMini ? '&m=1' : '')
     const { data: radky, error: chybaDb } = await sb.from('profiles')
       .update({ avatar_url: nova }).eq('id', workerId).select('id')
     if (chybaDb) { showToast('❌ Fotka se nahrála, ale k člověku se nepřiřadila: ' + chybaDb.message); return false }
@@ -37805,9 +37992,10 @@ async function uploadAvatar(input) {
     const { error: upErr } = await sb.storage.from('avatars').upload(filePath, compressed, { contentType:'image/jpeg', upsert:true })
     if (upErr) throw new Error(upErr.message)
     const { data: urlData } = sb.storage.from('avatars').getPublicUrl(filePath)
+    const maMini = await _ulozZmenseninu(userId, compressed)   // zmenšenina pro seznamy u správce
     // `?v=` ukládáme i do profilu — jméno souboru je pořád stejné a bez něj by
     // se jinde (seznamy u správce, odkaz pro odběratele) držela stará fotka.
-    const url = urlData.publicUrl + '?v=' + Date.now()
+    const url = urlData.publicUrl + '?v=' + Date.now() + (maMini ? '&m=1' : '')
     await sb.from('profiles').update({ avatar_url: url }).eq('id', userId)
     document.querySelectorAll('#mob-avatar-img').forEach(img => { img.src = url; img.style.display='block' })
     if (currentProfile) currentProfile.avatar_url = url

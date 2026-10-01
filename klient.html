@@ -340,6 +340,28 @@ function ulozUbytovani(pole){
   });
 }
 
+// Popis práce v buňce: německy nahoře, český originál drobně pod tím. Tentýž
+// kus HTML skládá vykreslení stránky i pozdější doplnění překladu
+// (doplnPreklady), takže tabulka vypadá nakonec stejně, ať vznikla jakkoli.
+function praceHtml(cs, de){
+  return (de && de !== cs)
+    ? '<div>' + esc(de) + '</div><div class="drobne">' + esc(cs) + '</div>'
+    // `data-prace` = český text, který ještě čeká na překlad
+    : '<div data-prace="' + esc(cs) + '">' + esc(cs) + '</div>';
+}
+
+// Doplní němčinu do už ukázané tabulky — naráz, jen do buněk s popisem práce.
+// Stránka se nepřekresluje: kdo zrovna píše poznámku nebo adresu, nepřijde
+// o kurzor ani o rozepsaný text, a fotky se nenačítají znovu.
+function doplnPreklady(){
+  var cekaji = obal.querySelectorAll('[data-prace]');
+  for (var i = 0; i < cekaji.length; i++) {
+    var cs = cekaji[i].getAttribute('data-prace');
+    var de = prekladyCache[cs];
+    if (de && de !== cs) cekaji[i].outerHTML = praceHtml(cs, de);
+  }
+}
+
 function vykreslit(d, preklady){
   preklady = preklady || {};
   var podle = {};
@@ -546,13 +568,7 @@ function vykreslit(d, preklady){
         // Německy nahoře (stránku čte Němec), český originál drobně pod tím.
         // Když překlad nedorazil, zůstane jen čeština — ale to nastane u všech
         // řádků naráz, ne u některých, takže tabulka vypadá jednotně.
-        var de = preklady[r.prace];
-        if (de && de !== r.prace){
-          prace += '<div>' + esc(de) + '</div>';
-          prace += '<div class="drobne">' + esc(r.prace) + '</div>';
-        } else {
-          prace += '<div>' + esc(r.prace) + '</div>';
-        }
+        prace += praceHtml(r.prace, preklady[r.prace]);
       }
       if (!prace) prace = '<span class="drobne">—</span>';
       var datumBunka = '<td class="cas">' + esc(datumDe(r.datum))
@@ -909,6 +925,9 @@ function oznacUhrazeno(zaskrtnuto){
 function zmenTyden(v){
   var c = String(v || '').split('/');
   TYDEN = { kw: parseInt(c[0], 10), rok: parseInt(c[1], 10) };
+  // Obnovení po minutě by teď jen poslalo druhý, souběžný dotaz na tentýž
+  // týden. Znovu se naplánuje, až se nový týden načte (hotovo → naplanuj).
+  if (casovac) { clearTimeout(casovac); casovac = null; }
   stav('Wird geladen…');
   nacti(true);
 }
@@ -972,15 +991,24 @@ function stav(text){
 // otevření stránky a nezapočítá do něj automatická obnovení.
 var prvniNacteni = true;
 var posledniTydny = null;   // viz DATA.tydny == null níž
+// Který týden si odběratel naposledy vybral, jako text („" = probíhající).
+function klicTydne(){ return TYDEN ? TYDEN.kw + '/' + TYDEN.rok : ''; }
 function nacti(rucne){
   if (rucne) stav('Wird aktualisiert…');
   var adresa = '/api/klient-dochazka?t=' + encodeURIComponent(TOKEN)
              + (prvniNacteni ? '&prvni=1' : '')
              + (TYDEN ? '&kw=' + TYDEN.kw + '&rok=' + TYDEN.rok : '');
   prvniNacteni = false;
+  var tydenDotazu = klicTydne();
   return fetch(adresa, { cache: 'no-store' })
     .then(function(r){ return r.json().then(function(j){ return { stav: r.status, j: j } }) })
     .then(function(o){
+      // Seznam týdnů platí, ať odpověď patří ke kterémukoli týdnu.
+      if (o.j && o.j.ok && o.j.tydny != null) posledniTydny = o.j.tydny;
+      // Odběratel mezitím přepnul na jiný týden (třeba dvakrát rychle za
+      // sebou). Pozdě dorazivší odpověď na ten předchozí by přepsala stránku
+      // špatným týdnem — zahodí se, novější dotaz už běží.
+      if (o.j && o.j.ok && tydenDotazu !== klicTydne()) return;
       if (!o.j || !o.j.ok){
         if (casovac) { clearTimeout(casovac); casovac = null }
         if (o.stav === 429){
@@ -998,7 +1026,9 @@ function nacti(rucne){
       document.querySelectorAll('textarea.pozn').forEach(function(t){
         if (document.activeElement === t) rozepsane[t.getAttribute('data-w')] = t.value;
       });
+      var predtim = DATA;
       DATA = o.j;
+      var mojeData = DATA;
       // Seznam týdnů posílá server JEN při skutečném otevření stránky —
       // je to jeho nejdražší dotaz (docházka od roku 2000) a mezi dvěma
       // obnoveními se stejně nezmění. `null` znamená „nech si ten, co máš";
@@ -1014,13 +1044,35 @@ function nacti(rucne){
       DATA.radky.forEach(function(r){ if (r.prace) popisy[r.prace] = 1 });
       var klice = Object.keys(popisy).filter(function(k){ return prekladyCache[k] === undefined });
 
+      // Je tenhle týden na obrazovce zatím česky a čeká na překlad? (viz níž)
+      var cesky = false;
       function hotovo(){
-        vykreslit(DATA, prekladyCache);
+        // Mezitím dorazila novější data (jiný týden, obnovení) — ta si
+        // stránku vykreslí sama, tahle by ji jen přepsala starším.
+        if (DATA !== mojeData) return;
+        if (cesky) doplnPreklady(); else vykreslit(DATA, prekladyCache);
         var d = new Date();
         stav('Stand ' + String(d.getHours()).padStart(2,'0') + ':' + String(d.getMinutes()).padStart(2,'0'));
         naplanuj();
       }
       if (!klice.length){ hotovo(); return; }
+
+      // DATA HNED, PŘEKLAD POTOM (1. 10. 2026) — jen u NOVÉHO týdne na
+      // obrazovce, tedy při otevření stránky a při přepnutí týdne.
+      // Do teď se na překladač čekalo, než se ukázalo cokoli: odkaz se
+      // otevíral o celou dobu překladu později a při přepnutí týdne koukal
+      // odběratel tu dobu dál na starý týden (až 3,5 s, když překladač
+      // nestíhá). Jazyky se ani teď NEMÍCHAJÍ: dokud nejsou přeložené
+      // všechny popisy, ukazuje se všechno česky — i ty, které by šly vzít
+      // z paměti — a potom se naráz doplní všechna němčina (doplnPreklady).
+      // Obnovení po minutě (týž týden už na obrazovce je) čeká na překlad
+      // jako dřív — stará data mezitím zůstávají vidět, nic neblikne.
+      var novyTyden = !predtim || predtim.kw !== DATA.kw || predtim.rok !== DATA.rok;
+      if (novyTyden) {
+        vykreslit(DATA, {});
+        cesky = true;
+        stav('Übersetzung läuft… · překládá se…');
+      }
 
       // Čeká se na VŠECHNY překlady naráz. Kdyby se dokreslovaly postupně,
       // měl by klient část řádků německy a část česky — a to je přesně ta
