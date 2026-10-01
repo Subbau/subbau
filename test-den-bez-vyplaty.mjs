@@ -30,7 +30,10 @@ const ok = (b, t) => { if (!b) { chyb++; console.log('  ❌ ' + t) } else consol
 
 // ── 1. výpočet pro fakturu (čistá funkce, vytažená z appky) ──
 console.log('── faktura ──')
+// Od 1. 10. 2026 si výpočet bere i srazkaZaPuntikyHodin (srážka za černé puntíky).
+const vyrez = (od, po) => { const i = src.indexOf(od); return src.slice(i, src.indexOf(po, i)) }
 const kod = src.slice(src.indexOf('function hodinyPodleSazeb'), src.indexOf('\n// Po změně sazby se musí přepočítat'))
+  + '\n' + vyrez('function srazkaZaPuntikyHodin', '\n// Text na fakturu.')
 const { hodinyPodleSazeb } = await import('data:text/javascript,'
   + encodeURIComponent(kod + '\nexport { hodinyPodleSazeb }'))
 const sazba = () => 23
@@ -50,6 +53,12 @@ const sPevnou = hodinyPodleSazeb(
    { work_date: '2026-09-08', total_hours: 8, vyplata_castka: 100 }], sazba)
 ok(sPevnou.hodiny === 16 && sPevnou.castka === 284,
    'ručně přepsaná částka platí místo hodiny × sazba (' + sPevnou.castka + ' €)')
+const sSrazkou = hodinyPodleSazeb(
+  [{ work_date: '2026-09-07', total_hours: 8 },
+   { work_date: '2026-09-08', total_hours: 8, vyplata_castka: 138, vyplata_poznamka: 'Srážka 2 h — 3 černé puntíky' }], sazba)
+ok(sSrazkou.hodiny === 16 && sSrazkou.castka === 322 && sSrazkou.srazka === 2 && sSrazkou.srazkyDny.join() === '2026-09-08',
+   'srážka za puntíky: hodiny zůstanou 16, částka o 2 h nižší, srážka je vidět (' + JSON.stringify([sSrazkou.hodiny, sSrazkou.castka, sSrazkou.srazka]) + ')')
+ok(sPevnou.srazka === 0, 'běžná ručně přepsaná částka srážka není')
 ok(sPevnou.skupiny.some(g => g.pevna && g.castka === 100),
    'den s pevnou částkou dostane na faktuře vlastní řádek')
 ok(/rozpis\.skupiny\.length > 1 \|\| jePevna/.test(src),

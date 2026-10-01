@@ -4670,7 +4670,7 @@ async function submitAdminSignatureWithPlacement() {
 // Po nahrání nové verze se snadno pozná, jestli se opravdu nasadila: otevřete
 // appku, zmáčkněte F12 (na Macu ⌥⌘I) a v konzoli je vypsané tohle datum. Když
 // tam svítí starší, prohlížeč nebo GitHub drží starou verzi.
-const SUBBAU_VERZE = '2026-10-01 d — fotky jako Alešova, firmy oddělené pruhem, puntíky u jmen'
+const SUBBAU_VERZE = '2026-10-01 e — srážka za puntíky na faktuře a výkazu, řádky v barvách firmy a party, fotky nepřeskakují'
 console.log('SubBau docházka — verze ' + SUBBAU_VERZE)
 // Verze i dole v menu správce. Když někdo novinku „nevidí", podle ní se hned
 // pozná, jestli nemá otevřenou starou kopii appky — bez hledání v konzoli.
@@ -7505,7 +7505,8 @@ async function rozpisTydne(workerId, radky, sazbaVPoli) {
 // Vrací { hodiny, castka, skupiny: [{ sazba, hodiny, od, do }] } seřazené podle data.
 function hodinyPodleSazeb(radky, sazbaKDni) {
   const podleSazby = new Map()
-  let hodiny = 0, castka = 0
+  let hodiny = 0, castka = 0, srazka = 0
+  const srazkyDny = []
   ;(radky || []).slice()
     .sort((a, b) => String(a.work_date || '').localeCompare(String(b.work_date || '')))
     .forEach(r => {
@@ -7525,6 +7526,15 @@ function hodinyPodleSazeb(radky, sazbaKDni) {
         const gp = podleSazby.get(kp) || { sazba: 0, hodiny: 0, od: den, do: den, pevna: true, castka: 0 }
         gp.hodiny += h
         gp.castka += pevna
+        // Srážka za černé puntíky: hodiny zůstávají, na faktuře se napíše, kolik
+        // z nich se nefakturuje (textSrazkyNaFakturu).
+        const sr = srazkaZaPuntikyHodin(r)
+        if (sr) {
+          gp.srazka = (gp.srazka || 0) + sr
+          gp.sazbaDne = Number(sazbaKDni(den)) || 0
+          srazka += sr
+          if (!srazkyDny.includes(den)) srazkyDny.push(den)
+        }
         podleSazby.set(kp, gp)
         return
       }
@@ -7542,7 +7552,8 @@ function hodinyPodleSazeb(radky, sazbaKDni) {
     g.hodiny = Math.round(g.hodiny * 100) / 100
     if (g.pevna) g.castka = Math.round(g.castka * 100) / 100
   })
-  return { hodiny: Math.round(hodiny * 100) / 100, castka: Math.round(castka * 100) / 100, skupiny }
+  return { hodiny: Math.round(hodiny * 100) / 100, castka: Math.round(castka * 100) / 100, skupiny,
+    srazka: Math.round(srazka * 100) / 100, srazkyDny: srazkyDny.sort() }
 }
 
 // Po změně sazby se musí přepočítat celá tabulka (peníze se počítají den po dni,
@@ -8103,7 +8114,9 @@ async function renderProvizeContent() {
     el.innerHTML = '<div style="text-align:center;color:var(--text3);padding:30px">Provize může zobrazit jen správce.</div>'
     return
   }
-  el.innerHTML = '<div style="text-align:center;color:var(--text3);padding:30px">Načítám...</div>'
+  // „Načítám…" jen napoprvé — obnova po každém příchodu/odchodu kohokoli by
+  // jinak celou tabulku na okamžik smazala (bliká, fotky přeskakují).
+  if (!el.querySelector('table')) el.innerHTML = '<div style="text-align:center;color:var(--text3);padding:30px">Načítám...</div>'
 
   const anchor = provizeAnchor
   const mode = provizeMode
@@ -8673,12 +8686,13 @@ async function renderProvizeContent() {
       r.firemniTerms ? ' (' + r.firemniTerms + ')' : ' (7/14)'}</option>`
       + TERMS_OPTIONS.map(t => `<option value="${t}" ${r.vlastniTerms === t ? 'selected' : ''}>${t}</option>`).join('')
       const rowBg = (r.bezProvize ? 'opacity:0.55;' : '')
-      + (r.paid ? 'background:var(--green-l)' : (r.overdue ? 'background:var(--red-l)' : ''))
+      + (r.paid ? 'background:var(--green-l)' : (r.overdue ? 'background:var(--red-l)'
+        : (r.podskupina ? 'background:' + barvaRadkuPodskupiny(r.podskupina) : '')))
       const dueLabel = paymentTermsColumnMissing
         ? '<div style="font-size:10px;margin-top:3px;color:var(--amber)">⚠️ neukládá se (chybí migrace)</div>'
         : `<div style="font-size:10px;margin-top:3px;font-weight:${r.overdue ? '700' : '400'};color:${r.overdue ? 'var(--red)' : 'var(--text3)'}">${r.overdue ? '⚠️ po splatnosti ' : 'splatnost '}${r.dueDate.toLocaleDateString('cs-CZ')}</div>`
       return `<tr style="${rowBg}">
-        <td style="font-size:${isNoFirm ? '16px' : '14.5px'};font-weight:600${r.podSefem ? ';padding-left:30px;border-left:3px solid #c7d6e4' : ''}">${r.podSefem ? '<span style="color:var(--text3);font-weight:400;margin-left:-16px;margin-right:4px">↳</span>' : ''}${escAttr(r.name)}${r.overdue ? ' <span style="font-size:11px;color:var(--red);font-weight:700">⚠️ nezaplaceno</span>' : ''}${
+        <td style="background:${gc.bg};font-size:${isNoFirm ? '16px' : '14.5px'};font-weight:600${r.podSefem ? ';padding-left:30px;border-left:3px solid #c7d6e4' : ''}">${r.podSefem ? '<span style="color:var(--text3);font-weight:400;margin-left:-16px;margin-right:4px">↳</span>' : ''}${escAttr(r.name)}${r.overdue ? ' <span style="font-size:11px;color:var(--red);font-weight:700">⚠️ nezaplaceno</span>' : ''}${
           // Podskupina pod jménem — stejná barva jako v Týmech, ať se to dá
           // spárovat pohledem. U větších firem je bez toho nepoznat, kdo kde dělá.
           (r.podskupina || r.zamestnavatel || r.jeFirma || r.sefChybi || pocetLidiPodFirmou[r.id]) ? (() => {
@@ -9834,6 +9848,15 @@ function pauzaDlouha(bs, be) {
 // v Pracovnících, v dnešní docházce i v týdenním přehledu; řádky mají vlevo
 // proužek v barvě firmy. Třída tbl-group: hledání (filterTableRows) pruh
 // schová, když pod ním nikdo nezbude.
+// PODBARVENÍ ŘÁDKU. Majitel 1. 10. 2026: „podbarvení jména v barvách firmy
+// a zbytek toho řádku podbarvený barvou podskupiny — v Pracovnících, Provizích,
+// Docházce a Fakturách." Buňka se jménem dostane barvu firmy (stejnou jako pruh
+// nad firmou), zbytek řádku barvu podskupiny; kdo podskupinu nemá, má zbytek
+// bílý. Buňky s vlastním podkladem (dovolená, 0 h, neplacený den, uhrazeno,
+// po splatnosti) si ho nechávají.
+function barvaJmenaFirmy(firma) { return groupColor(firma || 'Bez firmy', 'company').bg }
+function barvaRadkuPodskupiny(podskupina) { return podskupina ? groupColor(podskupina, 'sub').bg : '' }
+
 function pocetLidiText(n) { return n + (n === 1 ? ' člověk' : (n >= 2 && n <= 4) ? ' lidé' : ' lidí') }
 function hlavickaFirmyHtml(firma, sloupcu, popis) {
   const f = firma || 'Bez firmy'
@@ -9914,8 +9937,8 @@ async function loadWorkers() {
       hlava = hlavickaFirmyHtml(teamName, 9, pocetLidiText(sortedWorkers.filter(x => (x.team_id ? (teamNameById[x.team_id] || '') : '') === teamName).length))
     }
     return hlava + `
-    <tr style="cursor:pointer;border-left:4px solid ${groupColor(teamName || 'Bez firmy', 'company').border}" class="worker-row" data-id="${w.id}" data-name="${escAttr(((w.full_name||'') + ' ' + (w.email||'')).replace(/"/g,'&quot;'))}">
-      <td style="padding:0 10px 0 0;height:1px"><div style="display:flex;align-items:stretch;gap:10px;min-width:0;min-height:${FOTKA_RADEK_VYSKA}px;height:100%">${fotkaHtml(w.avatar_url, w.full_name, FOTKA_RADEK_VYSKA * 3 / 4, true, w.id)}<div style="display:flex;flex-direction:column;justify-content:center;min-width:0;padding:6px 0"><div><b>${jmenoSNemcinou(w.full_name, w.id, w.german_level || null)}</b>${puntikyHtml(w.id)}</div><div>${w.has_car ? '<span style="font-size:11px;background:#eef7ee;color:#2e7d32;border:1px solid #b8dcb8;font-weight:700;padding:1px 6px;border-radius:8px;white-space:nowrap" title="Má vlastní auto">🚗 auto</span>' : ''}${(window.unclosedWorkerIds && window.unclosedWorkerIds.has(w.id)) ? ' <span style="background:var(--red);color:#fff;font-size:10px;font-weight:700;padding:2px 6px;border-radius:8px;white-space:nowrap" title="Nemá ukončený den — směna běží i po 20:30">⚠️ neukončeno</span>' : ''}</div></div></div></td>
+    <tr style="cursor:pointer;border-left:4px solid ${groupColor(teamName || 'Bez firmy', 'company').border}${subName ? ';background:' + barvaRadkuPodskupiny(subName) : ''}" class="worker-row" data-id="${w.id}" data-name="${escAttr(((w.full_name||'') + ' ' + (w.email||'')).replace(/"/g,'&quot;'))}">
+      <td style="padding:0 10px 0 0;height:1px;background:${barvaJmenaFirmy(teamName)}"><div style="display:flex;align-items:stretch;gap:10px;min-width:0;min-height:${FOTKA_RADEK_VYSKA}px;height:100%">${fotkaHtml(w.avatar_url, w.full_name, FOTKA_RADEK_VYSKA * 3 / 4, true, w.id)}<div style="display:flex;flex-direction:column;justify-content:center;min-width:0;padding:6px 0"><div><b>${jmenoSNemcinou(w.full_name, w.id, w.german_level || null)}</b>${puntikyHtml(w.id)}</div><div>${w.has_car ? '<span style="font-size:11px;background:#eef7ee;color:#2e7d32;border:1px solid #b8dcb8;font-weight:700;padding:1px 6px;border-radius:8px;white-space:nowrap" title="Má vlastní auto">🚗 auto</span>' : ''}${(window.unclosedWorkerIds && window.unclosedWorkerIds.has(w.id)) ? ' <span style="background:var(--red);color:#fff;font-size:10px;font-weight:700;padding:2px 6px;border-radius:8px;white-space:nowrap" title="Nemá ukončený den — směna běží i po 20:30">⚠️ neukončeno</span>' : ''}</div></div></div></td>
       <td>${groupCellHtml(teamName, subName)}</td>
       <td onclick="event.stopPropagation();otevriUbytovani('${w.id}')" title="Kliknutím upravíte adresu ubytování i poznámky (kódy, patro, pokoj)" style="cursor:pointer;font-size:12px;max-width:190px">${ubytovaniBunka(w)}</td>
       <td>${escAttr(profLabel(w.profession)||'—')}</td>
@@ -10321,7 +10344,10 @@ async function loadTodayTimeline() {
   const today = localDateStr()
   const div = document.getElementById('today-timeline')
   if (!div) return
-  div.innerHTML = '<div style="text-align:center;color:var(--text3);font-size:13px">Načítám…</div>'
+  // „Načítám…" jen napoprvé. Při obnově (realtime při každém příchodu či
+  // odchodu, tichá obnova) zůstane stará tabulka, dokud není nová — dřív
+  // tabulka na okamžik zmizela a fotky „přeskakovaly" (majitel 1. 10. 2026).
+  if (!div.querySelector('tbody')) div.innerHTML = '<div style="text-align:center;color:var(--text3);font-size:13px">Načítám…</div>'
   const vlajkyNactene = Promise.all([nactiVlajky(), nactiPuntikyVsech()])   // vlaječky, němčina a puntíky u jmen (souběžně)
 
   // Všechny dnešní záznamy všech pracovníků + firma a podskupina, podle kterých se řadí
@@ -10379,6 +10405,7 @@ async function loadTodayTimeline() {
 
   if (!data?.length) {
     div.innerHTML = todayBubblesHtml([]) + '<div style="text-align:center;color:var(--text3);font-size:13px">Žádné záznamy pro dnešek</div>'
+    div._posledniHtml = null
     return
   }
 
@@ -10526,8 +10553,8 @@ async function loadTodayTimeline() {
           // Do hledání patří i firma a podskupina, ať jde vypsat celá parta najednou
           const searchKey = [g.name, g.firm, g.sub].filter(Boolean).join(' ')
           return groupHead + `
-            <tr class="today-row" data-id="${g.worker_id||''}" data-name="${searchKey.replace(/"/g,'&quot;')}" data-worker="${(g.name||'').replace(/"/g,'&quot;')}" style="border-top:0.5px solid var(--brd);border-left:4px solid ${gc.border}" title="Klikněte na časy pro úpravu hodin">
-              <td class="td-open today-name" title="Klikněte pro otevření profilu pracovníka" style="padding:0 10px 0 0;cursor:pointer;height:1px">
+            <tr class="today-row" data-id="${g.worker_id||''}" data-name="${searchKey.replace(/"/g,'&quot;')}" data-worker="${(g.name||'').replace(/"/g,'&quot;')}" style="border-top:0.5px solid var(--brd);border-left:4px solid ${gc.border}${g.sub ? ';background:' + barvaRadkuPodskupiny(g.sub) : ''}" title="Klikněte na časy pro úpravu hodin">
+              <td class="td-open today-name" title="Klikněte pro otevření profilu pracovníka" style="padding:0 10px 0 0;cursor:pointer;height:1px;background:${barvaJmenaFirmy(g.firm)}">
                 <!-- Fotka vlevo přes celou výšku řádku, VŠECHEN text vedle ní.
                      Dřív bylo jméno vedle a profese s firmou pod fotkou, takže
                      fotka nemohla být větší než jeden řádek textu. -->
@@ -10555,7 +10582,7 @@ async function loadTodayTimeline() {
             </tr>`
         }).join('')
 
-  div.innerHTML = todayBubblesHtml(rows) + `
+  const dnesHtml = todayBubblesHtml(rows) + `
     <div style="overflow-x:auto">
     <table style="width:100%;border-collapse:collapse;font-size:13px;min-width:1080px">
       <thead>
@@ -10576,6 +10603,12 @@ async function loadTodayTimeline() {
     </table>
     </div>
     <div style="margin-top:12px;padding:9px 12px;background:var(--bg);border-radius:8px;font-size:12px;color:var(--text3);display:flex;align-items:center;gap:7px"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:14px;height:14px;flex-shrink:0"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/></svg>Klikněte na jméno pro otevření profilu pracovníka, na časy pro úpravu příchodu, pauzy a odchodu.</div>`
+  // Obnova každou minutu: stejnou tabulku znovu nevkládat — fotky by se
+  // vykreslovaly znovu a bliklo by to (týdenní přehled to dělá stejně).
+  if (div._posledniHtml !== dnesHtml || !div.querySelector('tbody')) {
+    div.innerHTML = dnesHtml
+    div._posledniHtml = dnesHtml
+  }
 
   // Klik na jméno → profil pracovníka, klik na časy (mimo tlačítko smazat) → úprava hodin pro dnešek
   div.querySelector('tbody').onclick = function(e) {
@@ -10793,12 +10826,16 @@ function fotkaHtml(url, jmeno, px, obdelnik, workerId) {
   const kodZeme = workerId ? (_lideVlajky.mapa.get(String(workerId)) || {}).narodnost : null
   const zeme = vlajka && vlajkaEmoji(kodZeme) ? nazevNarodnosti(String(kodZeme).toUpperCase()) : ''
   if (!url) return `<span data-fotka="obal"${zeme ? ` title="${escAttr(zeme)}"` : ''} style="display:inline-flex;${obal}">${iniciraly}${vlajka}</span>`
-  // onerror: když se fotka nenačte (smazaná z úložiště), schová se a zůstanou
-  // iniciály pod ní — ne ikona rozbitého obrázku.
+  // FOTKA NEPŘESKAKUJE NA INICIÁLY (majitel 1. 10. 2026: „pokud je zvolená
+  // fotka, ať je tam ta fotka a ne že to bude přeskakovat"). Iniciály pod fotkou
+  // jsou schované a podklad je neutrální — dřív při každém načtení stránky
+  // (a s loading=lazy i při rolování) nejdřív blikly barevné iniciály.
+  // Ukážou se, jen když se fotka nenačte (smazaná z úložiště) — ne ikona
+  // rozbitého obrázku. Načítá se hned, ne až při rolování.
   return `<span data-fotka="obal" onclick="event.stopPropagation();showAvatarPreview('${jsStr(url)}')" title="${zeme ? escAttr(zeme) + ' · k' : 'K'}liknutím zvětšíte"
-      style="display:inline-flex;cursor:zoom-in;${obal}">
-    ${iniciraly}
-    <img src="${escAttr(url)}" alt="" loading="lazy" style="position:absolute;inset:0;width:100%;height:100%;object-fit:cover" onerror="this.style.display='none'">
+      style="display:inline-flex;cursor:zoom-in;background:#e9e3d9;${obal}">
+    ${iniciraly.replace('display:flex;', 'display:none;')}
+    <img src="${escAttr(url)}" alt="" decoding="async" style="position:absolute;inset:0;width:100%;height:100%;object-fit:cover" onerror="this.style.display='none';if(this.previousElementSibling)this.previousElementSibling.style.display='flex'">
     ${vlajka}
   </span>`
 }
@@ -10943,6 +10980,7 @@ async function loadKWData() {
     if (r.bez_vyplaty) di.bezVyplaty = true
     if (r.bez_provize_den) di.bezProvize = true
     if (r.vyplata_castka != null && r.vyplata_castka !== '') di.pevnaCastka = Number(r.vyplata_castka) || 0
+    if (srazkaZaPuntikyHodin(r)) di.srazka = (di.srazka || 0) + srazkaZaPuntikyHodin(r)
     if (r.vyplata_poznamka && !di.poznamka) di.poznamka = String(r.vyplata_poznamka)
     const ci = r.check_in ? r.check_in.slice(0,5) : null
     const co = r.check_out ? r.check_out.slice(0,5) : null
@@ -11006,8 +11044,9 @@ async function loadKWData() {
       const popisVyjimky = nezaplaceno
         ? 'Za tenhle den pracovník nedostane zaplaceno — nefakturuje se' + (info.poznamka ? ' (' + info.poznamka + ')' : '')
         : (info.bezProvize ? 'Za tenhle den nemáme provizi' + (info.poznamka ? ' (' + info.poznamka + ')' : '')
+        : (info.srazka ? 'Srážka ' + info.srazka + ' h za černé puntíky — hodiny zůstávají, fakturuje se o ' + info.srazka + ' h méně (' + (info.pevnaCastka || 0).toFixed(2) + ' €)'
         : (info.pevnaCastka != null ? 'Ručně nastavená částka ' + info.pevnaCastka.toFixed(2) + ' €'
-           + (info.poznamka ? ' (' + info.poznamka + ')' : '') : ''))
+           + (info.poznamka ? ' (' + info.poznamka + ')' : '') : '')))
       return `<td class="kw-day" data-date="${dateStr}"${popisVyjimky ? ` title="${escAttr(popisVyjimky)}"` : ''} style="padding:4px 3px;vertical-align:middle${nezaplaceno ? ';background:var(--red-l)' : ''}">
         <div style="position:relative;min-height:52px;display:flex;align-items:center;justify-content:center${nezaplaceno ? ';text-decoration:line-through;text-decoration-color:var(--red);text-decoration-thickness:2px;opacity:.75' : ''}">
           ${!nezaplaceno && (info.bezProvize || info.pevnaCastka != null)
@@ -11067,8 +11106,8 @@ async function loadKWData() {
       hlava = hlavickaFirmyHtml(w.firm, 10, pocetLidiText(list.filter(x => (x.firm || '') === kwFirma).length))
     }
     return hlava + `
-    <tr style="cursor:pointer;height:56px;border-left:4px solid ${groupColor(w.firm || 'Bez firmy', 'company').border}" class="kw-row" data-id="${w.id||''}" data-name="${(w.name||'').replace(/"/g,'&quot;')}">
-      <td class="kw-name" title="Klikněte pro otevření profilu pracovníka" style="vertical-align:middle;overflow:hidden;padding:0 8px 0 0;height:1px"><div style="display:flex;align-items:stretch;gap:9px;min-width:0;min-height:${FOTKA_RADEK_VYSKA}px;height:100%">${fotkaHtml(w.fotka, w.name, FOTKA_RADEK_VYSKA * 3 / 4, true, w.id)}<div style="display:flex;flex-direction:column;justify-content:center;align-items:flex-start;min-width:0;padding:6px 0"><div><b>${jmenoSNemcinou(w.name, w.id)}</b>${puntikyHtml(w.id)}</div>${w.byvaly?' <span style="font-size:10px;font-weight:700;background:var(--bg);color:var(--text3);border:1px solid var(--brd);padding:1px 6px;border-radius:8px;white-space:nowrap" title="Pracovník už do aplikace nemá přístup. Hodiny, které stihl odpracovat, zůstávají v přehledu.">📦 bývalý</span>':''}${w.mimoVykaz?' <span style="font-size:10px;font-weight:700;background:var(--bg);color:var(--red);border:1px solid var(--red);padding:1px 6px;border-radius:8px;white-space:nowrap" title="V Týmech je odškrtnutý. Tady ho vidíte i s hodinami, ale do vytištěného výkazu se nedostane — proto tam bude jiný součet.">🚫 mimo výkaz</span>':''}${w.blocked?' <span style="font-size:10px;font-weight:700;background:var(--red-l);color:var(--red);border:1px solid #e8c4ba;padding:1px 6px;border-radius:8px;white-space:nowrap" title="Pracovník má dočasně zablokované zapisování docházky">🚫 docházka zablokovaná</span>':''}${(w.firm||w.sub)?`<div style="margin-top:3px">${groupCellHtml(w.firm, w.sub)}</div>`:''}</div></div></td><td style="font-size:12px;vertical-align:middle">${profLabel(w.prof)||''}</td>
+    <tr style="cursor:pointer;height:56px;border-left:4px solid ${groupColor(w.firm || 'Bez firmy', 'company').border}${w.sub ? ';background:' + barvaRadkuPodskupiny(w.sub) : ''}" class="kw-row" data-id="${w.id||''}" data-name="${(w.name||'').replace(/"/g,'&quot;')}">
+      <td class="kw-name" title="Klikněte pro otevření profilu pracovníka" style="vertical-align:middle;overflow:hidden;padding:0 8px 0 0;height:1px;background:${barvaJmenaFirmy(w.firm)}"><div style="display:flex;align-items:stretch;gap:9px;min-width:0;min-height:${FOTKA_RADEK_VYSKA}px;height:100%">${fotkaHtml(w.fotka, w.name, FOTKA_RADEK_VYSKA * 3 / 4, true, w.id)}<div style="display:flex;flex-direction:column;justify-content:center;align-items:flex-start;min-width:0;padding:6px 0"><div><b>${jmenoSNemcinou(w.name, w.id)}</b>${puntikyHtml(w.id)}</div>${w.byvaly?' <span style="font-size:10px;font-weight:700;background:var(--bg);color:var(--text3);border:1px solid var(--brd);padding:1px 6px;border-radius:8px;white-space:nowrap" title="Pracovník už do aplikace nemá přístup. Hodiny, které stihl odpracovat, zůstávají v přehledu.">📦 bývalý</span>':''}${w.mimoVykaz?' <span style="font-size:10px;font-weight:700;background:var(--bg);color:var(--red);border:1px solid var(--red);padding:1px 6px;border-radius:8px;white-space:nowrap" title="V Týmech je odškrtnutý. Tady ho vidíte i s hodinami, ale do vytištěného výkazu se nedostane — proto tam bude jiný součet.">🚫 mimo výkaz</span>':''}${w.blocked?' <span style="font-size:10px;font-weight:700;background:var(--red-l);color:var(--red);border:1px solid #e8c4ba;padding:1px 6px;border-radius:8px;white-space:nowrap" title="Pracovník má dočasně zablokované zapisování docházky">🚫 docházka zablokovaná</span>':''}${(w.firm||w.sub)?`<div style="margin-top:3px">${groupCellHtml(w.firm, w.sub)}</div>`:''}</div></div></td><td style="font-size:12px;vertical-align:middle">${profLabel(w.prof)||''}</td>
       ${dayCell(w,1)}${dayCell(w,2)}${dayCell(w,3)}${dayCell(w,4)}${dayCell(w,5)}${dayCell(w,6)}${dayCell(w,7)}
       <td style="vertical-align:middle"><b style="color:var(--blue)">${w.total.toFixed(1)}h</b></td>
     </tr>`}).join('')
@@ -14198,7 +14237,7 @@ async function loadWorkerInvoices() {
   // Kód z CRM a barvu bereme živě z profilu — barva je vlastnost pracovníka,
   // ne dokladu, takže když se přidělí jinak, projeví se to i u starších faktur.
   let { data, error } = await sb.from('worker_invoices')
-    .select('*, worker:profiles(full_name, profession, crm_code, invoice_color, can_track_hours, is_active, invoice_design, team_id, avatar_url)')
+    .select('*, worker:profiles(full_name, profession, crm_code, invoice_color, can_track_hours, is_active, invoice_design, team_id, subteam_id, avatar_url)')
     .order('sent_at', { ascending: false })
   if (error) {
     // Bez spuštěné migrace sloupce chybí — načti aspoň to, co bylo dřív,
@@ -14266,6 +14305,13 @@ function _invSortValue(r, key) {
 // Firma (skupina) pracovníka u faktury. Bere se ŽIVĚ z _teamsCache, ne z řádku
 // faktury — firma je vlastnost člověka, ne dokladu, takže když se přeřadí,
 // projeví se to i u starších faktur. Stejně to dělá barva o kus níž.
+// Podskupina člověka u faktury — kvůli podbarvení řádku. Taky živě.
+function podskupinaFaktury(r) {
+  const sid = r && r.worker?.subteam_id
+  if (sid == null) return ''
+  const s = (_subteamsCache || []).find(x => String(x.id) === String(sid))
+  return (s && s.name) || ''
+}
 function firmaFaktury(r) {
   const tid = r && (r.worker?.team_id ?? r.team_id)
   if (tid == null) return 'Bez firmy'
@@ -14424,14 +14470,15 @@ function renderWorkerInvoices() {
         _poslFirma = firmaTeto
       }
     }
+    const podskFakt = podskupinaFaktury(r)
     return oddelovac + `
-    <tr>
+    <tr${podskFakt ? ` style="background:${barvaRadkuPodskupiny(podskFakt)}"` : ''}>
       <!-- Fotka je tu 28 px, ne 40 jako v denním přehledu. Tahle tabulka má
            deset sloupců a při okně 1280 jí zbývá asi 1005 px, zatímco potřebuje
            nejmíň 1023 — každý pixel navíc znamená rolování do stran. Změřeno
            29. 9. 2026; na obličeje se správce dívá v denním přehledu, tady jde
            o čísla. -->
-      <td style="border-left:5px solid ${barva || 'transparent'}"><span style="display:inline-flex;align-items:center;gap:8px;min-width:0">${fotkaHtml(r.worker?.avatar_url, r.worker?.full_name || r.supplier_name, 28)}<b style="overflow:hidden;text-overflow:ellipsis">${escAttr(r.worker?.full_name || r.supplier_name || '—')}</b></span>${r.supplier_name && r.worker?.full_name && r.supplier_name !== r.worker.full_name ? `<div style="font-size:11px;color:var(--text3)">${escAttr(r.supplier_name)}</div>` : ''}</td>
+      <td style="border-left:5px solid ${barva || 'transparent'};background:${barvaJmenaFirmy(firmaFaktury(r))}"><span style="display:inline-flex;align-items:center;gap:8px;min-width:0">${fotkaHtml(r.worker?.avatar_url, r.worker?.full_name || r.supplier_name, 28)}<b style="overflow:hidden;text-overflow:ellipsis">${escAttr(r.worker?.full_name || r.supplier_name || '—')}</b></span>${r.supplier_name && r.worker?.full_name && r.supplier_name !== r.worker.full_name ? `<div style="font-size:11px;color:var(--text3)">${escAttr(r.supplier_name)}</div>` : ''}</td>
       <td style="font-weight:700;white-space:nowrap">${escAttr(r.invoice_number || '—')}${kod ? `<div style="font-size:11.5px;font-weight:800;letter-spacing:.03em;color:${barva || 'var(--text3)'}">${escAttr(kod)}</div>` : ''}${
         // V JAKÉM VZHLEDU JE TAHLE FAKTURA VYSTAVENÁ. Je to údaj o už
         // vystaveném dokladu, ne nastavení — proto se tu nedá měnit.
@@ -20993,8 +21040,8 @@ async function onInvoiceWeekChange() {
     const zaklad = Number.isFinite(sazba) ? sazba : 0
     // Když SubBau změnil sazbu uprostřed týdne, počítá se každý den svou sazbou —
     // jinak by faktura zvedla i dny odpracované za starou sazbu.
-    let castka
-    try { castka = (await rozpisTydne(currentUser?.id, att, zaklad)).castka }
+    let castka, rozpisTydnePracovnika = null
+    try { rozpisTydnePracovnika = await rozpisTydne(currentUser?.id, att, zaklad); castka = rozpisTydnePracovnika.castka }
     catch (e) {
       if (sel.value !== v) return
       window._invTydenniCastka = 0
@@ -21007,6 +21054,7 @@ async function onInvoiceWeekChange() {
     if (sel.value !== v) return
     window._invTydenniCastka = castka
     rozpocitatCastku('inv')
+    ukazSrazkuVeFakture('inv', rozpisTydnePracovnika)
     await predvyplnitCisloFaktury(currentUser?.id, parseInt(year), 'inv', week)
   } catch (e) { console.warn('[faktura] předvyplnění položky:', e?.message) }
 
@@ -23399,7 +23447,7 @@ function showPrintPreview(html, filename) {
     { tag: 'COMM',  key: 'sb_pdf_comm',  label: 'Přehled provizí (jen pro nás)' },
     // Označení neplacených dnů je naše vnitřní věc — odběrateli po něm nic není.
     // Proto se dá jedním kliknutím vypnout, než se výkaz pošle ven.
-    { tag: 'NEPLAC', key: 'sb_pdf_neplac', label: 'Označit neplacené dny (jen pro nás)' }
+    { tag: 'NEPLAC', key: 'sb_pdf_neplac', label: 'Označit neplacené dny a srážky (jen pro nás)' }
   ]
   const _optBoxes = []
   const applyOpts = () => {
@@ -25532,7 +25580,18 @@ async function generateInvoiceMob(lang = 'en', override = null) {
   const jePevna = rozpis.skupiny.some(g => g.pevna)
   const polozkySazeb = (!maPolozky && (rozpis.skupiny.length > 1 || jePevna))
     ? rozpis.skupiny.map(g => g.pevna
-        ? { popis: invoiceItem + '\n' + denCz(g.od), mnozstvi: 1, cena: g.castka }
+        ? (g.srazka
+          // Den se srážkou: odpracované hodiny a srážka v popisu, fakturuje se
+          // hodiny − srážka × sazba dne. Kdyby to kvůli pozdější změně sazby
+          // nesedělo na haléř, zůstane pevná částka za den (s týmž popisem).
+          ? (() => {
+              const fakt = Math.round((g.hodiny - g.srazka) * 100) / 100
+              const popis = invoiceItem + '\n' + denCz(g.od) + '\n' + textSrazkyNaFakturu(g.hodiny, g.srazka)
+              return (fakt > 0 && g.sazbaDne > 0 && Math.abs(fakt * g.sazbaDne - g.castka) < 0.011)
+                ? { popis, mnozstvi: fakt, cena: g.sazbaDne }
+                : { popis, mnozstvi: 1, cena: g.castka }
+            })()
+          : { popis: invoiceItem + '\n' + denCz(g.od), mnozstvi: 1, cena: g.castka })
         : {
             popis: invoiceItem + '\n' + denCz(g.od) + (g.do !== g.od ? ' – ' + denCz(g.do) : ''),
             mnozstvi: g.hodiny, cena: g.sazba
@@ -25541,6 +25600,14 @@ async function generateInvoiceMob(lang = 'en', override = null) {
   const totalAmount = maPolozky
     ? soucetPolozek(polozkyFaktury)
     : (polozkySazeb ? soucetPolozek(polozkySazeb) : Math.round(totalHours * rate * 100) / 100)
+  // Pracovník fakturuje týden vlastními položkami (první = celý týden) —
+  // srážka se proto připíše k první položce. Částka už je o ni nižší (pevná
+  // částka dne), tady jde o to, aby bylo vidět proč. Podruhé se nepřipisuje.
+  if (rozpis.srazka > 0 && maPolozky && polozkyFaktury.length
+      && !/h invoiced/.test(String(polozkyFaktury[0].popis || ''))) {
+    polozkyFaktury[0] = { ...polozkyFaktury[0],
+      popis: String(polozkyFaktury[0].popis || '').trim() + '\n' + textSrazkyNaFakturu(rozpis.hodiny, rozpis.srazka, rozpis.srazkyDny.map(denCz)) }
+  }
 
   // Faktura na 0 h je skoro vždycky zapomenutý odchod, ne skutečnost.
   // Faktura s položkami stojí na tom, co je v nich — na paušál nebo za kusy se
@@ -25561,6 +25628,15 @@ async function generateInvoiceMob(lang = 'en', override = null) {
       + 'Zkontrolujte prosím hodiny nebo množství a cenu u položek.\n\n'
       + 'Opravdu ji vystavit?')
     if (!stejne) return
+  }
+
+  // Srážka za černé puntíky v tomhle týdnu — říct to dřív, než se faktura vystaví.
+  if (rozpis.srazka > 0) {
+    const f = x => String(Math.round(x * 100) / 100).replace('.', ',')
+    if (!confirm('⚠️ Fakturujete o ' + f(rozpis.srazka) + ' h méně — srážka za černé puntíky ('
+        + rozpis.srazkyDny.map(denCz).join(', ') + ').\n\n'
+        + 'Odpracováno ' + f(rozpis.hodiny) + ' h, fakturuje se ' + f(rozpis.hodiny - rozpis.srazka) + ' h. '
+        + 'Na faktuře to bude napsané, odpracované hodiny zůstanou.\n\nVystavit fakturu?')) return
   }
 
   // Data faktury. Admin může vystavit i zpětně — pak se použije jeho datum
@@ -33862,7 +33938,12 @@ function znackyVyjimekDne(r) {
   const z = []
   if (!denJePlaceny(r)) z.push({ de: 'NICHT BEZAHLT', cs: 'neplaceno', barva: '#b02a2a' })
   if (!denMaProvizi(r)) z.push({ de: 'OHNE PROVISION', cs: 'bez provize', barva: '#8a5a00' })
-  if (r && r.vyplata_castka != null && r.vyplata_castka !== '') {
+  const srazka = srazkaZaPuntikyHodin(r)
+  if (srazka) {
+    // Hodiny ve výkazu zůstávají — podle nich se fakturuje odběrateli.
+    const h = String(srazka).replace('.', ',')
+    z.push({ de: 'ABZUG ' + h + ' STD.', cs: 'srážka ' + h + ' h', barva: '#b02a2a' })
+  } else if (r && r.vyplata_castka != null && r.vyplata_castka !== '') {
     z.push({ de: 'FESTBETRAG', cs: 'pevná částka', barva: '#2f6b45' })
   }
   return z
@@ -33949,6 +34030,45 @@ const PUNTIKY_NA_SRAZKU = 3
 const SRAZKA_HODIN = 2
 // Poznámka se skládá z čísel výš — kdyby se změnila, nesmí u dne zůstat lživé „2 h".
 const SRAZKA_POZNAMKA = 'Srážka ' + SRAZKA_HODIN + ' h — ' + PUNTIKY_NA_SRAZKU + ' černé puntíky'
+
+// Den se srážkou za puntíky: pevná částka dne a poznámka „Srážka 2 h — …
+// puntíky" (zapisuje odecistSrazku). Vrací odečtené hodiny, jinak 0. Hodiny se
+// berou z poznámky — kdyby se SRAZKA_HODIN časem změnilo, staré dny platí dál.
+function srazkaZaPuntikyHodin(r) {
+  if (!r || r.vyplata_castka == null || r.vyplata_castka === '') return 0
+  const m = /^Srážka (\d+(?:[.,]\d+)?) h\b.*puntík/.exec(String(r.vyplata_poznamka || ''))
+  return m ? (Number(m[1].replace(',', '.')) || 0) : 0
+}
+// Text na fakturu. FAKTURU ČTE NĚMECKÝ ODBĚRATEL — anglicky, pod tím DE a CZ.
+// Odpracované hodiny zůstanou vidět, k nim srážka a kolik se fakturuje
+// (majitel 1. 10. 2026: „musí to zachovat ty hodiny, co měl, ale musí to
+// upozornit, že fakturuje o 2 h méně").
+function textSrazkyNaFakturu(odpracovano, srazka, dny) {
+  const f = (x, carka) => { const t = String(Math.round(x * 100) / 100); return carka ? t.replace('.', ',') : t }
+  const fakt = Math.max(0, odpracovano - srazka)
+  const kdy = (dny && dny.length) ? ' (' + dny.join(', ') + ')' : ''
+  return 'Hours worked ' + f(odpracovano) + ' h − deduction ' + f(srazka) + ' h' + kdy + ' = ' + f(fakt) + ' h invoiced'
+    + '\nGearbeitet ' + f(odpracovano, 1) + ' Std. − Abzug ' + f(srazka, 1) + ' Std. = ' + f(fakt, 1) + ' Std. berechnet'
+    + ' · Odpracováno ' + f(odpracovano, 1) + ' h − srážka ' + f(srazka, 1) + ' h = fakturováno ' + f(fakt, 1) + ' h'
+}
+// Upozornění u formuláře faktury (pracovník v mobilu i správce v kartě).
+function textSrazkyVeFormulari(rozpis) {
+  if (!rozpis || !(rozpis.srazka > 0)) return ''
+  const f = x => String(Math.round(x * 100) / 100).replace('.', ',')
+  const dny = (rozpis.srazkyDny || []).map(d => new Date(d + 'T00:00:00').toLocaleDateString('cs-CZ')).join(', ')
+  return '⚠️ Fakturujete o ' + f(rozpis.srazka) + ' h méně — srážka za černé puntíky (' + dny + '). '
+    + 'Odpracováno ' + f(rozpis.hodiny) + ' h, fakturuje se ' + f(rozpis.hodiny - rozpis.srazka) + ' h. Na faktuře to bude napsané.'
+}
+function ukazSrazkuVeFakture(pre, rozpis) {
+  let el = document.getElementById(pre + '-srazka-info')
+  const text = textSrazkyVeFormulari(rozpis)
+  if (!text) { if (el) el.style.display = 'none'; return }
+  const kotva = document.getElementById(pre + '-item-note')
+  if (!el && kotva) { el = document.createElement('div'); el.id = pre + '-srazka-info'; kotva.insertAdjacentElement('afterend', el) }
+  if (!el) return
+  el.style.cssText = 'display:block;margin-top:8px;padding:9px 11px;border-radius:10px;background:var(--red-l,#f6e9e4);color:var(--red,#9c3b22);font-size:13px;font-weight:700;line-height:1.45'
+  el.textContent = text
+}
 
 function puntikyStav(seznam) {
   const s = (seznam || []).slice().sort((a, b) => String(a.vytvoreno_v || '').localeCompare(String(b.vytvoreno_v || '')))
@@ -34365,9 +34485,11 @@ async function loadWdAttendance() {
       ? `<span title="Nefakturuje se${escAttr(duvod)}" style="margin-left:6px;font-size:9.5px;font-weight:800;letter-spacing:.04em;color:var(--red);background:var(--red-l);border-radius:5px;padding:1px 5px;text-decoration:none;white-space:nowrap">NEPLACENO</span>`
       : (r.bez_provize_den
         ? `<span title="Za tenhle den nemáme provizi${escAttr(duvod)}" style="margin-left:6px;font-size:9.5px;font-weight:800;color:var(--amber);background:var(--amber-l);border-radius:5px;padding:1px 5px;white-space:nowrap">BEZ PROVIZE</span>`
+        : (srazkaZaPuntikyHodin(r)
+          ? `<span title="Srážka ${srazkaZaPuntikyHodin(r)} h za černé puntíky — hodiny zůstávají, fakturuje se o ${srazkaZaPuntikyHodin(r)} h méně (${(Number(r.vyplata_castka)||0).toFixed(2)} €)" style="margin-left:6px;font-size:9.5px;font-weight:800;color:var(--red);background:var(--red-l);border-radius:5px;padding:1px 5px;white-space:nowrap">−${srazkaZaPuntikyHodin(r)} h ⚫</span>`
         : (r.vyplata_castka != null
           ? `<span title="Ručně nastavená částka${escAttr(duvod)}" style="margin-left:6px;font-size:9.5px;font-weight:800;color:var(--amber);background:var(--amber-l);border-radius:5px;padding:1px 5px;white-space:nowrap">${(Number(r.vyplata_castka)||0).toFixed(0)} €</span>`
-          : ''))
+          : '')))
     return `<tr${nezaplaceno ? ' style="background:var(--red-l);text-decoration:line-through;text-decoration-color:var(--red);text-decoration-thickness:2px"' : ''}>
       <td style="font-size:12px;white-space:nowrap">${r.work_date ? new Date(r.work_date).toLocaleDateString('cs-CZ') : '—'}${vyjimkaOdznak}</td>
       <td>
@@ -35485,6 +35607,7 @@ async function updateWdInvoiceHours() {
   box.innerHTML = hours > 0
     ? `⏱ Odpracováno <b>${hours.toFixed(2)} h</b>${popisSazby ? ` · ${popisSazby} → <b style="color:var(--blue)">${amount.toFixed(2)} €</b>` : ''}`
     : '<span style="color:var(--red)">⚠️ Za tento týden není zapsaná žádná docházka — faktura by byla na 0 h.</span>'
+  if (rozpis.srazka > 0) box.innerHTML += `<div style="margin-top:6px;color:var(--red);font-weight:700">${escAttr(textSrazkyVeFormulari(rozpis))}</div>`
 
   // Předvyplnění první položky. Co už je vyplněné, se nepřepisuje — admin si
   // mohl zadat paušál a přepnutí týdne by mu ho přemazalo.
