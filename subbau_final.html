@@ -4756,7 +4756,7 @@ async function submitAdminSignatureWithPlacement() {
 // Po nahrání nové verze se snadno pozná, jestli se opravdu nasadila: otevřete
 // appku, zmáčkněte F12 (na Macu ⌥⌘I) a v konzoli je vypsané tohle datum. Když
 // tam svítí starší, prohlížeč nebo GitHub drží starou verzi.
-const SUBBAU_VERZE = '2026-10-01 j — poloha: čas na dotaz se nepočítá, adresa nezdrží příchod; řádky bez podbarvení'
+const SUBBAU_VERZE = '2026-10-01 k — přejmenování podskupiny hlídá stejný název; poloha bez limitu prohlížeče'
 console.log('SubBau docházka — verze ' + SUBBAU_VERZE)
 // Verze i dole v menu správce. Když někdo novinku „nevidí", podle ní se hned
 // pozná, jestli nemá otevřenou starou kopii appky — bez hledání v konzoli.
@@ -16870,8 +16870,21 @@ async function renameSubteam(subteamId, oldName) {
   if (name === null) return
   const nm = name.trim()
   if (!nm) { showToast('⚠️ Zadejte název'); return }
+  // Stejný název v téže firmě: od 1. 10. 2026 ho hlídá i databáze (pojistka
+  // subteams_team_name_uniq). Předem se zeptat, ať správce nedostane
+  // technickou hlášku — a kdyby to přesto narazilo, říct to česky.
+  const teamId = ((_subteamsCache || []).find(x => String(x.id) === String(subteamId)) || {}).team_id
+  if (teamId != null && String(nm).toLowerCase() !== String(oldName || '').trim().toLowerCase()) {
+    const existing = (await findSubteamsByName(teamId, nm)).filter(x => String(x.id) !== String(subteamId))
+    if (existing.length) { showToast('⚠️ Podskupina „' + nm + '“ už v tomto týmu je — zvolte jiný název'); return }
+  }
   const { error } = await sb.from('subteams').update({ name: nm }).eq('id', subteamId)
-  if (error) { showToast('❌ Chyba: ' + error.message); return }
+  if (error) {
+    showToast(/23505|duplicate key|subteams_team_name_uniq/i.test((error.code || '') + ' ' + (error.message || ''))
+      ? '⚠️ Podskupina „' + nm + '“ už v tomto týmu je — zvolte jiný název'
+      : '❌ Chyba: ' + error.message)
+    return
+  }
   showToast('✅ Přejmenováno')
   loadTeams()
 }
