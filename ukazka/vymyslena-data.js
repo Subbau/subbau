@@ -89,6 +89,18 @@
     updated_at: new Date().toISOString(),
   }));
 
+  // Ubytování a auta (od 1. 10. 2026) — ať je v ukázce vidět sekce i řazení podle nich.
+  D.skupinky = [
+    { id: uuid(), druh: 'ubytovani', nazev: 'Pension Linde', adresa: 'Lindenstraße 4, 85049 Ingolstadt', pocet_mist: 6, barva: '#2a5d8f', poznamka: null, aktivni: true },
+    { id: uuid(), druh: 'ubytovani', nazev: 'Monteurzimmer Nord', adresa: 'Nordring 12, 85053 Ingolstadt', pocet_mist: 4, barva: '#2f6f4e', poznamka: 'klíče u majitele', aktivni: true },
+    { id: uuid(), druh: 'auto', nazev: 'VW Crafter', adresa: null, pocet_mist: 9, barva: '#9c3b22', poznamka: null, aktivni: true },
+  ];
+  D.skupinky_lide = [
+    ...lideId.slice(0, 5).map(w => ({ skupinka_id: D.skupinky[0].id, worker_id: w, druh: 'ubytovani' })),
+    ...lideId.slice(5, 8).map(w => ({ skupinka_id: D.skupinky[1].id, worker_id: w, druh: 'ubytovani' })),
+    ...lideId.slice(0, 6).map(w => ({ skupinka_id: D.skupinky[2].id, worker_id: w, druh: 'auto' })),
+  ];
+
   // ---- Docházka za poslední tři týdny ----
   const STAVBY = [
     'Ingolstädter Straße 96, Pfaffenhofen', 'Riemer Straße 12, München',
