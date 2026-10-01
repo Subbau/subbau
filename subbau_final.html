@@ -352,6 +352,9 @@ button:not(.x-close) > svg:first-child{margin-right:6px}
 /* Foťák přesně doprostřed kolečka (majitel 1. 10. 2026). Obecné pravidlo
    „button > svg:first-child{margin-right:6px}" ho posouvalo doleva. */
 .foto-zmen svg{margin:0!important;display:block;flex-shrink:0}
+/* Firma a parta (Pracovníci, týden) se zalomí, ne useknou uprostřed slova
+   ani neroztáhnou tabulku přes okraj karty. */
+.skupina-pilulky .pill{white-space:normal!important;max-width:100%}
 .toast{pointer-events:none;position:fixed;bottom:100px;left:50%;transform:translateX(-50%);background:#211D1A;color:#fff;padding:12px 20px;border-radius:12px;font-size:14px;font-weight:700;z-index:999999;opacity:0;transition:opacity .2s;white-space:normal;overflow-wrap:anywhere;line-height:1.35;max-width:90vw;text-align:center;box-shadow:0 4px 20px rgba(0,0,0,0.3)}
 .toast.on{opacity:1}
 
@@ -1213,9 +1216,10 @@ setTimeout(function () {
               </div>
             </div>
             <div style="overflow-x:auto">
-              <table class="kw-grid" style="table-layout:fixed;width:100%;min-width:1140px;border-collapse:collapse">
+              <table class="kw-grid" style="table-layout:fixed;width:100%;min-width:1210px;border-collapse:collapse">
                 <colgroup>
-                  <col style="width:230px"><col style="width:100px">
+                  <!-- 300: fotka 98 px + jméno, DE a firma vedle ní (do 1. 10. 2026 230) -->
+                  <col style="width:300px"><col style="width:100px">
                   <col style="width:92px"><col style="width:92px"><col style="width:92px"><col style="width:92px"><col style="width:92px"><col style="width:92px"><col style="width:92px">
                   <col style="width:78px">
                 </colgroup>
@@ -2895,13 +2899,6 @@ setTimeout(function () {
             </select>
           </div>
           <div class="fg" style="margin-bottom:0">
-            <label style="font-size:11px;color:var(--text3)">Národnost <span style="font-weight:400">(vlaječka u fotky)</span></label>
-            <select id="wd-narodnost" style="width:100%;padding:6px 10px;border:1.5px solid var(--brd);border-radius:7px;font-size:13px;font-family:inherit">
-              <option value="">— neuvedeno —</option>
-            </select>
-            <div id="wd-narodnost-pozn" style="display:none;font-size:11px;color:var(--amber);font-weight:700;margin-top:3px">⚠️ spusťte migraci supabase-migrace-narodnost.sql</div>
-          </div>
-          <div class="fg" style="margin-bottom:0">
             <label style="font-size:11px;color:var(--text3)">Úroveň angličtiny</label>
             <select id="wd-english" style="width:100%;padding:6px 10px;border:1.5px solid var(--brd);border-radius:7px;font-size:13px;font-family:inherit">
               <option value="">— neuvedeno —</option>
@@ -2920,7 +2917,13 @@ setTimeout(function () {
               <option value="yes">Ano</option>
             </select>
           </div>
-          <div class="fg" style="margin-bottom:0"></div>
+          <div class="fg" style="margin-bottom:0">
+            <label style="font-size:11px;color:var(--text3)">Národnost <span style="font-weight:400">(vlaječka u fotky)</span></label>
+            <select id="wd-narodnost" style="width:100%;padding:6px 10px;border:1.5px solid var(--brd);border-radius:7px;font-size:13px;font-family:inherit">
+              <option value="">— neuvedeno —</option>
+            </select>
+            <div id="wd-narodnost-pozn" style="display:none;font-size:11px;color:var(--amber);font-weight:700;margin-top:3px">⚠️ spusťte migraci supabase-migrace-narodnost.sql</div>
+          </div>
         </div>
         <div style="margin-top:16px;display:flex;gap:8px">
           <button class="btn-pri" onclick="saveWorkerProfile()">Uložit změny</button>
@@ -4667,7 +4670,7 @@ async function submitAdminSignatureWithPlacement() {
 // Po nahrání nové verze se snadno pozná, jestli se opravdu nasadila: otevřete
 // appku, zmáčkněte F12 (na Macu ⌥⌘I) a v konzoli je vypsané tohle datum. Když
 // tam svítí starší, prohlížeč nebo GitHub drží starou verzi.
-const SUBBAU_VERZE = '2026-10-01 c — zaměstnanec i pod živnostníkem, fotky na odkazu'
+const SUBBAU_VERZE = '2026-10-01 d — fotky jako Alešova, firmy oddělené pruhem, puntíky u jmen'
 console.log('SubBau docházka — verze ' + SUBBAU_VERZE)
 // Verze i dole v menu správce. Když někdo novinku „nevidí", podle ní se hned
 // pozná, jestli nemá otevřenou starou kopii appky — bez hledání v konzoli.
@@ -9825,9 +9828,22 @@ function pauzaDlouha(bs, be) {
   return min != null && min > PAUZA_LIMIT_MIN
 }
 
+// ODDĚLENÍ FIREM. Majitel 1. 10. 2026: „v pracovníkách a docházce potřebuji
+// odlišit ty firmy od sebe čárou nebo tak něco, ať se mi to nemotá dohromady."
+// Nad každou firmou pruh v její barvě s názvem a počtem lidí — stejný
+// v Pracovnících, v dnešní docházce i v týdenním přehledu; řádky mají vlevo
+// proužek v barvě firmy. Třída tbl-group: hledání (filterTableRows) pruh
+// schová, když pod ním nikdo nezbude.
+function pocetLidiText(n) { return n + (n === 1 ? ' člověk' : (n >= 2 && n <= 4) ? ' lidé' : ' lidí') }
+function hlavickaFirmyHtml(firma, sloupcu, popis) {
+  const f = firma || 'Bez firmy'
+  const gc = groupColor(f, 'company')
+  return `<tr class="tbl-group"><td colspan="${sloupcu}" style="padding:9px 12px;background:${gc.bg};border-top:4px solid ${gc.border};border-bottom:1.5px solid ${gc.border}"><span style="font-size:14px;font-weight:800;color:${gc.text}">🏢 ${escAttr(f)}</span>${popis ? `<span style="font-size:12px;color:var(--text3);margin-left:10px">${escAttr(popis)}</span>` : ''}</td></tr>`
+}
+
 function groupCellHtml(teamName, subName) {
   if (!teamName && !subName) return '<span style="color:var(--text3)">—</span>'
-  let html = '<div style="display:flex;flex-direction:column;gap:4px;align-items:flex-start">'
+  let html = '<div class="skupina-pilulky" style="display:flex;flex-direction:column;gap:4px;align-items:flex-start">'
   if (teamName) {
     const c = groupColor(teamName, 'company')
     html += `<span class="pill" style="background:${c.bg};color:${c.text};border:1px solid ${c.border};white-space:nowrap">🏢 ${teamName}</span>`
@@ -9880,19 +9896,26 @@ async function loadWorkers() {
 
   // Zjisti, kdo má nezavřenou směnu > 11 h (pro červený odznáček)
   await computeLongDayAlerts()
-  await nactiVlajky()
+  await vlajkyNejdyl(Promise.all([nactiVlajky(), nactiPuntikyVsech()]))
   // Kdo má kódy k ubytování (🔑 ve sloupci Ubytování) — jedním dotazem pro všechny.
   await nactiKodyUbytovani()
 
   const sortedWorkers = sortByGroup((data || []).filter(w => !jeSkrytaFirmaPracovnika(w)), teamNameById, subteamById)
 
-  tbody.innerHTML = sortedWorkers.map(w=>{
+  let pracFirma = null
+  const htmlRadku = sortedWorkers.map(w=>{
     const canTrack = w.can_track_hours !== false   // null/undefined = povoleno (zpětná kompatibilita)
     const teamName = w.team_id ? (teamNameById[w.team_id]||'') : ''
     const subName = w.subteam_id ? (subteamById[w.subteam_id]?.name||'') : ''
-    return `
-    <tr style="cursor:pointer" class="worker-row" data-id="${w.id}" data-name="${escAttr(((w.full_name||'') + ' ' + (w.email||'')).replace(/"/g,'&quot;'))}">
-      <td style="padding:0 10px 0 0;height:1px"><div style="display:flex;align-items:stretch;gap:10px;min-width:0;min-height:${FOTKA_RADEK_VYSKA}px;height:100%">${fotkaHtml(w.avatar_url, w.full_name, FOTKA_RADEK_VYSKA * 3 / 4, true, w.id)}<div style="display:flex;flex-direction:column;justify-content:center;min-width:0;padding:6px 0"><div><b>${escAttr(w.full_name)}</b>${nemcinaHtml(w.id, w.german_level || null)}</div><div>${w.has_car ? '<span style="font-size:11px;background:#eef7ee;color:#2e7d32;border:1px solid #b8dcb8;font-weight:700;padding:1px 6px;border-radius:8px;white-space:nowrap" title="Má vlastní auto">🚗 auto</span>' : ''}${(window.unclosedWorkerIds && window.unclosedWorkerIds.has(w.id)) ? ' <span style="background:var(--red);color:#fff;font-size:10px;font-weight:700;padding:2px 6px;border-radius:8px;white-space:nowrap" title="Nemá ukončený den — směna běží i po 20:30">⚠️ neukončeno</span>' : ''}</div></div></div></td>
+    // Pruh nad každou firmou — viz hlavickaFirmyHtml (majitel 1. 10. 2026).
+    let hlava = ''
+    if (teamName !== pracFirma) {
+      pracFirma = teamName
+      hlava = hlavickaFirmyHtml(teamName, 9, pocetLidiText(sortedWorkers.filter(x => (x.team_id ? (teamNameById[x.team_id] || '') : '') === teamName).length))
+    }
+    return hlava + `
+    <tr style="cursor:pointer;border-left:4px solid ${groupColor(teamName || 'Bez firmy', 'company').border}" class="worker-row" data-id="${w.id}" data-name="${escAttr(((w.full_name||'') + ' ' + (w.email||'')).replace(/"/g,'&quot;'))}">
+      <td style="padding:0 10px 0 0;height:1px"><div style="display:flex;align-items:stretch;gap:10px;min-width:0;min-height:${FOTKA_RADEK_VYSKA}px;height:100%">${fotkaHtml(w.avatar_url, w.full_name, FOTKA_RADEK_VYSKA * 3 / 4, true, w.id)}<div style="display:flex;flex-direction:column;justify-content:center;min-width:0;padding:6px 0"><div><b>${jmenoSNemcinou(w.full_name, w.id, w.german_level || null)}</b>${puntikyHtml(w.id)}</div><div>${w.has_car ? '<span style="font-size:11px;background:#eef7ee;color:#2e7d32;border:1px solid #b8dcb8;font-weight:700;padding:1px 6px;border-radius:8px;white-space:nowrap" title="Má vlastní auto">🚗 auto</span>' : ''}${(window.unclosedWorkerIds && window.unclosedWorkerIds.has(w.id)) ? ' <span style="background:var(--red);color:#fff;font-size:10px;font-weight:700;padding:2px 6px;border-radius:8px;white-space:nowrap" title="Nemá ukončený den — směna běží i po 20:30">⚠️ neukončeno</span>' : ''}</div></div></div></td>
       <td>${groupCellHtml(teamName, subName)}</td>
       <td onclick="event.stopPropagation();otevriUbytovani('${w.id}')" title="Kliknutím upravíte adresu ubytování i poznámky (kódy, patro, pokoj)" style="cursor:pointer;font-size:12px;max-width:190px">${ubytovaniBunka(w)}</td>
       <td>${escAttr(profLabel(w.profession)||'—')}</td>
@@ -9905,6 +9928,12 @@ async function loadWorkers() {
       </td>
       <td onclick="event.stopPropagation()"><button onclick="toggleAccess('${w.id}',${w.is_active})" style="font-size:12px;padding:4px 10px;border:1px solid var(--brd);border-radius:6px;cursor:pointer;background:none;font-family:inherit">${w.is_active?'Odebrat':'Obnovit'}</button></td>
     </tr>`}).join('')
+  // Obnova každou minutu: stejné řádky znovu nevkládat — fotky by se načítaly
+  // znovu a na okamžik by bliklo (týdenní přehled to dělá stejně).
+  if (tbody._posledniHtml !== htmlRadku || !tbody.querySelector('.worker-row')) {
+    tbody.innerHTML = htmlRadku
+    tbody._posledniHtml = htmlRadku
+  }
   // Event delegation pro worker rows - spolehlivejsi nez inline onclick
   tbody.onclick = function(e) {
     const row = e.target.closest('.worker-row')
@@ -10293,7 +10322,7 @@ async function loadTodayTimeline() {
   const div = document.getElementById('today-timeline')
   if (!div) return
   div.innerHTML = '<div style="text-align:center;color:var(--text3);font-size:13px">Načítám…</div>'
-  const vlajkyNactene = nactiVlajky()   // vlaječky a němčina u fotek (souběžně)
+  const vlajkyNactene = Promise.all([nactiVlajky(), nactiPuntikyVsech()])   // vlaječky, němčina a puntíky u jmen (souběžně)
 
   // Všechny dnešní záznamy všech pracovníků + firma a podskupina, podle kterých se řadí
   const [{ data }, { data: tmTeams }, { data: tmComps }, { data: tmSubs }] = await Promise.all([
@@ -10443,7 +10472,7 @@ async function loadTodayTimeline() {
   // Řádky pracovníků prokládané hlavičkou firmy, ať je vidět, kde jedna firma končí.
   // Hlavičky mají třídu tbl-group — filterTableRows je při hledání schová, když pod nimi nic nezbude.
   let lastFirm = null
-  await vlajkyNactene
+  await vlajkyNejdyl(vlajkyNactene)
   const bodyHtml = rows.map(g => {
           const hours = g.check_out
             ? '<b style="color:var(--blue)">' + (g.total || 0) + 'h</b>'
@@ -10454,7 +10483,7 @@ async function loadTodayTimeline() {
           if (g.firm !== lastFirm) {
             lastFirm = g.firm
             const cnt = rows.filter(x => x.firm === g.firm).length
-            groupHead = `<tr class="tbl-group"><td colspan="8" style="padding:7px 10px;background:${gc.bg};border-top:2px solid ${gc.border}"><span style="font-size:12px;font-weight:800;color:${gc.text}">🏢 ${g.firm}</span><span style="font-size:11px;color:var(--text3);margin-left:8px">${cnt} v práci</span></td></tr>`
+            groupHead = hlavickaFirmyHtml(g.firm, 8, cnt + ' v práci')
           }
           // Podskupina drobným písmem pod jménem — např. „Treskower · 👥 Parta A"
           const subC = g.sub ? groupColor(g.sub, 'sub') : null
@@ -10505,7 +10534,7 @@ async function loadTodayTimeline() {
                 <div style="display:flex;align-items:stretch;gap:10px;min-height:${FOTKA_RADEK_VYSKA}px;height:100%">
                   ${fotkaHtml(g.avatar, g.name, FOTKA_RADEK_VYSKA * 3 / 4, true, g.worker_id)}
                   <div style="display:flex;flex-direction:column;justify-content:center;min-width:0;padding:6px 0">
-                    <b>${escAttr(g.name||'—')}${nemcinaHtml(g.worker_id)}</b>
+                    <b>${jmenoSNemcinou(g.name||'—', g.worker_id)}</b>${puntikyHtml(g.worker_id)}
                     <small style="color:var(--text3)">${escAttr(profLabel(g.profession)||'')}</small>
                     ${groupLine}
                   </div>
@@ -10600,24 +10629,83 @@ async function deleteTodayRecord(id, name) {
 // Národnost je profiles.narodnost (kód země, supabase-migrace-narodnost.sql),
 // němčina už v profilu byla (german_level). Jedno načtení pro všechny
 // seznamy, platí minutu; bez migrace se vlaječky prostě nekreslí.
-let _lideVlajky = { kdy: 0, mapa: new Map(), bezNarodnosti: false }
-async function nactiVlajky(vynutit) {
-  if (!vynutit && Date.now() - _lideVlajky.kdy < 60000) return _lideVlajky.mapa
-  try {
-    let bezNarodnosti = false
-    let { data, error } = await sb.from('profiles').select('id, narodnost, german_level')
-    if (error && (error.code === '42703' || /narodnost/i.test(error.message || ''))) {
-      bezNarodnosti = true
-      ;({ data, error } = await sb.from('profiles').select('id, german_level'))
-    }
-    if (error) return _lideVlajky.mapa   // výpadek: platí, co bylo načtené minule
-    const mapa = new Map()
-    ;(data || []).forEach(p => mapa.set(String(p.id), { narodnost: p.narodnost || null, nemcina: p.german_level || null }))
-    _lideVlajky = { kdy: Date.now(), mapa, bezNarodnosti }
-  } catch (e) {}
-  return _lideVlajky.mapa
+let _lideVlajky = { kdy: 0, mapa: new Map(), bezNarodnosti: false, bezNarodnostiOd: 0 }
+let _vlajkyBezi = null
+function nactiVlajky(vynutit) {
+  if (!vynutit && Date.now() - _lideVlajky.kdy < 60000) return Promise.resolve(_lideVlajky.mapa)
+  // Docházka se otevírá třemi seznamy najednou — sdílejí jeden dotaz.
+  if (_vlajkyBezi) return _vlajkyBezi
+  _vlajkyBezi = (async () => {
+    try {
+      // Bez migrace se sloupec narodnost zkusí znovu až po deseti minutách;
+      // jinak by každá obnova hodila do konzole chybu 400 a dotaz navíc.
+      const preskoc = _lideVlajky.bezNarodnosti && Date.now() - _lideVlajky.bezNarodnostiOd < 600000
+      let bezNarodnosti = preskoc, data = null, error = null
+      if (!preskoc) {
+        ;({ data, error } = await sb.from('profiles').select('id, narodnost, german_level'))
+        if (error && (error.code === '42703' || /narodnost/i.test(error.message || ''))) bezNarodnosti = true
+      }
+      if (bezNarodnosti) ({ data, error } = await sb.from('profiles').select('id, german_level'))
+      if (error) return _lideVlajky.mapa   // výpadek: platí, co bylo načtené minule
+      const mapa = new Map()
+      ;(data || []).forEach(p => mapa.set(String(p.id), { narodnost: p.narodnost || null, nemcina: p.german_level || null }))
+      _lideVlajky = { kdy: Date.now(), mapa, bezNarodnosti,
+        bezNarodnostiOd: !bezNarodnosti ? 0 : (preskoc ? _lideVlajky.bezNarodnostiOd : Date.now()) }
+    } catch (e) {}
+    return _lideVlajky.mapa
+  })().finally(() => { _vlajkyBezi = null })
+  return _vlajkyBezi
 }
-function zneplatniVlajky() { _lideVlajky.kdy = 0 }
+// Po uložení profilu (třeba po spuštěné migraci) načíst znovu a zkusit i národnost.
+// POČET ČERNÝCH PUNTÍKŮ U JMÉNA. Majitel 1. 10. 2026: „v docházce a
+// v pracovníkách chci vidět počet puntíků, kdo kolik má." Jeden dotaz pro
+// všechny, platí minutu (po přidání nebo smazání puntíku hned znovu). Bez
+// tabulky puntiky (neproběhlá migrace) se prostě nic neukáže.
+let _puntikyVsech = { kdy: 0, mapa: new Map() }
+let _puntikyBezi = null
+function nactiPuntikyVsech(vynutit) {
+  if (!vynutit && Date.now() - _puntikyVsech.kdy < 60000) return Promise.resolve(_puntikyVsech.mapa)
+  if (_puntikyBezi) return _puntikyBezi
+  _puntikyBezi = (async () => {
+    try {
+      const { data, error } = await sb.from('puntiky').select('worker_id, srazka_zapsana_v')
+      if (error) return _puntikyVsech.mapa
+      const mapa = new Map()
+      ;(data || []).forEach(p => {
+        const k = String(p.worker_id), o = mapa.get(k) || { pocet: 0, provedeno: 0 }
+        o.pocet++; if (p.srazka_zapsana_v) o.provedeno++
+        mapa.set(k, o)
+      })
+      // Stejné počítání jako puntikyStav: každé 3 = srážka, kolik jich ještě čeká.
+      mapa.forEach(o => { o.ceka = Math.max(0, Math.floor(o.pocet / PUNTIKY_NA_SRAZKU) - o.provedeno) })
+      _puntikyVsech = { kdy: Date.now(), mapa }
+    } catch (e) {}
+    return _puntikyVsech.mapa
+  })().finally(() => { _puntikyBezi = null })
+  return _puntikyBezi
+}
+// Po přidání nebo smazání puntíku: načíst znovu a překreslit, co je na očích.
+function obnovPuntikyVTabulkach() {
+  _puntikyVsech.kdy = 0
+  const videt = id => { const el = document.getElementById(id); return !!(el && el.offsetParent) }
+  if (videt('today-timeline') && typeof loadTodayTimeline === 'function') loadTodayTimeline()
+  if (videt('kw-table') && typeof loadKWData === 'function') loadKWData()
+  if (videt('workers-table') && typeof loadWorkers === 'function') loadWorkers()
+}
+// Štítek za jménem: černý „⚫ 2", oranžový, když čeká srážka za trojici.
+function puntikyHtml(workerId) {
+  const o = _puntikyVsech.mapa.get(String(workerId || ''))
+  if (!o || !o.pocet) return ''
+  const doSrazky = PUNTIKY_NA_SRAZKU - (o.pocet % PUNTIKY_NA_SRAZKU)
+  const popis = o.ceka
+    ? 'Černé puntíky: ' + o.pocet + ' — čeká srážka ' + SRAZKA_HODIN + ' h (v kartě pracovníka, záložka Docházka)'
+    : 'Černé puntíky: ' + o.pocet + ' — do srážky ' + SRAZKA_HODIN + ' h chybí ' + doSrazky
+  return ` <span data-puntiky="${o.pocet}" title="${escAttr(popis)}" style="display:inline-block;vertical-align:1px;margin-left:3px;padding:0 6px;border-radius:9px;background:${o.ceka ? '#E8A13A' : '#211D1A'};color:${o.ceka ? '#211D1A' : '#fff'};font-size:10.5px;font-weight:800;line-height:16px;white-space:nowrap">⚫ ${o.pocet}</span>`
+}
+
+function zneplatniVlajky() { _lideVlajky.kdy = 0; _lideVlajky.bezNarodnosti = false }
+// Vlaječky jsou ozdoba: tabulka na ně počká nejvýš chvilku, pak se vykreslí bez nich.
+function vlajkyNejdyl(slib, ms = 2500) { return Promise.race([slib, new Promise(r => setTimeout(r, ms))]) }
 
 // Národnosti v nabídce karty pracovníka (kód podle ISO, název česky).
 const NARODNOSTI = [['CZ','Česko'],['SK','Slovensko'],['PL','Polsko'],['UA','Ukrajina'],['RO','Rumunsko'],
@@ -10645,8 +10733,23 @@ const NEMCINA_TEXT = { basic: 'DE A1–A2', intermediate: 'DE B1–B2', advanced
 const NEMCINA_POPIS = { basic: 'základní (A1–A2)', intermediate: 'pokročilá (B1–B2)', advanced: 'profi (C1–C2)' }
 function nemcinaHtml(workerId, uroven) {
   const u = uroven !== undefined ? uroven : (_lideVlajky.mapa.get(String(workerId || '')) || {}).nemcina
-  if (!NEMCINA_TEXT[u]) return ''
+  if (!Object.prototype.hasOwnProperty.call(NEMCINA_TEXT, u)) return ''
   return ` <span data-nemcina="${escAttr(u)}" title="Umí německy — ${NEMCINA_POPIS[u]}" style="display:inline-block;vertical-align:1px;margin-left:3px;padding:0 5px;border:1.5px solid #2c4257;border-radius:3px;font-size:10.5px;font-weight:800;line-height:15px;color:#2c4257;background:#fff;white-space:nowrap">${NEMCINA_TEXT[u]}</span>`
+}
+
+// Jméno a za ním obdélníček DE. Poslední slovo jména drží s obdélníčkem na
+// jednom řádku — jinak DE v užším sloupci spadlo pod jméno samo (Pracovníci,
+// týden), a majitel ho chtěl „za jménem".
+function jmenoSNemcinou(jmeno, workerId, uroven) {
+  const t = String(jmeno == null ? '' : jmeno)
+  const de = nemcinaHtml(workerId, uroven)
+  if (!de) return escAttr(t)
+  const i = t.lastIndexOf(' ')
+  const posledni = t.slice(i + 1)
+  // Dlouhé poslední slovo („Müller-Lüdenscheidt") by s obdélníčkem přeteklo
+  // buňku — pak ať DE klidně skočí na další řádek.
+  if (posledni.length > 12) return escAttr(t) + de
+  return escAttr(t.slice(0, i + 1)) + '<span style="white-space:nowrap">' + escAttr(posledni) + de + '</span>'
 }
 
 // Jednotná výška fotky v řádcích (3:4 na výšku). Majitel 30. 9. 2026: „ty
@@ -10655,7 +10758,9 @@ function nemcinaHtml(workerId, uroven) {
 // vedle, nikdy ne pod tou fotkou". Dřív se výška brala z řádku, takže krátký
 // řádek = malinká fotka. Teď má každý řádek s fotkou aspoň tuhle výšku
 // a fotka jde od čáry k čáře.
-const FOTKA_RADEK_VYSKA = 100
+// 130 (fotka 98 × 130) od 1. 10. 2026: vzorová Alešova fotka měla 98 × 131,
+// se 100 byly všechny menší než vzor (nezávislá kontrola).
+const FOTKA_RADEK_VYSKA = 130
 
 function fotkaHtml(url, jmeno, px, obdelnik, workerId) {
   // ČTVERCOVÁ MINIATURA (px), NEBO OBDÉLNÍK 3:4 PŘES CELOU VÝŠKU ŘÁDKU.
@@ -10683,10 +10788,14 @@ function fotkaHtml(url, jmeno, px, obdelnik, workerId) {
   const pismo = obdelnik ? 18 : Math.round(v * 0.4)
   const iniciraly = `<span data-fotka="iniciraly" style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;background:${fotkaBarva(jmeno)};color:#fff;font-size:${pismo}px;font-weight:700">${escAttr(fotkaIniciraly(jmeno))}</span>`
   const vlajka = workerId ? vlajkaHtml(workerId) : ''
-  if (!url) return `<span data-fotka="obal" style="display:inline-flex;${obal}">${iniciraly}${vlajka}</span>`
+  // Název země do popisku fotky — vlaječka sama popisek neukáže (klik i myš
+  // propouští na fotku) a podobné trikolóry (SK, SI, RS…) se pletou.
+  const kodZeme = workerId ? (_lideVlajky.mapa.get(String(workerId)) || {}).narodnost : null
+  const zeme = vlajka && vlajkaEmoji(kodZeme) ? nazevNarodnosti(String(kodZeme).toUpperCase()) : ''
+  if (!url) return `<span data-fotka="obal"${zeme ? ` title="${escAttr(zeme)}"` : ''} style="display:inline-flex;${obal}">${iniciraly}${vlajka}</span>`
   // onerror: když se fotka nenačte (smazaná z úložiště), schová se a zůstanou
   // iniciály pod ní — ne ikona rozbitého obrázku.
-  return `<span data-fotka="obal" onclick="event.stopPropagation();showAvatarPreview('${jsStr(url)}')" title="Kliknutím zvětšíte"
+  return `<span data-fotka="obal" onclick="event.stopPropagation();showAvatarPreview('${jsStr(url)}')" title="${zeme ? escAttr(zeme) + ' · k' : 'K'}liknutím zvětšíte"
       style="display:inline-flex;cursor:zoom-in;${obal}">
     ${iniciraly}
     <img src="${escAttr(url)}" alt="" loading="lazy" style="position:absolute;inset:0;width:100%;height:100%;object-fit:cover" onerror="this.style.display='none'">
@@ -10713,7 +10822,7 @@ async function loadKWData() {
   if (!val) return
   const [week, year] = val.split('-').map(Number)
   const tbody = document.getElementById('kw-table')
-  const vlajkyNactene = nactiVlajky()   // vlaječky a němčina u fotek (souběžně)
+  const vlajkyNactene = Promise.all([nactiVlajky(), nactiPuntikyVsech()])   // vlaječky, němčina a puntíky u jmen (souběžně)
 
   // ═══ PĚT DOTAZŮ NAJEDNOU, NE ZA SEBOU ═══════════════════════════════════
   // Do 29. 9. 2026 se tu čekalo na pět dotazů popořadě — lidi, firmy,
@@ -10813,7 +10922,7 @@ async function loadKWData() {
     if (jeSkrytaFirmaPracovnika(r.worker)) return   // schovaná firma
     // Kdo není v seznamu výše, ale docházku v tomhle týdnu má — typicky bývalý
     // pracovník. Řádek mu vytvoříme, ať hodiny z přehledu nezmizí.
-    if (!workers[wid]) workers[wid] = { id: wid, name: r.worker?.full_name, prof: r.worker?.profession,
+    if (!workers[wid]) workers[wid] = { id: wid, name: r.worker?.full_name, prof: r.worker?.profession, fotka: r.worker?.avatar_url || '',
       byvaly: r.worker?.is_active === false, days:{}, total:0 }
     const rawDay = new Date(r.work_date).getDay()
     const day = rawDay === 0 ? 7 : rawDay   // neděle 0 → 7 (poslední den týdne)
@@ -10948,13 +11057,21 @@ async function loadKWData() {
     return (a.name||'').localeCompare(b.name||'', 'cs')
   })
 
-  await vlajkyNactene
-  const kwHtml = list.map(w=>`
-    <tr style="cursor:pointer;height:56px" class="kw-row" data-id="${w.id||''}" data-name="${(w.name||'').replace(/"/g,'&quot;')}">
-      <td class="kw-name" title="Klikněte pro otevření profilu pracovníka" style="vertical-align:middle;overflow:hidden;padding:0 8px 0 0;height:1px"><div style="display:flex;align-items:stretch;gap:9px;min-width:0;min-height:${FOTKA_RADEK_VYSKA}px;height:100%">${fotkaHtml(w.fotka, w.name, FOTKA_RADEK_VYSKA * 3 / 4, true, w.id)}<div style="display:flex;flex-direction:column;justify-content:center;min-width:0;padding:6px 0"><div><b style="overflow:hidden;text-overflow:ellipsis">${escAttr(w.name)}</b>${nemcinaHtml(w.id)}</div>${w.byvaly?' <span style="font-size:10px;font-weight:700;background:var(--bg);color:var(--text3);border:1px solid var(--brd);padding:1px 6px;border-radius:8px;white-space:nowrap" title="Pracovník už do aplikace nemá přístup. Hodiny, které stihl odpracovat, zůstávají v přehledu.">📦 bývalý</span>':''}${w.mimoVykaz?' <span style="font-size:10px;font-weight:700;background:var(--bg);color:var(--red);border:1px solid var(--red);padding:1px 6px;border-radius:8px;white-space:nowrap" title="V Týmech je odškrtnutý. Tady ho vidíte i s hodinami, ale do vytištěného výkazu se nedostane — proto tam bude jiný součet.">🚫 mimo výkaz</span>':''}${w.blocked?' <span style="font-size:10px;font-weight:700;background:var(--red-l);color:var(--red);border:1px solid #e8c4ba;padding:1px 6px;border-radius:8px;white-space:nowrap" title="Pracovník má dočasně zablokované zapisování docházky">🚫 docházka zablokovaná</span>':''}${(w.firm||w.sub)?`<div style="margin-top:3px">${groupCellHtml(w.firm, w.sub)}</div>`:''}</div></div></td><td style="font-size:12px;vertical-align:middle">${profLabel(w.prof)||''}</td>
+  await vlajkyNejdyl(vlajkyNactene)
+  let kwFirma = null
+  const kwHtml = list.map(w => {
+    // Pruh nad každou firmou — viz hlavickaFirmyHtml (majitel 1. 10. 2026).
+    let hlava = ''
+    if ((w.firm || '') !== kwFirma) {
+      kwFirma = w.firm || ''
+      hlava = hlavickaFirmyHtml(w.firm, 10, pocetLidiText(list.filter(x => (x.firm || '') === kwFirma).length))
+    }
+    return hlava + `
+    <tr style="cursor:pointer;height:56px;border-left:4px solid ${groupColor(w.firm || 'Bez firmy', 'company').border}" class="kw-row" data-id="${w.id||''}" data-name="${(w.name||'').replace(/"/g,'&quot;')}">
+      <td class="kw-name" title="Klikněte pro otevření profilu pracovníka" style="vertical-align:middle;overflow:hidden;padding:0 8px 0 0;height:1px"><div style="display:flex;align-items:stretch;gap:9px;min-width:0;min-height:${FOTKA_RADEK_VYSKA}px;height:100%">${fotkaHtml(w.fotka, w.name, FOTKA_RADEK_VYSKA * 3 / 4, true, w.id)}<div style="display:flex;flex-direction:column;justify-content:center;align-items:flex-start;min-width:0;padding:6px 0"><div><b>${jmenoSNemcinou(w.name, w.id)}</b>${puntikyHtml(w.id)}</div>${w.byvaly?' <span style="font-size:10px;font-weight:700;background:var(--bg);color:var(--text3);border:1px solid var(--brd);padding:1px 6px;border-radius:8px;white-space:nowrap" title="Pracovník už do aplikace nemá přístup. Hodiny, které stihl odpracovat, zůstávají v přehledu.">📦 bývalý</span>':''}${w.mimoVykaz?' <span style="font-size:10px;font-weight:700;background:var(--bg);color:var(--red);border:1px solid var(--red);padding:1px 6px;border-radius:8px;white-space:nowrap" title="V Týmech je odškrtnutý. Tady ho vidíte i s hodinami, ale do vytištěného výkazu se nedostane — proto tam bude jiný součet.">🚫 mimo výkaz</span>':''}${w.blocked?' <span style="font-size:10px;font-weight:700;background:var(--red-l);color:var(--red);border:1px solid #e8c4ba;padding:1px 6px;border-radius:8px;white-space:nowrap" title="Pracovník má dočasně zablokované zapisování docházky">🚫 docházka zablokovaná</span>':''}${(w.firm||w.sub)?`<div style="margin-top:3px">${groupCellHtml(w.firm, w.sub)}</div>`:''}</div></div></td><td style="font-size:12px;vertical-align:middle">${profLabel(w.prof)||''}</td>
       ${dayCell(w,1)}${dayCell(w,2)}${dayCell(w,3)}${dayCell(w,4)}${dayCell(w,5)}${dayCell(w,6)}${dayCell(w,7)}
       <td style="vertical-align:middle"><b style="color:var(--blue)">${w.total.toFixed(1)}h</b></td>
-    </tr>`).join('')
+    </tr>`}).join('')
   // Tichá obnova volá tohle každou minutu i beze změny dat — přepsat DOM pokaždé
   // by na obrazovce probliklo, i když admin jen sedí a nic se neděje. Přepiš tedy
   // jen když se tabulka opravdu liší od té, co je tam už teď (běžící směna hodiny
@@ -32899,7 +33016,13 @@ async function openWorkerModal(id) {
       NARODNOSTI.map(([k, n]) => `<option value="${k}">${vlajkaEmoji(k)} ${escAttr(n)}</option>`).join(''))
     const maSloupec = 'narodnost' in w
     wdNar.disabled = !maSloupec
-    wdNar.value = maSloupec ? (w.narodnost || '') : ''
+    // Kód, který v nabídce není (zapsaný jinudy), dostane volbu navíc — jinak
+    // by nabídka zůstala prázdná a Uložit by národnost potichu smazalo.
+    const kodNar = maSloupec ? String(w.narodnost || '') : ''
+    wdNar.querySelectorAll('option[data-navic]').forEach(o => o.remove())
+    if (kodNar && ![...wdNar.options].some(o => o.value === kodNar))
+      wdNar.insertAdjacentHTML('beforeend', `<option value="${escAttr(kodNar)}" data-navic="1">${vlajkaEmoji(kodNar)} ${escAttr(kodNar)}</option>`)
+    wdNar.value = kodNar
     const pozn = document.getElementById('wd-narodnost-pozn'); if (pozn) pozn.style.display = maSloupec ? 'none' : 'block'
   }
   const wdEng = document.getElementById('wd-english'); if (wdEng) wdEng.value = w.english_level || ''
@@ -33910,6 +34033,7 @@ async function ulozPuntik(workerId, den, duvod, jmeno) {
     showToast('⚫ Puntík zapsán (' + st.pocet + ' z ' + (st.trojic * PUNTIKY_NA_SRAZKU + PUNTIKY_NA_SRAZKU) + ')')
   }
   if (typeof nactiPuntikyKarta === 'function' && currentWorkerId === workerId) nactiPuntikyKarta()
+  obnovPuntikyVTabulkach()
   return true
 }
 
@@ -33922,6 +34046,7 @@ async function smazatPuntik(id, workerId) {
   }
   showToast('🗑 Puntík smazán')
   if (currentWorkerId === workerId) nactiPuntikyKarta()
+  obnovPuntikyVTabulkach()
 }
 
 // ODEČET 2 H — přes „ručně nastavenou částku" dne. Ukáže čísla a ptá se
