@@ -4756,7 +4756,7 @@ async function submitAdminSignatureWithPlacement() {
 // Po nahrání nové verze se snadno pozná, jestli se opravdu nasadila: otevřete
 // appku, zmáčkněte F12 (na Macu ⌥⌘I) a v konzoli je vypsané tohle datum. Když
 // tam svítí starší, prohlížeč nebo GitHub drží starou verzi.
-const SUBBAU_VERZE = '2026-10-01 m — Ubytování: velké Kopírovat adresu, u lidí fotka, jméno a vlaječka'
+const SUBBAU_VERZE = '2026-10-01 n — Ubytování: cizí lidé na pokoji, zaplaceno od–do, firmy, kterým ubytování řešíme'
 console.log('SubBau docházka — verze ' + SUBBAU_VERZE)
 // Verze i dole v menu správce. Když někdo novinku „nevidí", podle ní se hned
 // pozná, jestli nemá otevřenou starou kopii appky — bez hledání v konzoli.
@@ -10216,6 +10216,19 @@ let _druhSkupinek = 'ubytovani'
 let _skupinky = { kdy: 0, seznam: [], clenove: [], chybi: false }
 let _skupinkyBezi = null
 
+const SKUPINKY_DOPLNKY = ', cizi_pocet, cizi_jmena, zaplaceno_od, zaplaceno_do'
+function chybiSloupec(e) {
+  const kod = String((e && e.code) || ''), zprava = (e && e.message) || ''
+  return kod === '42703' || kod === 'PGRST204' || /column .* does not exist|could not find the '.*' column/i.test(zprava)
+}
+// Kdy naposled databáze doplňky neznala. Deset minut se pak čte rovnou bez nich
+// — jinak by každá tichá obnova (minuta) poslala dotaz, o kterém víme, že spadne.
+let _skupinkyBezDoplnkuOd = 0
+// CIZÍ LIDÉ NA POKOJI (majitel 1. 10. 2026: „pokoj je pro 5 lidí, ale jsou tam
+// dva cizí — ať je vidět, že je ještě jedno místo volný"). Počítají se do
+// obsazenosti všude, kde se obsazenost ukazuje, jinak by „volno" lhalo.
+function ciziSkupinky(s) { return s && s.druh === 'ubytovani' ? Math.max(0, Math.round(Number(s.cizi_pocet) || 0)) : 0 }
+function obsazenoSkupinky(s) { return clenoveSkupinky(s.id).length + ciziSkupinky(s) }
 function jeChybiSkupinky(e) {
   return /does not exist|schema cache|could not find the table|PGRST205|42P01/i.test(((e && e.message) || '') + ' ' + ((e && e.code) || ''))
 }
@@ -10225,16 +10238,25 @@ function nactiSkupinky(vynutit) {
   if (_skupinkyBezi) return _skupinkyBezi
   _skupinkyBezi = (async () => {
     try {
-      const [s, c] = await Promise.all([
-        sb.from('skupinky').select('id, druh, nazev, adresa, pocet_mist, barva, poznamka, aktivni').eq('aktivni', true).order('nazev'),
+      const zakladni = 'id, druh, nazev, adresa, pocet_mist, barva, poznamka, aktivni'
+      const dotaz = sloupce => sb.from('skupinky').select(sloupce).eq('aktivni', true).order('nazev')
+      const zkusitDoplnky = Date.now() - _skupinkyBezDoplnkuOd > 600000
+      let [s, c] = await Promise.all([
+        dotaz(zakladni + (zkusitDoplnky ? SKUPINKY_DOPLNKY : '')),
         sb.from('skupinky_lide').select('skupinka_id, worker_id, druh')
       ])
+      // DOPLŇKY (cizí lidé, zaplaceno od–do) přidává supabase-migrace-ubytovani-
+      // doplnky.sql. Dokud neproběhla, čte se jako dřív a okno je nenabízí —
+      // ubytování musí fungovat dál i bez ní. Chybějící SLOUPEC se pozná dřív
+      // než chybějící tabulka: obojí hlásí „does not exist".
+      let bezDoplnku = !zkusitDoplnky
+      if (s.error && chybiSloupec(s.error)) { bezDoplnku = true; _skupinkyBezDoplnkuOd = Date.now(); s = await dotaz(zakladni) }
       const chyba = s.error || c.error
       if (chyba) {
         if (jeChybiSkupinky(chyba)) _skupinky = { kdy: Date.now(), seznam: [], clenove: [], chybi: true }
         return _skupinky   // jiný výpadek: platí, co bylo načtené minule
       }
-      _skupinky = { kdy: Date.now(), seznam: s.data || [], clenove: c.data || [], chybi: false }
+      _skupinky = { kdy: Date.now(), seznam: s.data || [], clenove: c.data || [], chybi: false, bezDoplnku }
     } catch (e) {}
     return _skupinky
   })().finally(() => { _skupinkyBezi = null })
@@ -10253,7 +10275,7 @@ function tonSkupinky(s, pruhlednost) {
   return 'rgba(' + ((n >> 16) & 255) + ',' + ((n >> 8) & 255) + ',' + (n & 255) + ',' + pruhlednost + ')'
 }
 function obsazenostText(s) {
-  const n = clenoveSkupinky(s.id).length
+  const n = obsazenoSkupinky(s)
   return s.pocet_mist ? n + ' / ' + s.pocet_mist + ' ' + (SKUPINKY_DRUH[s.druh] || SKUPINKY_DRUH.ubytovani).mista : n + ' ' + (n === 1 ? 'člověk' : (n >= 2 && n <= 4) ? 'lidé' : 'lidí')
 }
 // Malé štítky pod jménem v tabulkách: „🏠 Pension Linde", „🚗 Crafter".
@@ -10304,7 +10326,7 @@ function hlavickaSkupinkyHtml(s, sloupcu, popis) {
   const d = razeniSkupin()
   const D = SKUPINKY_DRUH[d] || SKUPINKY_DRUH.ubytovani
   if (!s) return `<tr class="tbl-group"><td colspan="${sloupcu}" style="padding:9px 12px;background:#f4f1ec;border-top:4px solid #b9b1a6;border-bottom:1.5px solid #b9b1a6"><span style="font-size:14px;font-weight:800;color:#5c554d">${D.ikona} ${D.bez}</span>${popis ? `<span style="font-size:12px;color:var(--text3);margin-left:10px">${escAttr(popis)}</span>` : ''}</td></tr>`
-  const plno = s.pocet_mist && clenoveSkupinky(s.id).length > s.pocet_mist
+  const plno = s.pocet_mist && obsazenoSkupinky(s) > s.pocet_mist
   // Počet lidí v řádcích už říká obsazenost — opakuje se jen „N v práci" (dnešek).
   if (/^\d+ (člověk|lidé|lidí)$/.test(popis || '')) popis = ''
   return `<tr class="tbl-group"><td colspan="${sloupcu}" style="padding:9px 12px;background:${tonSkupinky(s, 0.13)};border-top:4px solid ${barvaSkupinky(s)};border-bottom:1.5px solid ${tonSkupinky(s, 0.5)}"><span style="font-size:14px;font-weight:800;color:#2b2622">${D.ikona} ${escAttr(s.nazev)}</span><span style="font-size:12px;color:${plno ? 'var(--red)' : 'var(--text3)'};margin-left:10px;font-weight:${plno ? 800 : 400}">${escAttr(obsazenostText(s))}${popis ? ' · ' + escAttr(popis) : ''}</span>${s.adresa ? `<span style="font-size:11.5px;color:var(--text3);margin-left:10px">${escAttr(s.adresa)}</span>` : ''}</td></tr>`
@@ -10318,14 +10340,80 @@ function prepniDruhSkupinek(druh) {
   vykresliUbytovani()
 }
 let _ubytLide = []
+// FIRMY, KTERÝM ŘEŠÍME UBYTOVÁNÍ (majitel 1. 10. 2026: „tlačítko, který firmy
+// řeším ubytování — ostatní mě nezajímají, ať mi tam nepíše, že ten ještě nemá").
+// Uloženo u skupiny (teams.resime_ubytovani), takže platí pro všechny správce
+// na mobilu i PC. Není-li vybraná žádná, ukazují se lidi ze všech firem jako dřív.
+// „FIRMA" JE TU SKUPINA Z TÝMŮ (teams) — tak ji appka ukazuje u lidí
+// v Pracovnících („🏢 …") i v Týmech. Sekce Firmy jsou odběratelé, ti to nejsou.
+let _ubytFirmy = { seznam: [], bezSloupce: false, chyba: false }
+async function nactiFirmyUbytovani() {
+  let t = await sb.from('teams').select('id, name, is_active, resime_ubytovani').order('name')
+  let bezSloupce = false
+  if (t.error && chybiSloupec(t.error)) { bezSloupce = true; t = await sb.from('teams').select('id, name, is_active').order('name') }
+  // Když se skupiny nenačtou, filtr se VYPNE (ukáže všechny) — jinak by
+  // výpadek sítě potichu schoval všechny lidi.
+  _ubytFirmy = { seznam: t.error ? [] : (t.data || []).filter(x => x.is_active !== false), bezSloupce, chyba: !!t.error }
+}
+function vybraneFirmyUbytovani() {
+  return new Set(_ubytFirmy.seznam.filter(f => f.resime_ubytovani === true).map(f => String(f.id)))
+}
+// Patří člověk mezi ty, jejichž ubytování řešíme? Rozhoduje jeho skupina (firma).
+function vRizenychFirmach(w) {
+  const vybrane = vybraneFirmyUbytovani()
+  if (!vybrane.size) return true
+  return w && w.team_id != null && vybrane.has(String(w.team_id))
+}
+async function prepniFirmuUbytovani(id) {
+  const f = _ubytFirmy.seznam.find(x => String(x.id) === String(id))
+  if (!f) return
+  const nove = f.resime_ubytovani !== true
+  const { data, error } = await sb.from('teams').update({ resime_ubytovani: nove }).eq('id', f.id).select('id')
+  if (error || !data || !data.length) { showToast('❌ Neuložilo se' + (error ? ': ' + error.message : ' — zkontrolujte oprávnění')); return }
+  f.resime_ubytovani = nove
+  vykresliUbytovani()
+}
+// ZAPLACENO OD–DO (majitel 1. 10. 2026: „od kdy do kdy je ubytování zaplacený").
+// Týden před koncem svítí oranžově, po konci červeně — ať se na zaplacení
+// nezapomene dřív, než lidi stojí před zavřenými dveřmi.
+function zaplacenoHtml(s) {
+  if (!s || s.druh !== 'ubytovani' || (!s.zaplaceno_od && !s.zaplaceno_do)) return ''
+  const d = x => { const [r, m, den] = String(x).slice(0, 10).split('-'); return `${Number(den)}. ${Number(m)}. ${r}` }
+  const styl = (barva, tuc) => `font-size:12.5px;margin-top:3px;color:${barva};font-weight:${tuc}`
+  if (!s.zaplaceno_do) return `<div data-zaplaceno="od" style="${styl('var(--text2)', 600)}">💶 Zaplaceno od ${d(s.zaplaceno_od)}</div>`
+  const dnes = localDateStr(new Date())
+  const zbyva = Math.round((new Date(s.zaplaceno_do + 'T12:00:00') - new Date(dnes + 'T12:00:00')) / 86400000)
+  const rozsah = (s.zaplaceno_od ? d(s.zaplaceno_od) + ' – ' : 'do ') + d(s.zaplaceno_do)
+  if (zbyva < 0) return `<div data-zaplaceno="proslo" style="${styl('var(--red)', 800)}">⛔ Zaplaceno ${rozsah} — už prošlo</div>`
+  if (zbyva <= 7) return `<div data-zaplaceno="brzy" style="${styl('var(--amber)', 800)}">⚠️ Zaplaceno ${rozsah} — ${zbyva === 0 ? 'končí dnes' : 'zbývá ' + zbyva + ' ' + (zbyva === 1 ? 'den' : zbyva <= 4 ? 'dny' : 'dní')}</div>`
+  return `<div data-zaplaceno="ok" style="${styl('var(--text2)', 600)}">💶 Zaplaceno ${rozsah}</div>`
+}
+// Naši · cizí · volno. Volno počítá i s cizími lidmi na pokoji.
+function mistaUbytovaniHtml(s, nasich) {
+  if (!s || s.druh !== 'ubytovani') return ''
+  const cizi = ciziSkupinky(s)
+  const casti = [`Naši: ${nasich}`]
+  if (cizi) casti.push(`Cizí: ${cizi}`)
+  let volno = ''
+  if (s.pocet_mist) {
+    const v = s.pocet_mist - nasich - cizi
+    volno = v >= 0 ? ` · <b data-volno="${v}" style="color:${v > 0 ? 'var(--green)' : 'var(--text2)'}">Volno: ${v}</b>`
+      : ` · <b data-volno="${v}" style="color:var(--red)">Přeplněno o ${-v}</b>`
+  }
+  return `<div data-mista style="font-size:12.5px;color:var(--text2);margin-top:3px">${casti.join(' · ')}${volno}</div>`
+}
 async function loadUbytovani(tichy) {
   const box = document.getElementById('ubyt-obsah')
   if (!box) return
+  // Kdo sekci otevře, dostane čerstvý pokus o doplňky (třeba právě pustil SQL);
+  // paměť „databáze je nezná" brzdí jen tichou obnovu každou minutu.
+  if (!tichy) _skupinkyBezDoplnkuOd = 0
   if (!tichy && !box.querySelector('.ubyt-karta')) box.innerHTML = '<div style="color:var(--text3);padding:10px">Načítám…</div>'
-  const [, , { data: lide, error }] = await Promise.all([
+  const [, , , { data: lide, error }] = await Promise.all([
     nactiSkupinky(true),
     // Vlaječky u lidí v ubytování (majitel 1. 10. 2026: „fotka, jméno a vlaječka").
     vlajkyNejdyl(nactiVlajky()),
+    nactiFirmyUbytovani().catch(() => {}),
     sb.from('profiles').select('id, full_name, avatar_url, team_id, accommodation_address').in('role', ['osvec', 'partak']).eq('is_active', true).order('full_name')
   ])
   if (error) { box.innerHTML = `<div style="color:var(--red);font-weight:700;padding:10px">❌ Pracovníky se nepodařilo načíst: ${escAttr(error.message || '')}</div>`; return }
@@ -10345,14 +10433,21 @@ function vykresliUbytovani() {
   const podleId = {}
   _ubytLide.forEach(w => { podleId[w.id] = w })
   const karty = skupiny.map(s => {
-    const lide = clenoveSkupinky(s.id).map(id => podleId[id]).filter(Boolean)
-    const plno = s.pocet_mist && lide.length > s.pocet_mist
+    // Počítá se z VŠECH členů (jako odznak a pruh v Pracovnících); vypisují se
+    // jen viditelní. Neaktivní nebo ze schované firmy jsou dole jen číslem —
+    // jejich jména se na obrazovce, kterou může vidět zákazník, neukazují.
+    const clenu = clenoveSkupinky(s.id)
+    const lide = clenu.map(id => podleId[id]).filter(Boolean)
+    const neviditelnych = clenu.length - lide.length
+    const plno = s.pocet_mist && obsazenoSkupinky(s) > s.pocet_mist
     const mapa = s.adresa ? `<a href="https://www.google.com/maps/search/?api=1&amp;query=${encodeURIComponent(s.adresa)}" target="_blank" rel="noopener" style="color:inherit">${escAttr(s.adresa)}</a>` : ''
     return `<div class="ubyt-karta" data-id="${escAttr(s.id)}" style="border:1.5px solid var(--brd);border-left:7px solid ${barvaSkupinky(s)};border-radius:12px;background:#fff;padding:12px 14px;display:flex;flex-direction:column;gap:8px">
       <div style="display:flex;align-items:flex-start;gap:8px">
         <div style="flex:1;min-width:0">
           <div style="font-size:15px;font-weight:800">${D.ikona} ${escAttr(s.nazev)}</div>
           ${mapa ? `<div style="font-size:12.5px;color:var(--text2);margin-top:2px">📍 ${mapa}</div>` : ''}
+          ${mistaUbytovaniHtml(s, clenu.length)}
+          ${zaplacenoHtml(s)}
           ${s.poznamka ? `<div style="font-size:12px;color:var(--text3);margin-top:2px">${escAttr(s.poznamka)}</div>` : ''}
         </div>
         <span title="${s.pocet_mist ? 'Obsazeno / míst celkem' : 'Počet míst není zadaný'}" style="flex-shrink:0;padding:3px 9px;border-radius:9px;font-size:12.5px;font-weight:800;background:${plno ? 'var(--red-l)' : tonSkupinky(s, 0.13)};color:${plno ? 'var(--red)' : '#2b2622'}">${escAttr(obsazenostText(s))}${plno ? ' ⚠️' : ''}</span>
@@ -10360,6 +10455,8 @@ function vykresliUbytovani() {
       <div style="display:flex;flex-direction:column;gap:4px">
         ${lide.length ? lide.map(w => `<div style="display:flex;align-items:center;gap:10px;font-size:14px">${fotkaHtml(w.avatar_url, w.full_name, 44, false, w.id)}<span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;cursor:pointer;font-weight:600" onclick="openWorkerModal('${jsStr(String(w.id))}')">${escAttr(w.full_name || '')}</span><button onclick="odeberZeSkupinky('${jsStr(String(s.id))}','${jsStr(String(w.id))}')" title="Odebrat z ${escAttr(D.jedno)}" style="border:none;background:none;color:var(--text3);cursor:pointer;font-size:15px;padding:2px 6px;min-height:28px">✕</button></div>`).join('')
           : '<div style="font-size:12.5px;color:var(--text3)">Zatím tu nikdo není.</div>'}
+        ${neviditelnych ? `<div data-neviditelni style="font-size:12px;color:var(--text3)">＋ ${neviditelnych} další (neaktivní nebo ze schované firmy)</div>` : ''}
+        ${ciziSkupinky(s) ? `<div data-cizi style="font-size:12.5px;color:var(--text2);padding:6px 8px;border:1.5px dashed var(--brd);border-radius:8px">👤 Cizí lidé na pokoji: <b>${ciziSkupinky(s)}</b>${s.cizi_jmena ? ' — ' + escAttr(s.cizi_jmena) : ''}</div>` : ''}
       </div>
       <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:2px">
         <button onclick="pridatLideDoSkupinky('${jsStr(String(s.id))}')" class="btn-pri" style="padding:7px 12px;font-size:13px">＋ Přidat lidi</button>
@@ -10368,12 +10465,23 @@ function vykresliUbytovani() {
       ${s.adresa ? `<button data-kopirovat-adresu onclick="zkopirujAdresuUbytovani('${jsStr(String(s.id))}')" style="width:100%;min-height:48px;padding:10px 14px;font-size:15px;font-weight:800;border:2px solid var(--blue);border-radius:10px;background:var(--blue-l,#e8f0fb);color:var(--blue);cursor:pointer;font-family:inherit">📋 Kopírovat adresu</button>` : ''}
     </div>`
   }).join('')
-  const bez = _ubytLide.filter(w => !skupinkaCloveka(w.id, _druhSkupinek))
-  box.innerHTML = `
+  const naUbytovani = _druhSkupinek === 'ubytovani'
+  const bezVsichni = _ubytLide.filter(w => !skupinkaCloveka(w.id, _druhSkupinek))
+  const bez = bezVsichni.filter(w => !naUbytovani || vRizenychFirmach(w))
+  const jinychFirem = bezVsichni.length - bez.length
+  const vybrane = vybraneFirmyUbytovani()
+  const viditelneFirmy = _ubytFirmy.seznam.filter(f => tymJeVidet(f.id))
+  const firmyHtml = naUbytovani && viditelneFirmy.length ? `<div data-ubyt-firmy style="margin-bottom:14px;padding:12px 14px;border:1.5px solid var(--brd);border-radius:12px;background:#fff">
+      <div style="font-size:13.5px;font-weight:800;margin-bottom:8px">🏢 Ubytování řeším pro firmy:</div>
+      ${_ubytFirmy.bezSloupce ? '<div style="font-size:12.5px;color:var(--amber);font-weight:700">Výběr firem půjde po spuštění SQL supabase-migrace-ubytovani-doplnky.sql.</div>'
+        : `<div style="display:flex;flex-wrap:wrap;gap:8px">${viditelneFirmy.map(f => { const on = f.resime_ubytovani === true; return `<button type="button" data-firma="${escAttr(String(f.id))}" aria-pressed="${on}" onclick="prepniFirmuUbytovani('${jsStr(String(f.id))}')" style="min-height:44px;padding:8px 14px;border-radius:22px;border:2px solid ${on ? 'var(--blue)' : 'var(--brd)'};background:${on ? 'var(--blue)' : '#fff'};color:${on ? '#fff' : 'var(--text)'};font-size:13.5px;font-weight:700;cursor:pointer;font-family:inherit">${on ? '✓ ' : ''}${escAttr(cleanTeamName(f.name || ''))}</button>` }).join('')}</div>
+      <div style="font-size:12px;color:var(--text3);margin-top:8px">${vybrane.size ? 'Dole a v „Přidat lidi" jsou jen lidi z vybraných firem.' : 'Žádná firma není vybraná — ukazují se lidi ze všech firem.'}</div>`}
+    </div>` : ''
+  box.innerHTML = `${firmyHtml}
     ${skupiny.length ? `<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:12px">${karty}</div>`
       : `<div style="padding:16px;color:var(--text3)">Zatím tu není žádné ${escAttr(D.jedno)}. Založte ho tlačítkem „＋ ${escAttr(D.nove)}".</div>`}
     <div style="margin-top:16px;padding:12px 14px;border-radius:12px;background:var(--bg,#f4efe7)">
-      <div style="font-size:13px;font-weight:800;margin-bottom:6px">${D.ikona} ${escAttr(D.bez)}: ${bez.length}</div>
+      <div style="font-size:13px;font-weight:800;margin-bottom:6px">${D.ikona} ${escAttr(D.bez)}: ${bez.length}${jinychFirem ? `<span data-jinych-firem style="font-weight:400;color:var(--text3)"> · ${jinychFirem} z ostatních firem se neukazuje</span>` : ''}</div>
       <div style="font-size:12.5px;color:var(--text2);line-height:1.7">${bez.map(w => escAttr(w.full_name || '')).join(' · ') || '—'}</div>
     </div>`
 }
@@ -10413,6 +10521,19 @@ function upravSkupinku(id) {
     <input data-pole="adresa" maxlength="300" value="${escAttr(s ? (s.adresa || '') : '')}" placeholder="Lindenstraße 4, 10969 Berlin" style="${pole}">` : ''}
     <label style="display:block;font-size:12px;font-weight:700;color:var(--text3);margin:12px 0 4px">${druh === 'auto' ? 'Počet míst v autě' : 'Počet míst celkem'}</label>
     <input data-pole="pocet" type="number" min="0" max="500" step="1" value="${s && s.pocet_mist != null ? s.pocet_mist : ''}" placeholder="${druh === 'auto' ? '9' : '6'}" style="${pole}">
+    ${druh === 'ubytovani' ? (_skupinky.bezDoplnku
+      ? '<div style="font-size:12px;color:var(--amber);font-weight:700;margin-top:10px">Cizí lidi na pokoji a „zaplaceno od–do" půjde zapsat po spuštění SQL supabase-migrace-ubytovani-doplnky.sql.</div>'
+      : `<div style="display:flex;gap:10px;margin-top:12px">
+      <label style="flex:1;font-size:12px;font-weight:700;color:var(--text3)">Zaplaceno od<input data-pole="zaplaceno_od" type="date" value="${escAttr(s && s.zaplaceno_od ? String(s.zaplaceno_od).slice(0, 10) : '')}" style="${pole};margin-top:4px"></label>
+      <label style="flex:1;font-size:12px;font-weight:700;color:var(--text3)">Zaplaceno do<input data-pole="zaplaceno_do" type="date" value="${escAttr(s && s.zaplaceno_do ? String(s.zaplaceno_do).slice(0, 10) : '')}" style="${pole};margin-top:4px"></label>
+    </div>
+    <button type="button" data-cizi-prepinac style="margin-top:12px;width:100%;min-height:44px;padding:9px 12px;border:1.5px dashed var(--brd);border-radius:9px;background:#fff;font-size:14px;font-weight:700;cursor:pointer;font-family:inherit;text-align:left">👤 Na pokoji jsou i cizí lidé</button>
+    <div data-cizi-pole style="display:${s && ciziSkupinky(s) ? 'block' : 'none'};margin-top:8px;padding:10px;border:1.5px solid var(--brd);border-radius:9px;background:#faf8f5">
+      <label style="display:block;font-size:12px;font-weight:700;color:var(--text3);margin-bottom:4px">Kolik cizích lidí</label>
+      <input data-pole="cizi_pocet" type="number" min="0" max="500" step="1" value="${s && ciziSkupinky(s) ? ciziSkupinky(s) : ''}" placeholder="2" style="${pole}">
+      <label style="display:block;font-size:12px;font-weight:700;color:var(--text3);margin:10px 0 4px">Jména (nepovinné)</label>
+      <input data-pole="cizi_jmena" maxlength="1000" value="${escAttr(s ? (s.cizi_jmena || '') : '')}" placeholder="Hans, Petra" style="${pole}">
+    </div>`) : ''}
     <label style="display:block;font-size:12px;font-weight:700;color:var(--text3);margin:12px 0 6px">Barva</label>
     <div data-barvy style="display:flex;flex-wrap:wrap;gap:8px">${SKUPINKY_BARVY.map(b => `<button type="button" data-barva="${b}" title="${b}" style="width:34px;height:34px;border-radius:50%;background:${b};border:3px solid ${b === barva ? '#211D1A' : '#fff'};box-shadow:0 0 0 1px #ccc;cursor:pointer"></button>`).join('')}</div>
     <label style="display:block;font-size:12px;font-weight:700;color:var(--text3);margin:12px 0 4px">Poznámka</label>
@@ -10431,6 +10552,12 @@ function upravSkupinku(id) {
   const zavri = () => ov.remove()
   ov.addEventListener('click', e => { if (e.target === ov) zavri() })
   ov.querySelector('[data-zrusit]').onclick = zavri
+  const prepinacCizich = ov.querySelector('[data-cizi-prepinac]')
+  if (prepinacCizich) prepinacCizich.onclick = () => {
+    const pole = ov.querySelector('[data-cizi-pole]')
+    pole.style.display = pole.style.display === 'none' ? 'block' : 'none'
+    if (pole.style.display === 'block') ov.querySelector('[data-pole="cizi_pocet"]').focus()
+  }
   const sm = ov.querySelector('[data-smazat]')
   if (sm) sm.onclick = async () => {
     const n = clenoveSkupinky(s.id).length
@@ -10448,12 +10575,28 @@ function upravSkupinku(id) {
     if (pocet != null && (!Number.isFinite(pocet) || pocet < 0 || pocet > 500)) { showToast('⚠️ Počet míst musí být číslo 0–500'); return }
     const zapis = { druh, nazev, pocet_mist: pocet, barva: zvolena, poznamka: hodnota('poznamka') || null }
     if (druh === 'ubytovani') zapis.adresa = hodnota('adresa') || null
+    // Doplňky se posílají, jen když je databáze zná (jinak by uložení spadlo
+    // na neznámém sloupci a neuložilo by se nic).
+    if (druh === 'ubytovani' && !_skupinky.bezDoplnku) {
+      const ciziTxt = ov.querySelector('[data-cizi-pole]').style.display === 'none' ? '' : hodnota('cizi_pocet')
+      const cizi = ciziTxt === '' ? 0 : Math.round(Number(ciziTxt))
+      if (!Number.isFinite(cizi) || cizi < 0 || cizi > 500) { showToast('⚠️ Počet cizích lidí musí být číslo 0–500'); return }
+      const od = hodnota('zaplaceno_od') || null, doKdy = hodnota('zaplaceno_do') || null
+      if (od && doKdy && doKdy < od) { showToast('⚠️ „Zaplaceno do" je dřív než „od"'); return }
+      zapis.cizi_pocet = cizi
+      zapis.cizi_jmena = cizi ? (hodnota('cizi_jmena') || null) : null
+      zapis.zaplaceno_od = od
+      zapis.zaplaceno_do = doKdy
+    }
     e.target.disabled = true
     const dotaz = s ? sb.from('skupinky').update(zapis).eq('id', s.id) : sb.from('skupinky').insert(zapis)
     const { data, error } = await dotaz.select('id')
     e.target.disabled = false
     if (error || !data || !data.length) {
-      showToast(error && jeChybiSkupinky(error) ? '❌ Spusťte migraci supabase-migrace-skupinky.sql' : '❌ Neuložilo se' + (error ? ': ' + error.message : ' — zkontrolujte oprávnění'))
+      // Chybějící SLOUPEC se ptá dřív než chybějící tabulka — obojí hlásí „does not exist".
+      if (error && chybiSloupec(error)) { _skupinkyBezDoplnkuOd = Date.now(); zneplatniSkupinky() }
+      showToast(error && chybiSloupec(error) ? '❌ Databáze ještě nezná cizí lidi a zaplaceno — spusťte SQL supabase-migrace-ubytovani-doplnky.sql'
+        : error && jeChybiSkupinky(error) ? '❌ Spusťte migraci supabase-migrace-skupinky.sql' : '❌ Neuložilo se' + (error ? ': ' + error.message : ' — zkontrolujte oprávnění'))
       return
     }
     // Změnila se adresa ubytování → přepsat ji i lidem v něm (profil, odkaz).
@@ -10482,7 +10625,7 @@ function pridatLideDoSkupinky(id) {
     ${s.pocet_mist ? `<div style="font-size:12px;color:var(--text3);margin-top:4px">Míst celkem: ${s.pocet_mist}</div>` : ''}
     <input type="text" data-hledat placeholder="Hledat jméno…" style="margin-top:12px;padding:9px 11px;border:1.5px solid var(--brd);border-radius:9px;font-size:14px;font-family:inherit">
     <div data-seznam style="overflow-y:auto;margin-top:6px;flex:1;min-height:80px">
-      ${_ubytLide.map(w => `<label data-jmeno="${escAttr(String(w.full_name || '').toLowerCase())}" style="display:flex;gap:10px;align-items:center;padding:8px 10px;border:1.5px solid var(--brd);border-radius:10px;margin-top:6px;cursor:pointer">
+      ${_ubytLide.filter(w => s.druh !== 'ubytovani' || uz.has(String(w.id)) || vRizenychFirmach(w)).map(w => `<label data-jmeno="${escAttr(String(w.full_name || '').toLowerCase())}" style="display:flex;gap:10px;align-items:center;padding:8px 10px;border:1.5px solid var(--brd);border-radius:10px;margin-top:6px;cursor:pointer">
         <input type="checkbox" value="${escAttr(String(w.id))}" ${uz.has(String(w.id)) ? 'checked' : ''} style="width:19px;height:19px;accent-color:var(--blue);flex-shrink:0">
         ${fotkaHtml(w.avatar_url, w.full_name, 28)}<span><b style="font-size:14px">${escAttr(w.full_name || '')}</b>${jinde(w)}</span></label>`).join('')}
     </div>
@@ -10498,9 +10641,11 @@ function pridatLideDoSkupinky(id) {
   const pocitej = () => {
     const n = ov.querySelectorAll('[data-seznam] input:checked').length
     const el = ov.querySelector('[data-pocitadlo]')
-    el.textContent = 'Vybráno: ' + n + (s.pocet_mist ? ' z ' + s.pocet_mist + ' míst' : '')
-    el.style.color = s.pocet_mist && n > s.pocet_mist ? 'var(--red)' : 'var(--text2)'
-    el.style.fontWeight = s.pocet_mist && n > s.pocet_mist ? '800' : '400'
+    const cizi = ciziSkupinky(s)
+    const mist = s.pocet_mist ? s.pocet_mist - cizi : 0
+    el.textContent = 'Vybráno: ' + n + (s.pocet_mist ? ' z ' + mist + ' míst' + (cizi ? ' (' + cizi + ' obsadili cizí)' : '') : '')
+    el.style.color = s.pocet_mist && n > mist ? 'var(--red)' : 'var(--text2)'
+    el.style.fontWeight = s.pocet_mist && n > mist ? '800' : '400'
   }
   ov.querySelectorAll('[data-seznam] input').forEach(i => i.onchange = pocitej)
   pocitej()
@@ -10511,7 +10656,11 @@ function pridatLideDoSkupinky(id) {
   ov.querySelector('[data-ulozit]').onclick = async (e) => {
     const vybrane = new Set([...ov.querySelectorAll('[data-seznam] input:checked')].map(x => x.value))
     const pridat = [...vybrane].filter(x => !uz.has(x))
-    const odebrat = [...uz].filter(x => !vybrane.has(x))
+    // ODEBÍRÁ SE JEN Z TOHO, CO BYLO V SEZNAMU VIDĚT. Člen ze schované firmy
+    // nebo neaktivní zaškrtávátko nemá — dřív ho Uložit (i beze změny) tiše
+    // vyhodilo z ubytování a smazalo mu adresu v profilu (nalezeno 1. 10. 2026).
+    const videt = new Set([...ov.querySelectorAll('[data-seznam] input')].map(x => x.value))
+    const odebrat = [...uz].filter(x => videt.has(x) && !vybrane.has(x))
     if (!pridat.length && !odebrat.length) { zavri(); return }
     if (s.pocet_mist && vybrane.size > s.pocet_mist && !confirm('Vybráno ' + vybrane.size + ' lidí, ale míst je jen ' + s.pocet_mist + '.\n\nUložit i tak?')) return
     e.target.disabled = true; e.target.textContent = 'Ukládám…'

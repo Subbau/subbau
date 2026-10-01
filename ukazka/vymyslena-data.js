@@ -89,10 +89,15 @@
     updated_at: new Date().toISOString(),
   }));
 
+  // Den posunutý od dneška (místní čas, ne UTC — v noci by UTC dalo včerejšek).
+  const posunDen = (o) => { const d = new Date(); d.setDate(d.getDate() + o); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}` };
   // Ubytování a auta (od 1. 10. 2026) — ať je v ukázce vidět sekce i řazení podle nich.
   D.skupinky = [
-    { id: uuid(), druh: 'ubytovani', nazev: 'Pension Linde', adresa: 'Lindenstraße 4, 85049 Ingolstadt', pocet_mist: 6, barva: '#2a5d8f', poznamka: null, aktivni: true },
-    { id: uuid(), druh: 'ubytovani', nazev: 'Monteurzimmer Nord', adresa: 'Nordring 12, 85053 Ingolstadt', pocet_mist: 4, barva: '#2f6f4e', poznamka: 'klíče u majitele', aktivni: true },
+    // Cizí lidé na pokoji a „zaplaceno od–do" (doplňky 1. 10. 2026 večer).
+    { id: uuid(), druh: 'ubytovani', nazev: 'Pension Linde', adresa: 'Lindenstraße 4, 85049 Ingolstadt', pocet_mist: 6, barva: '#2a5d8f', poznamka: null, aktivni: true,
+      cizi_pocet: 0, cizi_jmena: null, zaplaceno_od: posunDen(-20), zaplaceno_do: posunDen(25) },
+    { id: uuid(), druh: 'ubytovani', nazev: 'Monteurzimmer Nord', adresa: 'Nordring 12, 85053 Ingolstadt', pocet_mist: 5, barva: '#2f6f4e', poznamka: 'klíče u majitele', aktivni: true,
+      cizi_pocet: 1, cizi_jmena: 'Hans', zaplaceno_od: posunDen(-25), zaplaceno_do: posunDen(4) },
     { id: uuid(), druh: 'auto', nazev: 'VW Crafter', adresa: null, pocet_mist: 9, barva: '#9c3b22', poznamka: null, aktivni: true },
   ];
   D.skupinky_lide = [
