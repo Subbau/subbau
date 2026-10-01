@@ -563,6 +563,8 @@ module.exports = async (req, res) => {
       let jmena = {}, sazbaTed = {}, provizeTed = {}, bezProvize = new Set(), historie = {};
       // Zaměstnanec firmy → id firmy (šéfa), podle které se počítají peníze.
       const sefPodle = {};
+      // Zaměstnanci s vlastní provizí a kdo má provizi vůbec vyplněnou (null ≠ 0).
+      const vlastniProvize = new Set(), provizeZadana = new Set();
       // Telefon a řidičák — od 23. 9. 2026 na přání SubBau. Odběratel volá
       // lidem na stavbu přímo a potřebuje vědět, koho smí poslat s dodávkou.
       let telefony = {}, ridicaky = {}, ubytovani = {}, fotky = {};
@@ -585,7 +587,7 @@ module.exports = async (req, res) => {
         const tise = (popis) => (e) => {
           console.warn('[klient] ' + popis + ':', e.message); return null;
         };
-        const [lidi, dokl, prov, h, ubyt, zam, fot] = await Promise.all([
+        const [lidi, dokl, prov, h, ubyt, zam, fot, vlastni] = await Promise.all([
           // Jméno, hodinová sazba a telefon. SubBau si přeje, aby odběratel
           // viděl u každého člověka sazbu i provizi — vyžádal si to sám, aby
           // si mohl fakturu překontrolovat. V appce zůstává provize dál jen
@@ -620,7 +622,13 @@ module.exports = async (req, res) => {
           // stránka obejde. Ven jde jen odkaz do našeho úložiště fotek.
           db(`profiles?select=id,avatar_url&id=in.(${seznamIds})`, klic)
             .catch(tise('fotky se nenačetly')),
+          // Vlastní provize zaměstnance (od 1. 10. 2026, stejně jako v appce):
+          // kdo ji má zapnutou a vyplněnou, počítá se jeho sazbou místo šéfovy.
+          // Bez migrace sloupec není → nikdo, jako dosud.
+          db(`worker_commissions?select=worker_id&vlastni_provize_zamestnance=is.true&worker_id=in.(${seznamIds})`, klic)
+            .catch(tise('vlastní provize zaměstnanců se nenačetly')),
         ]);
+        for (const p of (vlastni || [])) vlastniProvize.add(p.worker_id);
         for (const p of (zam || [])) {
           if (p.zamestnavatel_id && p.zamestnavatel_id !== p.id) sefPodle[p.id] = p.zamestnavatel_id;
         }
@@ -661,6 +669,7 @@ module.exports = async (req, res) => {
           if (!stav || doKdy > (stav.do || '')) ridicaky[d.worker_id] = { do: doKdy };
         }
         for (const p of (prov || []).concat(sefProv || [])) {
+          if (p.provize != null) provizeZadana.add(p.worker_id);
           if (p.bez_provize) { bezProvize.add(p.worker_id); continue; }
           provizeTed[p.worker_id] = Number(p.provize) || 0;
         }
@@ -724,9 +733,12 @@ module.exports = async (req, res) => {
         const sazbaDne = z.bez_vyplaty
           ? 0
           : (pevnaCastka != null && u.hodiny > 0 ? pevnaCastka / u.hodiny : sazbaZHistorie);
+        // Provize: „bez provize" řídí ten, kdo platí; sazba může být zaměstnancova vlastní.
+        const provizeOd = (sefPodle[z.worker_id] && vlastniProvize.has(z.worker_id)
+          && provizeZadana.has(z.worker_id)) ? z.worker_id : kdoPlati;
         const provizeDne = (bezProvize.has(kdoPlati) || z.bez_provize_den)
           ? 0
-          : Number(kDni('provize', kdoPlati, zaklad.datum, provizeTed[kdoPlati] || 0)) || 0;
+          : Number(kDni('provize', provizeOd, zaklad.datum, provizeTed[provizeOd] || 0)) || 0;
         radky.push({
           ...zaklad,
           probiha: false,

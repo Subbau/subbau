@@ -4670,7 +4670,7 @@ async function submitAdminSignatureWithPlacement() {
 // Po nahrání nové verze se snadno pozná, jestli se opravdu nasadila: otevřete
 // appku, zmáčkněte F12 (na Macu ⌥⌘I) a v konzoli je vypsané tohle datum. Když
 // tam svítí starší, prohlížeč nebo GitHub drží starou verzi.
-const SUBBAU_VERZE = '2026-10-01 e — srážka za puntíky na faktuře a výkazu, řádky v barvách firmy a party, fotky nepřeskakují'
+const SUBBAU_VERZE = '2026-10-01 f — vlastní provize zaměstnance'
 console.log('SubBau docházka — verze ' + SUBBAU_VERZE)
 // Verze i dole v menu správce. Když někdo novinku „nevidí", podle ní se hned
 // pozná, jestli nemá otevřenou starou kopii appky — bez hledání v konzoli.
@@ -7692,6 +7692,48 @@ async function saveProvizeRate(input, workerId) {
       : '✅ Sazba uložena — platí od ' + new Date(odKdy + 'T00:00:00').toLocaleDateString('cs-CZ'))
   prekresliProvize()
 }
+// VLASTNÍ PROVIZE ZAMĚSTNANCE. Majitel 1. 10. 2026: „aby v provizích šla zadat
+// provize, když je to ten zaměstnanec." Zapíná se v Provizích u zaměstnance
+// (✎ vlastní provize). Kdo ji má zapnutou A zadanou, jeho hodiny se počítají
+// jeho provizí; peníze dál jdou šéfovi — ten za něj fakturuje — a „bez provize"
+// se řídí šéfem. Kdo ne (nebo ji ještě nemá vyplněnou), počítá se šéfovou jako
+// dosud. Stejně v Provizích, v reportu firmy, ve výkazu za tým i na odkazu
+// pro odběratele. Sloupec přidává supabase-migrace-provize-zamestnance.sql;
+// dokud není, nemá vlastní provizi nikdo a nic se nemění.
+async function nactiVlastniProvizeZamestnancu() {
+  try {
+    const { data, error } = await sb.from('worker_commissions').select('worker_id').eq('vlastni_provize_zamestnance', true)
+    if (error) {
+      // Chybějící sloupec = migrace ještě neproběhla → nikdo ji nemá. Jiná chyba
+      // (síť, práva) se nesmí tvářit jako „nikdo" — peníze by vyšly jinak.
+      if (/42703|PGRST204|column|schema cache/i.test((error.code || '') + ' ' + (error.message || ''))) return { set: new Set(), chybi: true }
+      return { chyba: error }
+    }
+    return { set: new Set((data || []).map(r => r.worker_id)), chybi: false }
+  } catch (e) { return { chyba: e } }
+}
+// Čí provizní sazbou se počítají hodiny pracovníka. Bez šéfa jeho vlastní;
+// u zaměstnance jeho, má-li vlastní zapnutou a vyplněnou, jinak šéfova.
+function provizniSazbaOd(workerId, sefId, vlastni, provMap) {
+  if (!sefId) return workerId
+  return (vlastni && vlastni.has(workerId) && sazbaJeZadana(provMap[workerId])) ? workerId : sefId
+}
+async function nastavVlastniProvizi(workerId, zapnout) {
+  const { data, error } = await sb.from('worker_commissions')
+    .upsert({ worker_id: workerId, vlastni_provize_zamestnance: !!zapnout, updated_at: new Date().toISOString() }, { onConflict: 'worker_id' })
+    .select('worker_id, vlastni_provize_zamestnance')
+  if (error || !data || !data.length || !!data[0].vlastni_provize_zamestnance !== !!zapnout) {
+    showToast(error && /vlastni_provize_zamestnance|42703|PGRST204|column|schema cache/i.test((error.code || '') + ' ' + (error.message || ''))
+      ? '❌ Chybí sloupec — spusťte migraci supabase-migrace-provize-zamestnance.sql'
+      : '❌ Neuložilo se' + (error ? ': ' + error.message : ' — zkontrolujte oprávnění'))
+    return
+  }
+  showToast(zapnout
+    ? '✅ Vlastní provize zapnutá — zadejte ji v políčku (dokud je prázdné, počítá se šéfova)'
+    : '✅ Zase se počítá šéfovou provizí')
+  prekresliProvize()
+}
+
 async function saveProvizeCommission(input, workerId) {
   const val = parseFloat(input.value)
   const provize = isNaN(val) ? null : val
@@ -7946,6 +7988,8 @@ async function generateProvizeFirmReport(firmName, mode) {
     }
     // Kdo je označený „bez provize", do vyúčtování nepatří — odešel dřív, než za
     // něj přijdou peníze, takže si za jeho hodiny nemá kdo nárokovat provizi.
+    const vlastniRep = await nactiVlastniProvizeZamestnancu()
+    if (vlastniRep.chyba) throw vlastniRep.chyba
     const provMap = {}
     const bezProvizeFirma = new Set()
     ;(provRows || []).forEach(p => {
@@ -8034,7 +8078,10 @@ async function generateProvizeFirmReport(firmName, mode) {
       hoursByWorker[a.worker_id] = (hoursByWorker[a.worker_id] || 0) + h
       if (a.bez_provize_den) { if (h) dnuBezProvize++; return }
       provHoursByWorker[a.worker_id] = (provHoursByWorker[a.worker_id] || 0) + h
-      commByWorker[a.worker_id] = (commByWorker[a.worker_id] || 0) + h * provKDni(sefOf(a.worker_id) || a.worker_id, a.work_date)
+      // „Bez provize" řídí ten, kdo platí (šéf); sazba může být zaměstnancova vlastní.
+      const platce = sefOf(a.worker_id) || a.worker_id
+      const sazbaOd = provizniSazbaOd(a.worker_id, sefOf(a.worker_id), vlastniRep.set, provMap)
+      commByWorker[a.worker_id] = (commByWorker[a.worker_id] || 0) + h * (bezProvizeFirma.has(platce) ? 0 : provKDni(sazbaOd, a.work_date))
     })
 
     // Bývalý pracovník patří do vyúčtování jen za období, kdy opravdu pracoval.
@@ -8212,6 +8259,9 @@ async function renderProvizeContent() {
     console.warn('[provize] historie sazeb se nenačetla:', e?.message)
   }
 
+  const vlastniVysledek = await nactiVlastniProvizeZamestnancu()
+  if (vlastniVysledek.chyba) { provizeNejdou('Provize zaměstnanců', vlastniVysledek.chyba); return }
+  const vlastniProvizeZam = vlastniVysledek.set
   const provMap = {}, termsMap = {}, bezProvize = new Set()
   ;(provRows || []).forEach(p => {
     if (p.provize != null) provMap[p.worker_id] = Number(p.provize)
@@ -8384,8 +8434,10 @@ async function renderProvizeContent() {
     // U zaměstnance firmy se provize počítá sazbou firmy a připisuje se jí.
     const firmaId = firmaZamestnance[a.worker_id] || null
     const komuProvize = firmaId || a.worker_id
+    // Sazba šéfova, nebo zaměstnancova vlastní (provizniSazbaOd); „bez provize" řídí šéf.
+    const sazbaProvizeOd = provizniSazbaOd(a.worker_id, firmaId, vlastniProvizeZam, provMap)
     const provDen = (bezProvize.has(komuProvize) || a.bez_provize_den)
-      ? 0 : Number(hodnotaKDni('provize', komuProvize, den, provMap[komuProvize] || 0)) || 0
+      ? 0 : Number(hodnotaKDni('provize', sazbaProvizeOd, den, provMap[sazbaProvizeOd] || 0)) || 0
     // Kolik za ten den dostane pracovník. Ručně přepsaná částka platí celá za
     // den, ne za hodinu — proto se dělí hodinami, ať sedí i násobení níž.
     // Zaměstnanec firmy nemá sazbu — nic mu nevyplácíme, platí ho jeho firma.
@@ -8437,7 +8489,8 @@ async function renderProvizeContent() {
   dnesVPraci.forEach(id => {
     const komu = firmaZamestnance[id] || id
     if (bezProvize.has(komu)) return
-    dnesNaHodinu += Number(hodnotaKDni('provize', komu, dnesStrStat, provMap[komu] || 0)) || 0
+    const od = provizniSazbaOd(id, firmaZamestnance[id] || null, vlastniProvizeZam, provMap)
+    dnesNaHodinu += Number(hodnotaKDni('provize', od, dnesStrStat, provMap[od] || 0)) || 0
   })
   const dnesTedLidi = dnesVPraci.size
 
@@ -8533,6 +8586,7 @@ async function renderProvizeContent() {
       // Zapsaný pod firmou, která tu mezi aktivními není — peníze se mu pak
       // počítají jako OSVČ a to musí být vidět.
       sefChybi: !!(w.zamestnavatel_id && !firmaZamestnance[w.id]),
+      vlastniProvize: vlastniProvizeZam.has(w.id),
       podilDay: hrs.zDay || 0, podilWeek: hrs.zWeek || 0, podilMonth: hrs.zMonth || 0,
       prov, provUlozena, sazbaPole, provPole, bezProvize: bezProvize.has(w.id), byvaly: !!w._byvaly,
       sazbaNenastavena, provizeNenastavena,
@@ -8718,7 +8772,9 @@ async function renderProvizeContent() {
           })() : ''
         }</td>
         <td style="text-align:right">${r.zamestnavatelId ? `<button onclick="vyberSefa('${r.id}')" title="Zaměstnanec firmy — sazbu nemá. Klepnutím změníte, pod kým pracuje, nebo ho vrátíte mezi OSVČ." style="padding:6px 10px;font-size:12.5px;font-weight:700;border:1.5px solid #c7d6e4;border-radius:7px;background:#eef3f8;color:#2c4257;cursor:pointer;font-family:inherit;white-space:nowrap">👔 zaměstnanec</button><div style="font-size:10.5px;color:var(--text3);margin-top:3px">sazbu nemá</div>` : `<input id="pv-rate-${r.id}" type="number" step="0.01" value="${r.sazbaPole == null ? '' : r.sazbaPole}" placeholder="chybí" title="${r.sazbaPole == null ? 'Chybí hodinová sazba — dokud ji nezadáte, počítá se pracovníkovi nula' : (r.sazbaPole === 0 ? 'Sazba je nula — pracovník za hodiny nedostane nic' : '')}" onchange="saveProvizeRate(this,'${r.id}')" style="width:80px;padding:6px 8px;border:${r.sazbaPole != null ? '1.5px solid var(--brd)' : '2px solid var(--red)'};background:${r.sazbaPole != null ? '' : 'var(--red-l)'};border-radius:7px;font-size:14px;text-align:right;font-family:inherit"> €/h${(!r.jeFirma && !r.byvaly && !pocetLidiPodFirmou[r.id]) ? `<div><button onclick="vyberSefa('${r.id}')" title="Pracuje pod někým (firma nebo živnostník)? Označte ho jako zaměstnance — sazbu mít nebude, ukáže se pod šéfem a provize půjde šéfovi." style="margin-top:4px;padding:2px 7px;font-size:10.5px;font-weight:700;border:1px solid var(--brd);border-radius:6px;background:#fff;color:var(--text2);cursor:pointer;font-family:inherit;white-space:nowrap">👔 zaměstnanec?</button></div>` : ''}`}</td>
-        <td style="text-align:right">${r.zamestnavatelId ? `<span title="Provize za jeho hodiny se počítá sazbou firmy, pod kterou pracuje" style="font-size:11.5px;color:var(--text3)">sazbou firmy</span>` : `<input id="pv-prov-${r.id}" type="number" step="0.01" value="${r.provPole == null ? '' : r.provPole}" placeholder="chybí" title="${r.provPole != null ? (r.bezProvize ? 'Sazba zůstává uložená, ale nepočítá se — pracovník je označený „bez provize“' : (r.provPole === 0 ? 'Provize je nula — SubBau na něm nevydělává' : '')) : 'Chybí provize — dokud ji nezadáte, počítá se nula'}" onchange="saveProvizeCommission(this,'${r.id}')" style="width:80px;padding:6px 8px;border:${r.provPole != null ? '1.5px solid var(--amber)' : '2px solid var(--red)'};background:${r.provPole != null ? '' : 'var(--red-l)'};border-radius:7px;font-size:14px;text-align:right;font-family:inherit;background:#faf6ee"> €/h`}</td>
+        <td style="text-align:right">${r.zamestnavatelId ? (r.vlastniProvize
+          ? `<input id="pv-prov-${r.id}" type="number" step="0.01" value="${r.provPole == null ? '' : r.provPole}" placeholder="šéfova" title="Vlastní provize zaměstnance — jeho hodiny se počítají touto sazbou, peníze jdou šéfovi.${r.provPole == null ? ' Dokud je prázdná, počítá se šéfova.' : ''}" onchange="saveProvizeCommission(this,'${r.id}')" style="width:80px;padding:6px 8px;border:1.5px solid var(--amber);border-radius:7px;font-size:14px;text-align:right;font-family:inherit;background:#faf6ee"> €/h<div><button onclick="nastavVlastniProvizi('${r.id}', false)" title="Zase počítat jeho hodiny šéfovou provizí" style="margin-top:4px;padding:2px 7px;font-size:10.5px;font-weight:700;border:1px solid var(--brd);border-radius:6px;background:#fff;color:var(--text2);cursor:pointer;font-family:inherit;white-space:nowrap">↺ podle šéfa</button></div>`
+          : `<span title="Provize za jeho hodiny se počítá sazbou firmy (šéfa), pod kterou pracuje" style="font-size:11.5px;color:var(--text3)">sazbou firmy</span><div><button onclick="nastavVlastniProvizi('${r.id}', true)" title="Zadat zaměstnanci vlastní provizi — peníze dál jdou šéfovi" style="margin-top:4px;padding:2px 7px;font-size:10.5px;font-weight:700;border:1px solid var(--brd);border-radius:6px;background:#fff;color:var(--text2);cursor:pointer;font-family:inherit;white-space:nowrap">✎ vlastní provize</button></div>`) : `<input id="pv-prov-${r.id}" type="number" step="0.01" value="${r.provPole == null ? '' : r.provPole}" placeholder="chybí" title="${r.provPole != null ? (r.bezProvize ? 'Sazba zůstává uložená, ale nepočítá se — pracovník je označený „bez provize“' : (r.provPole === 0 ? 'Provize je nula — SubBau na něm nevydělává' : '')) : 'Chybí provize — dokud ji nezadáte, počítá se nula'}" onchange="saveProvizeCommission(this,'${r.id}')" style="width:80px;padding:6px 8px;border:${r.provPole != null ? '1.5px solid var(--amber)' : '2px solid var(--red)'};background:${r.provPole != null ? '' : 'var(--red-l)'};border-radius:7px;font-size:14px;text-align:right;font-family:inherit;background:#faf6ee"> €/h`}</td>
         <td style="text-align:center;padding:0">${r.zamestnavatelId ? '<span title="Řídí se firmou, pod kterou pracuje" style="color:var(--text3)">—</span>' : `<label title="Pracovník odešel dřív, než za něj přijdou peníze — nepočítat mu provizi" style="display:flex;align-items:center;justify-content:center;width:100%;height:100%;min-height:44px;padding:8px;cursor:pointer"><input type="checkbox" ${r.bezProvize ? 'checked' : ''} onchange="toggleBezProvize(this,'${r.id}')" style="width:20px;height:20px;cursor:pointer;accent-color:var(--red)"></label>`}</td>
         <td style="text-align:right;background:#f2f8f4">${r.zamestnavatelId ? '<span style="font-size:11.5px;color:var(--text3)">platí ho firma</span>' : `<b id="pv-e-${r.id}" style="font-size:14px;color:var(--green)">${eur(r.earnWeek)}</b>`}<div style="font-size:11px;color:var(--text3)">${r.hoursWeek.toFixed(2)} h</div></td>
         <td style="text-align:right">${r.zamestnavatelId ? `<b id="pv-d-${r.id}" title="Podíl na provizi firmy — je už sečtený v jejím řádku, nepřičítá se znovu" style="font-size:13px;font-weight:600;color:var(--text3)">(${eur(r.podilDay)})</b><div style="font-size:11px;color:var(--text3)">${r.hoursDay.toFixed(2)} h · u firmy</div>` : `<b id="pv-d-${r.id}" style="font-size:14px">${eur(r.commDay)}</b><div style="font-size:11px;color:var(--text3)">${r.hoursDay.toFixed(2)} h</div>`}</td>
@@ -16657,8 +16713,11 @@ async function generateTeamAttendancePdf(teamId, teamName) {
   // po dnech, provizí platnou ten den, „bez provize" přebíjí vše a zaměstnanec
   // se počítá provizí své firmy.
   const _provMap = {}, _bezProvizeLidi = new Set(), _histProv = {}, _sefPodle = {}
+  let _vlastniProvize = new Set()
   if (smiVidetProvize()) {
     try {
+      const vl = await nactiVlastniProvizeZamestnancu()
+      if (vl.set) _vlastniProvize = vl.set
       let pv = await sb.from('worker_commissions').select('worker_id, provize, bez_provize')
       if (pv.error) pv = await sb.from('worker_commissions').select('worker_id, provize')
       ;(pv.data || []).forEach(p => {
@@ -16679,10 +16738,12 @@ async function generateTeamAttendancePdf(teamId, teamName) {
   const _provizeDne = (wid, den) => {
     const komu = _sefPodle[wid] || wid
     if (_bezProvizeLidi.has(komu)) return 0
-    const h = _histProv[komu]
+    // Sazba: zaměstnancova vlastní, má-li ji zapnutou a vyplněnou, jinak šéfova.
+    const od = provizniSazbaOd(wid, _sefPodle[wid] || null, _vlastniProvize, _provMap)
+    const h = _histProv[od]
     let v = null
     if (h) for (let i = 0; i < h.length; i++) { if (h[i].od <= den) v = h[i].hodnota; else break }
-    return v == null ? (_provMap[komu] || 0) : v
+    return v == null ? (_provMap[od] || 0) : v
   }
 
   const _rateMap = new Map()
