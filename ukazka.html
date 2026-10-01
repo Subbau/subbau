@@ -5457,7 +5457,7 @@ async function submitAdminSignatureWithPlacement() {
 // Po nahrání nové verze se snadno pozná, jestli se opravdu nasadila: otevřete
 // appku, zmáčkněte F12 (na Macu ⌥⌘I) a v konzoli je vypsané tohle datum. Když
 // tam svítí starší, prohlížeč nebo GitHub drží starou verzi.
-const SUBBAU_VERZE = '2026-10-01 l — Provize: pod sazbou už není „zaměstnanec?“ (nastavuje se v profilu)'
+const SUBBAU_VERZE = '2026-10-01 m — Ubytování: velké Kopírovat adresu, u lidí fotka, jméno a vlaječka'
 console.log('StavKo docházka — verze ' + SUBBAU_VERZE)
 // Verze i dole v menu správce. Když někdo novinku „nevidí", podle ní se hned
 // pozná, jestli nemá otevřenou starou kopii appky — bez hledání v konzoli.
@@ -11017,8 +11017,10 @@ async function loadUbytovani(tichy) {
   const box = document.getElementById('ubyt-obsah')
   if (!box) return
   if (!tichy && !box.querySelector('.ubyt-karta')) box.innerHTML = '<div style="color:var(--text3);padding:10px">Načítám…</div>'
-  const [, { data: lide, error }] = await Promise.all([
+  const [, , { data: lide, error }] = await Promise.all([
     nactiSkupinky(true),
+    // Vlaječky u lidí v ubytování (majitel 1. 10. 2026: „fotka, jméno a vlaječka").
+    vlajkyNejdyl(nactiVlajky()),
     sb.from('profiles').select('id, full_name, avatar_url, team_id, accommodation_address').in('role', ['osvec', 'partak']).eq('is_active', true).order('full_name')
   ])
   if (error) { box.innerHTML = `<div style="color:var(--red);font-weight:700;padding:10px">❌ Pracovníky se nepodařilo načíst: ${escAttr(error.message || '')}</div>`; return }
@@ -11051,13 +11053,14 @@ function vykresliUbytovani() {
         <span title="${s.pocet_mist ? 'Obsazeno / míst celkem' : 'Počet míst není zadaný'}" style="flex-shrink:0;padding:3px 9px;border-radius:9px;font-size:12.5px;font-weight:800;background:${plno ? 'var(--red-l)' : tonSkupinky(s, 0.13)};color:${plno ? 'var(--red)' : '#2b2622'}">${escAttr(obsazenostText(s))}${plno ? ' ⚠️' : ''}</span>
       </div>
       <div style="display:flex;flex-direction:column;gap:4px">
-        ${lide.length ? lide.map(w => `<div style="display:flex;align-items:center;gap:8px;font-size:13px">${fotkaHtml(w.avatar_url, w.full_name, 28)}<span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;cursor:pointer" onclick="openWorkerModal('${jsStr(String(w.id))}')">${escAttr(w.full_name || '')}</span><button onclick="odeberZeSkupinky('${jsStr(String(s.id))}','${jsStr(String(w.id))}')" title="Odebrat z ${escAttr(D.jedno)}" style="border:none;background:none;color:var(--text3);cursor:pointer;font-size:15px;padding:2px 6px;min-height:28px">✕</button></div>`).join('')
+        ${lide.length ? lide.map(w => `<div style="display:flex;align-items:center;gap:10px;font-size:14px">${fotkaHtml(w.avatar_url, w.full_name, 44, false, w.id)}<span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;cursor:pointer;font-weight:600" onclick="openWorkerModal('${jsStr(String(w.id))}')">${escAttr(w.full_name || '')}</span><button onclick="odeberZeSkupinky('${jsStr(String(s.id))}','${jsStr(String(w.id))}')" title="Odebrat z ${escAttr(D.jedno)}" style="border:none;background:none;color:var(--text3);cursor:pointer;font-size:15px;padding:2px 6px;min-height:28px">✕</button></div>`).join('')
           : '<div style="font-size:12.5px;color:var(--text3)">Zatím tu nikdo není.</div>'}
       </div>
       <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:2px">
         <button onclick="pridatLideDoSkupinky('${jsStr(String(s.id))}')" class="btn-pri" style="padding:7px 12px;font-size:13px">＋ Přidat lidi</button>
         <button onclick="upravSkupinku('${jsStr(String(s.id))}')" style="padding:7px 12px;font-size:13px;border:1.5px solid var(--brd);border-radius:8px;background:#fff;cursor:pointer;font-family:inherit;font-weight:700">✎ Upravit</button>
       </div>
+      ${s.adresa ? `<button data-kopirovat-adresu onclick="zkopirujAdresuUbytovani('${jsStr(String(s.id))}')" style="width:100%;min-height:48px;padding:10px 14px;font-size:15px;font-weight:800;border:2px solid var(--blue);border-radius:10px;background:var(--blue-l,#e8f0fb);color:var(--blue);cursor:pointer;font-family:inherit">📋 Kopírovat adresu</button>` : ''}
     </div>`
   }).join('')
   const bez = _ubytLide.filter(w => !skupinkaCloveka(w.id, _druhSkupinek))
@@ -11068,6 +11071,22 @@ function vykresliUbytovani() {
       <div style="font-size:13px;font-weight:800;margin-bottom:6px">${D.ikona} ${escAttr(D.bez)}: ${bez.length}</div>
       <div style="font-size:12.5px;color:var(--text2);line-height:1.7">${bez.map(w => escAttr(w.full_name || '')).join(' · ') || '—'}</div>
     </div>`
+}
+
+// KOPÍROVAT ADRESU (majitel 1. 10. 2026: „velký tlačítko kopírovat adresu").
+// Adresa se bere ze seznamu podle id, ne z textu v tlačítku — v obsluze by
+// se musela escapovat a uvozovka v adrese by ji rozbila.
+async function zkopirujAdresuUbytovani(id) {
+  const s = _skupinky.seznam.find(x => x.id === id)
+  const adresa = (s && s.adresa) || ''
+  if (!adresa) return
+  try {
+    await navigator.clipboard.writeText(adresa)
+    showToast('📋 Adresa zkopírována')
+  } catch (e) {
+    // Schránku prohlížeč nepustil — ať se dá adresa aspoň označit a opsat.
+    prompt('Zkopírujte adresu:', adresa)
+  }
 }
 
 // Založení a úprava ubytování / auta (okno se staví z JavaScriptu — viz past s koncovou značkou body).
