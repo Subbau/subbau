@@ -4756,7 +4756,7 @@ async function submitAdminSignatureWithPlacement() {
 // Po nahrání nové verze se snadno pozná, jestli se opravdu nasadila: otevřete
 // appku, zmáčkněte F12 (na Macu ⌥⌘I) a v konzoli je vypsané tohle datum. Když
 // tam svítí starší, prohlížeč nebo GitHub drží starou verzi.
-const SUBBAU_VERZE = '2026-10-01 h — rychlejší appka (méně dotazů, malé fotky v seznamech), týden v Docházce neskáče'
+const SUBBAU_VERZE = '2026-10-01 i — na slabém signálu nečeká na síť, faktury a týdny bez stropu 1000 řádků'
 console.log('SubBau docházka — verze ' + SUBBAU_VERZE)
 // Verze i dole v menu správce. Když někdo novinku „nevidí", podle ní se hned
 // pozná, jestli nemá otevřenou starou kopii appky — bez hledání v konzoli.
@@ -15107,15 +15107,25 @@ async function loadWorkerInvoices() {
   }
   // Kód z CRM a barvu bereme živě z profilu — barva je vlastnost pracovníka,
   // ne dokladu, takže když se přidělí jinak, projeví se to i u starších faktur.
-  let { data, error } = await sb.from('worker_invoices')
-    .select('*, worker:profiles(full_name, profession, crm_code, invoice_color, can_track_hours, is_active, invoice_design, team_id, subteam_id, avatar_url)')
-    .order('sent_at', { ascending: false })
+  // PO STRÁNKÁCH (1. 10. 2026). Databáze vrací nejvýš 1000 řádků na dotaz —
+  // při ~40 fakturách týdně by zhruba po půl roce ty nejstarší ze složky tiše
+  // zmizely (a s nimi i ze soupisů a součtů).
+  const vsechnyFaktury = async (sloupce) => {
+    const vse = []
+    for (let od = 0; od < 200000; od += 1000) {
+      const { data: kus, error: e } = await sb.from('worker_invoices').select(sloupce)
+        .order('sent_at', { ascending: false }).order('id').range(od, od + 999)
+      if (e) return { data: null, error: e }
+      vse.push(...(kus || []))
+      if (!kus || kus.length < 1000) break
+    }
+    return { data: vse, error: null }
+  }
+  let { data, error } = await vsechnyFaktury('*, worker:profiles(full_name, profession, crm_code, invoice_color, can_track_hours, is_active, invoice_design, team_id, subteam_id, avatar_url)')
   if (error) {
     // Bez spuštěné migrace sloupce chybí — načti aspoň to, co bylo dřív,
     // ať složka Faktury nehlásí chybu a jen se neukáže kód a barva.
-    ;({ data, error } = await sb.from('worker_invoices')
-      .select('*, worker:profiles(full_name, profession)')
-      .order('sent_at', { ascending: false }))
+    ;({ data, error } = await vsechnyFaktury('*, worker:profiles(full_name, profession)'))
   } else {
     if (await prideliBarvyFaktur(data)) { /* barvy doplněny do načtených řádků */ }
   }
@@ -17322,10 +17332,13 @@ async function populateTeamPdfWeeks() {
       continue
     }
     try {
+      // NEJNOVĚJŠÍ NAPŘED: databáze vrací nejvýš 1000 řádků — bez řazení by
+      // u větší party v nabídce mohly chybět právě poslední týdny (1. 10. 2026).
       const { data: rows } = await sb.from('attendance')
         .select('kw, kw_year')
         .in('worker_id', memberIds)
         .not('kw', 'is', null)
+        .order('work_date', { ascending: false })
       const map = new Map()
       ;(rows || []).forEach(r => {
         if (r.kw == null || r.kw_year == null) return

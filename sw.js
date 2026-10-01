@@ -6,7 +6,8 @@
 // staré (viz 'activate' níže). Zvedněte ho pokaždé, když je podezření, že si
 // někdo drží poškozenou kopii appky — je to jediný způsob, jak mu ji zahodit
 // na dálku, aniž by sám mazal data v prohlížeči.
-const CACHE = 'subbau-v125';
+const CACHE = 'subbau-v126';
+const LIMIT_SITE = 3500;   // ms — jak dlouho se při otevření appky čeká na síť, než se ukáže uložená verze
 
 self.addEventListener('install', (event) => {
   // Nová verze se má aktivovat hned, nečekat na zavření všech karet
@@ -42,21 +43,44 @@ self.addEventListener('fetch', (event) => {
       || url.pathname.startsWith('/ukazka')) return;
 
   event.respondWith((async () => {
+    // Výkon (1. 10. 2026): síť má přednost dál, ale u otevření appky čeká nejvýš
+    // LIMIT_SITE ms. Na slabém signálu dřív appka visela tak dlouho, dokud síť
+    // neodpověděla nebo úplně nespadla (desítky vteřin), i když měla v paměti
+    // celou poslední verzi. Když síť odpoví později, kopie se jen tiše obnoví.
+    const ulozit = fetch(req).then((fresh) => {
+      if (fresh && fresh.ok && fresh.status === 200 && fresh.type === 'basic') {
+        const kopieOdpovedi = fresh.clone()
+        // Ukládá se na pozadí (odpověď jde stránce hned). Stejná verze (stejný ETag)
+        // už v paměti je → nepřepisovat 2,6 MB při každém otevření appky.
+        event.waitUntil((async () => {
+          try {
+            const cache = await caches.open(CACHE)
+            const stara = await cache.match(req)
+            const et = fresh.headers.get('etag')
+            if (!(stara && et && stara.headers.get('etag') === et)) await cache.put(req, kopieOdpovedi)
+          } catch (e) {}
+        })())
+      }
+      return fresh
+    })
+    if (req.mode === 'navigate') {
+      const kopie = await caches.match(req)
+      if (kopie) {
+        const limit = new Promise(ok => setTimeout(() => ok(null), LIMIT_SITE))
+        const vitez = await Promise.race([ulozit.catch(() => null), limit])
+        if (vitez) return vitez
+        event.waitUntil(ulozit.catch(() => {}))
+        return kopie
+      }
+    }
     try {
       // NETWORK-FIRST: zkus síť
-      const fresh = await fetch(req);
+      const fresh = await ulozit;
       // Ukládáme JEN odpověď, o které víme, že je celá a v pořádku. Dřív se
       // ukládalo cokoli — i chybová stránka nebo odpověď přerušená cestou.
       // Taková kopie zůstala v prohlížeči a při každém dalším spuštění se z ní
       // servírovala rozdrolená appka: holý nadpis, žádné styly, žádná pole.
       // Nepomohlo ani zavření okna, protože to nedrží stránka, ale prohlížeč.
-      if (!(fresh && fresh.ok && fresh.status === 200 && fresh.type === 'basic')) {
-        return fresh;
-      }
-      try {
-        const cache = await caches.open(CACHE);
-        cache.put(req, fresh.clone());
-      } catch (e) {}
       return fresh;
     } catch (e) {
       // Offline → zkus cache
