@@ -364,6 +364,15 @@ button:not(.x-close) > svg:first-child{margin-right:6px}
 .skupina-pilulky .pill{white-space:normal!important;max-width:100%}
 .ubyt-tab{padding:8px 14px;min-height:38px;border:1.5px solid var(--brd);border-radius:10px;background:#fff;font-size:14px;font-weight:700;cursor:pointer;font-family:inherit;color:var(--text2)}
 .ubyt-tab.on{background:#211D1A;color:#E8A13A;border-color:#211D1A}
+/* Přesouvání karet ubytování (2. 10. 2026): bod v pravém horním rohu karty. */
+.ubyt-uchop{flex-shrink:0;width:32px;height:32px;margin:-6px -8px 0 0;border:none;border-radius:50%;background:transparent;color:var(--text2);font-size:22px;line-height:32px;text-align:center;cursor:grab;touch-action:none;user-select:none;-webkit-user-select:none;font-family:inherit}
+.ubyt-uchop:hover{background:var(--bg);color:var(--text)}
+.ubyt-tazena{opacity:.35}
+.ubyt-duch{position:fixed;z-index:3000;pointer-events:none;opacity:.93;box-shadow:0 14px 30px rgba(0,0,0,.28);transform:rotate(1.2deg)}
+.ubyt-volno{min-height:90px;border:2px dashed var(--brd);border-radius:12px}
+.ubyt-cil{outline:3px solid var(--amber);outline-offset:2px}
+.ubyt-volno.ubyt-cil{background:var(--amber-l)}
+body.ubyt-tahne,body.ubyt-tahne *{cursor:grabbing!important;user-select:none!important;-webkit-user-select:none!important}
 .toast{pointer-events:none;position:fixed;bottom:100px;left:50%;transform:translateX(-50%);background:#211D1A;color:#fff;padding:12px 20px;border-radius:12px;font-size:14px;font-weight:700;z-index:999999;opacity:0;transition:opacity .2s;white-space:normal;overflow-wrap:anywhere;line-height:1.35;max-width:90vw;text-align:center;box-shadow:0 4px 20px rgba(0,0,0,0.3)}
 .toast.on{opacity:1}
 
@@ -4768,7 +4777,7 @@ async function submitAdminSignatureWithPlacement() {
 // Po nahrání nové verze se snadno pozná, jestli se opravdu nasadila: otevřete
 // appku, zmáčkněte F12 (na Macu ⌥⌘I) a v konzoli je vypsané tohle datum. Když
 // tam svítí starší, prohlížeč nebo GitHub drží starou verzi.
-const SUBBAU_VERZE = '2026-10-02 a — Ubytování: vlaječka za jménem, menší Kopírovat adresu, hledání, okno se nezavře při označování; Kalendář: dovolená světle modrá DOV, nemoc křížek, dnešek svisle, větší hodiny'
+const SUBBAU_VERZE = '2026-10-02 b — Ubytování: karty se dají přetáhnout za bod v rohu (mezery, víc sloupců)'
 console.log('SubBau docházka — verze ' + SUBBAU_VERZE)
 // Verze i dole v menu správce. Když někdo novinku „nevidí", podle ní se hned
 // pozná, jestli nemá otevřenou starou kopii appky — bez hledání v konzoli.
@@ -4887,8 +4896,8 @@ function pdfSafeText(text, unicode) {
 if ('serviceWorker' in navigator) {
   navigator.serviceWorker.register('/sw.js').then(reg => {
     // Zkontroluj aktualizaci hned a pak občas — ať Android nedrží starou verzi
-    try { reg.update() } catch(e) {}
-    setInterval(() => { try { reg.update() } catch(e) {} }, 60 * 60 * 1000)
+    try { reg.update().catch(() => {}) } catch(e) {}
+    setInterval(() => { try { reg.update().catch(() => {}) } catch(e) {} }, 60 * 60 * 1000)
     // Nainstalovaná appka se často jen "probouzí" z pozadí (žádné nové načtení
     // stránky), takže hodinový časovač na pozadí nemusí na Androidu vůbec běžet.
     // Při návratu do popředí si proto aktualizaci vyžádáme i zvlášť — ale nejvýš
@@ -4899,7 +4908,7 @@ if ('serviceWorker' in navigator) {
     const zkusAktualizaci = () => {
       if (Date.now() - _poslKontrola < 10 * 60 * 1000) return
       _poslKontrola = Date.now()
-      try { reg.update() } catch(e) {}
+      try { reg.update().catch(() => {}) } catch(e) {}
     }
     document.addEventListener('visibilitychange', () => {
       if (document.visibilityState === 'visible') zkusAktualizaci()
@@ -10229,6 +10238,11 @@ let _skupinky = { kdy: 0, seznam: [], clenove: [], chybi: false }
 let _skupinkyBezi = null
 
 const SKUPINKY_DOPLNKY = ', cizi_pocet, cizi_jmena, zaplaceno_od, zaplaceno_do'
+// ROZLOŽENÍ KARET (majitel 2. 10. 2026: „v pravém horním rohu bod, abych mohl
+// přesouvat ubytování, jak budu potřebovat, vynechat mezeru, dávat si je do
+// více sloupců"). Přidává supabase-migrace-ubytovani-rozlozeni.sql; bez ní se
+// karty řadí samy jako dřív a bod se nenabízí.
+const SKUPINKY_POZICE = ', pozice_sloupec, pozice_radek'
 function chybiSloupec(e) {
   const kod = String((e && e.code) || ''), zprava = (e && e.message) || ''
   return kod === '42703' || kod === 'PGRST204' || /column .* does not exist|could not find the '.*' column/i.test(zprava)
@@ -10236,6 +10250,7 @@ function chybiSloupec(e) {
 // Kdy naposled databáze doplňky neznala. Deset minut se pak čte rovnou bez nich
 // — jinak by každá tichá obnova (minuta) poslala dotaz, o kterém víme, že spadne.
 let _skupinkyBezDoplnkuOd = 0
+let _skupinkyBezPoziceOd = 0
 // CIZÍ LIDÉ NA POKOJI (majitel 1. 10. 2026: „pokoj je pro 5 lidí, ale jsou tam
 // dva cizí — ať je vidět, že je ještě jedno místo volný"). Počítají se do
 // obsazenosti všude, kde se obsazenost ukazuje, jinak by „volno" lhalo.
@@ -10253,22 +10268,29 @@ function nactiSkupinky(vynutit) {
       const zakladni = 'id, druh, nazev, adresa, pocet_mist, barva, poznamka, aktivni'
       const dotaz = sloupce => sb.from('skupinky').select(sloupce).eq('aktivni', true).order('nazev')
       const zkusitDoplnky = Date.now() - _skupinkyBezDoplnkuOd > 600000
+      const zkusitPozice = zkusitDoplnky && Date.now() - _skupinkyBezPoziceOd > 600000
       let [s, c] = await Promise.all([
-        dotaz(zakladni + (zkusitDoplnky ? SKUPINKY_DOPLNKY : '')),
+        dotaz(zakladni + (zkusitDoplnky ? SKUPINKY_DOPLNKY : '') + (zkusitPozice ? SKUPINKY_POZICE : '')),
         sb.from('skupinky_lide').select('skupinka_id, worker_id, druh')
       ])
       // DOPLŇKY (cizí lidé, zaplaceno od–do) přidává supabase-migrace-ubytovani-
       // doplnky.sql. Dokud neproběhla, čte se jako dřív a okno je nenabízí —
       // ubytování musí fungovat dál i bez ní. Chybějící SLOUPEC se pozná dřív
       // než chybějící tabulka: obojí hlásí „does not exist".
+      // Rozložení je novější než doplňky: chybí-li JEN ono, čte se s doplňky
+      // dál — jinak by s ním zmizeli i cizí lidé a zaplaceno.
+      let bezPozice = !zkusitPozice
+      if (s.error && chybiSloupec(s.error) && zkusitPozice && /pozice_/.test(String(s.error.message || ''))) {
+        bezPozice = true; _skupinkyBezPoziceOd = Date.now(); s = await dotaz(zakladni + SKUPINKY_DOPLNKY)
+      }
       let bezDoplnku = !zkusitDoplnky
-      if (s.error && chybiSloupec(s.error)) { bezDoplnku = true; _skupinkyBezDoplnkuOd = Date.now(); s = await dotaz(zakladni) }
+      if (s.error && chybiSloupec(s.error)) { bezDoplnku = true; bezPozice = true; _skupinkyBezDoplnkuOd = Date.now(); s = await dotaz(zakladni) }
       const chyba = s.error || c.error
       if (chyba) {
         if (jeChybiSkupinky(chyba)) _skupinky = { kdy: Date.now(), seznam: [], clenove: [], chybi: true }
         return _skupinky   // jiný výpadek: platí, co bylo načtené minule
       }
-      _skupinky = { kdy: Date.now(), seznam: s.data || [], clenove: c.data || [], chybi: false, bezDoplnku }
+      _skupinky = { kdy: Date.now(), seznam: s.data || [], clenove: c.data || [], chybi: false, bezDoplnku, bezPozice }
     } catch (e) {}
     return _skupinky
   })().finally(() => { _skupinkyBezi = null })
@@ -10364,6 +10386,9 @@ function prepniDruhSkupinek(druh) {
   vykresliUbytovani()
 }
 let _ubytLide = []
+// Rozložení posledního kreslení (kam která karta patří) a jestli se právě táhne.
+let _ubytRozlozeni = null
+let _ubytTahne = false
 // FIRMY, KTERÝM ŘEŠÍME UBYTOVÁNÍ (majitel 1. 10. 2026: „tlačítko, který firmy
 // řeším ubytování — ostatní mě nezajímají, ať mi tam nepíše, že ten ještě nemá").
 // Uloženo u skupiny (teams.resime_ubytovani), takže platí pro všechny správce
@@ -10434,7 +10459,7 @@ async function loadUbytovani(tichy) {
   if (!box) return
   // Kdo sekci otevře, dostane čerstvý pokus o doplňky (třeba právě pustil SQL);
   // paměť „databáze je nezná" brzdí jen tichou obnovu každou minutu.
-  if (!tichy) _skupinkyBezDoplnkuOd = 0
+  if (!tichy) { _skupinkyBezDoplnkuOd = 0; _skupinkyBezPoziceOd = 0 }
   if (!tichy && !box.querySelector('.ubyt-karta')) box.innerHTML = '<div style="color:var(--text3);padding:10px">Načítám…</div>'
   const [, , , { data: lide, error }] = await Promise.all([
     nactiSkupinky(true),
@@ -10450,6 +10475,9 @@ async function loadUbytovani(tichy) {
 function vykresliUbytovani() {
   const box = document.getElementById('ubyt-obsah')
   if (!box) return
+  // Během tažení se nepřekresluje (tichá obnova každou minutu) — karta by se
+  // vytrhla z ruky. Po puštění se kreslí znovu.
+  if (_ubytTahne) return
   if (_skupinky.chybi) {
     box.innerHTML = `<div style="padding:16px;border:2px dashed var(--amber);border-radius:12px;background:var(--amber-l,#faf0dc);line-height:1.6">
       <b>🏠 Ubytování a auta ještě nejsou v databázi.</b><br>Spusťte migraci <code>supabase-migrace-skupinky.sql</code> (Supabase → SQL Editor). Pak tu půjde zakládat ubytování a auta a přiřazovat k nim lidi.</div>`
@@ -10461,7 +10489,17 @@ function vykresliUbytovani() {
   const sedi = t => !hledat || textKHledani(t).includes(hledat)
   const podleId = {}
   _ubytLide.forEach(w => { podleId[w.id] = w })
-  const karty = skupiny.map(s => {
+  // ROZLOŽENÍ: na počítači karty stojí, kam je správce přetáhl, a prázdná
+  // místa zůstávají. Při hledání, na telefonu (jeden sloupec) a bez SQL se
+  // karty řadí za sebou — v pořadí rozložení (řádek, pak sloupec), ostatní
+  // podle názvu.
+  const sloupcu = Math.max(1, Math.min(12, Math.floor((box.clientWidth - 28 + 12) / 292)))
+  const rozlozit = !hledat && !_skupinky.bezPozice && sloupcu > 1
+  const rozlozeni = rozlozKarty(skupiny, sloupcu)
+  _ubytRozlozeni = rozlozit ? rozlozeni : null
+  const poradi = rozlozit ? skupiny : [...skupiny].sort((a, b) =>
+    ((a.pozice_radek ?? 1e9) - (b.pozice_radek ?? 1e9)) || ((a.pozice_sloupec ?? 1e9) - (b.pozice_sloupec ?? 1e9)))
+  const karty = poradi.map(s => {
     // Počítá se z VŠECH členů (jako odznak a pruh v Pracovnících); vypisují se
     // jen viditelní. Neaktivní nebo ze schované firmy jsou dole jen číslem —
     // jejich jména se na obrazovce, kterou může vidět zákazník, neukazují.
@@ -10474,7 +10512,8 @@ function vykresliUbytovani() {
     if (hledat && !sedi([s.nazev, s.adresa, s.poznamka, s.cizi_jmena].join(' ')) && !lide.some(w => sedi(w.full_name))) return ''
     const plno = s.pocet_mist && obsazenoSkupinky(s) > s.pocet_mist
     const mapa = s.adresa ? `<a href="https://www.google.com/maps/search/?api=1&amp;query=${encodeURIComponent(s.adresa)}" target="_blank" rel="noopener" style="color:inherit">${escAttr(s.adresa)}</a>` : ''
-    return `<div class="ubyt-karta" data-id="${escAttr(s.id)}" style="border:1.5px solid var(--brd);border-left:7px solid ${barvaSkupinky(s)};border-radius:12px;background:#fff;padding:12px 14px;display:flex;flex-direction:column;gap:8px">
+    const misto = rozlozit ? rozlozeni.mapa.get(s.id) : null
+    return `<div class="ubyt-karta" data-id="${escAttr(s.id)}" style="${misto ? `grid-column:${misto.x + 1};grid-row:${misto.y + 1};` : ''}border:1.5px solid var(--brd);border-left:7px solid ${barvaSkupinky(s)};border-radius:12px;background:#fff;padding:12px 14px;display:flex;flex-direction:column;gap:8px">
       <div style="display:flex;align-items:flex-start;gap:8px">
         <div style="flex:1;min-width:0">
           <div style="font-size:15px;font-weight:800">${D.ikona} ${escAttr(s.nazev)}</div>
@@ -10484,6 +10523,7 @@ function vykresliUbytovani() {
           ${s.poznamka ? `<div style="font-size:12px;color:var(--text3);margin-top:2px">${escAttr(s.poznamka)}</div>` : ''}
         </div>
         <span title="${s.pocet_mist ? 'Obsazeno / míst celkem' : 'Počet míst není zadaný'}" style="flex-shrink:0;padding:3px 9px;border-radius:9px;font-size:12.5px;font-weight:800;background:${plno ? 'var(--red-l)' : tonSkupinky(s, 0.13)};color:${plno ? 'var(--red)' : '#2b2622'}">${escAttr(obsazenostText(s))}${plno ? ' ⚠️' : ''}</span>
+        ${rozlozit ? `<button type="button" class="ubyt-uchop" data-uchop="${escAttr(s.id)}" title="Chyťte a přetáhněte kartu, kam potřebujete" aria-label="Přesunout kartu" onpointerdown="zacniPresunKarty(event,'${jsStr(String(s.id))}')">⠿</button>` : ''}
       </div>
       <div style="display:flex;flex-direction:column;gap:4px">
         ${lide.length ? lide.map(w => `<div data-ubyt-clovek="${escAttr(String(w.id))}"${hledat && sedi(w.full_name) ? ' data-nalezen' : ''} style="display:flex;align-items:center;gap:10px;font-size:14px;border-radius:8px${hledat && sedi(w.full_name) ? ';background:#fff3c4;box-shadow:0 0 0 4px #fff3c4' : ''}">${fotkaHtml(w.avatar_url, w.full_name, 44, false)}<span style="flex:1;min-width:0;display:flex;align-items:center"><span style="min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;cursor:pointer;font-weight:600" onclick="openWorkerModal('${jsStr(String(w.id))}')">${escAttr(w.full_name || '')}</span>${vlajkaZaJmenemHtml(w.id)}</span><button onclick="odeberZeSkupinky('${jsStr(String(s.id))}','${jsStr(String(w.id))}')" title="Odebrat z ${escAttr(D.jedno)}" style="border:none;background:none;color:var(--text3);cursor:pointer;font-size:15px;padding:2px 6px;min-height:28px">✕</button></div>`).join('')
@@ -10511,13 +10551,144 @@ function vykresliUbytovani() {
     </div>` : ''
   box.innerHTML = `${firmyHtml}
     ${!skupiny.length ? `<div style="padding:16px;color:var(--text3)">Zatím tu není žádné ${escAttr(D.jedno)}. Založte ho tlačítkem „＋ ${escAttr(D.nove)}".</div>`
-      : karty ? `<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:12px">${karty}</div>`
+      : karty ? `<div id="ubyt-mrizka" data-sloupcu="${rozlozit ? sloupcu : 0}" style="display:grid;${rozlozit ? `grid-template-columns:repeat(${sloupcu},minmax(0,1fr));grid-template-rows:repeat(${rozlozeni.radku},auto)` : 'grid-template-columns:repeat(auto-fill,minmax(280px,1fr))'};gap:12px">${karty}</div>
+        ${_skupinky.bezPozice && !_skupinky.bezDoplnku && !hledat ? '<div data-bez-rozlozeni style="font-size:12px;color:var(--text3);margin-top:8px">Přesouvání karet půjde po spuštění SQL supabase-migrace-ubytovani-rozlozeni.sql.</div>' : ''}`
       : `<div data-nic-nenalezeno style="padding:16px;color:var(--text3)">Na „${escAttr(_ubytHledat.trim())}" se nic nenašlo.</div>`}
     <div data-bez-ubytovani style="margin-top:16px;padding:12px 14px;border-radius:12px;background:var(--bg,#f4efe7);${hledat && !bez.length ? 'display:none' : ''}">
       <div style="font-size:13px;font-weight:800;margin-bottom:6px">${D.ikona} ${escAttr(D.bez)}: ${bez.length}${jinychFirem ? `<span data-jinych-firem style="font-weight:400;color:var(--text3)"> · ${jinychFirem} z ostatních firem se neukazuje</span>` : ''}</div>
       <div style="font-size:12.5px;color:var(--text2);line-height:1.7">${bez.map(w => escAttr(w.full_name || '')).join(' · ') || '—'}</div>
     </div>`
 }
+
+// Kam která karta patří při `sloupcu` sloupcích: nejdřív uložená místa (vejdou-li
+// se a nejsou-li obsazená), pak zbytek na první volná místa zleva doprava,
+// shora dolů — v pořadí podle názvu, jako dosud.
+function rozlozKarty(skupiny, sloupcu) {
+  const mapa = new Map(), obsazeno = new Set(), zbytek = []
+  const klic = (x, y) => x + ',' + y
+  for (const s of skupiny) {
+    const x = s.pozice_sloupec, y = s.pozice_radek
+    if (Number.isInteger(x) && Number.isInteger(y) && x >= 0 && y >= 0 && x < sloupcu && !obsazeno.has(klic(x, y))) {
+      mapa.set(s.id, { x, y }); obsazeno.add(klic(x, y))
+    } else zbytek.push(s)
+  }
+  let i = 0
+  for (const s of zbytek) {
+    while (obsazeno.has(klic(i % sloupcu, Math.floor(i / sloupcu)))) i++
+    const p = { x: i % sloupcu, y: Math.floor(i / sloupcu) }
+    mapa.set(s.id, p); obsazeno.add(klic(p.x, p.y))
+  }
+  let radku = 1
+  for (const p of mapa.values()) radku = Math.max(radku, p.y + 1)
+  return { mapa, sloupcu, radku }
+}
+// PŘETAŽENÍ KARTY ZA BOD v pravém horním rohu. Myš i prst (pointer události).
+// Během tažení jsou volná místa i jeden řádek navíc dole vidět jako čárkované
+// rámečky — kam se dá karta pustit, musí být vidět. Pustí-li se na jinou
+// kartu, ty dvě se vymění.
+function zacniPresunKarty(e, id) {
+  const rozl = _ubytRozlozeni
+  if (!rozl || _ubytTahne || (e.pointerType === 'mouse' && e.button !== 0)) return
+  const mrizka = document.getElementById('ubyt-mrizka')
+  const karta = mrizka && [...mrizka.querySelectorAll('.ubyt-karta')].find(k => k.dataset.id === String(id))
+  if (!karta) return
+  e.preventDefault()
+  _ubytTahne = true
+  document.body.classList.add('ubyt-tahne')
+  const r = karta.getBoundingClientRect()
+  const dx = e.clientX - r.left, dy = e.clientY - r.top
+  mrizka.style.gridTemplateRows = `repeat(${rozl.radku + 1}, minmax(90px, auto))`
+  const obsazene = new Set([...rozl.mapa.values()].map(p => p.x + ',' + p.y))
+  for (let y = 0; y <= rozl.radku; y++) for (let x = 0; x < rozl.sloupcu; x++) {
+    if (obsazene.has(x + ',' + y)) continue
+    const m = document.createElement('div')
+    m.className = 'ubyt-volno'; m.dataset.x = String(x); m.dataset.y = String(y)
+    m.style.gridColumn = String(x + 1); m.style.gridRow = String(y + 1)
+    mrizka.appendChild(m)
+  }
+  const duch = karta.cloneNode(true)
+  duch.classList.remove('ubyt-karta'); duch.removeAttribute('data-id'); duch.classList.add('ubyt-duch')
+  duch.style.left = r.left + 'px'; duch.style.top = r.top + 'px'; duch.style.width = r.width + 'px'
+  document.body.appendChild(duch)
+  karta.classList.add('ubyt-tazena')
+  let cil = null, posledniY = e.clientY
+  const najdiCil = (x, y) => {
+    for (const el of document.elementsFromPoint(x, y)) {
+      if (el.classList && el.classList.contains('ubyt-volno') && el.parentElement === mrizka) return { el, x: Number(el.dataset.x), y: Number(el.dataset.y) }
+      const k = el.closest && el.closest('.ubyt-karta')
+      if (k && k.parentElement === mrizka) { const p = rozl.mapa.get(k.dataset.id); return p ? { el: k, x: p.x, y: p.y } : null }
+    }
+    return null
+  }
+  const pohyb = ev => {
+    duch.style.left = (ev.clientX - dx) + 'px'; duch.style.top = (ev.clientY - dy) + 'px'
+    posledniY = ev.clientY
+    const novy = najdiCil(ev.clientX, ev.clientY)
+    if (cil && (!novy || novy.el !== cil.el)) cil.el.classList.remove('ubyt-cil')
+    if (novy && novy.el !== karta) novy.el.classList.add('ubyt-cil')
+    cil = novy
+  }
+  // U horního a dolního okraje se stránka posouvá sama — jinak by se karta
+  // nedala dotáhnout do řádku, který není vidět.
+  const svitek = mrizka.closest('.view') || document.scrollingElement
+  const rolovani = setInterval(() => {
+    if (posledniY > innerHeight - 70) svitek.scrollTop += 14
+    else if (posledniY < 70) svitek.scrollTop -= 14
+  }, 30)
+  const konec = async ev => {
+    window.removeEventListener('pointermove', pohyb)
+    window.removeEventListener('pointerup', konec)
+    window.removeEventListener('pointercancel', konec)
+    clearInterval(rolovani)
+    duch.remove()
+    document.body.classList.remove('ubyt-tahne')
+    _ubytTahne = false
+    const kam = ev.type === 'pointerup' && cil ? { x: cil.x, y: cil.y } : null
+    if (kam) await presunKartu(id, kam)
+    else vykresliUbytovani()
+  }
+  window.addEventListener('pointermove', pohyb)
+  window.addEventListener('pointerup', konec)
+  window.addEventListener('pointercancel', konec)
+}
+
+// Přesun = nové místo karty; stojí-li tam jiná, vymění se. Uloží se místa
+// VŠECH karet, která se v databázi liší od toho, co je vidět — jinak by se
+// karty bez uloženého místa po přesunu jedné z nich samy přeskládaly.
+async function presunKartu(id, cil) {
+  const rozl = _ubytRozlozeni
+  const odkud = rozl && rozl.mapa.get(String(id))
+  if (!odkud || (odkud.x === cil.x && odkud.y === cil.y)) { vykresliUbytovani(); return }
+  const nove = new Map(rozl.mapa)
+  const soused = [...rozl.mapa].find(([k, p]) => k !== String(id) && p.x === cil.x && p.y === cil.y)
+  nove.set(String(id), { x: cil.x, y: cil.y })
+  if (soused) nove.set(soused[0], { x: odkud.x, y: odkud.y })
+  const zmeny = []
+  for (const [k, p] of nove) {
+    const sk = _skupinky.seznam.find(x => String(x.id) === k)
+    if (sk && (sk.pozice_sloupec !== p.x || sk.pozice_radek !== p.y)) zmeny.push([sk, p])
+  }
+  // Hned je vidět, kam karta dopadla; databáze dobíhá za tím. Když neuloží,
+  // načte se znovu, co v ní opravdu je.
+  zmeny.forEach(([sk, p]) => { sk.pozice_sloupec = p.x; sk.pozice_radek = p.y })
+  vykresliUbytovani()
+  const vysledky = await Promise.all(zmeny.map(([sk, p]) =>
+    sb.from('skupinky').update({ pozice_sloupec: p.x, pozice_radek: p.y }).eq('id', sk.id).select('id')))
+  const spatne = vysledky.find(v => v.error || !v.data || !v.data.length)
+  if (spatne) {
+    showToast('❌ Rozložení se neuložilo' + (spatne.error ? ': ' + spatne.error.message : ' — zkontrolujte oprávnění'))
+    zneplatniSkupinky(); loadUbytovani(true)
+  }
+}
+
+// Jiná šířka okna = jiný počet sloupců: karty se přeskládají.
+let _ubytZmenaSirky = null
+window.addEventListener('resize', () => {
+  clearTimeout(_ubytZmenaSirky)
+  _ubytZmenaSirky = setTimeout(() => {
+    if (document.getElementById('v-ubytovani')?.classList.contains('on')) vykresliUbytovani()
+  }, 200)
+})
 
 // KOPÍROVAT ADRESU (majitel 1. 10. 2026: „velký tlačítko kopírovat adresu";
 // 2. 10.: „už je moc velké" — teď malé „📋 Kopírovat" hned za adresou).
