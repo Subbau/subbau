@@ -1917,7 +1917,7 @@ setTimeout(function () {
           <div class="card">
             <div class="card-h" style="flex-wrap:wrap;gap:10px">
               <h4>🕘 Historie úprav</h4>
-              <span style="font-size:12px;color:var(--text3)">Kdo co v appce změnil, kdy a komu. Zapisuje to databáze sama — nedá se to obejít ani smazat. Vidí jen vedení.</span>
+              <span style="font-size:12px;color:var(--text3)">Co v appce změnilo vedení a kancelář — kdy a komu. Co si pracovníci zapíšou sami (píchnutí, fotky, své údaje), se sem nepíše. Zapisuje to databáze sama — nedá se to obejít ani smazat. Vidí jen vedení.</span>
             </div>
             <div id="hist-filtry" style="display:flex;flex-wrap:wrap;gap:8px;align-items:center;padding:12px 16px;border-bottom:1px solid var(--brd)">
               <select id="hist-kdo" onchange="nactiHistoriiUprav(true)" aria-label="Kdo měnil" style="padding:7px 10px;border:1px solid var(--brd);border-radius:8px;font-size:14px;font-family:inherit;background:#fff;max-width:220px"><option value="">Kdo měnil: všichni</option></select>
@@ -1925,7 +1925,6 @@ setTimeout(function () {
               <select id="hist-oblast" onchange="nactiHistoriiUprav(true)" aria-label="Oblast" style="padding:7px 10px;border:1px solid var(--brd);border-radius:8px;font-size:14px;font-family:inherit;background:#fff;max-width:220px"><option value="">Oblast: vše</option></select>
               <label style="display:inline-flex;align-items:center;gap:6px;font-size:13px;color:var(--text2)">Od <input type="date" id="hist-od" onchange="nactiHistoriiUprav(true)" style="padding:6px 8px;border:1px solid var(--brd);border-radius:8px;font-family:inherit"></label>
               <label style="display:inline-flex;align-items:center;gap:6px;font-size:13px;color:var(--text2)">Do <input type="date" id="hist-do" onchange="nactiHistoriiUprav(true)" style="padding:6px 8px;border:1px solid var(--brd);border-radius:8px;font-family:inherit"></label>
-              <label style="display:inline-flex;align-items:center;gap:6px;font-size:13px;color:var(--text2)"><input type="checkbox" id="hist-sami" onchange="nactiHistoriiUprav(true)"> i příchody a odchody, které si lidé zapsali sami</label>
             </div>
             <div id="hist-obsah" style="padding:12px 16px"><div style="color:var(--text3)">Načítám…</div></div>
           </div>
@@ -4796,7 +4795,7 @@ async function submitAdminSignatureWithPlacement() {
 // Po nahrání nové verze se snadno pozná, jestli se opravdu nasadila: otevřete
 // appku, zmáčkněte F12 (na Macu ⌥⌘I) a v konzoli je vypsané tohle datum. Když
 // tam svítí starší, prohlížeč nebo GitHub drží starou verzi.
-const SUBBAU_VERZE = '2026-10-02 c — Historie úprav (kdo co změnil, kdy a komu); text zpráv se ukazuje jen jako text'
+const SUBBAU_VERZE = '2026-10-02 d — Historie úprav jen pro kroky vedení a kanceláře (ne pracovníků)'
 console.log('SubBau docházka — verze ' + SUBBAU_VERZE)
 // Verze i dole v menu správce. Když někdo novinku „nevidí", podle ní se hned
 // pozná, jestli nemá otevřenou starou kopii appky — bez hledání v konzoli.
@@ -22617,9 +22616,13 @@ function reblurStats() {
 // jen čte — z prohlížeče se tak nedá obejít ani zfalšovat. Vidí jen správce
 // (pravidlo na tabulce, ne jen schované menu).
 //
-// Vlastní příchody a odchody pracovníků (sam_sobe) jsou ve výchozím stavu
-// schované: jinak by úpravy správců zapadly mezi stovkami píchnutí denně.
+// JEN KANCELÁŘ: do historie se zapisují kroky vedení (a později sekretářky
+// nebo účetní), ne pracovníků — o to se stará spoušť v databázi. Kroky
+// každého admina vidí všichni admini, nic se neschovává (2. 10. 2026).
 const HIST_STRANKA = 100
+// Role pracovníků — jejich kroky se do historie nezapisují (stejný seznam je
+// ve spoušti zapis_historie_uprav v databázi).
+const HIST_ROLE_PRACOVNIKU = ['osvec', 'partak']
 let _histPocet = HIST_STRANKA, _histPoradi = 0, _histJmena = null
 const HIST_OBLASTI = {
   attendance: 'Docházka', vacations: 'Dovolená a nemoc', profiles: 'Pracovníci', worker_rate_history: 'Sazby',
@@ -22705,14 +22708,16 @@ async function _histNactiJmena() {
   for (const t of podsk.data || []) m.set(String(t.id), t.name || '')
   for (const t of skup.data || []) m.set(String(t.id), t.nazev || '')
   _histJmena = m
-  const moznosti = (sel, prvni) => {
+  const moznosti = (sel, prvni, kdo) => {
     const el = document.getElementById(sel); if (!el) return
     const bylo = el.value
-    el.innerHTML = `<option value="">${prvni}</option>` + (lide.data || []).map(p => `<option value="${escAttr(String(p.id))}">${escAttr(p.full_name || '—')}${p.role === 'admin' ? ' (vedení)' : ''}</option>`).join('')
-    el.value = bylo
+    el.innerHTML = `<option value="">${prvni}</option>` + kdo.map(p => `<option value="${escAttr(String(p.id))}">${escAttr(p.full_name || '—')}${p.role === 'admin' ? ' (vedení)' : ''}</option>`).join('')
+    el.value = kdo.some(p => String(p.id) === bylo) ? bylo : ''
   }
-  moznosti('hist-kdo', 'Kdo měnil: všichni')
-  moznosti('hist-komu', 'Komu: všem')
+  // „Kdo měnil" jen kancelář — kroky pracovníků se do historie nepíšou.
+  const kancelar = (lide.data || []).filter(p => !HIST_ROLE_PRACOVNIKU.includes(String(p.role || '').trim().toLowerCase()))
+  moznosti('hist-kdo', 'Kdo měnil: všichni', kancelar)
+  moznosti('hist-komu', 'Komu: všem', lide.data || [])
   const ob = document.getElementById('hist-oblast')
   if (ob) {
     const bylo = ob.value
@@ -22739,7 +22744,9 @@ async function nactiHistoriiUprav(znovu, vic) {
   // Den od–do v MÍSTNÍM čase: půlnoc v Praze, ne v UTC (o dvě hodiny jinde).
   if (hodnota('hist-od')) q = q.gte('kdy', new Date(hodnota('hist-od') + 'T00:00:00').toISOString())
   if (hodnota('hist-do')) { const d = new Date(hodnota('hist-do') + 'T00:00:00'); d.setDate(d.getDate() + 1); q = q.lt('kdy', d.toISOString()) }
-  if (!document.getElementById('hist-sami')?.checked) q = q.eq('sam_sobe', false)
+  // KROKY ADMINŮ VIDÍ VŠICHNI ADMINI — žádný filtr (majitel 2. 10. 2026: „když
+  // já jako admin něco udělám, tak to ostatní admini uvidí"). Kroky pracovníků
+  // se do historie nepíšou vůbec (SQL supabase-migrace-historie-jen-kancelar.sql).
   const provize = _histProvizeOdemceno()
   if (!provize) q = q.not('tabulka', 'in', '(' + HIST_PROVIZE.join(',') + ')')
   const { data, error } = await q.order('kdy', { ascending: false }).range(0, _histPocet - 1)
