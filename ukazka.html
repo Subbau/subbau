@@ -2888,8 +2888,15 @@ setTimeout(function () {
         <div style="font-size:16px;font-weight:800;line-height:1.3;margin-bottom:5px">⚠️ Nezapomeňte si podepsat výkaz hodin!</div>
         <div style="font-size:13px;line-height:1.55;opacity:.95">Dnes je pátek — stáhněte si výkaz a nechte ho podepsat vedoucím na stavbě. Bez podpisu nemáte doklad k faktuře.</div>
       </div>
+      <!-- FIRMA BEZ PODPISU (majitel 2. 10. 2026): kartu výkazu k podpisu
+           schová prepniKartuVykazu() a místo ní je tahle věta. -->
+      <div class="mob-card" id="mob-vykaz-bez-podpisu" style="display:none;margin-top:0;border-left:5px solid #2e7d32">
+        <div style="font-size:15px;font-weight:800;line-height:1.35;margin-bottom:6px">✍️ Podpis hodin není potřeba</div>
+        <div style="font-size:14px;line-height:1.55;color:var(--text2)">U této firmy není vyžadován podpis vašich odpracovaných hodin. Veškeré hodiny vedeme v elektronické podobě každý den.</div>
+        <div style="font-size:13px;line-height:1.5;color:var(--text3);margin-top:6px">Bei dieser Firma ist keine Unterschrift Ihrer Arbeitsstunden nötig. Alle Stunden werden täglich elektronisch erfasst.</div>
+      </div>
       <!-- Export hodin -->
-      <div class="mob-card" style="margin-top:0">
+      <div class="mob-card" id="mob-vykaz-karta" style="margin-top:0">
         <div style="display:flex;align-items:center;gap:9px;margin-bottom:6px">
           <span style="color:#9c3b22;display:flex"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:20px;height:20px"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/><path d="M16 13H8M16 17H8M10 9H8"/></svg></span>
           <div class="mob-card-title" style="margin-bottom:0">Výkaz hodin</div>
@@ -5532,7 +5539,7 @@ async function submitAdminSignatureWithPlacement() {
 // Po nahrání nové verze se snadno pozná, jestli se opravdu nasadila: otevřete
 // appku, zmáčkněte F12 (na Macu ⌥⌘I) a v konzoli je vypsané tohle datum. Když
 // tam svítí starší, prohlížeč nebo GitHub drží starou verzi.
-const SUBBAU_VERZE = '2026-10-02 e — Kalendář: německé státní svátky (celostátní, zemské, Bavorsko výrazně)'
+const SUBBAU_VERZE = '2026-10-02 f — Firma bez podpisu výkazu (zaškrtnutí u firmy v Týmech)'
 console.log('StavKo docházka — verze ' + SUBBAU_VERZE)
 // Verze i dole v menu správce. Když někdo novinku „nevidí", podle ní se hned
 // pozná, jestli nemá otevřenou starou kopii appky — bez hledání v konzoli.
@@ -6936,6 +6943,7 @@ function showOsvec(profile) {
     // loadInvoiceForm() se pouští z loadMobProfil() — podruhé ho tu nevoláme
     loadMobExportWeeks()
     loadMySheets()
+    nactiPodpisVykazu()
     loadMobNotifications()
     startOsvecRealtime()
     updateChatBadge()
@@ -18480,8 +18488,47 @@ function pravidlaFirmyHtml(t) {
       ${t.prac_doba_od || t.prac_doba_do ? `<button onclick="event.stopPropagation();nastavPracDobuTymu('${t.id}', true)" ${vyp}
         style="min-height:40px;padding:6px 10px;border:1px solid var(--brd);border-radius:8px;background:#fff;cursor:pointer;font-family:inherit;font-size:12px">zrušit</button>` : ''}
     </div>
+    ${firma ? podpisFirmyHtml(firma) : ''}
     ${migrace}${migrace2}
   </div>`
+}
+
+// ✍️ PODPIS VÝKAZU U FIRMY (majitel 2. 10. 2026): „já si musím vybrat, u jaké
+// firmy se podepisují hodiny a u které ne." Zaškrtnuto = lidé ve všech
+// skupinách téhle firmy výkaz hodin nepodepisují: zmizí jim podpis vedoucího,
+// výkaz k podpisu i páteční červené připomenutí, uvidí větu, že hodiny vedeme
+// elektronicky. Jiné firmy se to netýká.
+function podpisFirmyHtml(firma) {
+  const maSloupec = 'bez_podpisu_vykazu' in firma
+  return `<div style="margin-top:8px;padding-top:8px;border-top:1px dashed var(--brd)">
+    ${gpsVolbaHtml(`nastavPodpisFirmy('${firma.id}', this)`, !!firma.bez_podpisu_vykazu, maSloupec,
+      '✍️ U celé firmy ' + escAttr(firma.name || '') + ' se výkaz hodin nepodepisuje',
+      'lidé uvidí, že hodiny vedeme elektronicky',
+      'Zaškrtnuto = lidi ze všech skupin téhle firmy nebudou podepisovat výkaz hodin: zmizí jim podpis vedoucího, výkaz k podpisu i páteční červené připomenutí. Uvidí větu, že u této firmy není podpis vyžadován.')}
+    ${maSloupec ? '' : `<span style="font-size:11px;color:var(--amber);font-weight:700">⚠️ spusťte SQL supabase-migrace-podpis-vykazu.sql</span>`}
+  </div>`
+}
+
+async function nastavPodpisFirmy(companyId, el) {
+  const zapnout = !!(el && el.checked)
+  if (el) el.disabled = true
+  const { data, error } = await sb.from('companies')
+    .update({ bez_podpisu_vykazu: zapnout }).eq('id', companyId).select('id, name, bez_podpisu_vykazu')
+  if (el) el.disabled = false
+  if (error || !data || !data.length || data[0].bez_podpisu_vykazu !== zapnout) {
+    if (el) el.checked = !zapnout
+    showToast(error && /bez_podpisu_vykazu|column|schema cache/i.test(error.message || '')
+      ? '❌ Chybí sloupec — spusťte SQL supabase-migrace-podpis-vykazu.sql'
+      : '❌ Nastavení se neuložilo' + (error ? ': ' + error.message : ' — zkontrolujte oprávnění'))
+    return
+  }
+  const c = (_teamCompaniesCache || []).find(x => String(x.id) === String(companyId))
+  if (c) c.bez_podpisu_vykazu = zapnout
+  const jmeno = data[0].name ? ' ' + data[0].name : ''
+  showToast(zapnout
+    ? '✍️ Firma' + jmeno + ': výkaz hodin se nepodepisuje — lidé uvidí, že hodiny vedeme elektronicky'
+    : '✅ Firma' + jmeno + ': výkaz hodin se zase podepisuje jako dřív')
+  renderTeams()
 }
 
 // Uloží „jen s polohou" u firmy (companies), skupiny (teams) nebo podskupiny
@@ -26642,6 +26689,7 @@ async function exportWorkerKW(workerId, workerName, week, year, lang, foreman, r
 
 
 async function exportMobWorkerHours(lang) {
+  if (jeBezPodpisu()) { showToast('✍️ ' + vetaBezPodpisu()); return }
   const sel = document.getElementById('mob-export-week')
   if (!sel?.value) { showToast('Vyberte týden'); return }
   const [week, year] = sel.value.split('/').map(Number)
@@ -26673,6 +26721,7 @@ let _foremanPad = null
 
 // Vedoucí nejdřív uvidí náhled celého výkazu, pak teprve podepíše
 async function previewBeforeForemanSign() {
+  if (jeBezPodpisu()) { showToast('✍️ ' + vetaBezPodpisu()); return }
   const sel = document.getElementById('mob-export-week')
   if (!sel?.value) { showToast('Vyberte týden v přehledu níže / Bitte Woche unten wählen'); return }
   const [week, year] = sel.value.split('/').map(Number)
@@ -26752,6 +26801,7 @@ function closeForemanPreview() {
 }
 
 function openForemanSign() {
+  if (jeBezPodpisu()) { showToast('✍️ ' + vetaBezPodpisu()); return }
   const dlg = document.getElementById('foreman-sign-dialog')
   if (!dlg) return
   // Předvyplň jméno z pole nahoře
@@ -35789,6 +35839,52 @@ function _odlozPipnuti() {
   document.addEventListener('keydown', zkus, true)
 }
 
+// ============ FIRMA BEZ PODPISU VÝKAZU (majitel 2. 10. 2026) ============
+// Lidé u firmy, kde se výkaz hodin nepodepisuje (správce to zaškrtne u firmy
+// v Týmech, companies.bez_podpisu_vykazu), nevidí podpis vedoucího, vytvoření
+// výkazu k podpisu ani páteční červené připomenutí — jen větu, že hodiny
+// vedeme elektronicky. Ptá se databáze funkcí muj_bez_podpisu_vykazu(): vrací
+// jen ano/ne o vlastní firmě (security definer, jako muj_zapis_jen_gps()).
+// Bez migrace, bez sítě nebo při chybě = jako dosud (podpis se nabízí).
+// Stav visí na funkci, ne v proměnné na nejvyšší úrovni — žádná „let" by
+// nesměla být sáhnuta dřív, než se k ní skript dočte.
+function stavBezPodpisu() {
+  if (!stavBezPodpisu.s) stavBezPodpisu.s = { hodnota: null, kdy: 0 }
+  return stavBezPodpisu.s
+}
+function jeBezPodpisu() { return stavBezPodpisu().hodnota === true }
+function vetaBezPodpisu() {
+  return 'U této firmy není vyžadován podpis vašich odpracovaných hodin. Veškeré hodiny vedeme v elektronické podobě každý den.'
+}
+async function mojeFirmaBezPodpisu(obnovit) {
+  const st = stavBezPodpisu()
+  if (!obnovit && st.hodnota !== null && Date.now() - st.kdy < 10 * 60 * 1000) return st.hodnota
+  try {
+    const r = await Promise.race([
+      sb.rpc('muj_bez_podpisu_vykazu'),
+      new Promise((_, ne) => setTimeout(() => ne(new Error('timeout')), 5000))
+    ])
+    if (r?.error) return st.hodnota === true
+    stavBezPodpisu.s = { hodnota: r?.data === true, kdy: Date.now() }
+    return stavBezPodpisu.s.hodnota
+  } catch (e) { return st.hodnota === true }
+}
+// Karta výkazu k podpisu, nebo jen věta — podle pravidla firmy.
+function prepniKartuVykazu() {
+  const bez = jeBezPodpisu()
+  const karta = document.getElementById('mob-vykaz-karta')
+  const veta = document.getElementById('mob-vykaz-bez-podpisu')
+  if (karta) karta.style.display = bez ? 'none' : ''
+  if (veta) veta.style.display = bez ? 'block' : 'none'
+}
+// Po spuštění appky pracovníka: zjistí pravidlo firmy a srovná kartu výkazu
+// i páteční připomenutí (to se jinak mohlo rozsvítit dřív, než přišla odpověď).
+async function nactiPodpisVykazu() {
+  await mojeFirmaBezPodpisu(true)
+  prepniKartuVykazu()
+  try { pripomenVykazVPatek(typeof currentProfile !== 'undefined' ? currentProfile : null) } catch (e) {}
+}
+
 // Je dneska pátek? Vytažené zvlášť, ať to jde ve zkoušce podstrčit.
 function jePatek(datum) {
   return (datum || new Date()).getDay() === 5
@@ -35801,7 +35897,8 @@ function pripomenVykazVPatek(profil, datumProZkousku) {
   // Připomínka je pro pracovníky, ne pro správce — ten výkaz nepodepisuje.
   const p = profil || (typeof currentProfile !== 'undefined' ? currentProfile : null)
   if (p && p.role === 'admin') return
-  const je = jePatek(datumProZkousku)
+  // U firmy bez podpisu výkazu se v pátek nic nerozsvítí (majitel 2. 10. 2026).
+  const je = jePatek(datumProZkousku) && !jeBezPodpisu()
   const navEl = document.getElementById('mob-nav-vykaz')
   const banner = document.getElementById('mob-vykaz-pripominka')
 
