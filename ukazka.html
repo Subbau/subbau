@@ -1803,6 +1803,7 @@ setTimeout(function () {
                 <button class="ubyt-tab on" data-druh="ubytovani" onclick="prepniDruhSkupinek('ubytovani')">🏠 Ubytování</button>
                 <button class="ubyt-tab" data-druh="auto" onclick="prepniDruhSkupinek('auto')">🚗 Auta</button>
               </div>
+              <input id="ubyt-hledat" type="search" placeholder="🔍 Jméno, ubytování nebo adresa" aria-label="Hledat v ubytování" autocomplete="off" oninput="hledejVUbytovani(this.value)" style="flex:1 1 240px;min-width:0;max-width:380px;min-height:40px;padding:7px 12px;border:1.5px solid var(--brd);border-radius:9px;font-size:16px;font-family:inherit;background:#fff">
               <button class="btn-pri" id="ubyt-nove" onclick="upravSkupinku(null)" style="margin-left:auto">＋ Nové ubytování</button>
             </div>
             <div id="ubyt-obsah" style="padding:14px"><div style="color:var(--text3)">Načítám…</div></div>
@@ -2016,10 +2017,21 @@ setTimeout(function () {
             .kal-den{min-width:26px;padding:4px 0 3px;background:#fff;font-size:11.5px;font-weight:700;color:#211D1A;text-align:center;cursor:pointer;line-height:1.1}
             .kal-den small{display:block;font-size:9.5px;font-weight:600;color:var(--text3)}
             .kal-den.vikend,.kal-b.vikend,.kal-pocet.vikend{background:rgba(216,201,184,.32)}
-            .kal-den.dnes{background:var(--amber-l);box-shadow:inset 0 -3px 0 var(--amber)}
-            .kal-b{min-width:26px;height:30px;padding:0 1px;text-align:center;font-size:11.5px;font-weight:800;white-space:nowrap;border-left:1px solid #f1ece4;cursor:pointer}
+            /* DNES = jen svislé čáry přes celý sloupec (majitel 2. 10. 2026: „vodorovné
+               tam nemusí být, vypadá to divně"). Rámeček kolem každého políčka dělal
+               z dneška žebřík. Okraje, ne stín: stín je uvnitř políčka a mezi řádky
+               by ho přerušila šedá linka. */
+            .kal-den.dnes{background:var(--amber-l)}
+            .kal-den.dnes,.kal-b.dnes,.kal-pocet.dnes{border-left:2px solid var(--amber);border-right:2px solid var(--amber)}
+            /* Hodiny větším písmem (majitel 2. 10. 2026). Užší proporcionální číslice
+               a staženější rozestup, ať se celý měsíc vejde jako dřív — tabulková
+               „1" je stejně široká jako „8" a 10.5 by sloupec roztáhlo. */
+            .kal-b{min-width:26px;height:30px;padding:0 1px;text-align:center;font-size:13.5px;font-weight:800;white-space:nowrap;border-left:1px solid #f1ece4;cursor:pointer;font-variant-numeric:proportional-nums;letter-spacing:-.05em}
             .kal-b:hover{filter:brightness(.92)}
-            .kal-b.dnes{box-shadow:inset 0 0 0 2px var(--amber)}
+            .kal-znacka{font-size:10px;letter-spacing:-.2px}
+            .kal-kriz{width:13px;height:13px;vertical-align:-2px}
+            .kal-jmeno-obal{display:flex;align-items:center;min-width:0}
+            .kal-jmeno-text{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
             .kal-b.rozpor{box-shadow:inset 0 0 0 3px var(--red)}
             .kal-bezi{font-size:8px;margin-left:1px;vertical-align:1px}
             .kal-soucet{text-align:right;padding:5px 10px;font-size:12.5px;font-weight:800;white-space:nowrap;border-left:1px solid var(--brd);color:#211D1A}
@@ -5462,7 +5474,7 @@ async function submitAdminSignatureWithPlacement() {
 // Po nahrání nové verze se snadno pozná, jestli se opravdu nasadila: otevřete
 // appku, zmáčkněte F12 (na Macu ⌥⌘I) a v konzoli je vypsané tohle datum. Když
 // tam svítí starší, prohlížeč nebo GitHub drží starou verzi.
-const SUBBAU_VERZE = '2026-10-01 n — Ubytování: cizí lidé na pokoji, zaplaceno od–do, firmy, kterým ubytování řešíme'
+const SUBBAU_VERZE = '2026-10-02 a — Ubytování: vlaječka za jménem, menší Kopírovat adresu, hledání, okno se nezavře při označování; Kalendář: dovolená světle modrá DOV, nemoc křížek, dnešek svisle, větší hodiny'
 console.log('StavKo docházka — verze ' + SUBBAU_VERZE)
 // Verze i dole v menu správce. Když někdo novinku „nevidí", podle ní se hned
 // pozná, jestli nemá otevřenou starou kopii appky — bez hledání v konzoli.
@@ -11033,8 +11045,20 @@ function hlavickaSkupinkyHtml(s, sloupcu, popis) {
 }
 
 // ── SEKCE UBYTOVÁNÍ ──
+// HLEDÁNÍ V UBYTOVÁNÍ (majitel 2. 10. 2026: „když dám jméno, ukáže mi to, kde
+// je ten člověk, a když si vyhledám ubytování, ukáže mi všechny lidi na tom
+// ubytování"). Políčko je v pevné hlavičce MIMO #ubyt-obsah: obsah se každou
+// minutu překresluje a políčko by ztratilo text i kurzor. Hledá se bez háčků
+// a čárek a „ß" = „ss" — Němec napíše Strasse, Čech Dvorak.
+let _ubytHledat = ''
+function textKHledani(t) {
+  return String(t || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/ß/g, 'ss').toLowerCase().trim()
+}
+function hledejVUbytovani(text) { _ubytHledat = String(text || ''); vykresliUbytovani() }
 function prepniDruhSkupinek(druh) {
   _druhSkupinek = SKUPINKY_DRUH[druh] ? druh : 'ubytovani'
+  const hl = document.getElementById('ubyt-hledat')
+  if (hl) hl.placeholder = _druhSkupinek === 'auto' ? '🔍 Jméno nebo auto' : '🔍 Jméno, ubytování nebo adresa'
   document.querySelectorAll('#ubyt-druhy .ubyt-tab').forEach(b => b.classList.toggle('on', b.dataset.druh === _druhSkupinek))
   const nove = document.getElementById('ubyt-nove'); if (nove) nove.textContent = '＋ ' + SKUPINKY_DRUH[_druhSkupinek].nove
   vykresliUbytovani()
@@ -11085,6 +11109,9 @@ function zaplacenoHtml(s) {
   const zbyva = Math.round((new Date(s.zaplaceno_do + 'T12:00:00') - new Date(dnes + 'T12:00:00')) / 86400000)
   const rozsah = (s.zaplaceno_od ? d(s.zaplaceno_od) + ' – ' : 'do ') + d(s.zaplaceno_do)
   if (zbyva < 0) return `<div data-zaplaceno="proslo" style="${styl('var(--red)', 800)}">⛔ Zaplaceno ${rozsah} — už prošlo</div>`
+  // Období, které teprve začne, dnešek nepokrývá (revize 2. 10. 2026: hlásilo
+  // se „v pořádku" a na nezaplacený říjen nic neupozornilo).
+  if (s.zaplaceno_od && dnes < String(s.zaplaceno_od).slice(0, 10)) return `<div data-zaplaceno="jeste_ne" style="${styl('var(--amber)', 800)}">⚠️ Zaplaceno ${rozsah} — teď ještě nezaplaceno</div>`
   if (zbyva <= 7) return `<div data-zaplaceno="brzy" style="${styl('var(--amber)', 800)}">⚠️ Zaplaceno ${rozsah} — ${zbyva === 0 ? 'končí dnes' : 'zbývá ' + zbyva + ' ' + (zbyva === 1 ? 'den' : zbyva <= 4 ? 'dny' : 'dní')}</div>`
   return `<div data-zaplaceno="ok" style="${styl('var(--text2)', 600)}">💶 Zaplaceno ${rozsah}</div>`
 }
@@ -11130,6 +11157,8 @@ function vykresliUbytovani() {
   }
   const D = SKUPINKY_DRUH[_druhSkupinek]
   const skupiny = _skupinky.seznam.filter(s => s.druh === _druhSkupinek)
+  const hledat = textKHledani(_ubytHledat)
+  const sedi = t => !hledat || textKHledani(t).includes(hledat)
   const podleId = {}
   _ubytLide.forEach(w => { podleId[w.id] = w })
   const karty = skupiny.map(s => {
@@ -11139,13 +11168,17 @@ function vykresliUbytovani() {
     const clenu = clenoveSkupinky(s.id)
     const lide = clenu.map(id => podleId[id]).filter(Boolean)
     const neviditelnych = clenu.length - lide.length
+    // HLEDÁNÍ: karta zůstane, když sedí její název, adresa, poznámka nebo cizí
+    // jména (pak se ukážou všichni, kdo v ní bydlí), nebo když v ní bydlí
+    // hledaný člověk (ten se zvýrazní).
+    if (hledat && !sedi([s.nazev, s.adresa, s.poznamka, s.cizi_jmena].join(' ')) && !lide.some(w => sedi(w.full_name))) return ''
     const plno = s.pocet_mist && obsazenoSkupinky(s) > s.pocet_mist
     const mapa = s.adresa ? `<a href="https://www.google.com/maps/search/?api=1&amp;query=${encodeURIComponent(s.adresa)}" target="_blank" rel="noopener" style="color:inherit">${escAttr(s.adresa)}</a>` : ''
     return `<div class="ubyt-karta" data-id="${escAttr(s.id)}" style="border:1.5px solid var(--brd);border-left:7px solid ${barvaSkupinky(s)};border-radius:12px;background:#fff;padding:12px 14px;display:flex;flex-direction:column;gap:8px">
       <div style="display:flex;align-items:flex-start;gap:8px">
         <div style="flex:1;min-width:0">
           <div style="font-size:15px;font-weight:800">${D.ikona} ${escAttr(s.nazev)}</div>
-          ${mapa ? `<div style="font-size:12.5px;color:var(--text2);margin-top:2px">📍 ${mapa}</div>` : ''}
+          ${mapa ? `<div style="font-size:12.5px;color:var(--text2);margin-top:2px;display:flex;align-items:center;flex-wrap:wrap;gap:4px 8px"><span style="min-width:0">📍 ${mapa}</span><button data-kopirovat-adresu onclick="zkopirujAdresuUbytovani('${jsStr(String(s.id))}')" title="Zkopírovat adresu do schránky" style="flex-shrink:0;min-height:30px;padding:3px 10px;font-size:12.5px;font-weight:700;border:1.5px solid var(--blue);border-radius:7px;background:var(--blue-l,#f4efe7);color:var(--blue);cursor:pointer;font-family:inherit">📋 Kopírovat</button></div>` : ''}
           ${mistaUbytovaniHtml(s, clenu.length)}
           ${zaplacenoHtml(s)}
           ${s.poznamka ? `<div style="font-size:12px;color:var(--text3);margin-top:2px">${escAttr(s.poznamka)}</div>` : ''}
@@ -11153,7 +11186,7 @@ function vykresliUbytovani() {
         <span title="${s.pocet_mist ? 'Obsazeno / míst celkem' : 'Počet míst není zadaný'}" style="flex-shrink:0;padding:3px 9px;border-radius:9px;font-size:12.5px;font-weight:800;background:${plno ? 'var(--red-l)' : tonSkupinky(s, 0.13)};color:${plno ? 'var(--red)' : '#2b2622'}">${escAttr(obsazenostText(s))}${plno ? ' ⚠️' : ''}</span>
       </div>
       <div style="display:flex;flex-direction:column;gap:4px">
-        ${lide.length ? lide.map(w => `<div style="display:flex;align-items:center;gap:10px;font-size:14px">${fotkaHtml(w.avatar_url, w.full_name, 44, false, w.id)}<span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;cursor:pointer;font-weight:600" onclick="openWorkerModal('${jsStr(String(w.id))}')">${escAttr(w.full_name || '')}</span><button onclick="odeberZeSkupinky('${jsStr(String(s.id))}','${jsStr(String(w.id))}')" title="Odebrat z ${escAttr(D.jedno)}" style="border:none;background:none;color:var(--text3);cursor:pointer;font-size:15px;padding:2px 6px;min-height:28px">✕</button></div>`).join('')
+        ${lide.length ? lide.map(w => `<div data-ubyt-clovek="${escAttr(String(w.id))}"${hledat && sedi(w.full_name) ? ' data-nalezen' : ''} style="display:flex;align-items:center;gap:10px;font-size:14px;border-radius:8px${hledat && sedi(w.full_name) ? ';background:#fff3c4;box-shadow:0 0 0 4px #fff3c4' : ''}">${fotkaHtml(w.avatar_url, w.full_name, 44, false)}<span style="flex:1;min-width:0;display:flex;align-items:center"><span style="min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;cursor:pointer;font-weight:600" onclick="openWorkerModal('${jsStr(String(w.id))}')">${escAttr(w.full_name || '')}</span>${vlajkaZaJmenemHtml(w.id)}</span><button onclick="odeberZeSkupinky('${jsStr(String(s.id))}','${jsStr(String(w.id))}')" title="Odebrat z ${escAttr(D.jedno)}" style="border:none;background:none;color:var(--text3);cursor:pointer;font-size:15px;padding:2px 6px;min-height:28px">✕</button></div>`).join('')
           : '<div style="font-size:12.5px;color:var(--text3)">Zatím tu nikdo není.</div>'}
         ${neviditelnych ? `<div data-neviditelni style="font-size:12px;color:var(--text3)">＋ ${neviditelnych} další (neaktivní nebo ze schované firmy)</div>` : ''}
         ${ciziSkupinky(s) ? `<div data-cizi style="font-size:12.5px;color:var(--text2);padding:6px 8px;border:1.5px dashed var(--brd);border-radius:8px">👤 Cizí lidé na pokoji: <b>${ciziSkupinky(s)}</b>${s.cizi_jmena ? ' — ' + escAttr(s.cizi_jmena) : ''}</div>` : ''}
@@ -11162,11 +11195,10 @@ function vykresliUbytovani() {
         <button onclick="pridatLideDoSkupinky('${jsStr(String(s.id))}')" class="btn-pri" style="padding:7px 12px;font-size:13px">＋ Přidat lidi</button>
         <button onclick="upravSkupinku('${jsStr(String(s.id))}')" style="padding:7px 12px;font-size:13px;border:1.5px solid var(--brd);border-radius:8px;background:#fff;cursor:pointer;font-family:inherit;font-weight:700">✎ Upravit</button>
       </div>
-      ${s.adresa ? `<button data-kopirovat-adresu onclick="zkopirujAdresuUbytovani('${jsStr(String(s.id))}')" style="width:100%;min-height:48px;padding:10px 14px;font-size:15px;font-weight:800;border:2px solid var(--blue);border-radius:10px;background:var(--blue-l,#e8f0fb);color:var(--blue);cursor:pointer;font-family:inherit">📋 Kopírovat adresu</button>` : ''}
     </div>`
   }).join('')
   const naUbytovani = _druhSkupinek === 'ubytovani'
-  const bezVsichni = _ubytLide.filter(w => !skupinkaCloveka(w.id, _druhSkupinek))
+  const bezVsichni = _ubytLide.filter(w => !skupinkaCloveka(w.id, _druhSkupinek) && sedi(w.full_name))
   const bez = bezVsichni.filter(w => !naUbytovani || vRizenychFirmach(w))
   const jinychFirem = bezVsichni.length - bez.length
   const vybrane = vybraneFirmyUbytovani()
@@ -11178,15 +11210,17 @@ function vykresliUbytovani() {
       <div style="font-size:12px;color:var(--text3);margin-top:8px">${vybrane.size ? 'Dole a v „Přidat lidi" jsou jen lidi z vybraných firem.' : 'Žádná firma není vybraná — ukazují se lidi ze všech firem.'}</div>`}
     </div>` : ''
   box.innerHTML = `${firmyHtml}
-    ${skupiny.length ? `<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:12px">${karty}</div>`
-      : `<div style="padding:16px;color:var(--text3)">Zatím tu není žádné ${escAttr(D.jedno)}. Založte ho tlačítkem „＋ ${escAttr(D.nove)}".</div>`}
-    <div style="margin-top:16px;padding:12px 14px;border-radius:12px;background:var(--bg,#f4efe7)">
+    ${!skupiny.length ? `<div style="padding:16px;color:var(--text3)">Zatím tu není žádné ${escAttr(D.jedno)}. Založte ho tlačítkem „＋ ${escAttr(D.nove)}".</div>`
+      : karty ? `<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:12px">${karty}</div>`
+      : `<div data-nic-nenalezeno style="padding:16px;color:var(--text3)">Na „${escAttr(_ubytHledat.trim())}" se nic nenašlo.</div>`}
+    <div data-bez-ubytovani style="margin-top:16px;padding:12px 14px;border-radius:12px;background:var(--bg,#f4efe7);${hledat && !bez.length ? 'display:none' : ''}">
       <div style="font-size:13px;font-weight:800;margin-bottom:6px">${D.ikona} ${escAttr(D.bez)}: ${bez.length}${jinychFirem ? `<span data-jinych-firem style="font-weight:400;color:var(--text3)"> · ${jinychFirem} z ostatních firem se neukazuje</span>` : ''}</div>
       <div style="font-size:12.5px;color:var(--text2);line-height:1.7">${bez.map(w => escAttr(w.full_name || '')).join(' · ') || '—'}</div>
     </div>`
 }
 
-// KOPÍROVAT ADRESU (majitel 1. 10. 2026: „velký tlačítko kopírovat adresu").
+// KOPÍROVAT ADRESU (majitel 1. 10. 2026: „velký tlačítko kopírovat adresu";
+// 2. 10.: „už je moc velké" — teď malé „📋 Kopírovat" hned za adresou).
 // Adresa se bere ze seznamu podle id, ne z textu v tlačítku — v obsluze by
 // se musela escapovat a uvozovka v adrese by ji rozbila.
 async function zkopirujAdresuUbytovani(id) {
@@ -11201,6 +11235,28 @@ async function zkopirujAdresuUbytovani(id) {
     prompt('Zkopírujte adresu:', adresa)
   }
 }
+
+// KLIK NA POZADÍ OKNA ZAVÍRÁ, JEN KDYŽ NA POZADÍ I ZAČAL. Majitel 2. 10. 2026:
+// „začnu vypisovat do tabulky, označím to myší, vyjedu mimo a pustím — zmizí
+// celá tabulka". Prohlížeč pošle klik SPOLEČNÉMU PŘEDKOVI místa stisku
+// a puštění, tedy pozadí okna — a pozadím se zavírá dvanáct oken. Pojistka
+// platí pro všechna naráz: klik, jehož cílem je celoobrazovkové pevné pozadí,
+// ale stisk začal uvnitř okna, se zahodí dřív, než ho okno uvidí. Programové
+// .click() (isTrusted = false) jde dál beze změny.
+let _stiskZacal = null
+window.addEventListener('pointerdown', e => { _stiskZacal = e.target }, true)
+window.addEventListener('click', e => {
+  const zacal = _stiskZacal
+  _stiskZacal = null
+  if (!e.isTrusted || !zacal || zacal === e.target) return
+  const cil = e.target
+  if (!(cil instanceof Element) || !cil.contains(zacal)) return
+  if (getComputedStyle(cil).position !== 'fixed') return
+  const r = cil.getBoundingClientRect()
+  if (r.width < innerWidth * 0.9 || r.height < innerHeight * 0.9) return
+  e.stopImmediatePropagation()
+  e.preventDefault()
+}, true)
 
 // Založení a úprava ubytování / auta (okno se staví z JavaScriptu — viz past s koncovou značkou body).
 function upravSkupinku(id) {
@@ -11278,9 +11334,16 @@ function upravSkupinku(id) {
     // Doplňky se posílají, jen když je databáze zná (jinak by uložení spadlo
     // na neznámém sloupci a neuložilo by se nic).
     if (druh === 'ubytovani' && !_skupinky.bezDoplnku) {
-      const ciziTxt = ov.querySelector('[data-cizi-pole]').style.display === 'none' ? '' : hodnota('cizi_pocet')
+      // SBALENÍ SEKCE CIZÍCH HODNOTY JEN SCHOVÁ, nemaže je (revize 2. 10. 2026
+      // ve Stavbyplánu: kdo sekci zavřel, aby viděl zbytek okna, přišel o cizí
+      // lidi). Zrušit cizí se dá výslovně: počet 0. Při vadě se sekce otevře,
+      // ať je vidět, co opravit.
+      const ukazCizi = () => { ov.querySelector('[data-cizi-pole]').style.display = 'block'; ov.querySelector('[data-pole="cizi_pocet"]').focus() }
+      const ciziTxt = hodnota('cizi_pocet')
       const cizi = ciziTxt === '' ? 0 : Math.round(Number(ciziTxt))
-      if (!Number.isFinite(cizi) || cizi < 0 || cizi > 500) { showToast('⚠️ Počet cizích lidí musí být číslo 0–500'); return }
+      if (!Number.isFinite(cizi) || cizi < 0 || cizi > 500) { ukazCizi(); showToast('⚠️ Počet cizích lidí musí být číslo 0–500'); return }
+      // Jména bez počtu se NEZAHAZUJÍ potichu — správce by si myslel, že je uložil.
+      if (!cizi && hodnota('cizi_jmena')) { ukazCizi(); showToast('⚠️ Napsali jste jména cizích lidí, ale ne kolik jich je'); return }
       const od = hodnota('zaplaceno_od') || null, doKdy = hodnota('zaplaceno_do') || null
       if (od && doKdy && doKdy < od) { showToast('⚠️ „Zaplaceno do" je dřív než „od"'); return }
       zapis.cizi_pocet = cizi
@@ -12227,6 +12290,19 @@ function vlajkaHtml(workerId, kod, uvnitr = true) {
   if (!e) return ''
   return `<span data-fotka="vlajka" title="${escAttr(nazevNarodnosti(String(k).toUpperCase()))}" style="position:absolute;${uvnitr ? 'right:3px;bottom:3px' : 'left:-4px;bottom:-4px'};width:22px;height:22px;border-radius:50%;overflow:hidden;background:#fff;box-shadow:0 0 0 1.5px #fff,0 1px 4px rgba(0,0,0,.45);display:flex;align-items:center;justify-content:center;font-size:27px;line-height:1;z-index:2;pointer-events:none">${e}</span>`
 }
+// VLAJEČKA ZA JMÉNEM V OBDÉLNÍČKU (majitel 2. 10. 2026: v ubytování „nechci
+// vlaječky na fotce, chci je za jménem v obdélníčku", v kalendáři „za jménem
+// malou obdélníčkovou vlaječku"). Emoji vlajky se ořízne do obdélníčku 10:7,
+// ať nemá průhledný okraj a vypadá všude stejně; tenký rámeček drží vidět
+// bílé pruhy (PL, AT). Kulatá vlaječka na fotce (vlajkaHtml) zůstává jinde.
+function vlajkaZaJmenemHtml(workerId, sirka = 20) {
+  const k = (_lideVlajky.mapa.get(String(workerId || '')) || {}).narodnost
+  const e = vlajkaEmoji(k)
+  if (!e) return ''
+  const vyska = Math.round(sirka * 0.7)
+  return `<span data-vlajka-jmeno="${escAttr(String(k).toUpperCase())}" title="${escAttr(nazevNarodnosti(String(k).toUpperCase()))}" style="flex-shrink:0;display:inline-flex;align-items:center;justify-content:center;width:${sirka}px;height:${vyska}px;margin-left:5px;border-radius:2px;overflow:hidden;box-shadow:0 0 0 1px rgba(0,0,0,.2);font-size:${Math.round(sirka * 1.2)}px;line-height:1;vertical-align:-2px">${e}</span>`
+}
+
 // Obdélníček za jménem, když umí německy (podle úrovně němčiny v profilu).
 const NEMCINA_TEXT = { basic: 'DE A1–A2', intermediate: 'DE B1–B2', advanced: 'DE C1–C2' }
 const NEMCINA_POPIS = { basic: 'základní (A1–A2)', intermediate: 'pokročilá (B1–B2)', advanced: 'profi (C1–C2)' }
@@ -12866,13 +12942,21 @@ function calH(h) {
 // rozejít (ve Stavbyplánu se ručně opsaná legenda jednou rozešla s mřížkou).
 // Je to funkce, ne konstanta: ABSENCE je v souboru definovaná až níž a const
 // se nedá číst dřív, než k němu skript při spuštění dojde.
+// Červený zdravotnický kříž (nemoc v kalendáři). Kreslený, ne znak „✚" —
+// ten má v každém písmu jinou tloušťku a na telefonu bývá jako emoji.
+const KRIZ_NEMOC = '<svg class="kal-kriz" viewBox="0 0 10 10" aria-hidden="true"><path d="M3.4 0h3.2v3.4H10v3.2H6.6V10H3.4V6.6H0V3.4h3.4z" fill="#d0021b"/></svg>'
 function kalStavy() {
   return {
-    worked: { nazev: 'Byl v práci',          barva: 'var(--green)',           pismo: '#fff' },
-    plan:   { nazev: 'Plán (měl by být)',    barva: '#a5d6a7',                pismo: '#211D1A' },
+    // Zelená o malinko světlejší a PLÁN ODLIŠENÝ PROUŽKY (majitel 2. 10. 2026:
+    // „plán měl by být v práci a je v práci taky zelenou, ale ať je mezi nimi
+    // rozdíl"): plná zelená = byl v práci, bledé proužky = teprve by měl být.
+    worked: { nazev: 'Byl v práci',          barva: '#4c9466',                pismo: '#fff' },
+    plan:   { nazev: 'Plán (měl by být)',    barva: 'repeating-linear-gradient(135deg,#cfe8d3 0 4px,#eef7ef 4px 8px)', pismo: '#211D1A' },
     bad:    { nazev: 'Problém s časem',      barva: '#f5c518',                pismo: '#211D1A' },
-    vac:    { nazev: ABSENCE.dovolena.label, barva: ABSENCE.dovolena.color,   pismo: '#fff' },
-    sick:   { nazev: ABSENCE.nemoc.label,    barva: ABSENCE.nemoc.color,      pismo: '#fff' },
+    // Dovolená světle modrá s „DOV", nemoc červený zdravotnický kříž na bílém
+    // (majitel 2. 10. 2026). Značku do políčka i do legendy dává `znacka`.
+    vac:    { nazev: ABSENCE.dovolena.label, barva: ABSENCE.dovolena.fill,    pismo: '#0e4a7b', znacka: '<span class="kal-znacka">DOV</span>' },
+    sick:   { nazev: ABSENCE.nemoc.label,    barva: ABSENCE.nemoc.fill,       pismo: '#d0021b', znacka: KRIZ_NEMOC },
     rest:   { nazev: 'Odpočinek (víkend)',   barva: '#d8c9b8',                pismo: '#211D1A' },
     off:    { nazev: 'Volno (turnus)',       barva: '#bbb',                   pismo: '#fff' }
   }
@@ -12884,8 +12968,11 @@ function kalLegenda() {
   const el = document.getElementById('cal-legenda')
   if (!el || el.__hotovo) return
   const vzorek = (styl) => `<span style="display:inline-block;width:12px;height:12px;border-radius:3px;vertical-align:-1px;${styl}"></span>`
-  el.innerHTML = Object.values(kalStavy()).map(s => `<span>${vzorek('background:' + s.barva)} ${escAttr(s.nazev)}</span>`).join('') +
-    `<span>${vzorek('background:#fff;box-shadow:inset 0 0 0 2px var(--amber)')} Dnes</span>` +
+  // Stav se značkou (DOV, kříž) ukáže v legendě i značku — jinak by legenda
+  // vypadala jinak než políčko.
+  const vzorekZnacky = (s) => `<span style="display:inline-flex;align-items:center;justify-content:center;min-width:26px;height:16px;padding:0 3px;border-radius:3px;vertical-align:-3px;background:${s.barva};color:${s.pismo};font-size:9.5px;font-weight:800">${s.znacka}</span>`
+  el.innerHTML = Object.values(kalStavy()).map(s => `<span>${s.znacka ? vzorekZnacky(s) : vzorek('background:' + s.barva)} ${escAttr(s.nazev)}</span>`).join('') +
+    `<span>${vzorek('background:#fff;box-shadow:inset 2px 0 0 var(--amber),inset -2px 0 0 var(--amber)')} Dnes</span>` +
     `<span>${vzorek('background:var(--green);background-image:linear-gradient(135deg,' + ABSENCE.dovolena.color + ' 0 6px,transparent 6px);box-shadow:inset 0 0 0 2px var(--red)')} Dovolená/nemoc i práce ve stejný den</span>`
   el.__hotovo = true
 }
@@ -12967,7 +13054,9 @@ async function renderCalendar(tichy) {
       .in('role', ['osvec','partak']).eq('is_active', true).order('full_name'),
     sb.from('teams').select('id, name, company_id'),
     sb.from('companies').select('id, name'),
-    sb.from('subteams').select('id, name, team_id').eq('is_active', true)
+    sb.from('subteams').select('id, name, team_id').eq('is_active', true),
+    // Vlaječky za jménem (majitel 2. 10. 2026). Ozdoba: na ně se čeká nejvýš chvilku.
+    vlajkyNejdyl(nactiVlajky())
   ])
 
   let allWorkers = rWorkers.data
@@ -13184,7 +13273,7 @@ async function renderCalendar(tichy) {
     // Jméno bez barvy firmy (podbarvení majitel 1. 10. 2026 vrátil). Plný bílý
     // podklad dává CSS .kal-jmeno — buňka je přilepená a pod ní jezdí dny.
     const pozadiJmena = ''
-    html += `<tr><th class="kal-jmeno${item.sub ? ' v-parte' : ''}" data-w="${escAttr(w.id)}"${pozadiJmena ? ` style="background:${pozadiJmena}"` : ''} title="${escAttr(w.full_name + (prof ? ' · ' + prof : '') + ' — klepnutím otevřete profil')}">${escAttr(w.full_name)}</th>`
+    html += `<tr><th class="kal-jmeno${item.sub ? ' v-parte' : ''}" data-w="${escAttr(w.id)}"${pozadiJmena ? ` style="background:${pozadiJmena}"` : ''} title="${escAttr(w.full_name + (prof ? ' · ' + prof : '') + ' — klepnutím otevřete profil')}"><div class="kal-jmeno-obal"><span class="kal-jmeno-text">${escAttr(w.full_name)}</span>${vlajkaZaJmenemHtml(w.id, 16)}</div></th>`
     dny.forEach(d => {
       const k = w.id + '|' + d.ds
       const st = dayStatusFor(w, d.ds, attSet, vacList)
@@ -13202,6 +13291,7 @@ async function renderCalendar(tichy) {
         else if (hod.h > 0) text = calH(hod.h)
         else text = '!'
       }
+      if (!text && s && s.znacka) text = s.znacka
       let popis = s ? s.nazev : 'Bez záznamu'
       if (prace && hod) popis += ' · ' + calH(hod.h) + ' h' + (hod.prichod ? ' (' + hod.prichod + '–' + (hod.odchod || (hod.bezi ? 'běží' : '?')) + ')' : '')
       if (st === 'bad') popis += ' · ' + calProcProblem(attMap[k])
@@ -13222,7 +13312,7 @@ async function renderCalendar(tichy) {
   html += '</tbody><tfoot><tr><th class="kal-jmeno kal-hlava">V práci</th>'
   dny.forEach(d => {
     const n = vPraci[d.ds] || 0
-    html += `<td class="kal-pocet${jeVikend(d) ? ' vikend' : ''}" data-den="${d.ds}" title="${escAttr(nazevDne(d) + ': v práci ' + n + ' — klepnutím uvidíte seznam')}">${n || ''}</td>`
+    html += `<td class="kal-pocet${jeVikend(d) ? ' vikend' : ''}${d.ds === dnes ? ' dnes' : ''}" data-den="${d.ds}" title="${escAttr(nazevDne(d) + ': v práci ' + n + ' — klepnutím uvidíte seznam')}">${n || ''}</td>`
   })
   html += '<td class="kal-soucet"></td></tr></tfoot></table></div>'
 
@@ -34576,12 +34666,18 @@ function toggleVacForm() {
 const ABSENCE = {
   dovolena: {
     label: 'Dovolená/volno', short: 'Volno',
-    color: 'var(--blue)', bg: 'var(--blue-l,#e7eefc)', dot: '#211D1A',
+    // SVĚTLE MODRÁ VŠUDE (majitel 2. 10. 2026: „změnit barvu dovolené z černé
+    // na nějakou světlou modrou, všude kde bude dovolená"). Dřív var(--blue) —
+    // jenže „modrá" v barvách appky je skoro černá (#211D1A). color = písmo,
+    // ikona a rámeček; bg = podklad odznaku; fill = políčko v kalendáři.
+    color: '#2f7fc1', bg: '#e3f1fc', fill: '#a9d4f5', dot: '#2f7fc1',
     icon: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:15px;height:15px;flex-shrink:0"><circle cx="12" cy="12" r="5"/><path d="M12 1v2M12 21v2M4.2 4.2l1.4 1.4M18.4 18.4l1.4 1.4M1 12h2M21 12h2"/></svg>'
   },
   nemoc: {
     label: 'Nemoc', short: 'Nemoc',
-    color: '#6a4c93', bg: '#ede7f4', dot: '#6a4c93',
+    // fill = políčko v kalendáři: světlé, ať je na něm vidět červený kříž
+    // (majitel 2. 10. 2026). Jinde zůstává nemoc fialová.
+    color: '#6a4c93', bg: '#ede7f4', fill: '#fdeeee', dot: '#6a4c93',
     icon: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:15px;height:15px;flex-shrink:0"><circle cx="12" cy="12" r="9"/><path d="M12 8v8M8 12h8"/></svg>'
   }
 }
