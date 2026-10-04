@@ -4850,7 +4850,7 @@ async function submitAdminSignatureWithPlacement() {
 // Po nahrání nové verze se snadno pozná, jestli se opravdu nasadila: otevřete
 // appku, zmáčkněte F12 (na Macu ⌥⌘I) a v konzoli je vypsané tohle datum. Když
 // tam svítí starší, prohlížeč nebo GitHub drží starou verzi.
-const SUBBAU_VERZE = '2026-10-04 b — Plánovaný přesun mezi ubytováními'
+const SUBBAU_VERZE = '2026-10-04 c — Překlady popisu práce ve výkazech a na faktuře'
 console.log('SubBau docházka — verze ' + SUBBAU_VERZE)
 // Verze i dole v menu správce. Když někdo novinku „nevidí", podle ní se hned
 // pozná, jestli nemá otevřenou starou kopii appky — bez hledání v konzoli.
@@ -15963,7 +15963,7 @@ async function stahniZalohovePdf() {
   try {
     const out = await buildInvoicePdf()
     const jmeno = 'Anzahlungsrechnung_' + String(d.cislo).replace(/[^a-zA-Z0-9_-]/g, '')
-      + '_' + String(d.dodavatel.jmeno || '').normalize('NFD').replace(/[̀-ͯ]/g, '')
+      + '_' + String(d.dodavatel.jmeno || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '')
         .replace(/[^a-zA-Z0-9]+/g, '_').replace(/^_+|_+$/g, '') + '.pdf'
     out.pdf.save(jmeno)
     showToast('✅ PDF uloženo')
@@ -16682,7 +16682,7 @@ async function downloadInvoicePdf(id) {
   const r = _invCache.find(x => x.id === id)
   const url = safeInvoiceUrl(r && r.pdf_url)
   if (!r || !url) { showToast('⚠️ U této faktury není PDF'); return }
-  const who = (r.worker?.full_name || r.supplier_name || '').normalize('NFD').replace(/[̀-ͯ]/g, '')
+  const who = (r.worker?.full_name || r.supplier_name || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '')
     .replace(/[^a-zA-Z0-9]+/g, '_').replace(/^_+|_+$/g, '')
   // Lomítko v čísle faktury by z názvu udělalo cestu — do souboru pouštíme jen písmena a číslice.
   const cis = String(r.invoice_number || '').replace(/[^a-zA-Z0-9_-]/g, '')
@@ -18582,19 +18582,11 @@ async function generateTeamAttendancePdf(teamId, teamName) {
   let grandTotal = 0
   const workerCount = Object.keys(byWorker).length
 
-  // Přelož všechny popisy práce do 3 jazyků dopředu (paralelně, s cache)
-  const _descToTrans = {}
-  Object.values(byWorker).forEach(w => (w.rows||[]).forEach(r => {
-    const d = (r.work_description || '').trim()
-    if (d && d !== '—') _descToTrans[d] = null
-  }))
-  const _descKeys = Object.keys(_descToTrans)
-  if (_descKeys.length) {
-    try {
-      const results = await Promise.all(_descKeys.map(d => translateWork3(d)))
-      _descKeys.forEach((d, i) => { _descToTrans[d] = results[i] })
-    } catch(e) { console.warn('[výkaz] překlady selhaly:', e?.message) }
-  }
+  // Popisy práce do 3 jazyků dopředu — jazyk podle národnosti autora, fronta,
+  // limit času a paměť (prelozPopisyDochazky).
+  let _descToTrans = {}
+  try { _descToTrans = await prelozPopisyDochazky(Object.values(byWorker).flatMap(w => w.rows || [])) }
+  catch(e) { console.warn('[výkaz] překlady selhaly:', e?.message) }
 
   const sectionsArr = await Promise.all(Object.entries(byWorker).map(async ([wid, w], idx) => {
     grandTotal += w.total
@@ -18623,7 +18615,7 @@ async function generateTeamAttendancePdf(teamId, teamName) {
       const dateFull = dt.toLocaleDateString('cs-CZ', { day:'2-digit', month:'2-digit', year:'numeric' })
       const site = attDisplaySite(r)
       const descRaw = (r.work_description || '').trim()
-      const descHtml = (descRaw && descRaw !== '—' && _descToTrans[descRaw]) ? renderWork3(_descToTrans[descRaw]) : '—'
+      const descHtml = (descRaw && descRaw !== '—') ? renderWork3(prekladRadku(_descToTrans, r)) : '—'
       const hh = (r.total_hours||0).toFixed(2)
       // Neplacený den ve výkazu ZŮSTÁVÁ — pracovník tam ten den byl a vedoucí
       // to má vidět. Jen se jeho hodiny nesčítají, a musí to být na první
@@ -22722,8 +22714,8 @@ function _invItemKey(week, year) {
 }
 
 // Poskládá anglický popis provedené práce za vybraný týden. Bere to, co
-// pracovník sám napsal do docházky („kde a co jsem dělal"), spojí to a
-// přeloží do angličtiny — fakturu čte německý odběratel.
+// pracovník sám napsal do docházky („kde a co jsem dělal"), každý popis
+// přeloží zvlášť do angličtiny a překlady spojí — fakturu čte německý odběratel.
 async function buildInvoiceItemEn(week, year) {
   const fallback = defaultInvoiceItem(currentProfile?.profession)
   if (!currentUser || !week || !year) return { text: fallback, note: 'default' }
@@ -22750,19 +22742,22 @@ async function buildInvoiceItemEn(week, year) {
   if (!uniq.length) return { text: fallback, note: 'empty' }
   const cs = uniq.join('; ')
   try {
-    const en = await translateToEn(cs)
-    // null = překladač neodpověděl. Český text pak NESMÍME vydávat za angličtinu —
-    // pracovník musí dostat varování, ať si položku přepíše sám.
-    if (en && en.trim()) return { text: en.trim(), note: 'translated' }
+    // Každý popis zvlášť a stejnou cestou jako výkazy (i se stejnou pamětí):
+    // spojený text pozná Google jen v JEDNOM jazyce a polský popis mezi
+    // českými by nechal nepřeložený (ověřeno 4. 10. 2026).
+    try { await nactiVlajky() } catch (e) {}
+    const jazyk = jazykPracovnika(currentUser.id)
+    // Den s „-" nebo jen zkratkou či jménem („OSB") nemá co překládat: bez
+    // písmen se vynechá, zkratka zůstane, jak je (dřív kvůli němu spadla
+    // celá položka na „nepřeloženo").
+    const sPismeny = uniq.filter(t => /\p{L}/u.test(t))
+    const en = (await prelozPopisyVcas(sPismeny.map(text => ({ text, jazyk })), { cile: ['en'] }))
+      .map((p, i) => p.en || (_slovaKPrekladu(sPismeny[i]).length ? null : sPismeny[i]))
+    // Chybí-li překlad byť jednoho popisu, nesmí se český text vydávat za
+    // angličtinu — pracovník dostane varování a položku si přepíše sám.
+    if (en.every(x => x && x.trim())) return { text: en.map(x => x.trim()).join('; '), note: 'translated' }
   } catch (e) { console.warn('[faktura] překlad selhal:', e?.message) }
   return { text: cs, note: 'untranslated' }
-}
-
-// Překlad do angličtiny — používá stejnou službu jako výkazy.
-// Vrací null, když se přeložit nepodařilo (na faktuře se to musí poznat).
-async function translateToEn(text) {
-  if (typeof _gtranslateTry === 'function') return await _gtranslateTry(text, 'en')
-  return null
 }
 
 // Přepnutí týdne → nový popis práce. Ručně upravený text pro daný týden má přednost.
@@ -23143,7 +23138,7 @@ async function onInvoiceWeekChange() {
     noteEl.style.fontWeight = res.note === 'untranslated' ? '700' : ''
     noteEl.textContent =
       res.note === 'translated'   ? 'Přeloženo z toho, co jste ten týden zapsal v docházce. Zkontrolujte a případně opravte.' :
-      res.note === 'untranslated' ? '⚠️ Překlad se nepodařilo načíst — tohle je váš původní český text. Přepište ho prosím anglicky, faktura jde německému odběrateli.' :
+      res.note === 'untranslated' ? '⚠️ Překlad se nepodařilo načíst — tohle je váš původní text. Přepište ho prosím anglicky, faktura jde německému odběrateli.' :
       res.note === 'empty'        ? 'V docházce za tento týden není popis práce — doplněn obecný text. Můžete ho upřesnit anglicky.' :
                                     'Text je anglicky, protože fakturu čte německý odběratel. Můžete ho přepsat.'
   }
@@ -25382,19 +25377,11 @@ async function generateAttendanceExport() {
   let grandTotal = 0
   const workerCount = Object.keys(byWorker).length
 
-  // Přelož všechny popisy práce do 3 jazyků dopředu (paralelně, s cache)
-  const _descToTrans = {}
-  Object.values(byWorker).forEach(w => (w.rows||[]).forEach(r => {
-    const d = (r.work_description || '').trim()
-    if (d && d !== '—') _descToTrans[d] = null
-  }))
-  const _descKeys = Object.keys(_descToTrans)
-  if (_descKeys.length) {
-    try {
-      const results = await Promise.all(_descKeys.map(d => translateWork3(d)))
-      _descKeys.forEach((d, i) => { _descToTrans[d] = results[i] })
-    } catch(e) { console.warn('[výkaz] překlady selhaly:', e?.message) }
-  }
+  // Popisy práce do 3 jazyků dopředu — jazyk podle národnosti autora, fronta,
+  // limit času a paměť (prelozPopisyDochazky).
+  let _descToTrans = {}
+  try { _descToTrans = await prelozPopisyDochazky(Object.values(byWorker).flatMap(w => w.rows || [])) }
+  catch(e) { console.warn('[výkaz] překlady selhaly:', e?.message) }
 
   const sectionsArr = await Promise.all(Object.entries(byWorker).map(async ([wid, w], idx) => {
     grandTotal += w.total
@@ -25423,7 +25410,7 @@ async function generateAttendanceExport() {
       const dateFull = dt.toLocaleDateString('cs-CZ', { day:'2-digit', month:'2-digit', year:'numeric' })
       const site = attDisplaySite(r)
       const descRaw = (r.work_description || '').trim()
-      const descHtml = (descRaw && descRaw !== '—' && _descToTrans[descRaw]) ? renderWork3(_descToTrans[descRaw]) : '—'
+      const descHtml = (descRaw && descRaw !== '—') ? renderWork3(prekladRadku(_descToTrans, r)) : '—'
       const hh = (r.total_hours||0).toFixed(2)
       // Stejně jako ve výkazu za tým: neplacený den je vidět, ale nesčítá se.
       const vyjimky = znackyVyjimekDne(r)
@@ -26180,7 +26167,20 @@ function triggerHtmlDownload(html, filename) {
 
 
 // -- EXPORT HODIN PRACOVNÍKA (trojjazyčný výkaz, 1× A4) --
+// POJISTKA PROTI DVOJÍMU ŤUKNUTÍ: výkaz s podpisem vedoucího se ukládá
+// (soubor + řádek weekly_hour_sheets) a překlad popisů trvá až 12 s. Druhé
+// ťuknutí mezitím by výkaz uložilo podruhé (oponent 4. 10. 2026). Náhled
+// (returnHtmlOnly) nic neukládá, ten se nehlídá.
+const _vykazyBezi = new Set()
 async function exportWorkerKW(workerId, workerName, week, year, lang, foreman, returnHtmlOnly) {
+  if (returnHtmlOnly) return _exportWorkerKWTed(workerId, workerName, week, year, lang, foreman, returnHtmlOnly)
+  const klic = workerId + '|' + week + '|' + year
+  if (_vykazyBezi.has(klic)) { showToast('⏳ Výkaz se ještě připravuje… / Bericht wird noch erstellt…'); return }
+  _vykazyBezi.add(klic)
+  try { return await _exportWorkerKWTed(workerId, workerName, week, year, lang, foreman, returnHtmlOnly) }
+  finally { _vykazyBezi.delete(klic) }
+}
+async function _exportWorkerKWTed(workerId, workerName, week, year, lang, foreman, returnHtmlOnly) {
   lang = lang || 'cs'
   // Trojjazyčný popisek: EN hlavní (velký), DE+CZ menší pod tím
   const L3 = (en, de, cs) => `<div style="font-weight:700;font-size:11px;line-height:1.1">${en}</div><div style="font-weight:400;font-size:9px;color:#666;line-height:1.15">${de} · ${cs}</div>`
@@ -26249,16 +26249,10 @@ async function exportWorkerKW(workerId, workerName, week, year, lang, foreman, r
   const dayDE = ['Sonntag','Montag','Dienstag','Mittwoch','Donnerstag','Freitag','Samstag']
   const dayCS = ['Neděle','Pondělí','Úterý','Středa','Čtvrtek','Pátek','Sobota']
 
-  // Přelož popisy práce do 3 jazyků dopředu (paralelně, s cache)
-  const _descToTrans = {}
-  ;(att||[]).forEach(r => { const d=(r.work_description||'').trim(); if(d && d!=='—') _descToTrans[d]=null })
-  const _dKeys = Object.keys(_descToTrans)
-  if (_dKeys.length) {
-    try {
-      const results = await Promise.all(_dKeys.map(d => translateWork3(d)))
-      _dKeys.forEach((d,i) => { _descToTrans[d] = results[i] })
-    } catch(e) { console.warn('[výkaz] překlady:', e?.message) }
-  }
+  // Popisy práce do 3 jazyků dopředu (prelozPopisyDochazky).
+  let _descToTrans = {}
+  try { _descToTrans = await prelozPopisyDochazky(att) }
+  catch(e) { console.warn('[výkaz] překlady:', e?.message) }
 
   const rows = (att||[]).map(r => {
     const dt = new Date(r.work_date + 'T00:00:00')
@@ -26275,7 +26269,7 @@ async function exportWorkerKW(workerId, workerName, week, year, lang, foreman, r
     const allBreaks = attAllBreaks(r)
     const site = attDisplaySite(r)
     const descRaw = (r.work_description||'').trim()
-    const descHtml = (descRaw && descRaw !== '—' && _descToTrans[descRaw]) ? renderWork3(_descToTrans[descRaw]) : '—'
+    const descHtml = (descRaw && descRaw !== '—') ? renderWork3(prekladRadku(_descToTrans, r)) : '—'
     return `<tr style="page-break-inside:avoid">
       <td style="padding:5px 7px;border:1px solid #ccc;vertical-align:top;width:92px">
         <div style="font-weight:700;font-size:11px">${dayEN[wd]}</div>
@@ -31715,7 +31709,7 @@ async function buildInvoicePdf() {
 // Název souboru faktury — bez diakritiky a mezer, ať projde všude
 function invoiceFileName() {
   const num = (window._lastInvoiceNum || '').toString().replace(/[^a-zA-Z0-9_-]/g, '')
-  const who = (window._lastInvoiceName || '').normalize('NFD').replace(/[̀-ͯ]/g, '')
+  const who = (window._lastInvoiceName || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '')
     .replace(/[^a-zA-Z0-9]+/g, '_').replace(/^_+|_+$/g, '')
   return 'Rechnung' + (num ? '_' + num : '') + (who ? '_' + who : '') + '.pdf'
 }
@@ -32492,7 +32486,7 @@ async function uploadAdminSignedContract() {
   progress.textContent = '⏳ Nahrávám smlouvu...'
 
   const safeName = contractFile.name
-    .normalize('NFD').replace(/[̀-ͯ]/g, '')
+    .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
     .replace(/[^a-zA-Z0-9._-]/g, '_')
     .replace(/_+/g, '_')
     .toLowerCase()
@@ -36684,75 +36678,404 @@ function flagBadge(flag, text) {
 // Adresa/stavba pro výkaz a přehledy — pořadí přednosti:
 // 1) ručně zapsaná stavba, 2) ručně zadaná adresa, 3) GPS adresa
 // ===== PŘEKLAD POPISU PRÁCE DO 3 JAZYKŮ (EN/DE/CZ) =====
-// Používá bezplatný Google Translate endpoint (bez klíče). Výsledky se cachují.
-window._transCache = window._transCache || {}
-// Zkusí přeložit. Když se to NEPOVEDE, vrátí null — volající tak pozná rozdíl mezi
-// „přeloženo" a „překladač neodpověděl". Na faktuře je to zásadní: nepřeložený český
-// popis se nesmí tvářit jako angličtina.
-async function _gtranslateTry(text, target) {
-  window._transCache = window._transCache || {}
-  const key = target + '::' + text
-  if (window._transCache[key]) return window._transCache[key]
-  // Překladová služba je jen ozdoba — když je pomalá nebo nedostupná (německá
-  // mobilní síť), NESMÍ zdržet export PDF. Bez limitu čeká fetch klidně minuty
-  // a správce kouká na „⏳ Generuji PDF…“, které se nikam nehne.
-  const fetchSLimitem = (u, ms = 3000) => {
-    const ac = typeof AbortController !== 'undefined' ? new AbortController() : null
-    const t = setTimeout(() => { try { ac && ac.abort() } catch(e) {} }, ms)
-    return fetch(u, ac ? { signal: ac.signal } : undefined).finally(() => clearTimeout(t))
-  }
-  // 1) Google Translate (gtx) — bez klíče
-  try {
-    const url = 'https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=' + target + '&dt=t&q=' + encodeURIComponent(text)
-    const res = await fetchSLimitem(url)
-    if (res.ok) {
-      const data = await res.json()
-      const translated = (data[0] || []).map(seg => seg[0]).join('')
-      if (translated) { window._transCache[key] = translated; return translated }
-    }
-  } catch (e) { console.warn('[překlad] Google selhal:', e?.message) }
-  // 2) Fallback: MyMemory API (bez klíče, limit ~1000/den)
-  try {
-    const url2 = 'https://api.mymemory.translated.net/get?q=' + encodeURIComponent(text) + '&langpair=cs|' + target
-    const res2 = await fetchSLimitem(url2)
-    if (res2.ok) {
-      const d2 = await res2.json()
-      const t2 = d2?.responseData?.translatedText
-      // Při vyčerpaném denním limitu vrátí MyMemory místo překladu varovnou větu —
-      // ta by se jinak vysázela rovnou na fakturu.
-      const varovani = /MYMEMORY WARNING|QUERY LENGTH LIMIT|TRANSLATED\.NET/i.test(String(t2 || ''))
-      if (t2 && !varovani) { window._transCache[key] = t2; return t2 }
-    }
-  } catch (e) { console.warn('[překlad] MyMemory selhal:', e?.message) }
-  return null   // překlad se nepovedl
+// Popis práce píše pracovník — česky (často bez háčků), slovensky, polsky,
+// ukrajinsky… — a výkaz hodin i faktura ho ukazují anglicky, německy a česky.
+// Kancelář 4. 10. 2026: „v němčině je to v češtině, v češtině v angličtině,
+// někde místo překladu ‚máš opravit jazyk' a někdy úplný nesmysl — dělá to
+// u všech výkazů hodin."
+//
+// PROČ TO TAK BYLO (ověřeno na obou službách 4. 10. 2026, dvě kola oponentů):
+//  • Tip jazyka od Googlu (sl=auto) u češtiny bez háčků NEPLATÍ — a to ani
+//    „jistý": „Bedneni zakladu" je ruština s jistotou 1 a vrátí se beze změny,
+//    „Lepeni dlazby" slovinština 0,31 a přeloží se na „Beautiful dlazby",
+//    „Natirani zabradli na terase" bosenština → „The bearded men went out…".
+//  • Google často nepřeloží nic, jen doplní háček („Zdeni pricek" → „Zdeni
+//    priček") — a to prošlo jako překlad.
+//  • Záloha MyMemory dostávala natvrdo „z češtiny": u cílové češtiny vrátila
+//    „PLEASE SELECT TWO DISTINCT LANGUAGES" („máš opravit jazyk"), cizí jazyk
+//    přeložila jako český nebo ho vrátila beze změny. S „autodetect" tipuje
+//    u češtiny bez háčků maltštinu nebo chorvatštinu → nesmysl.
+//  • Výkaz poslal všechno najednou s limitem 3 s; při selhání se vrátil
+//    PŮVODNÍ text a vysázel se pod 🇩🇪 i 🇬🇧.
+//
+// JAK TO JE TEĎ:
+//  • Jazyk popisu: rozhodne písmeno, které má jen jeden jazyk (ř → čeština,
+//    ł → polština, cyrilice…); jinak jazyk, na kterém se Google shodne
+//    s národností autora nebo s češtinou; jinak čeština, když se z ní text
+//    opravdu přeloží (appka je česky a česky tu píšou i cizinci); pak
+//    národnost; Googlův tip až nakonec — i „jistý" tip u textu bez háčků
+//    bývá chybný. Vietnamština bez tónových znamének se nepřekládá.
+//  • „Přeloženo" = slova originálu ve výsledku nezůstala; srovnává se bez
+//    háčků a vlastní jména a zkratky se nepočítají („Fasáda Fürth" → „Fürth
+//    facade" přeložené je, „Montaz Oken gegen Prizemi" není).
+//  • Do vlastního jazyka se nepřekládá: český popis = český řádek beze změny.
+//  • MyMemory jen se známým jazykem, nikdy autodetect ani stejný jazyk.
+//  • Jazyk ověřený jen národností: angličtina a němčina, které vyjdou stejně
+//    („Bourani" → „Burans"/„Burans"), jsou přepis, ne překlad — zahodí se.
+//  • Původní text je na výkazu vidět vždy (vlastní řádek, nebo zvlášť).
+//  • Nepovedený překlad = NIC: řádek se vynechá, původní text zůstane pod
+//    svou vlajkou (bez vlajky, když jazyk nevíme). Nikdy pod cizí.
+//  • Najednou nejvýš 6 dotazů, dokončují se nejdřív rozpracované popisy;
+//    výkaz čeká nejvýš 12 s a ukáže, co je hotové. Paměť v prohlížeči: jistý
+//    jazyk 30 dní, jazyk podle národnosti 1 den, nepovedené nic.
+const _PREKLAD_CILE = ['en', 'de', 'cs']
+const _PREKLAD_SOUBEZNE = 6
+const _PREKLAD_LIMIT_DOTAZU = 6000    // ms na jeden dotaz
+const _PREKLAD_JISTY = 0.9            // pod tím je Googlův tip jen hádání
+const _PREKLAD_PAMET_KLIC = 'sb_preklady_v3'
+const _PREKLAD_PAMET_ZNAKU = 1500000  // localStorage má kolem 5 MB na celou appku
+// Národnost (profiles.narodnost, seznam NARODNOSTI) → jazyk, kterým člověk píše.
+// Bělorusové píšou převážně rusky.
+const _JAZYK_NARODNOSTI = { CZ: 'cs', SK: 'sk', PL: 'pl', UA: 'uk', RO: 'ro', MD: 'ro', BG: 'bg', HU: 'hu', DE: 'de', AT: 'de', SI: 'sl', HR: 'hr', RS: 'sr', ME: 'sr', BA: 'bs', MK: 'mk', AL: 'sq', XK: 'sq', BY: 'ru', LT: 'lt', LV: 'lv', EE: 'et', TR: 'tr', GE: 'ka', PT: 'pt', ES: 'es', IT: 'it', GR: 'el', VN: 'vi' }
+const _VLAJKA_JAZYKA = { cs: '🇨🇿', sk: '🇸🇰', pl: '🇵🇱', uk: '🇺🇦', ro: '🇷🇴', bg: '🇧🇬', hu: '🇭🇺', de: '🇩🇪', sl: '🇸🇮', hr: '🇭🇷', sr: '🇷🇸', bs: '🇧🇦', mk: '🇲🇰', sq: '🇦🇱', ru: '🇷🇺', lt: '🇱🇹', lv: '🇱🇻', et: '🇪🇪', tr: '🇹🇷', ka: '🇬🇪', pt: '🇵🇹', es: '🇪🇸', it: '🇮🇹', el: '🇬🇷', vi: '🇻🇳', en: '🇬🇧' }
+// Věty, které MyMemory vrací MÍSTO překladu (se stavem 200 i 403).
+const _MYMEMORY_NENI_PREKLAD = /MYMEMORY WARNING|QUERY LENGTH LIMIT|TRANSLATED\.NET|PLEASE SELECT|DISTINCT LANGUAGES|IS AN INVALID|INVALID (SOURCE|TARGET) LANGUAGE|NO QUERY SPECIFIED|LIMIT EXCEEDED/i
+
+// Příbuzné jazyky Google u krátkého textu bez háčků plete („Prace na strese"
+// od Čecha je pro něj jistě slovenština a vyjde „Work on stress"). Mezi
+// příbuznými proto rozhoduje národnost autora, ne tip.
+const _PRIBUZNE_JAZYKY = [['cs', 'sk'], ['sr', 'hr', 'bs'], ['ru', 'uk'], ['bg', 'mk']]
+function _pribuzne(a, b) { return a !== b && _PRIBUZNE_JAZYKY.some(sk => sk.includes(a) && sk.includes(b)) }
+const _CYRILICE = ['uk', 'ru', 'bg', 'mk', 'be']
+// Písmena, která má JEN JEDEN z jazyků, kterými lidé ve firmě píšou. Společná
+// (á, č, š, ž, ö, ü, ß, đ…) nerozhodují — mají je i místní jména a značky.
+function _jazykPodlePismen(t) {
+  const s = String(t || '').toLowerCase()
+  if (/[іїєґ]/.test(s)) return 'uk'
+  if (/[ыэъё]/.test(s)) return 'ru'
+  if (/[ěřů]/.test(s)) return 'cs'
+  if (/[ľĺŕô]/.test(s)) return 'sk'
+  if (/[łąęśźżń]/.test(s)) return 'pl'
+  if (/[ășțţ]/.test(s)) return 'ro'
+  if (/[ğı]/.test(s)) return 'tr'
+  if (/[őű]/.test(s)) return 'hu'
+  if (/[ơưạảấầẩẫậắằẳẵặẹẻẽếềểễệỉịọỏốồổỗộớờởỡợụủứừửữựỳỵỷỹ]/.test(s)) return 'vi'
+  return null
+}
+// Jazyk, kterým nejspíš píše tento člověk (podle národnosti; jinak čeština).
+// Národnosti drží _lideVlajky — kdo chce jistotu, zavolá předtím nactiVlajky().
+function jazykPracovnika(workerId) {
+  const z = _lideVlajky.mapa.get(String(workerId || ''))
+  return _JAZYK_NARODNOSTI[String((z && z.narodnost) || '').toUpperCase()] || 'cs'
 }
 
-// Původní chování pro výkazy: když se překlad nepovede, vrátí text beze změny.
-async function _gtranslate(text, target) {
-  const out = await _gtranslateTry(text, target)
-  return out == null ? text : out
+// FRONTA: najednou nejvýš _PREKLAD_SOUBEZNE dotazů. Přednost mají popisy,
+// u kterých je jazyk už známý — jinak by se nejdřív zjišťoval jazyk u všech
+// a po limitu času by nebyl hotový ani jeden řádek celý.
+let _prekladBezi = 0
+const _prekladFronta = [[], []]   // [0] = dokončit rozpracované, [1] = nové popisy
+function _prekladVeFronte(fn, novy) {
+  return new Promise((ok, ne) => { _prekladFronta[novy ? 1 : 0].push({ fn, ok, ne }); _prekladPust() })
 }
-// Vrátí { en, de, cs } pro daný text (přeloží do všech tří jazyků)
-async function translateWork3(text) {
-  const t = (text || '').trim()
-  if (!t || t === '—') return { en: '', de: '', cs: '' }
-  const [en, de, cs] = await Promise.all([
-    _gtranslate(t, 'en'),
-    _gtranslate(t, 'de'),
-    _gtranslate(t, 'cs')
-  ])
-  return { en, de, cs }
+function _prekladPust() {
+  while (_prekladBezi < _PREKLAD_SOUBEZNE && (_prekladFronta[0].length || _prekladFronta[1].length)) {
+    const { fn, ok, ne } = (_prekladFronta[0].length ? _prekladFronta[0] : _prekladFronta[1]).shift()
+    _prekladBezi++
+    Promise.resolve().then(fn).then(ok, ne).finally(() => { _prekladBezi--; _prekladPust() })
+  }
 }
-// Vykreslí přeložený popis: EN tučně, pod tím DE a CZ menší
+// JSON z překladové služby, nebo null (chyba, vypršení, nečitelná odpověď).
+// Limit platí i na čtení těla — fetch bez něj čeká klidně minuty.
+function _prekladJson(url, novy) {
+  return _prekladVeFronte(async () => {
+    const ac = typeof AbortController !== 'undefined' ? new AbortController() : null
+    const casovac = setTimeout(() => { try { ac && ac.abort() } catch (e) {} }, _PREKLAD_LIMIT_DOTAZU)
+    try {
+      const res = await fetch(url, ac ? { signal: ac.signal } : undefined)
+      return res.ok ? await res.json() : null
+    } finally { clearTimeout(casovac) }
+  }, novy).catch(e => { console.warn('[překlad] dotaz selhal:', e?.message); return null })
+}
+
+// OPRAVDU PŘELOŽENO? Google často vrátí původní slova, jen s háčkem navíc
+// („Zdeni pricek" → „Zdeni priček") nebo napůl („Montaz Oken gegen Prizemi",
+// „Beautiful dlazby"). Srovnává se bez háčků; vlastní jména (velké písmeno
+// uprostřed věty) a zkratky (SDK, OSB) se nepočítají — ty zůstat smějí.
+function _bezHacku(s) { return String(s || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase() }
+function _slovaKPrekladu(s) {
+  return String(s || '').split(/[^\p{L}]+/u).filter(Boolean)
+    .filter((w, i) => w.length >= 3 && w !== w.toUpperCase() && !(i > 0 && w[0] !== w[0].toLowerCase()))
+    .map(_bezHacku)
+}
+function _prelozeno(vystup, vstup) {
+  const cele = s => _bezHacku(s).replace(/[^\p{L}\p{N}]+/gu, ' ').trim()
+  if (!vystup || cele(vystup) === cele(vstup)) return false
+  const slova = _slovaKPrekladu(vstup)
+  if (!slova.length) return true
+  const ve = new Set(String(vystup).split(/[^\p{L}]+/u).filter(Boolean).map(_bezHacku))
+  return slova.filter(w => ve.has(w)).length / slova.length < 0.5
+}
+// Google: { text, zdroj, jistota } nebo null. Se zadaným jazykem (sl) Google
+// nic nehádá — zdroj je ten zadaný a jistotu neříká.
+async function _prekladGoogle(text, cil, sl, novy) {
+  const d = await _prekladJson('https://translate.googleapis.com/translate_a/single?client=gtx&sl=' + sl + '&tl=' + cil + '&dt=t&q=' + encodeURIComponent(text), novy)
+  if (!Array.isArray(d) || !Array.isArray(d[0])) return null
+  const t = d[0].map(s => (Array.isArray(s) && typeof s[0] === 'string') ? s[0] : '').join('').trim()
+  if (!t) return null
+  if (sl !== 'auto') return { text: t, zdroj: sl, jistota: null }
+  return { text: t, zdroj: typeof d[2] === 'string' ? d[2].toLowerCase() : null, jistota: typeof d[6] === 'number' ? d[6] : 0 }
+}
+// MyMemory: přeložený text nebo null. Jen se známým jazykem (autodetect u
+// češtiny bez háčků tipuje maltštinu) a nikdy stejný jazyk na obou stranách.
+async function _prekladMyMemory(text, cil, sl) {
+  if (!sl || sl === cil) return null
+  const d = await _prekladJson('https://api.mymemory.translated.net/get?q=' + encodeURIComponent(text) + '&langpair=' + sl + '|' + cil, false)
+  if (!d || Number(d.responseStatus) !== 200 || d.quotaFinished === true) return null
+  const t = String(d.responseData?.translatedText || '').trim()
+  if (!t || _MYMEMORY_NENI_PREKLAD.test(t) || !_prelozeno(t, text)) return null
+  return t
+}
+// Jeden cílový jazyk ze známého jazyka: Google, pak MyMemory. null = nepovedlo se.
+async function _prelozDo(t, cil, zdroj) {
+  const g = await _prekladGoogle(t, cil, zdroj, false)
+  // Příbuzné jazyky (slovenština → čeština) sdílejí většinu slov — dobrý
+  // překlad „Zdění příček v přízemí" by kontrola slov zahodila. Bere se, co
+  // Google změnil; záloha MyMemory se tu nezkouší (dávala „Krok zednictví").
+  if (_pribuzne(zdroj, cil)) return g && g.text && _bezHacku(g.text) !== _bezHacku(t) ? g.text : null
+  if (g && _prelozeno(g.text, t)) return g.text
+  return _prekladMyMemory(t, cil, zdroj)
+}
+
+// PAMĚŤ v prohlížeči. Klíč = jazyk autora + text (tentýž text od Poláka
+// a od Čecha se přeloží každý zvlášť). Jistě zjištěný jazyk platí 30 dní,
+// jazyk podle národnosti 1 den; nepovedené se neukládá vůbec.
+let _prekladPamet = null
+let _prekladUlozCasovac = null
+function _prekladNactiPamet() {
+  if (_prekladPamet) return _prekladPamet
+  _prekladPamet = {}
+  try {
+    const o = JSON.parse(localStorage.getItem(_PREKLAD_PAMET_KLIC) || 'null')
+    if (o && typeof o === 'object' && !Array.isArray(o)) _prekladPamet = o
+  } catch (e) {}
+  return _prekladPamet
+}
+function _prekladZPameti(klic) {
+  const z = _prekladNactiPamet()[klic]
+  if (!z || typeof z !== 'object' || typeof z.zdroj !== 'string' || !z.k) return null
+  if (Date.now() - z.k > (z.j ? 30 : 1) * 86400000) return null
+  const v = { zdroj: z.zdroj, jisty: z.j === true }
+  _PREKLAD_CILE.forEach(c => { if (typeof z[c] === 'string' && z[c]) v[c] = z[c] })
+  // Přepis místo překladu se nepustí ani z paměti (uložený jinou verzí).
+  if (!v.jisty && v.en && v.de && _bezHacku(v.en) === _bezHacku(v.de)) { delete v.en; delete v.de }
+  return v
+}
+function _prekladDoPameti(klic, v) {
+  // Jen skutečné překlady — řádek vlastního jazyka (= původní text) se nepočítá.
+  const preklady = _PREKLAD_CILE.filter(c => v[c] && c !== v.zdroj)
+  if (!v.zdroj || !preklady.length) return
+  // Jazyk ověřený jen národností se ukládá, jen když prošel kontrolou přepisu
+  // (angličtina i němčina) — jinak by si paměť podržela třeba „Burans".
+  if (!v.jisty && v.zdroj !== 'en' && v.zdroj !== 'de' && !(v.en && v.de)) return
+  const p = _prekladNactiPamet()
+  const stary = p[klic]
+  const z = { k: Date.now(), zdroj: v.zdroj, j: !!v.jisty }
+  _PREKLAD_CILE.forEach(c => { if (v[c]) z[c] = v[c] })
+  // Nic nového = nic neukládat (a neprodlužovat platnost neúplnému záznamu) —
+  // ale propadlý záznam se obnoví, jinak by se každý výkaz ptal znovu.
+  if (stary && _prekladZPameti(klic) && stary.zdroj === z.zdroj && _PREKLAD_CILE.every(c => stary[c] === z[c])) return
+  p[klic] = z
+  clearTimeout(_prekladUlozCasovac)
+  _prekladUlozCasovac = setTimeout(() => {
+    const uloz = () => localStorage.setItem(_PREKLAD_PAMET_KLIC, JSON.stringify(p))
+    const orizni = (nechat) => {
+      const klice = Object.keys(p).sort((a, b) => (p[a]?.k || 0) - (p[b]?.k || 0))
+      klice.slice(0, Math.max(0, klice.length - nechat)).forEach(k => { delete p[k] })
+    }
+    try {
+      // Strop podle velikosti, ne počtu: dlouhé popisy by jinak paměť přeplnily
+      // a zápis by tiše selhával úplně.
+      while (JSON.stringify(p).length > _PREKLAD_PAMET_ZNAKU && Object.keys(p).length > 1) orizni(Math.floor(Object.keys(p).length * 0.8))
+      uloz()
+    } catch (e) {
+      try { orizni(Math.floor(Object.keys(p).length / 2)); uloz() } catch (e2) {}
+    }
+  }, 400)
+}
+
+// PŘEKLAD JEDNOHO POPISU: { puvodni, zdroj, jisty, en, de, cs }. Překlad,
+// který se nepovedl, je null — nikdy původní text v řádku jiného jazyka.
+// `jazyk` = jazyk autora (jazykPracovnika), `cile` = které řádky jsou potřeba.
+const _prekladRozdelane = new Map()   // klíč → slib výsledku
+const _prekladZiveStavy = new Map()    // klíč → průběžný výsledek (pro limit času)
+function _prekladPrazdny(t) { return { puvodni: t, zdroj: null, jisty: false, en: null, de: null, cs: null } }
+function _prekladKlicUlohy(t, jazyk, cile) { return jazyk + '|' + cile.join(',') + '|' + t }
+function prelozPopis(text, { jazyk = 'cs', cile = _PREKLAD_CILE } = {}) {
+  const t = String(text || '').trim()
+  // Bez písmen („—", „-", „12") není co překládat (MyMemory z „-" dělala „•").
+  if (!t || !/\p{L}/u.test(t)) return Promise.resolve(_prekladPrazdny(t))
+  const klic = _prekladKlicUlohy(t, jazyk, cile)
+  if (_prekladRozdelane.has(klic)) return _prekladRozdelane.get(klic)
+  const v = _prekladPrazdny(t)
+  _prekladZiveStavy.set(klic, v)
+  const uloha = _prelozPopisTed(t, jazyk, cile, v)
+    .catch(e => { console.warn('[překlad]', e?.message) })
+    .then(() => ({ ...v }))
+    .finally(() => { _prekladRozdelane.delete(klic); _prekladZiveStavy.delete(klic) })
+  _prekladRozdelane.set(klic, uloha)
+  return uloha
+}
+async function _prelozPopisTed(t, jazyk, cile, v) {
+  const klicPameti = jazyk + '|' + t
+  const pamet = _prekladZPameti(klicPameti)
+  if (pamet) Object.assign(v, pamet)
+  if (v.zdroj && cile.every(c => v[c])) return
+  // Překlady z jazyka ověřeného jen národností se ukážou až po kontrole přepisu
+  // (krok 3) — do té doby je nevidí ani výkaz, který skončí na limitu času.
+  const skryte = {}
+  // Pro limit času: víceslovný popis ukáže i neověřenou angličtinu (přepis
+  // hrozí hlavně u jednoho neznámého slova). Neenumerovatelné — do výsledku
+  // ani do paměti se nedostane.
+  Object.defineProperty(v, '_neovereno', { value: skryte, enumerable: false })
+  // 1) JAZYK POPISU. Kandidáti v pořadí:
+  //    a) písmeno, které má jen jeden jazyk (ř → čeština, ł → polština, cyrilice…);
+  //    b) jazyk, na kterém se Google shodne s národností autora (i příbuzný)
+  //       nebo s češtinou;
+  //    c) čeština, když se z ní text opravdu přeloží — jazyk firmy, appka je
+  //       česky a česky tu píšou i Poláci, Rumuni a Vietnamci (oponent: 6 z 11);
+  //    d) národnost autora (sedí-li na písmo), když se z ní text přeloží;
+  //    e) jistý tip Googlu, ze kterého se text přeložil (popis anglicky…).
+  //    Tip Googlu sám o sobě u textu bez háčků neplatí ani „jistý"
+  //    („Bedneni zakladu" → ruština 1,0; „Prace na strese" → slovenština 0,95).
+  if (!v.zdroj) {
+    const pismena = _jazykPodlePismen(t)
+    const cyrilice = /[\u0400-\u04FF]/.test(t)
+    const narodni = _CYRILICE.includes(jazyk) === cyrilice ? jazyk : null
+    const zkus = (pismena || narodni) === 'en' ? 'de' : 'en'
+    const g = await _prekladGoogle(t, zkus, 'auto', true)
+    // Překlad z tipu se převezme, jen když platí jazyk tipu — u češtiny místo
+    // tipnuté slovenštiny by to byl překlad ze slovenštiny („Work on stress").
+    const zGooglu = (z) => { v.zdroj = z; v.jisty = true; if (z === g.zdroj && z !== zkus && _prelozeno(g.text, t)) v[zkus] = g.text }
+    const overeny = async (z, jisty) => {
+      const p = await _prelozDo(t, zkus, z)
+      if (!p) return false
+      v.zdroj = z; v.jisty = jisty
+      if (jisty) v[zkus] = p; else skryte[zkus] = p
+      return true
+    }
+    if (pismena) {
+      if (g && g.zdroj === pismena) zGooglu(pismena)
+      else await overeny(pismena, true)
+    } else if (g && g.zdroj && (g.zdroj === narodni || g.zdroj === 'cs' || (narodni && _pribuzne(g.zdroj, narodni)))) {
+      // Shoda s národností — i příbuzný jazyk (srbština ↔ chorvatština,
+      // ukrajinština ↔ ruština: platí tip) — nebo s češtinou. Jen mezi
+      // češtinou a slovenštinou, které Google plete, rozhoduje národnost.
+      zGooglu(g.zdroj !== 'cs' && g.zdroj !== narodni && ['cs', 'sk'].includes(narodni) ? narodni : g.zdroj)
+    } else if (await overeny('cs', false)) {
+      // c) čeština
+    } else if (narodni && narodni !== 'cs' && await overeny(narodni, false)) {
+      // d) národnost
+    } else if (g && g.zdroj && g.jistota >= _PREKLAD_JISTY && (g.zdroj === zkus || _prelozeno(g.text, t))) {
+      zGooglu(g.zdroj)
+    }
+    // Vietnamštinu bez tónových znamének Google vždy uhodne jako jiná slova
+    // („Lap dat cua so" → „Lap data of number", oponent 15 z 15): nepřekládat.
+    if (v.zdroj === 'vi' && _jazykPodlePismen(t) !== 'vi') { v.jisty = true; _PREKLAD_CILE.forEach(c => { v[c] = null }); skryte.en = skryte.de = skryte.cs = null; return }
+  }
+  // Jazyk nevíme: nic se nepřekládá, ukáže se jen původní text bez vlajky.
+  if (!v.zdroj) return
+  // 2) OSTATNÍ JAZYKY ze zjištěného jazyka; do vlastního se nepřekládá.
+  //    U jazyka ověřeného jen národností jsou potřeba angličtina i němčina
+  //    kvůli kontrole přepisu, i když volající chce jen jednu.
+  const potreba = new Set(cile)
+  if (!v.jisty && v.zdroj !== 'en' && v.zdroj !== 'de') { potreba.add('en'); potreba.add('de') }
+  await Promise.all([...potreba].map(async c => {
+    if (v[c] || skryte[c]) return
+    if (c === v.zdroj) { v[c] = t; return }
+    const r = await _prelozDo(t, c, v.zdroj)
+    if (r) { if (v.jisty) v[c] = r; else skryte[c] = r }
+  }))
+  // 3) PŘEPIS MÍSTO PŘEKLADU: Google slovo nezná a jen ho přepíše
+  //    („Bourani" → „Burans" anglicky i německy). Pozná se tak, že angličtina
+  //    a němčina vyjdou stejně; u jistého jazyka se to nekontroluje.
+  if (!v.jisty && v.zdroj !== 'en' && v.zdroj !== 'de') {
+    const zahod = () => { skryte.en = null; skryte.de = null; if (v.zdroj !== 'cs') skryte.cs = null }
+    if (skryte.en && skryte.de) { if (_bezHacku(skryte.en) === _bezHacku(skryte.de)) zahod() }
+    // Jeden z jazyků nedorazil a kontrolu nejde udělat: jednoslovný popis
+    // (tam přepis hrozí) se nepustí — jinak by „Burans" prošlo a uložilo se.
+    else if (_slovaKPrekladu(t).length < 2) zahod()
+  }
+  _PREKLAD_CILE.forEach(c => { if (skryte[c] && cile.includes(c)) v[c] = skryte[c] })
+  _prekladDoPameti(klicPameti, v)
+}
+// Víc popisů najednou: [{ text, jazyk }] nebo [text]. Čeká NEJVÝŠ limitMs —
+// výkaz ani PDF se nesmí zaseknout na pomalé síti. Co do té doby nedoběhlo,
+// vrátí rozpracované (jen hotové řádky) a dopřeloží se do paměti pro příště.
+async function prelozPopisyVcas(polozky, { cile = _PREKLAD_CILE, limitMs = 12000 } = {}) {
+  const pol = polozky.map(p => typeof p === 'string' ? { text: p, jazyk: 'cs' } : { text: p.text, jazyk: p.jazyk || 'cs' })
+  const hotove = new Array(pol.length).fill(null)
+  let casovac = null
+  const limit = new Promise(ok => { casovac = setTimeout(ok, limitMs) })
+  await Promise.race([Promise.all(pol.map((p, i) => prelozPopis(p.text, { jazyk: p.jazyk, cile }).then(r => { hotove[i] = r }))), limit])
+  clearTimeout(casovac)
+  return pol.map((p, i) => {
+    if (hotove[i]) return { ...hotove[i] }
+    const t = String(p.text || '').trim()
+    const zivy = _prekladZiveStavy.get(_prekladKlicUlohy(t, p.jazyk, cile))
+    if (!zivy) return _prekladPrazdny(t)
+    const r = { ...zivy }
+    const nev = zivy._neovereno
+    if (!r.jisty && nev && nev.en && !r.en && cile.includes('en') && _slovaKPrekladu(t).length >= 2) r.en = nev.en
+    return r
+  })
+}
+// Popisy práce z řádků docházky → { popis: výsledek }. Jazyk podle národnosti
+// toho, kdo popis napsal. Dokud se překládá, drží se hláška vidět (toast
+// jinak po 3 s zmizí a výkaz pak 10 s „nic nedělá").
+async function prelozPopisyDochazky(radky) {
+  if (!(radky || []).some(r => String(r.work_description || '').trim())) return {}
+  let hlaska = null
+  const zacatek = setTimeout(() => {
+    const ukaz = () => showToast('⏳ Překládám popisy práce… / Übersetze Arbeitsbeschreibungen…')
+    ukaz(); hlaska = setInterval(ukaz, 2500)
+  }, 700)
+  try {
+    try { await nactiVlajky() } catch (e) {}
+    // Každá dvojice jazyk autora + text zvlášť: tentýž popis od Čecha a od
+    // Poláka se přeloží každý ze svého jazyka. Výsledek pod klíčem
+    // „jazyk|text" (klicPrekladuRadku) i pod samotným textem (první autor).
+    const pary = new Map()
+    ;(radky || []).forEach(r => {
+      const d = String(r.work_description || '').trim()
+      if (!d || d === '—') return
+      const jazyk = jazykPracovnika(r.worker_id)
+      if (!pary.has(jazyk + '|' + d)) pary.set(jazyk + '|' + d, { text: d, jazyk })
+    })
+    const pol = [...pary.values()]
+    const vysl = await prelozPopisyVcas(pol)
+    const mapa = {}
+    pol.forEach((p, i) => { mapa[p.jazyk + '|' + p.text] = vysl[i]; if (!mapa[p.text]) mapa[p.text] = vysl[i] })
+    return mapa
+  } finally {
+    clearTimeout(zacatek); clearInterval(hlaska)
+  }
+}
+// Překlad popisu z řádku docházky (podle jazyka toho, kdo ho napsal).
+function prekladRadku(mapa, r) {
+  const d = String((r && r.work_description) || '').trim()
+  return (mapa && (mapa[jazykPracovnika(r && r.worker_id) + '|' + d] || mapa[d])) || { puvodni: d }
+}
+// Vykreslí přeložený popis: EN tučně, pod tím DE a CZ menší. Popis píše
+// pracovník — vždy jako text, nikdy jako HTML (výkaz se tiskne v rámu
+// stejné domény).
 function renderWork3(tr) {
-  if (!tr || (!tr.en && !tr.de && !tr.cs)) return '—'
-  const parts = []
-  // Popis píše pracovník a překladač při výpadku vrací původní text — vždy
-  // jako text, nikdy jako HTML (výkaz se tiskne v rámu stejné domény).
-  if (tr.en) parts.push(`<div style="font-size:10px;font-weight:600;color:#222">🇬🇧 ${escAttr(tr.en)}</div>`)
-  if (tr.de) parts.push(`<div style="font-size:10px;color:#444">🇩🇪 ${escAttr(tr.de)}</div>`)
-  if (tr.cs) parts.push(`<div style="font-size:10px;color:#444">🇨🇿 ${escAttr(tr.cs)}</div>`)
-  return parts.join('')
+  if (!tr) return '—'
+  const puvodni = String(tr.puvodni || '').trim()
+  const radky = []
+  if (tr.en) radky.push(`<div style="font-size:10px;font-weight:600;color:#222">🇬🇧 ${escAttr(tr.en)}</div>`)
+  if (tr.de) radky.push(`<div style="font-size:10px;color:#444">🇩🇪 ${escAttr(tr.de)}</div>`)
+  if (tr.cs) radky.push(`<div style="font-size:10px;color:#444">🇨🇿 ${escAttr(tr.cs)}</div>`)
+  // Původní text je vidět VŽDY — když není jedním ze tří řádků (popis polsky,
+  // nepovedený překlad), přidá se zvlášť. Strojový překlad textu bez háčků
+  // bývá přibližný („Murovanie pricok" → „Masonry joints"), ať je vidět, co
+  // člověk opravdu napsal. Pod vlajkou svého jazyka, bez vlajky, když jazyk
+  // nevíme; nikdy pod cizí.
+  const vlastniRadek = tr.zdroj && _PREKLAD_CILE.includes(tr.zdroj) && tr[tr.zdroj]
+  if (puvodni && !vlastniRadek) {
+    const vlajka = tr.zdroj ? (_VLAJKA_JAZYKA[tr.zdroj] || '') : ''
+    radky.push(`<div style="font-size:10px;color:#444">${vlajka ? vlajka + ' ' : ''}${escAttr(puvodni)}</div>`)
+  }
+  return radky.length ? radky.join('') : '—'
 }
 
 function attDisplaySite(r, fallback = '—') {
@@ -37228,7 +37551,7 @@ async function uploadDocumentForWorker() {
   if (st) { st.style.display='block'; st.style.background='#e8f5e9'; st.style.color='#2e7d32'; st.textContent='Nahravam...' }
 
   const MULTI = MULTISIDE_TYPES
-  const safeName1 = adminUploadFile1.name.normalize('NFD').replace(/[̀-ͯ]/g,'').replace(/[^a-zA-Z0-9._-]/g,'_').toLowerCase()
+  const safeName1 = adminUploadFile1.name.normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/[^a-zA-Z0-9._-]/g,'_').toLowerCase()
   const fp1 = uploadingForWorkerId + '/' + Date.now() + '_' + safeName1
 
   const { error: e1 } = await sb.storage.from('documents').upload(fp1, adminUploadFile1, {upsert:true})
@@ -37268,7 +37591,7 @@ async function uploadDocumentForWorker() {
     for (let i = 0; i < adminUploadFiles2.length; i++) {
       const soubor = adminUploadFiles2[i]
       const cisloListu = i + 2
-      const safeName2 = soubor.name.normalize('NFD').replace(/[̀-ͯ]/g,'').replace(/[^a-zA-Z0-9._-]/g,'_').toLowerCase()
+      const safeName2 = soubor.name.normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/[^a-zA-Z0-9._-]/g,'_').toLowerCase()
       const fp2 = uploadingForWorkerId + '/' + (Date.now() + cisloListu) + '_' + safeName2
       const { error: e2 } = await sb.storage.from('documents').upload(fp2, soubor, {upsert:true})
       if (e2) { showToast('⚠️ ' + cisloListu + '. list se nenahrál: ' + e2.message); continue }

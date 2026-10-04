@@ -1079,6 +1079,23 @@ button:not(.x-close) > svg:first-child{margin-right:6px}
 .ubyt-cil{outline:3px solid var(--amber);outline-offset:2px}
 .ubyt-volno.ubyt-cil{background:var(--amber-l)}
 body.ubyt-tahne,body.ubyt-tahne *{cursor:grabbing!important;user-select:none!important;-webkit-user-select:none!important}
+/* Člověka v kartě ubytování jde chytit a přetáhnout do jiné karty (4. 10. 2026). */
+.ubyt-clovek{cursor:grab;-webkit-touch-callout:none}
+/* Fotka by jinak v Safari začala vlastní tažení obrázku a to naše by zrušila. */
+.ubyt-clovek img{-webkit-user-drag:none}
+.ubyt-clovek:hover{background:var(--bg)}
+.ubyt-clovek.ubyt-tazena{opacity:.35}
+.ubyt-duch.ubyt-clovek-duch{background:#fff;border:1.5px solid var(--brd);border-radius:10px;padding:4px 10px 4px 4px}
+/* Plánovaný přesun (4. 10. 2026): štítek „→ kam od kdy", výběr lidí, cílová karta. */
+.ubyt-plan{display:inline-flex;align-items:center;min-height:28px;padding:2px 9px;border:1.5px dashed var(--blue);border-radius:14px;background:#fff;color:var(--blue);font-size:11.5px;font-weight:800;cursor:pointer;font-family:inherit;white-space:nowrap;max-width:100%;overflow:hidden;text-overflow:ellipsis}
+.ubyt-plan:hover{background:var(--blue-l,#eef3f9)}
+.ubyt-plan.ubyt-plan--pozde{border-color:var(--red);color:var(--red)}
+.ubyt-vyber{cursor:pointer}
+.ubyt-vyber-znak{font-size:20px;color:var(--blue);padding:0 6px;flex-shrink:0}
+.ubyt-vybran{background:var(--blue-l,#eef3f9);box-shadow:0 0 0 2px var(--blue)}
+.ubyt-vyber-chip{min-height:40px;padding:6px 12px;border:1.5px solid var(--brd);border-radius:20px;background:#fff;font-size:13px;font-weight:700;cursor:pointer;font-family:inherit}
+.ubyt-vyber-chip.ubyt-vybran{border-color:var(--blue)}
+.ubyt-plan-cil{outline:3px solid var(--blue);outline-offset:2px}
 .toast{pointer-events:none;position:fixed;bottom:100px;left:50%;transform:translateX(-50%);background:#211D1A;color:#fff;padding:12px 20px;border-radius:12px;font-size:14px;font-weight:700;z-index:999999;opacity:0;transition:opacity .2s;white-space:normal;overflow-wrap:anywhere;line-height:1.35;max-width:90vw;text-align:center;box-shadow:0 4px 20px rgba(0,0,0,0.3)}
 .toast.on{opacity:1}
 
@@ -5539,7 +5556,7 @@ async function submitAdminSignatureWithPlacement() {
 // Po nahrání nové verze se snadno pozná, jestli se opravdu nasadila: otevřete
 // appku, zmáčkněte F12 (na Macu ⌥⌘I) a v konzoli je vypsané tohle datum. Když
 // tam svítí starší, prohlížeč nebo GitHub drží starou verzi.
-const SUBBAU_VERZE = '2026-10-02 f — Firma bez podpisu výkazu (zaškrtnutí u firmy v Týmech)'
+const SUBBAU_VERZE = '2026-10-04 c — Překlady popisu práce ve výkazech a na faktuře'
 console.log('StavKo docházka — verze ' + SUBBAU_VERZE)
 // Verze i dole v menu správce. Když někdo novinku „nevidí", podle ní se hned
 // pozná, jestli nemá otevřenou starou kopii appky — bez hledání v konzoli.
@@ -10987,11 +11004,11 @@ async function loadWorkers() {
 const SKUPINKY_BARVY = ['#2a5d8f', '#2f6f4e', '#9c3b22', '#8a5a10', '#6b3fa0', '#0f766e',
   '#a03050', '#4a7a35', '#b06010', '#1f6a7a', '#7a3f8f', '#455a8f']
 const SKUPINKY_DRUH = {
-  ubytovani: { ikona: '🏠', jedno: 'ubytování', nove: 'Nové ubytování', bez: 'Bez ubytování', mista: 'míst' },
-  auto: { ikona: '🚗', jedno: 'auto', nove: 'Nové auto', bez: 'Bez auta', mista: 'míst v autě' }
+  ubytovani: { ikona: '🏠', jedno: 'ubytování', nove: 'Nové ubytování', bez: 'Bez ubytování', mista: 'míst', jinam: 'do jiného ubytování', prijedou: 'Přijedou', adresa: true },
+  auto: { ikona: '🚗', jedno: 'auto', nove: 'Nové auto', bez: 'Bez auta', mista: 'míst v autě', jinam: 'do jiného auta', prijedou: 'Pojedou', adresa: false }
 }
 let _druhSkupinek = 'ubytovani'
-let _skupinky = { kdy: 0, seznam: [], clenove: [], chybi: false }
+let _skupinky = { kdy: 0, seznam: [], clenove: [], chybi: false, presuny: [] }
 let _skupinkyBezi = null
 
 const SKUPINKY_DOPLNKY = ', cizi_pocet, cizi_jmena, zaplaceno_od, zaplaceno_do'
@@ -11026,10 +11043,36 @@ function nactiSkupinky(vynutit) {
       const dotaz = sloupce => sb.from('skupinky').select(sloupce).eq('aktivni', true).order('nazev')
       const zkusitDoplnky = Date.now() - _skupinkyBezDoplnkuOd > 600000
       const zkusitPozice = zkusitDoplnky && Date.now() - _skupinkyBezPoziceOd > 600000
-      let [s, c] = await Promise.all([
+      const clenove = () => sb.from('skupinky_lide').select('skupinka_id, worker_id, druh')
+      const plany = () => sb.from('skupinky_presuny').select('id, worker_id, cil_skupinka_id, druh, od')
+      let [s, c, pr] = await Promise.all([
         dotaz(zakladni + (zkusitDoplnky ? SKUPINKY_DOPLNKY : '') + (zkusitPozice ? SKUPINKY_POZICE : '')),
-        sb.from('skupinky_lide').select('skupinka_id, worker_id, druh')
+        clenove(), plany()
       ])
+      // PLÁNOVANÝ PŘESUN (supabase-migrace-ubytovani-presuny.sql). Nastal-li u
+      // někoho den, provede ho databáze (skupinky_proved_presuny) a čte se znovu
+      // — člověk se tak přesune „sám", jakmile ten den kdokoli otevře docházku.
+      // Bez SQL se plány jen nenabízejí; ubytování jede dál jako dřív.
+      const bezPresunu = !!(pr.error && jeChybiSkupinky(pr.error))
+      let presuny = pr.error ? [] : (pr.data || [])
+      // Den v čase firmy (jako databáze), ne v čase prohlížeče. Zkouší se
+      // nejvýš jednou za 10 minut: když databáze nic neprovede nebo spadne,
+      // nemá se ptát při každé tiché obnově.
+      const dnes = dnesVPraze()
+      if (presuny.some(x => String(x.od) <= dnes) && Date.now() - _presunyZkusenoOd > 600000) {
+        _presunyZkusenoOd = Date.now()
+        const pv = await sb.rpc('skupinky_proved_presuny')
+        if (pv.error) {
+          // Tichá chyba = „nic se nestalo a nikdo neví proč". Správce to musí vidět.
+          console.warn('[ubytovani] plánované přesuny se neprovedly', pv.error)
+          showToast('⚠️ Plánované přesuny se neprovedly: ' + (pv.error.message || 'chyba serveru'))
+        } else {
+          if (Number(pv.data) > 0) showToast('📅 Podle plánu přesunuto: ' + Number(pv.data))
+          const [c2, pr2] = await Promise.all([clenove(), plany()])
+          if (!c2.error) c = c2
+          if (!pr2.error) presuny = pr2.data || []
+        }
+      }
       // DOPLŇKY (cizí lidé, zaplaceno od–do) přidává supabase-migrace-ubytovani-
       // doplnky.sql. Dokud neproběhla, čte se jako dřív a okno je nenabízí —
       // ubytování musí fungovat dál i bez ní. Chybějící SLOUPEC se pozná dřív
@@ -11047,7 +11090,7 @@ function nactiSkupinky(vynutit) {
         if (jeChybiSkupinky(chyba)) _skupinky = { kdy: Date.now(), seznam: [], clenove: [], chybi: true }
         return _skupinky   // jiný výpadek: platí, co bylo načtené minule
       }
-      _skupinky = { kdy: Date.now(), seznam: s.data || [], clenove: c.data || [], chybi: false, bezDoplnku, bezPozice }
+      _skupinky = { kdy: Date.now(), seznam: s.data || [], clenove: c.data || [], chybi: false, bezDoplnku, bezPozice, presuny, bezPresunu }
     } catch (e) {}
     return _skupinky
   })().finally(() => { _skupinkyBezi = null })
@@ -11076,6 +11119,11 @@ function skupinkyCipyHtml(workerId) {
     const s = skupinkaCloveka(workerId, d)
     if (!s) return ''
     return `<span title="${escAttr(SKUPINKY_DRUH[d].jedno + ': ' + s.nazev + (s.adresa ? ' — ' + s.adresa : ''))}" style="display:inline-block;margin:2px 4px 0 0;padding:0 6px;border-radius:8px;border:1.5px solid ${barvaSkupinky(s)};background:${tonSkupinky(s, 0.12)};color:#2b2622;font-size:10.5px;font-weight:700;line-height:16px;white-space:nowrap;max-width:100%;overflow:hidden;text-overflow:ellipsis">${SKUPINKY_DRUH[d].ikona} ${escAttr(s.nazev)}</span>`
+  }).join('') + ['ubytovani', 'auto'].map(d => {
+    // Plánovaný přesun je vidět i v Pracovnících (oponent 4. 10.: „plán je vidět jen v Ubytování").
+    const p = planCloveka(workerId, d)
+    const c = p && _skupinky.seznam.find(x => String(x.id) === String(p.cil_skupinka_id))
+    return c ? `<span data-plan-cip title="Plánovaný přesun" style="display:inline-block;margin:2px 4px 0 0;padding:0 6px;border-radius:8px;border:1.5px dashed var(--blue);color:var(--blue);font-size:10.5px;font-weight:700;line-height:16px;white-space:nowrap;max-width:100%;overflow:hidden;text-overflow:ellipsis">📅 → ${escAttr(c.nazev)} od ${escAttr(datumPlanu(p.od))}</span>` : ''
   }).join('')
 }
 
@@ -11242,6 +11290,8 @@ function vykresliUbytovani() {
   }
   const D = SKUPINKY_DRUH[_druhSkupinek]
   const skupiny = _skupinky.seznam.filter(s => s.druh === _druhSkupinek)
+  // Výběr do plánu platí jen pro tentýž druh a dokud cílová karta existuje.
+  if (_ubytPlan && (_ubytPlan.druh !== _druhSkupinek || !skupiny.some(x => String(x.id) === String(_ubytPlan.cil)))) _ubytPlan = null
   const hledat = textKHledani(_ubytHledat)
   const sedi = t => !hledat || textKHledani(t).includes(hledat)
   const podleId = {}
@@ -11270,7 +11320,7 @@ function vykresliUbytovani() {
     const plno = s.pocet_mist && obsazenoSkupinky(s) > s.pocet_mist
     const mapa = s.adresa ? `<a href="https://www.google.com/maps/search/?api=1&amp;query=${encodeURIComponent(s.adresa)}" target="_blank" rel="noopener" style="color:inherit">${escAttr(s.adresa)}</a>` : ''
     const misto = rozlozit ? rozlozeni.mapa.get(s.id) : null
-    return `<div class="ubyt-karta" data-id="${escAttr(s.id)}" style="${misto ? `grid-column:${misto.x + 1};grid-row:${misto.y + 1};` : ''}border:1.5px solid var(--brd);border-left:7px solid ${barvaSkupinky(s)};border-radius:12px;background:#fff;padding:12px 14px;display:flex;flex-direction:column;gap:8px">
+    return `<div class="ubyt-karta${_ubytPlan && String(_ubytPlan.cil) === String(s.id) ? ' ubyt-plan-cil' : ''}" data-id="${escAttr(s.id)}" style="${misto ? `grid-column:${misto.x + 1};grid-row:${misto.y + 1};` : ''}border:1.5px solid var(--brd);border-left:7px solid ${barvaSkupinky(s)};border-radius:12px;background:#fff;padding:12px 14px;display:flex;flex-direction:column;gap:8px">
       <div style="display:flex;align-items:flex-start;gap:8px">
         <div style="flex:1;min-width:0">
           <div style="font-size:15px;font-weight:800">${D.ikona} ${escAttr(s.nazev)}</div>
@@ -11283,14 +11333,16 @@ function vykresliUbytovani() {
         ${rozlozit ? `<button type="button" class="ubyt-uchop" data-uchop="${escAttr(s.id)}" title="Chyťte a přetáhněte kartu, kam potřebujete" aria-label="Přesunout kartu" onpointerdown="zacniPresunKarty(event,'${jsStr(String(s.id))}')">⠿</button>` : ''}
       </div>
       <div style="display:flex;flex-direction:column;gap:4px">
-        ${lide.length ? lide.map(w => `<div data-ubyt-clovek="${escAttr(String(w.id))}"${hledat && sedi(w.full_name) ? ' data-nalezen' : ''} style="display:flex;align-items:center;gap:10px;font-size:14px;border-radius:8px${hledat && sedi(w.full_name) ? ';background:#fff3c4;box-shadow:0 0 0 4px #fff3c4' : ''}">${fotkaHtml(w.avatar_url, w.full_name, 44, false)}<span style="flex:1;min-width:0;display:flex;align-items:center"><span style="min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;cursor:pointer;font-weight:600" onclick="openWorkerModal('${jsStr(String(w.id))}')">${escAttr(w.full_name || '')}</span>${vlajkaZaJmenemHtml(w.id)}</span><button onclick="odeberZeSkupinky('${jsStr(String(s.id))}','${jsStr(String(w.id))}')" title="Odebrat z ${escAttr(D.jedno)}" style="border:none;background:none;color:var(--text3);cursor:pointer;font-size:15px;padding:2px 6px;min-height:28px">✕</button></div>`).join('')
+        ${lide.length ? lide.map(w => radekClovekaUbytHtml(s, w, D, hledat && sedi(w.full_name))).join('')
           : '<div style="font-size:12.5px;color:var(--text3)">Zatím tu nikdo není.</div>'}
         ${neviditelnych ? `<div data-neviditelni style="font-size:12px;color:var(--text3)">＋ ${neviditelnych} další (neaktivní nebo ze schované firmy)</div>` : ''}
         ${ciziSkupinky(s) ? `<div data-cizi style="font-size:12.5px;color:var(--text2);padding:6px 8px;border:1.5px dashed var(--brd);border-radius:8px">👤 Cizí lidé na pokoji: <b>${ciziSkupinky(s)}</b>${s.cizi_jmena ? ' — ' + escAttr(s.cizi_jmena) : ''}</div>` : ''}
+        ${prijedouHtml(s, podleId)}
       </div>
       <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:2px">
         <button onclick="pridatLideDoSkupinky('${jsStr(String(s.id))}')" class="btn-pri" style="padding:7px 12px;font-size:13px">＋ Přidat lidi</button>
         <button onclick="upravSkupinku('${jsStr(String(s.id))}')" style="padding:7px 12px;font-size:13px;border:1.5px solid var(--brd);border-radius:8px;background:#fff;cursor:pointer;font-family:inherit;font-weight:700">✎ Upravit</button>
+        ${_skupinky.bezPresunu || _ubytPlan ? '' : `<button data-planovat="${escAttr(String(s.id))}" onclick="planujPresunSem('${jsStr(String(s.id))}')" style="padding:7px 12px;font-size:13px;border:1.5px solid var(--blue);border-radius:8px;background:#fff;color:var(--blue);cursor:pointer;font-family:inherit;font-weight:700">📅 Plánovat přesun sem</button>`}
       </div>
     </div>`
   }).join('')
@@ -11306,15 +11358,18 @@ function vykresliUbytovani() {
         : `<div style="display:flex;flex-wrap:wrap;gap:8px">${viditelneFirmy.map(f => { const on = f.resime_ubytovani === true; return `<button type="button" data-firma="${escAttr(String(f.id))}" aria-pressed="${on}" onclick="prepniFirmuUbytovani('${jsStr(String(f.id))}')" style="min-height:44px;padding:8px 14px;border-radius:22px;border:2px solid ${on ? 'var(--blue)' : 'var(--brd)'};background:${on ? 'var(--blue)' : '#fff'};color:${on ? '#fff' : 'var(--text)'};font-size:13.5px;font-weight:700;cursor:pointer;font-family:inherit">${on ? '✓ ' : ''}${escAttr(cleanTeamName(f.name || ''))}</button>` }).join('')}</div>
       <div style="font-size:12px;color:var(--text3);margin-top:8px">${vybrane.size ? 'Dole a v „Přidat lidi" jsou jen lidi z vybraných firem.' : 'Žádná firma není vybraná — ukazují se lidi ze všech firem.'}</div>`}
     </div>` : ''
-  box.innerHTML = `${firmyHtml}
+  box.innerHTML = `${planListaHtml()}${firmyHtml}
     ${!skupiny.length ? `<div style="padding:16px;color:var(--text3)">Zatím tu není žádné ${escAttr(D.jedno)}. Založte ho tlačítkem „＋ ${escAttr(D.nove)}".</div>`
       : karty ? `<div id="ubyt-mrizka" data-sloupcu="${rozlozit ? sloupcu : 0}" style="display:grid;${rozlozit ? `grid-template-columns:repeat(${sloupcu},minmax(0,1fr));grid-template-rows:repeat(${rozlozeni.radku},auto)` : 'grid-template-columns:repeat(auto-fill,minmax(280px,1fr))'};gap:12px">${karty}</div>
         ${_skupinky.bezPozice && !_skupinky.bezDoplnku && !hledat ? '<div data-bez-rozlozeni style="font-size:12px;color:var(--text3);margin-top:8px">Přesouvání karet půjde po spuštění SQL supabase-migrace-ubytovani-rozlozeni.sql.</div>' : ''}`
       : `<div data-nic-nenalezeno style="padding:16px;color:var(--text3)">Na „${escAttr(_ubytHledat.trim())}" se nic nenašlo.</div>`}
     <div data-bez-ubytovani style="margin-top:16px;padding:12px 14px;border-radius:12px;background:var(--bg,#f4efe7);${hledat && !bez.length ? 'display:none' : ''}">
       <div style="font-size:13px;font-weight:800;margin-bottom:6px">${D.ikona} ${escAttr(D.bez)}: ${bez.length}${jinychFirem ? `<span data-jinych-firem style="font-weight:400;color:var(--text3)"> · ${jinychFirem} z ostatních firem se neukazuje</span>` : ''}</div>
-      <div style="font-size:12.5px;color:var(--text2);line-height:1.7">${bez.map(w => escAttr(w.full_name || '')).join(' · ') || '—'}</div>
-    </div>`
+      ${_ubytPlan ? `<div data-bez-vyber style="display:flex;flex-wrap:wrap;gap:6px">${bez.map(w => vyberBezHtml(w)).join('') || '—'}</div>`
+        : `<div style="font-size:12.5px;color:var(--text2);line-height:1.7">${bez.map(w => escAttr(w.full_name || '') + planBezHtml(w)).join(' · ') || '—'}</div>`}
+    </div>
+    ${_skupinky.bezPresunu && !_skupinky.chybi ? '<div data-bez-presunu style="font-size:12px;color:var(--text3);margin-top:8px">Plánovaný přesun půjde po spuštění SQL supabase-migrace-ubytovani-presuny.sql.</div>' : ''}
+    ${_ubytPlan ? '<div data-plan-misto style="height:110px"></div>' : ''}`
 }
 
 // Kam která karta patří při `sloupcu` sloupcích: nejdřív uložená místa (vejdou-li
@@ -11387,7 +11442,7 @@ function zacniPresunKarty(e, id) {
   }
   // U horního a dolního okraje se stránka posouvá sama — jinak by se karta
   // nedala dotáhnout do řádku, který není vidět.
-  const svitek = mrizka.closest('.view') || document.scrollingElement
+  const svitek = rolujiciPredek(mrizka)
   const rolovani = setInterval(() => {
     if (posledniY > innerHeight - 70) svitek.scrollTop += 14
     else if (posledniY < 70) svitek.scrollTop -= 14
@@ -11436,6 +11491,332 @@ async function presunKartu(id, cil) {
     showToast('❌ Rozložení se neuložilo' + (spatne.error ? ': ' + spatne.error.message : ' — zkontrolujte oprávnění'))
     zneplatniSkupinky(); loadUbytovani(true)
   }
+}
+
+// PŘETAŽENÍ ČLOVĚKA DO JINÉHO UBYTOVÁNÍ (majitel 4. 10. 2026: „ať můžu taky
+// přesouvat lidi z ubytování na ubytování myší — chytím toho člověka
+// a přetáhnu"). Platí stejně pro auta: karta je karta.
+// MYŠ: tažení začne až po pohybu o pár pixelů — obyčejné kliknutí na jméno
+// dál otevře kartu pracovníka. PRST: až po podržení (0,4 s) — jinak by
+// každé posunutí stránky po kartách chytilo člověka.
+// Puštění na jinou kartu = jeden zápis (zapisClenstvi): člověk se přeřadí
+// a dostane do profilu novou adresu. Mimo karty se nestane nic.
+let _ubytPotlacKlik = 0
+function zacniPresunCloveka(e, odkudId, workerId) {
+  if (_ubytTahne || _ubytPlan || (e.pointerType === 'mouse' && e.button !== 0)) return
+  if (e.target.closest && e.target.closest('button, a')) return   // ✕ a odkazy mají svou práci
+  let radek = e.currentTarget
+  const dotyk = e.pointerType === 'touch'
+  const pid = e.pointerId   // druhý prst tažení prvního nesmí řídit
+  // Myš: žádné označování textu ani tažení obrázku. Prst ne — tam musí
+  // fungovat posouvání stránky, dokud se člověk nepodrží.
+  if (!dotyk) e.preventDefault()
+  const x0 = e.clientX, y0 = e.clientY
+  let tahne = false, cil = null, duch = null, rolovani = null, posledniY = y0, odDuchu = { x: 0, y: 0 }
+  const najdiCil = (x, y) => {
+    for (const el of document.elementsFromPoint(x, y)) {
+      const k = el.closest && el.closest('.ubyt-karta')
+      if (k && k.dataset.id && k.dataset.id !== String(odkudId)) return k
+      if (k) return null
+    }
+    return null
+  }
+  const zacni = () => {
+    // Tichá obnova během podržení prstem řádek překreslí — vezme se nový, nebo nic.
+    if (!radek.isConnected) {
+      const novy = document.querySelector(`.ubyt-karta[data-id="${CSS.escape(String(odkudId))}"] [data-ubyt-clovek="${CSS.escape(String(workerId))}"]`)
+      if (!novy) { uklid(false); return false }
+      radek = novy
+    }
+    tahne = true; _ubytTahne = true
+    document.body.classList.add('ubyt-tahne')
+    const r = radek.getBoundingClientRect()
+    odDuchu = { x: x0 - r.left, y: y0 - r.top }
+    duch = radek.cloneNode(true)
+    duch.removeAttribute('onpointerdown'); duch.removeAttribute('data-ubyt-clovek')
+    duch.classList.add('ubyt-duch', 'ubyt-clovek-duch')
+    duch.style.left = r.left + 'px'; duch.style.top = r.top + 'px'; duch.style.width = r.width + 'px'
+    document.body.appendChild(duch)
+    radek.classList.add('ubyt-tazena')
+    const svitek = rolujiciPredek(radek)
+    rolovani = setInterval(() => {
+      if (posledniY > innerHeight - 70) svitek.scrollTop += 14
+      else if (posledniY < 70) svitek.scrollTop -= 14
+    }, 30)
+    return true
+  }
+  // Prst: podržet. Pohne-li se dřív, je to posouvání stránky a nic se nechytá.
+  let drzeni = dotyk ? setTimeout(() => { drzeni = null; zacni() }, 400) : null
+  // Během tažení prstem se stránka nesmí posouvat (jinak prohlížeč tažení zruší).
+  const brzdaPosunu = ev => { if (tahne) ev.preventDefault() }
+  // Android po dlouhém podržení obrázku otevře kontextové menu a dotyk zruší.
+  const bezMenu = ev => { ev.preventDefault() }
+  if (dotyk) { window.addEventListener('touchmove', brzdaPosunu, { passive: false }); window.addEventListener('contextmenu', bezMenu, true) }
+  const pohyb = ev => {
+    if (ev.pointerId !== pid) return
+    posledniY = ev.clientY
+    if (!tahne) {
+      const daleko = Math.abs(ev.clientX - x0) > 6 || Math.abs(ev.clientY - y0) > 6
+      if (dotyk) { if (daleko && drzeni) { clearTimeout(drzeni); drzeni = null; uklid(false) } return }
+      if (!daleko) return
+      if (zacni() === false) return
+    }
+    duch.style.left = (ev.clientX - odDuchu.x) + 'px'; duch.style.top = (ev.clientY - odDuchu.y) + 'px'
+    const novy = najdiCil(ev.clientX, ev.clientY)
+    if (cil && cil !== novy) cil.classList.remove('ubyt-cil')
+    if (novy) novy.classList.add('ubyt-cil')
+    cil = novy
+  }
+  const uklid = (prekreslit) => {
+    if (drzeni) { clearTimeout(drzeni); drzeni = null }
+    window.removeEventListener('pointermove', pohyb)
+    window.removeEventListener('pointerup', konec)
+    window.removeEventListener('pointercancel', konec)
+    if (dotyk) { window.removeEventListener('touchmove', brzdaPosunu); window.removeEventListener('contextmenu', bezMenu, true) }
+    if (rolovani) clearInterval(rolovani)
+    if (duch) duch.remove()
+    if (cil) cil.classList.remove('ubyt-cil')
+    radek.classList.remove('ubyt-tazena')
+    if (tahne) { document.body.classList.remove('ubyt-tahne'); _ubytTahne = false }
+    if (prekreslit) vykresliUbytovani()
+  }
+  const konec = ev => {
+    if (ev.pointerId !== pid) return
+    const kam = tahne && ev.type === 'pointerup' && cil ? cil.dataset.id : null
+    const tahnul = tahne
+    uklid(false)
+    if (!tahnul) return
+    // Po tažení prohlížeč pošle ještě „click" — ten nesmí otevřít kartu pracovníka.
+    _ubytPotlacKlik = Date.now()
+    if (kam) presunCloveka(workerId, odkudId, kam)
+    else vykresliUbytovani()
+  }
+  window.addEventListener('pointermove', pohyb)
+  window.addEventListener('pointerup', konec)
+  window.addEventListener('pointercancel', konec)
+}
+document.addEventListener('click', e => {
+  if (_ubytPotlacKlik && Date.now() - _ubytPotlacKlik < 400 && e.target.closest && e.target.closest('#ubyt-obsah')) {
+    e.stopPropagation(); e.preventDefault()
+  }
+  _ubytPotlacKlik = 0
+}, true)
+async function presunCloveka(workerId, odkudId, kamId) {
+  const kam = _skupinky.seznam.find(x => String(x.id) === String(kamId))
+  const odkud = _skupinky.seznam.find(x => String(x.id) === String(odkudId))
+  if (!kam || String(kamId) === String(odkudId)) { vykresliUbytovani(); return }
+  const w = _ubytLide.find(x => String(x.id) === String(workerId))
+  const jmeno = (w && w.full_name) || 'pracovník'
+  if (kam.pocet_mist && obsazenoSkupinky(kam) + 1 > kam.pocet_mist &&
+      !confirm('V „' + kam.nazev + '" je plno (' + obsazenoSkupinky(kam) + ' / ' + kam.pocet_mist + ').\n\nPřesunout ' + jmeno + ' i tak?')) {
+    vykresliUbytovani(); return
+  }
+  // PLÁN A RUČNÍ PŘESUN (oponent 4. 10.): přesun přímo do cíle plánu plán
+  // splní (zapisClenstvi ho smaže); přesun jinam se zeptá — jinak by ho v den
+  // plánu databáze vrátila zpátky podle starého rozhodnutí.
+  const plan = planCloveka(workerId, kam.druh)
+  let zrusitPlan = null
+  if (plan && String(plan.cil_skupinka_id) !== String(kam.id)) {
+    if (confirm(jmeno + ' má naplánovaný přesun do „' + nazevSkupinky(plan.cil_skupinka_id) + '" od ' + datumPlanu(plan.od) + '\n\nOK = plán zrušit · Zrušit = plán nechat')) zrusitPlan = plan
+  }
+  // Hned je vidět, kam dopadl; databáze dobíhá za tím. Když neuloží, načte
+  // se znovu, co v ní opravdu je (jako u přesunu karet).
+  const predchozi = { [String(workerId)]: odkud && odkud.adresa ? odkud.adresa : null }
+  const clen = _skupinky.clenove.find(c => String(c.worker_id) === String(workerId) && c.druh === kam.druh)
+  if (clen) clen.skupinka_id = kam.id
+  vykresliUbytovani()
+  const chyba = await zapisClenstvi(kam, [workerId], [], predchozi)
+  if (chyba) { showToast(chyba); zneplatniSkupinky(); loadUbytovani(true); return }
+  if (zrusitPlan) {
+    const { error } = await sb.from('skupinky_presuny').delete().eq('id', zrusitPlan.id).select('id')
+    if (error) showToast('⚠️ Přesunuto, ale plán se nezrušil: ' + error.message)
+    else _skupinky.presuny = (_skupinky.presuny || []).filter(x => x.id !== zrusitPlan.id)
+  }
+  vykresliUbytovani()
+  showToast('✅ ' + jmeno + ' → ' + kam.nazev)
+  // Zápis je ověřený (zapisClenstvi hlídá počet uložených řádků), takže zůstává,
+  // co je vidět — jako u přesunu karet. Příští načtení vezme čerstvá data.
+  zneplatniSkupinky()
+}
+
+// ── PLÁNOVANÝ PŘESUN (majitel 4. 10. 2026) ─────────────────────────────────
+// „Dám, že se bude přesouvat — tlačítko — a ty osoby, na který kliknu, se tam
+// zařadí; bude u nich napsaný datum, od kdy se tam budou přesouvat."
+// Postup: na kartě „📅 Plánovat přesun sem" → od kdy → klikání na lidi (v
+// kartách i dole bez ubytování) → Uložit plán. U člověka je pak štítek
+// „→ kam od kdy", v cílové kartě „Přijedou". Do obsazenosti se nepočítá, dokud
+// den nenastane; ten den ho přesune databáze sama (viz nactiSkupinky).
+// Jeden plán na člověka a druh: nový plán starý nahradí.
+let _ubytPlan = null   // { cil, druh, od, vybrani: Set, uklada } — právě se vybírá
+let _presunyZkusenoOd = 0   // kdy se naposled zkoušelo provést splatné plány
+function dnesVPraze() {
+  try { return new Intl.DateTimeFormat('sv-SE', { timeZone: 'Europe/Prague' }).format(new Date()) } catch (e) { return localDateStr(new Date()) }
+}
+function nazevSkupinky(id) { const s = _skupinky.seznam.find(x => String(x.id) === String(id)); return s ? s.nazev : '?' }
+function jmenoUbyt(workerId) { const w = _ubytLide.find(x => String(x.id) === String(workerId)); return (w && w.full_name) || 'Pracovník' }
+// Co při tažení u okraje opravdu roluje: první předek, který se dá posouvat,
+// jinak celá stránka (.view na Ubytování neroluje — posouvat ho nedělalo nic).
+function rolujiciPredek(el) {
+  for (let x = el && el.parentElement; x && x !== document.body; x = x.parentElement) {
+    const o = getComputedStyle(x).overflowY
+    if ((o === 'auto' || o === 'scroll') && x.scrollHeight > x.clientHeight) return x
+  }
+  return document.scrollingElement || document.documentElement
+}
+function planCloveka(workerId, druh) {
+  return (_skupinky.presuny || []).find(p => String(p.worker_id) === String(workerId) && p.druh === druh) || null
+}
+function datumPlanu(d) {
+  const [y, m, dd] = String(d || '').split('-').map(Number)
+  return y && m && dd ? dd + '. ' + m + '.' : String(d || '')
+}
+function stitekPlanuHtml(p, text, pozde = false) {
+  return `<button type="button" class="ubyt-plan${pozde ? ' ubyt-plan--pozde' : ''}" data-plan="${escAttr(String(p.id))}" onclick="zrusPlanPresunu('${jsStr(String(p.id))}')" title="Plánovaný přesun — kliknutím ho zrušíte">${text}</button>`
+}
+// Řádek člověka v kartě. DVA REŽIMY: běžný (chytit a přetáhnout, jméno otevře
+// kartu pracovníka, ✕ odebere) a výběr do plánu (klik vybere / zruší výběr —
+// jméno ani fotka nic jiného neotvírají, ať se nedá minout).
+function radekClovekaUbytHtml(s, w, D, nalezen) {
+  const wid = String(w.id)
+  const zvyrazneni = nalezen ? ';background:#fff3c4;box-shadow:0 0 0 4px #fff3c4' : ''
+  const vlajka = vlajkaZaJmenemHtml(w.id)
+  if (_ubytPlan && String(_ubytPlan.cil) !== String(s.id)) {
+    const vybran = _ubytPlan.vybrani.has(wid)
+    // Dosavadní plán musí být vidět i při výběru — uložení ho nahradí.
+    const dosavadni = planCloveka(w.id, _ubytPlan.druh)
+    const poznamka = dosavadni ? `<span data-dosavadni-plan style="font-size:11.5px;color:var(--blue);font-weight:700;white-space:nowrap">📅 má plán → ${escAttr(nazevSkupinky(dosavadni.cil_skupinka_id))} od ${escAttr(datumPlanu(dosavadni.od))}</span>` : ''
+    // Fotka v běžném režimu otevírá náhled (onclick se stopPropagation) — při výběru by klik spolkla.
+    const fotka = fotkaHtml(w.avatar_url, w.full_name, 44, false).replace(/ onclick="event\.stopPropagation\(\);showAvatarPreview\([^"]*\)"/, '')
+    return `<div data-ubyt-clovek="${escAttr(wid)}" class="ubyt-clovek ubyt-vyber${vybran ? ' ubyt-vybran' : ''}" role="checkbox" aria-checked="${vybran}" tabindex="0" onclick="vyberDoPlanu('${jsStr(wid)}')" onkeydown="if(event.key===' '||event.key==='Enter'){event.preventDefault();vyberDoPlanu('${jsStr(wid)}')}" style="display:flex;align-items:center;gap:10px;font-size:14px;border-radius:8px${zvyrazneni}">${fotka}<span style="flex:1;min-width:0;display:flex;align-items:center;flex-wrap:wrap;gap:2px 6px"><span style="min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:600">${escAttr(w.full_name || '')}</span>${vlajka}${poznamka}</span><span class="ubyt-vyber-znak" aria-hidden="true">${vybran ? '☑' : '☐'}</span></div>`
+  }
+  const plan = planCloveka(w.id, s.druh)
+  const cil = plan && String(plan.cil_skupinka_id) !== String(s.id) ? _skupinky.seznam.find(x => String(x.id) === String(plan.cil_skupinka_id)) : null
+  // Plán, jehož den už minul, se neprovedl (chyba, nebo ještě neproběhl ranní běh) — musí to být vidět.
+  const pozde = cil && String(plan.od) < dnesVPraze()
+  const stitek = cil ? stitekPlanuHtml(plan, `${pozde ? '⚠️' : '📅'} → ${escAttr(cil.nazev)} od ${escAttr(datumPlanu(plan.od))}${pozde ? ' — neprovedeno' : ''}`, pozde) : ''
+  return `<div data-ubyt-clovek="${escAttr(wid)}"${nalezen ? ' data-nalezen' : ''} class="ubyt-clovek" title="Chyťte a přetáhněte ${escAttr(D.jinam)}" onpointerdown="zacniPresunCloveka(event,'${jsStr(String(s.id))}','${jsStr(wid)}')" style="display:flex;align-items:center;gap:10px;font-size:14px;border-radius:8px${zvyrazneni}">${fotkaHtml(w.avatar_url, w.full_name, 44, false)}<span style="flex:1;min-width:0;display:flex;align-items:center;flex-wrap:wrap;gap:2px 6px"><span style="min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;cursor:pointer;font-weight:600" onclick="openWorkerModal('${jsStr(wid)}')">${escAttr(w.full_name || '')}</span>${vlajka}${stitek}</span><button onclick="odeberZeSkupinky('${jsStr(String(s.id))}','${jsStr(wid)}')" title="Odebrat z ${escAttr(D.jedno)}" style="border:none;background:none;color:var(--text3);cursor:pointer;font-size:15px;padding:2px 6px;min-height:28px">✕</button></div>`
+}
+// Kdo do karty přijede (a od kdy). Jména jen viditelných lidí, ostatní číslem.
+function prijedouHtml(s, podleId) {
+  // Kdo už v kartě je (přesunut ručně dřív), do „Přijedou" nepatří.
+  const uz = new Set(clenoveSkupinky(s.id).map(String))
+  const plany = (_skupinky.presuny || []).filter(p => String(p.cil_skupinka_id) === String(s.id) && p.druh === s.druh && !uz.has(String(p.worker_id)))
+  if (!plany.length) return ''
+  const videt = plany.filter(p => podleId[p.worker_id]).sort((a, b) => (String(a.od) < String(b.od) ? -1 : String(a.od) > String(b.od) ? 1 : 0))
+  const skryto = plany.length - videt.length
+  return `<div data-prijedou style="font-size:12.5px;color:var(--text2);padding:6px 8px;border:1.5px dashed var(--blue);border-radius:8px;display:flex;flex-wrap:wrap;gap:6px;align-items:center"><span style="font-weight:800">📅 ${escAttr(SKUPINKY_DRUH[s.druh].prijedou)}:</span>${videt.map(p => stitekPlanuHtml(p, `${escAttr(podleId[p.worker_id].full_name || '')} od ${escAttr(datumPlanu(p.od))}`)).join('')}${skryto ? `<span>＋ ${skryto} další</span>` : ''}</div>`
+}
+function planBezHtml(w) {
+  const p = planCloveka(w.id, _druhSkupinek)
+  const cil = p && _skupinky.seznam.find(x => String(x.id) === String(p.cil_skupinka_id))
+  return cil ? ` <span data-plan-bez style="color:var(--blue);font-weight:700">(📅 → ${escAttr(cil.nazev)} od ${escAttr(datumPlanu(p.od))})</span>` : ''
+}
+function vyberBezHtml(w) {
+  const wid = String(w.id), v = !!(_ubytPlan && _ubytPlan.vybrani.has(wid))
+  const dosavadni = _ubytPlan && planCloveka(w.id, _ubytPlan.druh)
+  return `<button type="button" class="ubyt-vyber-chip${v ? ' ubyt-vybran' : ''}" data-ubyt-bez="${escAttr(wid)}" aria-pressed="${v}" onclick="vyberDoPlanu('${jsStr(wid)}')">${v ? '☑' : '☐'} ${escAttr(w.full_name || '')}${dosavadni ? ` <span data-dosavadni-plan style="color:var(--blue)">(📅 má plán → ${escAttr(nazevSkupinky(dosavadni.cil_skupinka_id))})</span>` : ''}</button>`
+}
+function planListaHtml() {
+  if (!_ubytPlan) return ''
+  const cil = _skupinky.seznam.find(x => String(x.id) === String(_ubytPlan.cil))
+  const n = _ubytPlan.vybrani.size
+  const uklada = !!_ubytPlan.uklada
+  const volno = cil && cil.pocet_mist ? Math.max(0, cil.pocet_mist - obsazenoSkupinky(cil)) : null
+  // DOLE A NAPEVNO (oponent 4. 10.): nahoře v kartě s overflow:hidden se lišta
+  // nepřilepí a horní lišta appky by ji zakryla. Dole je vždy vidět a na
+  // telefonu je pod palcem. Konec obsahu má místo navíc, ať nic nezakryje.
+  return `<div data-plan-lista style="position:fixed;left:50%;transform:translateX(-50%);bottom:calc(12px + env(safe-area-inset-bottom));width:min(860px, calc(100vw - 24px));box-sizing:border-box;z-index:9000;padding:12px 14px;border:2px solid var(--blue);border-radius:12px;background:#fff;box-shadow:0 10px 30px rgba(0,0,0,.25);display:flex;flex-wrap:wrap;align-items:center;gap:8px 12px">
+    <div style="flex:1;min-width:200px"><div style="font-size:14.5px;font-weight:800">📅 Přesun do „${escAttr(cil ? cil.nazev : '')}" od ${escAttr(datumPlanu(_ubytPlan.od))}</div><div style="font-size:12.5px;color:var(--text2);margin-top:2px">Klikněte na lidi, kteří se přesunou — v kartách i dole v seznamu „${escAttr(SKUPINKY_DRUH[_ubytPlan.druh].bez)}". Vybráno: <b data-plan-pocet>${n}</b>${volno !== null ? ` · volno teď: <b data-plan-volno>${volno}</b>` : ''}</div></div>
+    <button type="button" data-plan-zrusit onclick="zrusVyberPlanu()" ${uklada ? 'disabled' : ''} style="min-height:40px;padding:8px 14px;border:1.5px solid var(--brd);border-radius:9px;background:#fff;font-size:14px;font-weight:700;cursor:pointer;font-family:inherit">Zrušit</button>
+    <button type="button" data-plan-ulozit onclick="ulozPlanPresunu()" ${n && !uklada ? '' : 'disabled'} class="btn-pri" style="min-height:40px;padding:8px 16px;font-size:14px">${uklada ? 'Ukládám…' : 'Uložit plán'}</button>
+  </div>`
+}
+function planujPresunSem(id) {
+  const s = _skupinky.seznam.find(x => String(x.id) === String(id))
+  if (!s) return
+  // Dnešek v čase firmy — stejně jako databáze, která plán provede.
+  const dnes = dnesVPraze()
+  const z = new Date(dnes + 'T12:00:00'); z.setDate(z.getDate() + 1)
+  const zitra = localDateStr(z)
+  document.getElementById('ubyt-plan-overlay')?.remove()
+  const ov = document.createElement('div')
+  ov.id = 'ubyt-plan-overlay'
+  ov.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:10050;display:flex;align-items:center;justify-content:center;padding:16px'
+  ov.innerHTML = `<div style="background:#fff;border-radius:14px;max-width:420px;width:100%;padding:18px">
+    <div style="font-size:16px;font-weight:800">📅 Přesun do: ${escAttr(s.nazev)}</div>
+    <label style="display:block;margin-top:12px;font-size:13.5px;font-weight:700">Od kdy
+      <input type="date" data-od value="${zitra}" min="${dnes}" style="display:block;margin-top:6px;padding:9px 11px;border:1.5px solid var(--brd);border-radius:9px;font-size:15px;font-family:inherit;width:100%;box-sizing:border-box"></label>
+    <div style="font-size:12.5px;color:var(--text3);margin-top:8px;line-height:1.5">Pak klikáte na lidi, kteří se přesunou. Ten den je appka přesune sama — ráno kolem 8:00, nebo dřív, jakmile docházku otevře někdo z kanceláře${SKUPINKY_DRUH[s.druh].adresa ? ' (i s adresou v profilu)' : ''}. Do té doby jde plán zrušit kliknutím na štítek.</div>
+    <div style="display:flex;gap:10px;justify-content:flex-end;margin-top:14px">
+      <button type="button" data-zrusit style="padding:10px 16px;border:1.5px solid var(--brd);border-radius:9px;background:#fff;font-size:14px;font-weight:700;cursor:pointer;font-family:inherit">Zrušit</button>
+      <button type="button" data-dal style="padding:10px 16px;border:none;border-radius:9px;background:var(--blue);color:#fff;font-size:14px;font-weight:800;cursor:pointer;font-family:inherit">Vybrat lidi →</button>
+    </div></div>`
+  document.body.appendChild(ov)
+  const zavri = () => ov.remove()
+  ov.addEventListener('click', e => { if (e.target === ov) zavri() })
+  ov.querySelector('[data-zrusit]').onclick = zavri
+  ov.querySelector('[data-dal]').onclick = () => {
+    const od = ov.querySelector('[data-od]').value
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(od) || od < dnes) { showToast('Vyberte datum od dneška dál'); return }
+    zavri()
+    _ubytPlan = { cil: s.id, druh: s.druh, od, vybrani: new Set() }
+    vykresliUbytovani()
+    document.querySelector('[data-plan-lista]')?.scrollIntoView({ block: 'nearest' })
+  }
+}
+function vyberDoPlanu(workerId) {
+  if (!_ubytPlan || _ubytPlan.uklada) return
+  const k = String(workerId)
+  if (_ubytPlan.vybrani.has(k)) _ubytPlan.vybrani.delete(k); else _ubytPlan.vybrani.add(k)
+  // Klávesnicí (mezerník/Enter) se pokračuje na tomtéž řádku i po překreslení.
+  const ds = (document.activeElement && document.activeElement.dataset) || {}
+  const fokus = ds.ubytClovek ? `[data-ubyt-clovek="${CSS.escape(ds.ubytClovek)}"]` : ds.ubytBez ? `[data-ubyt-bez="${CSS.escape(ds.ubytBez)}"]` : null
+  vykresliUbytovani()
+  if (fokus) document.querySelector('#ubyt-obsah ' + fokus)?.focus()
+}
+function zrusVyberPlanu() { _ubytPlan = null; vykresliUbytovani() }
+async function ulozPlanPresunu() {
+  const pl = _ubytPlan
+  if (!pl || !pl.vybrani.size || pl.uklada) return
+  const cil = _skupinky.seznam.find(x => String(x.id) === String(pl.cil))
+  const vybrani = [...pl.vybrani]
+  // Jeden plán na člověka a druh: dosavadní se nahradí — ať se to neděje potichu.
+  const nahradi = vybrani.map(w => planCloveka(w, pl.druh)).filter(p => p && !(String(p.cil_skupinka_id) === String(pl.cil) && String(p.od) === String(pl.od)))
+  if (nahradi.length && !confirm('U ' + nahradi.length + (nahradi.length === 1 ? ' člověka' : ' lidí') + ' se nahradí dosavadní plán:\n\n'
+      + nahradi.map(p => '• ' + jmenoUbyt(p.worker_id) + ' → ' + nazevSkupinky(p.cil_skupinka_id) + ' od ' + datumPlanu(p.od)).join('\n') + '\n\nPokračovat?')) return
+  // Místa: kolik jich v cíli bude od toho dne (členové + cizí + kdo do té doby přijede + vybraní).
+  if (cil && cil.pocet_mist) {
+    const clenove = new Set(clenoveSkupinky(cil.id).map(String))
+    const prijdou = new Set((_skupinky.presuny || []).filter(p => String(p.cil_skupinka_id) === String(cil.id) && String(p.od) <= String(pl.od)).map(p => String(p.worker_id)))
+    vybrani.forEach(w => prijdou.add(String(w)))
+    const bude = obsazenoSkupinky(cil) + [...prijdou].filter(w => !clenove.has(w)).length
+    if (bude > cil.pocet_mist && !confirm('V „' + cil.nazev + '" bude od ' + datumPlanu(pl.od) + ' obsazeno ' + bude + ' / ' + cil.pocet_mist + '.\n\nUložit plán i tak?')) return
+  }
+  pl.uklada = true; vykresliUbytovani()   // žádný dvojklik ani výběr během ukládání
+  const radky = vybrani.map(w => ({ worker_id: w, cil_skupinka_id: pl.cil, druh: pl.druh, od: pl.od }))
+  const { data, error } = await sb.from('skupinky_presuny').upsert(radky, { onConflict: 'worker_id,druh' }).select('id')
+  if (error || !data || data.length !== radky.length) {
+    pl.uklada = false; vykresliUbytovani()
+    showToast(error && jeChybiSkupinky(error) ? '❌ Spusťte SQL supabase-migrace-ubytovani-presuny.sql'
+      : '❌ Plán se neuložil' + (error ? ': ' + error.message : ' — zkontrolujte oprávnění'))
+    return
+  }
+  _ubytPlan = null
+  showToast('✅ Naplánováno: ' + radky.length + ' → ' + ((cil && cil.nazev) || '') + ' od ' + datumPlanu(pl.od))
+  // Plán na dnešek se provede hned při tomhle načtení (nactiSkupinky) — bez brzdy.
+  _presunyZkusenoOd = 0
+  zneplatniSkupinky(); await loadUbytovani(true)
+}
+async function zrusPlanPresunu(planId) {
+  const p = (_skupinky.presuny || []).find(x => String(x.id) === String(planId))
+  if (!p) return
+  const w = _ubytLide.find(x => String(x.id) === String(p.worker_id))
+  const cil = _skupinky.seznam.find(x => String(x.id) === String(p.cil_skupinka_id))
+  if (!confirm('Zrušit plánovaný přesun?\n\n' + ((w && w.full_name) || 'Pracovník') + ' → ' + ((cil && cil.nazev) || '') + ' od ' + datumPlanu(p.od))) return
+  const { data, error } = await sb.from('skupinky_presuny').delete().eq('id', p.id).select('id')
+  if (error) { showToast('❌ Plán se nezrušil: ' + error.message); return }
+  if (!data || !data.length) { showToast('Plán už neexistuje — mezitím se provedl, nebo ho zrušil někdo jiný.'); zneplatniSkupinky(); loadUbytovani(true); return }
+  showToast('✅ Plán zrušen'); zneplatniSkupinky(); loadUbytovani(true)
 }
 
 // Jiná šířka okna = jiný počet sloupců: karty se přeskládají.
@@ -11610,7 +11991,11 @@ function pridatLideDoSkupinky(id) {
   const ov = document.createElement('div')
   ov.id = 'skupinka-lide-overlay'
   ov.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:10050;display:flex;align-items:center;justify-content:center;padding:16px'
-  const jinde = w => { const j = skupinkaCloveka(w.id, s.druh); return j && j.id !== id ? `<div style="font-size:11.5px;color:var(--amber);margin-top:1px">teď: ${escAttr(j.nazev)} — zaškrtnutím se přesune sem</div>` : '' }
+  const jinde = w => {
+    const j = skupinkaCloveka(w.id, s.druh), pl = planCloveka(w.id, s.druh)
+    return (j && j.id !== id ? `<div style="font-size:11.5px;color:var(--amber);margin-top:1px">teď: ${escAttr(j.nazev)} — zaškrtnutím se přesune sem</div>` : '')
+      + (pl ? `<div style="font-size:11.5px;color:var(--blue);margin-top:1px">📅 plán → ${escAttr(nazevSkupinky(pl.cil_skupinka_id))} od ${escAttr(datumPlanu(pl.od))}</div>` : '')
+  }
   ov.innerHTML = `<div style="background:#fff;border-radius:14px;max-width:460px;width:100%;max-height:88vh;display:flex;flex-direction:column;padding:18px">
     <div style="font-size:16px;font-weight:800">${D.ikona} Kdo patří do: ${escAttr(s.nazev)}</div>
     ${s.pocet_mist ? `<div style="font-size:12px;color:var(--text3);margin-top:4px">Míst celkem: ${s.pocet_mist}</div>` : ''}
@@ -11654,9 +12039,18 @@ function pridatLideDoSkupinky(id) {
     const odebrat = [...uz].filter(x => videt.has(x) && !vybrane.has(x))
     if (!pridat.length && !odebrat.length) { zavri(); return }
     if (s.pocet_mist && vybrane.size > s.pocet_mist && !confirm('Vybráno ' + vybrane.size + ' lidí, ale míst je jen ' + s.pocet_mist + '.\n\nUložit i tak?')) return
+    // Jako u přetažení: kdo má plán JINAM, toho by ten den databáze odvezla
+    // zpátky podle starého rozhodnutí — zeptat se, jestli plán zrušit.
+    const planyJinam = pridat.map(w => planCloveka(w, s.druh)).filter(p => p && String(p.cil_skupinka_id) !== String(s.id))
+    const zrusitPlany = planyJinam.length && confirm((planyJinam.length === 1 ? '1 člověk má' : planyJinam.length + ' lidí má') + ' naplánovaný přesun jinam:\n\n'
+      + planyJinam.map(p => '• ' + jmenoUbyt(p.worker_id) + ' → ' + nazevSkupinky(p.cil_skupinka_id) + ' od ' + datumPlanu(p.od)).join('\n') + '\n\nOK = plán zrušit · Zrušit = plán nechat') ? planyJinam : []
     e.target.disabled = true; e.target.textContent = 'Ukládám…'
     const chyba = await zapisClenstvi(s, pridat, odebrat)
     if (chyba) { e.target.disabled = false; e.target.textContent = 'Uložit'; showToast(chyba); return }
+    if (zrusitPlany.length) {
+      const { error } = await sb.from('skupinky_presuny').delete().in('id', zrusitPlany.map(p => p.id)).select('id')
+      if (error) showToast('⚠️ Uloženo, ale plán se nezrušil: ' + error.message)
+    }
     zavri()
     showToast('✅ Uloženo — ' + s.nazev + ': ' + vybrane.size + (s.pocet_mist ? ' / ' + s.pocet_mist : ''))
     zneplatniSkupinky(); loadUbytovani(true)
@@ -11664,8 +12058,14 @@ function pridatLideDoSkupinky(id) {
 }
 // Zápis členství. V jednom druhu je člověk jen jednou — přidání ho přesune.
 // Adresa ubytování jde i do profilu.
-async function zapisClenstvi(s, pridat, odebrat) {
+async function zapisClenstvi(s, pridat, odebrat, predchoziAdresy = null) {
   if (pridat.length) {
+    // Odkud kdo přichází (kvůli staré adrese v profilu). Volající, který už
+    // členství předběžně přepsal (přetažení), ji pošle sám.
+    const predchozi = predchoziAdresy || Object.fromEntries(pridat.map(w => {
+      const j = skupinkaCloveka(w, s.druh)
+      return [String(w), j && String(j.id) !== String(s.id) ? j.adresa : null]
+    }))
     // Jeden řádek na člověka a druh (unikátní v databázi) — přesun z jiného
     // ubytování je tak jediný zápis, ne „smazat a vložit" (nic se neztratí).
     const { data, error: e2 } = await sb.from('skupinky_lide')
@@ -11678,6 +12078,20 @@ async function zapisClenstvi(s, pridat, odebrat) {
     if (s.druh === 'ubytovani' && s.adresa) {
       const { error: e3 } = await sb.from('profiles').update({ accommodation_address: s.adresa }).in('id', pridat).select('id')
       if (e3) showToast('⚠️ Přiřazeno, ale adresa se lidem do profilu nezapsala: ' + e3.message)
+    } else if (s.druh === 'ubytovani') {
+      // Nové ubytování bez adresy: stará adresa v profilu by lhala — smaže se,
+      // ale jen když to byla adresa toho, odkud člověk odešel. Platí stejně
+      // pro přetažení, „Přidat lidi" i plánovaný přesun (funkce v databázi).
+      for (const w of pridat) {
+        const stara = predchozi[String(w)]
+        if (stara) await sb.from('profiles').update({ accommodation_address: null }).eq('id', w).eq('accommodation_address', stara).select('id')
+      }
+    }
+    // Kdo je teď tam, kam měl plán, ten plán splnil.
+    const splnene = (_skupinky.presuny || []).filter(p => pridat.map(String).includes(String(p.worker_id)) && String(p.cil_skupinka_id) === String(s.id))
+    if (splnene.length) {
+      const { error: e5 } = await sb.from('skupinky_presuny').delete().in('id', splnene.map(p => p.id)).select('id')
+      if (!e5) _skupinky.presuny = (_skupinky.presuny || []).filter(p => !splnene.includes(p))
     }
   }
   if (odebrat.length) {
@@ -16249,7 +16663,7 @@ async function stahniZalohovePdf() {
   try {
     const out = await buildInvoicePdf()
     const jmeno = 'Anzahlungsrechnung_' + String(d.cislo).replace(/[^a-zA-Z0-9_-]/g, '')
-      + '_' + String(d.dodavatel.jmeno || '').normalize('NFD').replace(/[̀-ͯ]/g, '')
+      + '_' + String(d.dodavatel.jmeno || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '')
         .replace(/[^a-zA-Z0-9]+/g, '_').replace(/^_+|_+$/g, '') + '.pdf'
     out.pdf.save(jmeno)
     showToast('✅ PDF uloženo')
@@ -16968,7 +17382,7 @@ async function downloadInvoicePdf(id) {
   const r = _invCache.find(x => x.id === id)
   const url = safeInvoiceUrl(r && r.pdf_url)
   if (!r || !url) { showToast('⚠️ U této faktury není PDF'); return }
-  const who = (r.worker?.full_name || r.supplier_name || '').normalize('NFD').replace(/[̀-ͯ]/g, '')
+  const who = (r.worker?.full_name || r.supplier_name || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '')
     .replace(/[^a-zA-Z0-9]+/g, '_').replace(/^_+|_+$/g, '')
   // Lomítko v čísle faktury by z názvu udělalo cestu — do souboru pouštíme jen písmena a číslice.
   const cis = String(r.invoice_number || '').replace(/[^a-zA-Z0-9_-]/g, '')
@@ -18868,19 +19282,11 @@ async function generateTeamAttendancePdf(teamId, teamName) {
   let grandTotal = 0
   const workerCount = Object.keys(byWorker).length
 
-  // Přelož všechny popisy práce do 3 jazyků dopředu (paralelně, s cache)
-  const _descToTrans = {}
-  Object.values(byWorker).forEach(w => (w.rows||[]).forEach(r => {
-    const d = (r.work_description || '').trim()
-    if (d && d !== '—') _descToTrans[d] = null
-  }))
-  const _descKeys = Object.keys(_descToTrans)
-  if (_descKeys.length) {
-    try {
-      const results = await Promise.all(_descKeys.map(d => translateWork3(d)))
-      _descKeys.forEach((d, i) => { _descToTrans[d] = results[i] })
-    } catch(e) { console.warn('[výkaz] překlady selhaly:', e?.message) }
-  }
+  // Popisy práce do 3 jazyků dopředu — jazyk podle národnosti autora, fronta,
+  // limit času a paměť (prelozPopisyDochazky).
+  let _descToTrans = {}
+  try { _descToTrans = await prelozPopisyDochazky(Object.values(byWorker).flatMap(w => w.rows || [])) }
+  catch(e) { console.warn('[výkaz] překlady selhaly:', e?.message) }
 
   const sectionsArr = await Promise.all(Object.entries(byWorker).map(async ([wid, w], idx) => {
     grandTotal += w.total
@@ -18909,7 +19315,7 @@ async function generateTeamAttendancePdf(teamId, teamName) {
       const dateFull = dt.toLocaleDateString('cs-CZ', { day:'2-digit', month:'2-digit', year:'numeric' })
       const site = attDisplaySite(r)
       const descRaw = (r.work_description || '').trim()
-      const descHtml = (descRaw && descRaw !== '—' && _descToTrans[descRaw]) ? renderWork3(_descToTrans[descRaw]) : '—'
+      const descHtml = (descRaw && descRaw !== '—') ? renderWork3(prekladRadku(_descToTrans, r)) : '—'
       const hh = (r.total_hours||0).toFixed(2)
       // Neplacený den ve výkazu ZŮSTÁVÁ — pracovník tam ten den byl a vedoucí
       // to má vidět. Jen se jeho hodiny nesčítají, a musí to být na první
@@ -23008,8 +23414,8 @@ function _invItemKey(week, year) {
 }
 
 // Poskládá anglický popis provedené práce za vybraný týden. Bere to, co
-// pracovník sám napsal do docházky („kde a co jsem dělal"), spojí to a
-// přeloží do angličtiny — fakturu čte německý odběratel.
+// pracovník sám napsal do docházky („kde a co jsem dělal"), každý popis
+// přeloží zvlášť do angličtiny a překlady spojí — fakturu čte německý odběratel.
 async function buildInvoiceItemEn(week, year) {
   const fallback = defaultInvoiceItem(currentProfile?.profession)
   if (!currentUser || !week || !year) return { text: fallback, note: 'default' }
@@ -23036,19 +23442,22 @@ async function buildInvoiceItemEn(week, year) {
   if (!uniq.length) return { text: fallback, note: 'empty' }
   const cs = uniq.join('; ')
   try {
-    const en = await translateToEn(cs)
-    // null = překladač neodpověděl. Český text pak NESMÍME vydávat za angličtinu —
-    // pracovník musí dostat varování, ať si položku přepíše sám.
-    if (en && en.trim()) return { text: en.trim(), note: 'translated' }
+    // Každý popis zvlášť a stejnou cestou jako výkazy (i se stejnou pamětí):
+    // spojený text pozná Google jen v JEDNOM jazyce a polský popis mezi
+    // českými by nechal nepřeložený (ověřeno 4. 10. 2026).
+    try { await nactiVlajky() } catch (e) {}
+    const jazyk = jazykPracovnika(currentUser.id)
+    // Den s „-" nebo jen zkratkou či jménem („OSB") nemá co překládat: bez
+    // písmen se vynechá, zkratka zůstane, jak je (dřív kvůli němu spadla
+    // celá položka na „nepřeloženo").
+    const sPismeny = uniq.filter(t => /\p{L}/u.test(t))
+    const en = (await prelozPopisyVcas(sPismeny.map(text => ({ text, jazyk })), { cile: ['en'] }))
+      .map((p, i) => p.en || (_slovaKPrekladu(sPismeny[i]).length ? null : sPismeny[i]))
+    // Chybí-li překlad byť jednoho popisu, nesmí se český text vydávat za
+    // angličtinu — pracovník dostane varování a položku si přepíše sám.
+    if (en.every(x => x && x.trim())) return { text: en.map(x => x.trim()).join('; '), note: 'translated' }
   } catch (e) { console.warn('[faktura] překlad selhal:', e?.message) }
   return { text: cs, note: 'untranslated' }
-}
-
-// Překlad do angličtiny — používá stejnou službu jako výkazy.
-// Vrací null, když se přeložit nepodařilo (na faktuře se to musí poznat).
-async function translateToEn(text) {
-  if (typeof _gtranslateTry === 'function') return await _gtranslateTry(text, 'en')
-  return null
 }
 
 // Přepnutí týdne → nový popis práce. Ručně upravený text pro daný týden má přednost.
@@ -23429,7 +23838,7 @@ async function onInvoiceWeekChange() {
     noteEl.style.fontWeight = res.note === 'untranslated' ? '700' : ''
     noteEl.textContent =
       res.note === 'translated'   ? 'Přeloženo z toho, co jste ten týden zapsal v docházce. Zkontrolujte a případně opravte.' :
-      res.note === 'untranslated' ? '⚠️ Překlad se nepodařilo načíst — tohle je váš původní český text. Přepište ho prosím anglicky, faktura jde německému odběrateli.' :
+      res.note === 'untranslated' ? '⚠️ Překlad se nepodařilo načíst — tohle je váš původní text. Přepište ho prosím anglicky, faktura jde německému odběrateli.' :
       res.note === 'empty'        ? 'V docházce za tento týden není popis práce — doplněn obecný text. Můžete ho upřesnit anglicky.' :
                                     'Text je anglicky, protože fakturu čte německý odběratel. Můžete ho přepsat.'
   }
@@ -25668,19 +26077,11 @@ async function generateAttendanceExport() {
   let grandTotal = 0
   const workerCount = Object.keys(byWorker).length
 
-  // Přelož všechny popisy práce do 3 jazyků dopředu (paralelně, s cache)
-  const _descToTrans = {}
-  Object.values(byWorker).forEach(w => (w.rows||[]).forEach(r => {
-    const d = (r.work_description || '').trim()
-    if (d && d !== '—') _descToTrans[d] = null
-  }))
-  const _descKeys = Object.keys(_descToTrans)
-  if (_descKeys.length) {
-    try {
-      const results = await Promise.all(_descKeys.map(d => translateWork3(d)))
-      _descKeys.forEach((d, i) => { _descToTrans[d] = results[i] })
-    } catch(e) { console.warn('[výkaz] překlady selhaly:', e?.message) }
-  }
+  // Popisy práce do 3 jazyků dopředu — jazyk podle národnosti autora, fronta,
+  // limit času a paměť (prelozPopisyDochazky).
+  let _descToTrans = {}
+  try { _descToTrans = await prelozPopisyDochazky(Object.values(byWorker).flatMap(w => w.rows || [])) }
+  catch(e) { console.warn('[výkaz] překlady selhaly:', e?.message) }
 
   const sectionsArr = await Promise.all(Object.entries(byWorker).map(async ([wid, w], idx) => {
     grandTotal += w.total
@@ -25709,7 +26110,7 @@ async function generateAttendanceExport() {
       const dateFull = dt.toLocaleDateString('cs-CZ', { day:'2-digit', month:'2-digit', year:'numeric' })
       const site = attDisplaySite(r)
       const descRaw = (r.work_description || '').trim()
-      const descHtml = (descRaw && descRaw !== '—' && _descToTrans[descRaw]) ? renderWork3(_descToTrans[descRaw]) : '—'
+      const descHtml = (descRaw && descRaw !== '—') ? renderWork3(prekladRadku(_descToTrans, r)) : '—'
       const hh = (r.total_hours||0).toFixed(2)
       // Stejně jako ve výkazu za tým: neplacený den je vidět, ale nesčítá se.
       const vyjimky = znackyVyjimekDne(r)
@@ -26466,7 +26867,20 @@ function triggerHtmlDownload(html, filename) {
 
 
 // -- EXPORT HODIN PRACOVNÍKA (trojjazyčný výkaz, 1× A4) --
+// POJISTKA PROTI DVOJÍMU ŤUKNUTÍ: výkaz s podpisem vedoucího se ukládá
+// (soubor + řádek weekly_hour_sheets) a překlad popisů trvá až 12 s. Druhé
+// ťuknutí mezitím by výkaz uložilo podruhé (oponent 4. 10. 2026). Náhled
+// (returnHtmlOnly) nic neukládá, ten se nehlídá.
+const _vykazyBezi = new Set()
 async function exportWorkerKW(workerId, workerName, week, year, lang, foreman, returnHtmlOnly) {
+  if (returnHtmlOnly) return _exportWorkerKWTed(workerId, workerName, week, year, lang, foreman, returnHtmlOnly)
+  const klic = workerId + '|' + week + '|' + year
+  if (_vykazyBezi.has(klic)) { showToast('⏳ Výkaz se ještě připravuje… / Bericht wird noch erstellt…'); return }
+  _vykazyBezi.add(klic)
+  try { return await _exportWorkerKWTed(workerId, workerName, week, year, lang, foreman, returnHtmlOnly) }
+  finally { _vykazyBezi.delete(klic) }
+}
+async function _exportWorkerKWTed(workerId, workerName, week, year, lang, foreman, returnHtmlOnly) {
   lang = lang || 'cs'
   // Trojjazyčný popisek: EN hlavní (velký), DE+CZ menší pod tím
   const L3 = (en, de, cs) => `<div style="font-weight:700;font-size:11px;line-height:1.1">${en}</div><div style="font-weight:400;font-size:9px;color:#666;line-height:1.15">${de} · ${cs}</div>`
@@ -26535,16 +26949,10 @@ async function exportWorkerKW(workerId, workerName, week, year, lang, foreman, r
   const dayDE = ['Sonntag','Montag','Dienstag','Mittwoch','Donnerstag','Freitag','Samstag']
   const dayCS = ['Neděle','Pondělí','Úterý','Středa','Čtvrtek','Pátek','Sobota']
 
-  // Přelož popisy práce do 3 jazyků dopředu (paralelně, s cache)
-  const _descToTrans = {}
-  ;(att||[]).forEach(r => { const d=(r.work_description||'').trim(); if(d && d!=='—') _descToTrans[d]=null })
-  const _dKeys = Object.keys(_descToTrans)
-  if (_dKeys.length) {
-    try {
-      const results = await Promise.all(_dKeys.map(d => translateWork3(d)))
-      _dKeys.forEach((d,i) => { _descToTrans[d] = results[i] })
-    } catch(e) { console.warn('[výkaz] překlady:', e?.message) }
-  }
+  // Popisy práce do 3 jazyků dopředu (prelozPopisyDochazky).
+  let _descToTrans = {}
+  try { _descToTrans = await prelozPopisyDochazky(att) }
+  catch(e) { console.warn('[výkaz] překlady:', e?.message) }
 
   const rows = (att||[]).map(r => {
     const dt = new Date(r.work_date + 'T00:00:00')
@@ -26561,7 +26969,7 @@ async function exportWorkerKW(workerId, workerName, week, year, lang, foreman, r
     const allBreaks = attAllBreaks(r)
     const site = attDisplaySite(r)
     const descRaw = (r.work_description||'').trim()
-    const descHtml = (descRaw && descRaw !== '—' && _descToTrans[descRaw]) ? renderWork3(_descToTrans[descRaw]) : '—'
+    const descHtml = (descRaw && descRaw !== '—') ? renderWork3(prekladRadku(_descToTrans, r)) : '—'
     return `<tr style="page-break-inside:avoid">
       <td style="padding:5px 7px;border:1px solid #ccc;vertical-align:top;width:92px">
         <div style="font-weight:700;font-size:11px">${dayEN[wd]}</div>
@@ -32001,7 +32409,7 @@ async function buildInvoicePdf() {
 // Název souboru faktury — bez diakritiky a mezer, ať projde všude
 function invoiceFileName() {
   const num = (window._lastInvoiceNum || '').toString().replace(/[^a-zA-Z0-9_-]/g, '')
-  const who = (window._lastInvoiceName || '').normalize('NFD').replace(/[̀-ͯ]/g, '')
+  const who = (window._lastInvoiceName || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '')
     .replace(/[^a-zA-Z0-9]+/g, '_').replace(/^_+|_+$/g, '')
   return 'Rechnung' + (num ? '_' + num : '') + (who ? '_' + who : '') + '.pdf'
 }
@@ -32778,7 +33186,7 @@ async function uploadAdminSignedContract() {
   progress.textContent = '⏳ Nahrávám smlouvu...'
 
   const safeName = contractFile.name
-    .normalize('NFD').replace(/[̀-ͯ]/g, '')
+    .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
     .replace(/[^a-zA-Z0-9._-]/g, '_')
     .replace(/_+/g, '_')
     .toLowerCase()
@@ -36970,75 +37378,404 @@ function flagBadge(flag, text) {
 // Adresa/stavba pro výkaz a přehledy — pořadí přednosti:
 // 1) ručně zapsaná stavba, 2) ručně zadaná adresa, 3) GPS adresa
 // ===== PŘEKLAD POPISU PRÁCE DO 3 JAZYKŮ (EN/DE/CZ) =====
-// Používá bezplatný Google Translate endpoint (bez klíče). Výsledky se cachují.
-window._transCache = window._transCache || {}
-// Zkusí přeložit. Když se to NEPOVEDE, vrátí null — volající tak pozná rozdíl mezi
-// „přeloženo" a „překladač neodpověděl". Na faktuře je to zásadní: nepřeložený český
-// popis se nesmí tvářit jako angličtina.
-async function _gtranslateTry(text, target) {
-  window._transCache = window._transCache || {}
-  const key = target + '::' + text
-  if (window._transCache[key]) return window._transCache[key]
-  // Překladová služba je jen ozdoba — když je pomalá nebo nedostupná (německá
-  // mobilní síť), NESMÍ zdržet export PDF. Bez limitu čeká fetch klidně minuty
-  // a správce kouká na „⏳ Generuji PDF…“, které se nikam nehne.
-  const fetchSLimitem = (u, ms = 3000) => {
-    const ac = typeof AbortController !== 'undefined' ? new AbortController() : null
-    const t = setTimeout(() => { try { ac && ac.abort() } catch(e) {} }, ms)
-    return fetch(u, ac ? { signal: ac.signal } : undefined).finally(() => clearTimeout(t))
-  }
-  // 1) Google Translate (gtx) — bez klíče
-  try {
-    const url = 'https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=' + target + '&dt=t&q=' + encodeURIComponent(text)
-    const res = await fetchSLimitem(url)
-    if (res.ok) {
-      const data = await res.json()
-      const translated = (data[0] || []).map(seg => seg[0]).join('')
-      if (translated) { window._transCache[key] = translated; return translated }
-    }
-  } catch (e) { console.warn('[překlad] Google selhal:', e?.message) }
-  // 2) Fallback: MyMemory API (bez klíče, limit ~1000/den)
-  try {
-    const url2 = 'https://api.mymemory.translated.net/get?q=' + encodeURIComponent(text) + '&langpair=cs|' + target
-    const res2 = await fetchSLimitem(url2)
-    if (res2.ok) {
-      const d2 = await res2.json()
-      const t2 = d2?.responseData?.translatedText
-      // Při vyčerpaném denním limitu vrátí MyMemory místo překladu varovnou větu —
-      // ta by se jinak vysázela rovnou na fakturu.
-      const varovani = /MYMEMORY WARNING|QUERY LENGTH LIMIT|TRANSLATED\.NET/i.test(String(t2 || ''))
-      if (t2 && !varovani) { window._transCache[key] = t2; return t2 }
-    }
-  } catch (e) { console.warn('[překlad] MyMemory selhal:', e?.message) }
-  return null   // překlad se nepovedl
+// Popis práce píše pracovník — česky (často bez háčků), slovensky, polsky,
+// ukrajinsky… — a výkaz hodin i faktura ho ukazují anglicky, německy a česky.
+// Kancelář 4. 10. 2026: „v němčině je to v češtině, v češtině v angličtině,
+// někde místo překladu ‚máš opravit jazyk' a někdy úplný nesmysl — dělá to
+// u všech výkazů hodin."
+//
+// PROČ TO TAK BYLO (ověřeno na obou službách 4. 10. 2026, dvě kola oponentů):
+//  • Tip jazyka od Googlu (sl=auto) u češtiny bez háčků NEPLATÍ — a to ani
+//    „jistý": „Bedneni zakladu" je ruština s jistotou 1 a vrátí se beze změny,
+//    „Lepeni dlazby" slovinština 0,31 a přeloží se na „Beautiful dlazby",
+//    „Natirani zabradli na terase" bosenština → „The bearded men went out…".
+//  • Google často nepřeloží nic, jen doplní háček („Zdeni pricek" → „Zdeni
+//    priček") — a to prošlo jako překlad.
+//  • Záloha MyMemory dostávala natvrdo „z češtiny": u cílové češtiny vrátila
+//    „PLEASE SELECT TWO DISTINCT LANGUAGES" („máš opravit jazyk"), cizí jazyk
+//    přeložila jako český nebo ho vrátila beze změny. S „autodetect" tipuje
+//    u češtiny bez háčků maltštinu nebo chorvatštinu → nesmysl.
+//  • Výkaz poslal všechno najednou s limitem 3 s; při selhání se vrátil
+//    PŮVODNÍ text a vysázel se pod 🇩🇪 i 🇬🇧.
+//
+// JAK TO JE TEĎ:
+//  • Jazyk popisu: rozhodne písmeno, které má jen jeden jazyk (ř → čeština,
+//    ł → polština, cyrilice…); jinak jazyk, na kterém se Google shodne
+//    s národností autora nebo s češtinou; jinak čeština, když se z ní text
+//    opravdu přeloží (appka je česky a česky tu píšou i cizinci); pak
+//    národnost; Googlův tip až nakonec — i „jistý" tip u textu bez háčků
+//    bývá chybný. Vietnamština bez tónových znamének se nepřekládá.
+//  • „Přeloženo" = slova originálu ve výsledku nezůstala; srovnává se bez
+//    háčků a vlastní jména a zkratky se nepočítají („Fasáda Fürth" → „Fürth
+//    facade" přeložené je, „Montaz Oken gegen Prizemi" není).
+//  • Do vlastního jazyka se nepřekládá: český popis = český řádek beze změny.
+//  • MyMemory jen se známým jazykem, nikdy autodetect ani stejný jazyk.
+//  • Jazyk ověřený jen národností: angličtina a němčina, které vyjdou stejně
+//    („Bourani" → „Burans"/„Burans"), jsou přepis, ne překlad — zahodí se.
+//  • Původní text je na výkazu vidět vždy (vlastní řádek, nebo zvlášť).
+//  • Nepovedený překlad = NIC: řádek se vynechá, původní text zůstane pod
+//    svou vlajkou (bez vlajky, když jazyk nevíme). Nikdy pod cizí.
+//  • Najednou nejvýš 6 dotazů, dokončují se nejdřív rozpracované popisy;
+//    výkaz čeká nejvýš 12 s a ukáže, co je hotové. Paměť v prohlížeči: jistý
+//    jazyk 30 dní, jazyk podle národnosti 1 den, nepovedené nic.
+const _PREKLAD_CILE = ['en', 'de', 'cs']
+const _PREKLAD_SOUBEZNE = 6
+const _PREKLAD_LIMIT_DOTAZU = 6000    // ms na jeden dotaz
+const _PREKLAD_JISTY = 0.9            // pod tím je Googlův tip jen hádání
+const _PREKLAD_PAMET_KLIC = 'sb_preklady_v3'
+const _PREKLAD_PAMET_ZNAKU = 1500000  // localStorage má kolem 5 MB na celou appku
+// Národnost (profiles.narodnost, seznam NARODNOSTI) → jazyk, kterým člověk píše.
+// Bělorusové píšou převážně rusky.
+const _JAZYK_NARODNOSTI = { CZ: 'cs', SK: 'sk', PL: 'pl', UA: 'uk', RO: 'ro', MD: 'ro', BG: 'bg', HU: 'hu', DE: 'de', AT: 'de', SI: 'sl', HR: 'hr', RS: 'sr', ME: 'sr', BA: 'bs', MK: 'mk', AL: 'sq', XK: 'sq', BY: 'ru', LT: 'lt', LV: 'lv', EE: 'et', TR: 'tr', GE: 'ka', PT: 'pt', ES: 'es', IT: 'it', GR: 'el', VN: 'vi' }
+const _VLAJKA_JAZYKA = { cs: '🇨🇿', sk: '🇸🇰', pl: '🇵🇱', uk: '🇺🇦', ro: '🇷🇴', bg: '🇧🇬', hu: '🇭🇺', de: '🇩🇪', sl: '🇸🇮', hr: '🇭🇷', sr: '🇷🇸', bs: '🇧🇦', mk: '🇲🇰', sq: '🇦🇱', ru: '🇷🇺', lt: '🇱🇹', lv: '🇱🇻', et: '🇪🇪', tr: '🇹🇷', ka: '🇬🇪', pt: '🇵🇹', es: '🇪🇸', it: '🇮🇹', el: '🇬🇷', vi: '🇻🇳', en: '🇬🇧' }
+// Věty, které MyMemory vrací MÍSTO překladu (se stavem 200 i 403).
+const _MYMEMORY_NENI_PREKLAD = /MYMEMORY WARNING|QUERY LENGTH LIMIT|TRANSLATED\.NET|PLEASE SELECT|DISTINCT LANGUAGES|IS AN INVALID|INVALID (SOURCE|TARGET) LANGUAGE|NO QUERY SPECIFIED|LIMIT EXCEEDED/i
+
+// Příbuzné jazyky Google u krátkého textu bez háčků plete („Prace na strese"
+// od Čecha je pro něj jistě slovenština a vyjde „Work on stress"). Mezi
+// příbuznými proto rozhoduje národnost autora, ne tip.
+const _PRIBUZNE_JAZYKY = [['cs', 'sk'], ['sr', 'hr', 'bs'], ['ru', 'uk'], ['bg', 'mk']]
+function _pribuzne(a, b) { return a !== b && _PRIBUZNE_JAZYKY.some(sk => sk.includes(a) && sk.includes(b)) }
+const _CYRILICE = ['uk', 'ru', 'bg', 'mk', 'be']
+// Písmena, která má JEN JEDEN z jazyků, kterými lidé ve firmě píšou. Společná
+// (á, č, š, ž, ö, ü, ß, đ…) nerozhodují — mají je i místní jména a značky.
+function _jazykPodlePismen(t) {
+  const s = String(t || '').toLowerCase()
+  if (/[іїєґ]/.test(s)) return 'uk'
+  if (/[ыэъё]/.test(s)) return 'ru'
+  if (/[ěřů]/.test(s)) return 'cs'
+  if (/[ľĺŕô]/.test(s)) return 'sk'
+  if (/[łąęśźżń]/.test(s)) return 'pl'
+  if (/[ășțţ]/.test(s)) return 'ro'
+  if (/[ğı]/.test(s)) return 'tr'
+  if (/[őű]/.test(s)) return 'hu'
+  if (/[ơưạảấầẩẫậắằẳẵặẹẻẽếềểễệỉịọỏốồổỗộớờởỡợụủứừửữựỳỵỷỹ]/.test(s)) return 'vi'
+  return null
+}
+// Jazyk, kterým nejspíš píše tento člověk (podle národnosti; jinak čeština).
+// Národnosti drží _lideVlajky — kdo chce jistotu, zavolá předtím nactiVlajky().
+function jazykPracovnika(workerId) {
+  const z = _lideVlajky.mapa.get(String(workerId || ''))
+  return _JAZYK_NARODNOSTI[String((z && z.narodnost) || '').toUpperCase()] || 'cs'
 }
 
-// Původní chování pro výkazy: když se překlad nepovede, vrátí text beze změny.
-async function _gtranslate(text, target) {
-  const out = await _gtranslateTry(text, target)
-  return out == null ? text : out
+// FRONTA: najednou nejvýš _PREKLAD_SOUBEZNE dotazů. Přednost mají popisy,
+// u kterých je jazyk už známý — jinak by se nejdřív zjišťoval jazyk u všech
+// a po limitu času by nebyl hotový ani jeden řádek celý.
+let _prekladBezi = 0
+const _prekladFronta = [[], []]   // [0] = dokončit rozpracované, [1] = nové popisy
+function _prekladVeFronte(fn, novy) {
+  return new Promise((ok, ne) => { _prekladFronta[novy ? 1 : 0].push({ fn, ok, ne }); _prekladPust() })
 }
-// Vrátí { en, de, cs } pro daný text (přeloží do všech tří jazyků)
-async function translateWork3(text) {
-  const t = (text || '').trim()
-  if (!t || t === '—') return { en: '', de: '', cs: '' }
-  const [en, de, cs] = await Promise.all([
-    _gtranslate(t, 'en'),
-    _gtranslate(t, 'de'),
-    _gtranslate(t, 'cs')
-  ])
-  return { en, de, cs }
+function _prekladPust() {
+  while (_prekladBezi < _PREKLAD_SOUBEZNE && (_prekladFronta[0].length || _prekladFronta[1].length)) {
+    const { fn, ok, ne } = (_prekladFronta[0].length ? _prekladFronta[0] : _prekladFronta[1]).shift()
+    _prekladBezi++
+    Promise.resolve().then(fn).then(ok, ne).finally(() => { _prekladBezi--; _prekladPust() })
+  }
 }
-// Vykreslí přeložený popis: EN tučně, pod tím DE a CZ menší
+// JSON z překladové služby, nebo null (chyba, vypršení, nečitelná odpověď).
+// Limit platí i na čtení těla — fetch bez něj čeká klidně minuty.
+function _prekladJson(url, novy) {
+  return _prekladVeFronte(async () => {
+    const ac = typeof AbortController !== 'undefined' ? new AbortController() : null
+    const casovac = setTimeout(() => { try { ac && ac.abort() } catch (e) {} }, _PREKLAD_LIMIT_DOTAZU)
+    try {
+      const res = await fetch(url, ac ? { signal: ac.signal } : undefined)
+      return res.ok ? await res.json() : null
+    } finally { clearTimeout(casovac) }
+  }, novy).catch(e => { console.warn('[překlad] dotaz selhal:', e?.message); return null })
+}
+
+// OPRAVDU PŘELOŽENO? Google často vrátí původní slova, jen s háčkem navíc
+// („Zdeni pricek" → „Zdeni priček") nebo napůl („Montaz Oken gegen Prizemi",
+// „Beautiful dlazby"). Srovnává se bez háčků; vlastní jména (velké písmeno
+// uprostřed věty) a zkratky (SDK, OSB) se nepočítají — ty zůstat smějí.
+function _bezHacku(s) { return String(s || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase() }
+function _slovaKPrekladu(s) {
+  return String(s || '').split(/[^\p{L}]+/u).filter(Boolean)
+    .filter((w, i) => w.length >= 3 && w !== w.toUpperCase() && !(i > 0 && w[0] !== w[0].toLowerCase()))
+    .map(_bezHacku)
+}
+function _prelozeno(vystup, vstup) {
+  const cele = s => _bezHacku(s).replace(/[^\p{L}\p{N}]+/gu, ' ').trim()
+  if (!vystup || cele(vystup) === cele(vstup)) return false
+  const slova = _slovaKPrekladu(vstup)
+  if (!slova.length) return true
+  const ve = new Set(String(vystup).split(/[^\p{L}]+/u).filter(Boolean).map(_bezHacku))
+  return slova.filter(w => ve.has(w)).length / slova.length < 0.5
+}
+// Google: { text, zdroj, jistota } nebo null. Se zadaným jazykem (sl) Google
+// nic nehádá — zdroj je ten zadaný a jistotu neříká.
+async function _prekladGoogle(text, cil, sl, novy) {
+  const d = await _prekladJson('https://translate.googleapis.com/translate_a/single?client=gtx&sl=' + sl + '&tl=' + cil + '&dt=t&q=' + encodeURIComponent(text), novy)
+  if (!Array.isArray(d) || !Array.isArray(d[0])) return null
+  const t = d[0].map(s => (Array.isArray(s) && typeof s[0] === 'string') ? s[0] : '').join('').trim()
+  if (!t) return null
+  if (sl !== 'auto') return { text: t, zdroj: sl, jistota: null }
+  return { text: t, zdroj: typeof d[2] === 'string' ? d[2].toLowerCase() : null, jistota: typeof d[6] === 'number' ? d[6] : 0 }
+}
+// MyMemory: přeložený text nebo null. Jen se známým jazykem (autodetect u
+// češtiny bez háčků tipuje maltštinu) a nikdy stejný jazyk na obou stranách.
+async function _prekladMyMemory(text, cil, sl) {
+  if (!sl || sl === cil) return null
+  const d = await _prekladJson('https://api.mymemory.translated.net/get?q=' + encodeURIComponent(text) + '&langpair=' + sl + '|' + cil, false)
+  if (!d || Number(d.responseStatus) !== 200 || d.quotaFinished === true) return null
+  const t = String(d.responseData?.translatedText || '').trim()
+  if (!t || _MYMEMORY_NENI_PREKLAD.test(t) || !_prelozeno(t, text)) return null
+  return t
+}
+// Jeden cílový jazyk ze známého jazyka: Google, pak MyMemory. null = nepovedlo se.
+async function _prelozDo(t, cil, zdroj) {
+  const g = await _prekladGoogle(t, cil, zdroj, false)
+  // Příbuzné jazyky (slovenština → čeština) sdílejí většinu slov — dobrý
+  // překlad „Zdění příček v přízemí" by kontrola slov zahodila. Bere se, co
+  // Google změnil; záloha MyMemory se tu nezkouší (dávala „Krok zednictví").
+  if (_pribuzne(zdroj, cil)) return g && g.text && _bezHacku(g.text) !== _bezHacku(t) ? g.text : null
+  if (g && _prelozeno(g.text, t)) return g.text
+  return _prekladMyMemory(t, cil, zdroj)
+}
+
+// PAMĚŤ v prohlížeči. Klíč = jazyk autora + text (tentýž text od Poláka
+// a od Čecha se přeloží každý zvlášť). Jistě zjištěný jazyk platí 30 dní,
+// jazyk podle národnosti 1 den; nepovedené se neukládá vůbec.
+let _prekladPamet = null
+let _prekladUlozCasovac = null
+function _prekladNactiPamet() {
+  if (_prekladPamet) return _prekladPamet
+  _prekladPamet = {}
+  try {
+    const o = JSON.parse(localStorage.getItem(_PREKLAD_PAMET_KLIC) || 'null')
+    if (o && typeof o === 'object' && !Array.isArray(o)) _prekladPamet = o
+  } catch (e) {}
+  return _prekladPamet
+}
+function _prekladZPameti(klic) {
+  const z = _prekladNactiPamet()[klic]
+  if (!z || typeof z !== 'object' || typeof z.zdroj !== 'string' || !z.k) return null
+  if (Date.now() - z.k > (z.j ? 30 : 1) * 86400000) return null
+  const v = { zdroj: z.zdroj, jisty: z.j === true }
+  _PREKLAD_CILE.forEach(c => { if (typeof z[c] === 'string' && z[c]) v[c] = z[c] })
+  // Přepis místo překladu se nepustí ani z paměti (uložený jinou verzí).
+  if (!v.jisty && v.en && v.de && _bezHacku(v.en) === _bezHacku(v.de)) { delete v.en; delete v.de }
+  return v
+}
+function _prekladDoPameti(klic, v) {
+  // Jen skutečné překlady — řádek vlastního jazyka (= původní text) se nepočítá.
+  const preklady = _PREKLAD_CILE.filter(c => v[c] && c !== v.zdroj)
+  if (!v.zdroj || !preklady.length) return
+  // Jazyk ověřený jen národností se ukládá, jen když prošel kontrolou přepisu
+  // (angličtina i němčina) — jinak by si paměť podržela třeba „Burans".
+  if (!v.jisty && v.zdroj !== 'en' && v.zdroj !== 'de' && !(v.en && v.de)) return
+  const p = _prekladNactiPamet()
+  const stary = p[klic]
+  const z = { k: Date.now(), zdroj: v.zdroj, j: !!v.jisty }
+  _PREKLAD_CILE.forEach(c => { if (v[c]) z[c] = v[c] })
+  // Nic nového = nic neukládat (a neprodlužovat platnost neúplnému záznamu) —
+  // ale propadlý záznam se obnoví, jinak by se každý výkaz ptal znovu.
+  if (stary && _prekladZPameti(klic) && stary.zdroj === z.zdroj && _PREKLAD_CILE.every(c => stary[c] === z[c])) return
+  p[klic] = z
+  clearTimeout(_prekladUlozCasovac)
+  _prekladUlozCasovac = setTimeout(() => {
+    const uloz = () => localStorage.setItem(_PREKLAD_PAMET_KLIC, JSON.stringify(p))
+    const orizni = (nechat) => {
+      const klice = Object.keys(p).sort((a, b) => (p[a]?.k || 0) - (p[b]?.k || 0))
+      klice.slice(0, Math.max(0, klice.length - nechat)).forEach(k => { delete p[k] })
+    }
+    try {
+      // Strop podle velikosti, ne počtu: dlouhé popisy by jinak paměť přeplnily
+      // a zápis by tiše selhával úplně.
+      while (JSON.stringify(p).length > _PREKLAD_PAMET_ZNAKU && Object.keys(p).length > 1) orizni(Math.floor(Object.keys(p).length * 0.8))
+      uloz()
+    } catch (e) {
+      try { orizni(Math.floor(Object.keys(p).length / 2)); uloz() } catch (e2) {}
+    }
+  }, 400)
+}
+
+// PŘEKLAD JEDNOHO POPISU: { puvodni, zdroj, jisty, en, de, cs }. Překlad,
+// který se nepovedl, je null — nikdy původní text v řádku jiného jazyka.
+// `jazyk` = jazyk autora (jazykPracovnika), `cile` = které řádky jsou potřeba.
+const _prekladRozdelane = new Map()   // klíč → slib výsledku
+const _prekladZiveStavy = new Map()    // klíč → průběžný výsledek (pro limit času)
+function _prekladPrazdny(t) { return { puvodni: t, zdroj: null, jisty: false, en: null, de: null, cs: null } }
+function _prekladKlicUlohy(t, jazyk, cile) { return jazyk + '|' + cile.join(',') + '|' + t }
+function prelozPopis(text, { jazyk = 'cs', cile = _PREKLAD_CILE } = {}) {
+  const t = String(text || '').trim()
+  // Bez písmen („—", „-", „12") není co překládat (MyMemory z „-" dělala „•").
+  if (!t || !/\p{L}/u.test(t)) return Promise.resolve(_prekladPrazdny(t))
+  const klic = _prekladKlicUlohy(t, jazyk, cile)
+  if (_prekladRozdelane.has(klic)) return _prekladRozdelane.get(klic)
+  const v = _prekladPrazdny(t)
+  _prekladZiveStavy.set(klic, v)
+  const uloha = _prelozPopisTed(t, jazyk, cile, v)
+    .catch(e => { console.warn('[překlad]', e?.message) })
+    .then(() => ({ ...v }))
+    .finally(() => { _prekladRozdelane.delete(klic); _prekladZiveStavy.delete(klic) })
+  _prekladRozdelane.set(klic, uloha)
+  return uloha
+}
+async function _prelozPopisTed(t, jazyk, cile, v) {
+  const klicPameti = jazyk + '|' + t
+  const pamet = _prekladZPameti(klicPameti)
+  if (pamet) Object.assign(v, pamet)
+  if (v.zdroj && cile.every(c => v[c])) return
+  // Překlady z jazyka ověřeného jen národností se ukážou až po kontrole přepisu
+  // (krok 3) — do té doby je nevidí ani výkaz, který skončí na limitu času.
+  const skryte = {}
+  // Pro limit času: víceslovný popis ukáže i neověřenou angličtinu (přepis
+  // hrozí hlavně u jednoho neznámého slova). Neenumerovatelné — do výsledku
+  // ani do paměti se nedostane.
+  Object.defineProperty(v, '_neovereno', { value: skryte, enumerable: false })
+  // 1) JAZYK POPISU. Kandidáti v pořadí:
+  //    a) písmeno, které má jen jeden jazyk (ř → čeština, ł → polština, cyrilice…);
+  //    b) jazyk, na kterém se Google shodne s národností autora (i příbuzný)
+  //       nebo s češtinou;
+  //    c) čeština, když se z ní text opravdu přeloží — jazyk firmy, appka je
+  //       česky a česky tu píšou i Poláci, Rumuni a Vietnamci (oponent: 6 z 11);
+  //    d) národnost autora (sedí-li na písmo), když se z ní text přeloží;
+  //    e) jistý tip Googlu, ze kterého se text přeložil (popis anglicky…).
+  //    Tip Googlu sám o sobě u textu bez háčků neplatí ani „jistý"
+  //    („Bedneni zakladu" → ruština 1,0; „Prace na strese" → slovenština 0,95).
+  if (!v.zdroj) {
+    const pismena = _jazykPodlePismen(t)
+    const cyrilice = /[\u0400-\u04FF]/.test(t)
+    const narodni = _CYRILICE.includes(jazyk) === cyrilice ? jazyk : null
+    const zkus = (pismena || narodni) === 'en' ? 'de' : 'en'
+    const g = await _prekladGoogle(t, zkus, 'auto', true)
+    // Překlad z tipu se převezme, jen když platí jazyk tipu — u češtiny místo
+    // tipnuté slovenštiny by to byl překlad ze slovenštiny („Work on stress").
+    const zGooglu = (z) => { v.zdroj = z; v.jisty = true; if (z === g.zdroj && z !== zkus && _prelozeno(g.text, t)) v[zkus] = g.text }
+    const overeny = async (z, jisty) => {
+      const p = await _prelozDo(t, zkus, z)
+      if (!p) return false
+      v.zdroj = z; v.jisty = jisty
+      if (jisty) v[zkus] = p; else skryte[zkus] = p
+      return true
+    }
+    if (pismena) {
+      if (g && g.zdroj === pismena) zGooglu(pismena)
+      else await overeny(pismena, true)
+    } else if (g && g.zdroj && (g.zdroj === narodni || g.zdroj === 'cs' || (narodni && _pribuzne(g.zdroj, narodni)))) {
+      // Shoda s národností — i příbuzný jazyk (srbština ↔ chorvatština,
+      // ukrajinština ↔ ruština: platí tip) — nebo s češtinou. Jen mezi
+      // češtinou a slovenštinou, které Google plete, rozhoduje národnost.
+      zGooglu(g.zdroj !== 'cs' && g.zdroj !== narodni && ['cs', 'sk'].includes(narodni) ? narodni : g.zdroj)
+    } else if (await overeny('cs', false)) {
+      // c) čeština
+    } else if (narodni && narodni !== 'cs' && await overeny(narodni, false)) {
+      // d) národnost
+    } else if (g && g.zdroj && g.jistota >= _PREKLAD_JISTY && (g.zdroj === zkus || _prelozeno(g.text, t))) {
+      zGooglu(g.zdroj)
+    }
+    // Vietnamštinu bez tónových znamének Google vždy uhodne jako jiná slova
+    // („Lap dat cua so" → „Lap data of number", oponent 15 z 15): nepřekládat.
+    if (v.zdroj === 'vi' && _jazykPodlePismen(t) !== 'vi') { v.jisty = true; _PREKLAD_CILE.forEach(c => { v[c] = null }); skryte.en = skryte.de = skryte.cs = null; return }
+  }
+  // Jazyk nevíme: nic se nepřekládá, ukáže se jen původní text bez vlajky.
+  if (!v.zdroj) return
+  // 2) OSTATNÍ JAZYKY ze zjištěného jazyka; do vlastního se nepřekládá.
+  //    U jazyka ověřeného jen národností jsou potřeba angličtina i němčina
+  //    kvůli kontrole přepisu, i když volající chce jen jednu.
+  const potreba = new Set(cile)
+  if (!v.jisty && v.zdroj !== 'en' && v.zdroj !== 'de') { potreba.add('en'); potreba.add('de') }
+  await Promise.all([...potreba].map(async c => {
+    if (v[c] || skryte[c]) return
+    if (c === v.zdroj) { v[c] = t; return }
+    const r = await _prelozDo(t, c, v.zdroj)
+    if (r) { if (v.jisty) v[c] = r; else skryte[c] = r }
+  }))
+  // 3) PŘEPIS MÍSTO PŘEKLADU: Google slovo nezná a jen ho přepíše
+  //    („Bourani" → „Burans" anglicky i německy). Pozná se tak, že angličtina
+  //    a němčina vyjdou stejně; u jistého jazyka se to nekontroluje.
+  if (!v.jisty && v.zdroj !== 'en' && v.zdroj !== 'de') {
+    const zahod = () => { skryte.en = null; skryte.de = null; if (v.zdroj !== 'cs') skryte.cs = null }
+    if (skryte.en && skryte.de) { if (_bezHacku(skryte.en) === _bezHacku(skryte.de)) zahod() }
+    // Jeden z jazyků nedorazil a kontrolu nejde udělat: jednoslovný popis
+    // (tam přepis hrozí) se nepustí — jinak by „Burans" prošlo a uložilo se.
+    else if (_slovaKPrekladu(t).length < 2) zahod()
+  }
+  _PREKLAD_CILE.forEach(c => { if (skryte[c] && cile.includes(c)) v[c] = skryte[c] })
+  _prekladDoPameti(klicPameti, v)
+}
+// Víc popisů najednou: [{ text, jazyk }] nebo [text]. Čeká NEJVÝŠ limitMs —
+// výkaz ani PDF se nesmí zaseknout na pomalé síti. Co do té doby nedoběhlo,
+// vrátí rozpracované (jen hotové řádky) a dopřeloží se do paměti pro příště.
+async function prelozPopisyVcas(polozky, { cile = _PREKLAD_CILE, limitMs = 12000 } = {}) {
+  const pol = polozky.map(p => typeof p === 'string' ? { text: p, jazyk: 'cs' } : { text: p.text, jazyk: p.jazyk || 'cs' })
+  const hotove = new Array(pol.length).fill(null)
+  let casovac = null
+  const limit = new Promise(ok => { casovac = setTimeout(ok, limitMs) })
+  await Promise.race([Promise.all(pol.map((p, i) => prelozPopis(p.text, { jazyk: p.jazyk, cile }).then(r => { hotove[i] = r }))), limit])
+  clearTimeout(casovac)
+  return pol.map((p, i) => {
+    if (hotove[i]) return { ...hotove[i] }
+    const t = String(p.text || '').trim()
+    const zivy = _prekladZiveStavy.get(_prekladKlicUlohy(t, p.jazyk, cile))
+    if (!zivy) return _prekladPrazdny(t)
+    const r = { ...zivy }
+    const nev = zivy._neovereno
+    if (!r.jisty && nev && nev.en && !r.en && cile.includes('en') && _slovaKPrekladu(t).length >= 2) r.en = nev.en
+    return r
+  })
+}
+// Popisy práce z řádků docházky → { popis: výsledek }. Jazyk podle národnosti
+// toho, kdo popis napsal. Dokud se překládá, drží se hláška vidět (toast
+// jinak po 3 s zmizí a výkaz pak 10 s „nic nedělá").
+async function prelozPopisyDochazky(radky) {
+  if (!(radky || []).some(r => String(r.work_description || '').trim())) return {}
+  let hlaska = null
+  const zacatek = setTimeout(() => {
+    const ukaz = () => showToast('⏳ Překládám popisy práce… / Übersetze Arbeitsbeschreibungen…')
+    ukaz(); hlaska = setInterval(ukaz, 2500)
+  }, 700)
+  try {
+    try { await nactiVlajky() } catch (e) {}
+    // Každá dvojice jazyk autora + text zvlášť: tentýž popis od Čecha a od
+    // Poláka se přeloží každý ze svého jazyka. Výsledek pod klíčem
+    // „jazyk|text" (klicPrekladuRadku) i pod samotným textem (první autor).
+    const pary = new Map()
+    ;(radky || []).forEach(r => {
+      const d = String(r.work_description || '').trim()
+      if (!d || d === '—') return
+      const jazyk = jazykPracovnika(r.worker_id)
+      if (!pary.has(jazyk + '|' + d)) pary.set(jazyk + '|' + d, { text: d, jazyk })
+    })
+    const pol = [...pary.values()]
+    const vysl = await prelozPopisyVcas(pol)
+    const mapa = {}
+    pol.forEach((p, i) => { mapa[p.jazyk + '|' + p.text] = vysl[i]; if (!mapa[p.text]) mapa[p.text] = vysl[i] })
+    return mapa
+  } finally {
+    clearTimeout(zacatek); clearInterval(hlaska)
+  }
+}
+// Překlad popisu z řádku docházky (podle jazyka toho, kdo ho napsal).
+function prekladRadku(mapa, r) {
+  const d = String((r && r.work_description) || '').trim()
+  return (mapa && (mapa[jazykPracovnika(r && r.worker_id) + '|' + d] || mapa[d])) || { puvodni: d }
+}
+// Vykreslí přeložený popis: EN tučně, pod tím DE a CZ menší. Popis píše
+// pracovník — vždy jako text, nikdy jako HTML (výkaz se tiskne v rámu
+// stejné domény).
 function renderWork3(tr) {
-  if (!tr || (!tr.en && !tr.de && !tr.cs)) return '—'
-  const parts = []
-  // Popis píše pracovník a překladač při výpadku vrací původní text — vždy
-  // jako text, nikdy jako HTML (výkaz se tiskne v rámu stejné domény).
-  if (tr.en) parts.push(`<div style="font-size:10px;font-weight:600;color:#222">🇬🇧 ${escAttr(tr.en)}</div>`)
-  if (tr.de) parts.push(`<div style="font-size:10px;color:#444">🇩🇪 ${escAttr(tr.de)}</div>`)
-  if (tr.cs) parts.push(`<div style="font-size:10px;color:#444">🇨🇿 ${escAttr(tr.cs)}</div>`)
-  return parts.join('')
+  if (!tr) return '—'
+  const puvodni = String(tr.puvodni || '').trim()
+  const radky = []
+  if (tr.en) radky.push(`<div style="font-size:10px;font-weight:600;color:#222">🇬🇧 ${escAttr(tr.en)}</div>`)
+  if (tr.de) radky.push(`<div style="font-size:10px;color:#444">🇩🇪 ${escAttr(tr.de)}</div>`)
+  if (tr.cs) radky.push(`<div style="font-size:10px;color:#444">🇨🇿 ${escAttr(tr.cs)}</div>`)
+  // Původní text je vidět VŽDY — když není jedním ze tří řádků (popis polsky,
+  // nepovedený překlad), přidá se zvlášť. Strojový překlad textu bez háčků
+  // bývá přibližný („Murovanie pricok" → „Masonry joints"), ať je vidět, co
+  // člověk opravdu napsal. Pod vlajkou svého jazyka, bez vlajky, když jazyk
+  // nevíme; nikdy pod cizí.
+  const vlastniRadek = tr.zdroj && _PREKLAD_CILE.includes(tr.zdroj) && tr[tr.zdroj]
+  if (puvodni && !vlastniRadek) {
+    const vlajka = tr.zdroj ? (_VLAJKA_JAZYKA[tr.zdroj] || '') : ''
+    radky.push(`<div style="font-size:10px;color:#444">${vlajka ? vlajka + ' ' : ''}${escAttr(puvodni)}</div>`)
+  }
+  return radky.length ? radky.join('') : '—'
 }
 
 function attDisplaySite(r, fallback = '—') {
@@ -37514,7 +38251,7 @@ async function uploadDocumentForWorker() {
   if (st) { st.style.display='block'; st.style.background='#e8f5e9'; st.style.color='#2e7d32'; st.textContent='Nahravam...' }
 
   const MULTI = MULTISIDE_TYPES
-  const safeName1 = adminUploadFile1.name.normalize('NFD').replace(/[̀-ͯ]/g,'').replace(/[^a-zA-Z0-9._-]/g,'_').toLowerCase()
+  const safeName1 = adminUploadFile1.name.normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/[^a-zA-Z0-9._-]/g,'_').toLowerCase()
   const fp1 = uploadingForWorkerId + '/' + Date.now() + '_' + safeName1
 
   const { error: e1 } = await sb.storage.from('documents').upload(fp1, adminUploadFile1, {upsert:true})
@@ -37554,7 +38291,7 @@ async function uploadDocumentForWorker() {
     for (let i = 0; i < adminUploadFiles2.length; i++) {
       const soubor = adminUploadFiles2[i]
       const cisloListu = i + 2
-      const safeName2 = soubor.name.normalize('NFD').replace(/[̀-ͯ]/g,'').replace(/[^a-zA-Z0-9._-]/g,'_').toLowerCase()
+      const safeName2 = soubor.name.normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/[^a-zA-Z0-9._-]/g,'_').toLowerCase()
       const fp2 = uploadingForWorkerId + '/' + (Date.now() + cisloListu) + '_' + safeName2
       const { error: e2 } = await sb.storage.from('documents').upload(fp2, soubor, {upsert:true})
       if (e2) { showToast('⚠️ ' + cisloListu + '. list se nenahrál: ' + e2.message); continue }

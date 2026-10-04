@@ -247,24 +247,90 @@ function datumPlne(iso){
 function hod(n){ return (Number(n)||0).toFixed(2).replace('.', ','); }
 
 // Překlad popisu práce do němčiny. Je to ozdoba — když překladač neodpoví,
-// zůstane český text a stránka se kvůli tomu nezdrží.
+// zůstane původní text a stránka se kvůli tomu nezdrží.
+//
+// STEJNÁ PRAVIDLA JAKO APPKA (subbau_final.html, „PŘEKLAD POPISU PRÁCE"). Dřív
+// se tu překládalo natvrdo „z češtiny" a za němčinu se bralo cokoli jiného
+// než originál: polské „Sprzatanie" vyšlo jako „Schmutzig werden", rumunský
+// popis jako nesmysl, „Zdeni pricek" jako „Zdeni priček" (jen háček navíc).
+// Tip jazyka od Googlu u češtiny bez háčků neplatí ani „jistý" („Bedneni
+// zakladu" je pro něj ruština s jistotou 1). Proto: jazyk určí písmeno, které
+// má jen jeden jazyk, jinak čeština (jazyk firmy; národnost autora stránka
+// nezná). Z něj se překládá, když se text OPRAVDU přeloží a nejde o přepis
+// neznámého slova; Googlův jistý tip až potom. Nepřeložené se za němčinu
+// nevydává.
 var mezipamet = {};
+var PISMENA = /[^A-Za-z\u00C0-\u024F\u0370-\u03FF\u0400-\u04FF\u1E00-\u1EFF]+/;
+function bezHacku(s){ return String(s||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase(); }
+// Slova, která se překladem MUSÍ změnit: bez vlastních jmen (velké písmeno
+// uprostřed věty — „Fürth"), zkratek (SDK) a krátkých slov.
+function slovaKPrekladu(s){
+  return String(s||'').split(PISMENA).filter(function(w){ return w; }).filter(function(w, i){
+    return w.length >= 3 && w !== w.toUpperCase() && !(i > 0 && w.charAt(0) !== w.charAt(0).toLowerCase());
+  }).map(bezHacku);
+}
+function prelozeno(vystup, vstup){
+  function cele(x){ return bezHacku(x).split(PISMENA).join(' ').trim(); }
+  if (!vystup || cele(vystup) === cele(vstup)) return false;
+  var slova = slovaKPrekladu(vstup);
+  if (!slova.length) return true;
+  var ve = {};
+  String(vystup).split(PISMENA).forEach(function(w){ if (w) ve[bezHacku(w)] = true; });
+  return slova.filter(function(w){ return ve[w]; }).length / slova.length < 0.5;
+}
+function google(t, sl, tl){
+  var ac = new AbortController();
+  var casovac = setTimeout(function(){ try{ac.abort()}catch(e){} }, 3500);
+  return fetch('https://translate.googleapis.com/translate_a/single?client=gtx&sl=' + sl + '&tl=' + tl + '&dt=t&q='
+      + encodeURIComponent(t), { signal: ac.signal, referrerPolicy: 'no-referrer' })
+    .then(function(r){ return r.ok ? r.json() : null })
+    .then(function(d){
+      if (!d || !d[0]) return null;
+      var v = d[0].map(function(s){ return (s && s[0]) || '' }).join('').trim();
+      return v ? { text: v, zdroj: typeof d[2] === 'string' ? d[2] : sl, jistota: typeof d[6] === 'number' ? d[6] : 0 } : null;
+    })
+    .catch(function(){ return null })
+    .finally(function(){ clearTimeout(casovac) });
+}
+// Písmena, která má jen jeden z jazyků lidí ve firmě (stejně jako appka,
+// _jazykPodlePismen). Společná (á, č, š, ž, ö, ü, ß) nerozhodují.
+function jazykPodlePismen(t){
+  var s = String(t||'').toLowerCase();
+  if (/[іїєґ]/.test(s)) return 'uk';
+  if (/[ыэъё]/.test(s)) return 'ru';
+  if (/[ěřů]/.test(s)) return 'cs';
+  if (/[ľĺŕô]/.test(s)) return 'sk';
+  if (/[łąęśźżń]/.test(s)) return 'pl';
+  if (/[ășțţ]/.test(s)) return 'ro';
+  if (/[ğı]/.test(s)) return 'tr';
+  if (/[őű]/.test(s)) return 'hu';
+  if (/[ơưạảấầẩẫậắằẳẵặẹẻẽếềểễệỉịọỏốồổỗộớờởỡợụủứừửữựỳỵỷỹ]/.test(s)) return 'vi';
+  return null;
+}
+// Jazyky, za které Google češtinu bez háčků NEPLETE (u rumunštiny, maďarštiny,
+// turečtiny… je jeho jistý tip spolehlivý). S ruštinou, ukrajinštinou,
+// bulharštinou, slovenštinou, polštinou, slovinštinou ani angličtinou ano —
+// tam má přednost čeština.
+var NEPLETE_SE = ['ro', 'hu', 'tr', 'vi', 'it', 'es', 'pt', 'fr', 'lt', 'lv', 'et', 'el', 'ka', 'sq'];
 function prelozit(text){
   var t = (text||'').trim();
   if (!t) return Promise.resolve(null);
   if (mezipamet[t] !== undefined) return Promise.resolve(mezipamet[t]);
-  var ac = new AbortController();
-  var casovac = setTimeout(function(){ try{ac.abort()}catch(e){} }, 3500);
-  return fetch('https://translate.googleapis.com/translate_a/single?client=gtx&sl=cs&tl=de&dt=t&q='
-      + encodeURIComponent(t), { signal: ac.signal, referrerPolicy: 'no-referrer' })
-    .then(function(r){ return r.ok ? r.json() : null })
-    .then(function(d){
-      var v = d && d[0] ? d[0].map(function(s){ return s[0] }).join('') : null;
-      mezipamet[t] = v || null;
-      return mezipamet[t];
-    })
-    .catch(function(){ mezipamet[t] = null; return null })
-    .finally(function(){ clearTimeout(casovac) });
+  var zdroj = jazykPodlePismen(t) || 'cs';
+  // Tři dotazy NAJEDNOU — stránka čeká na překlady jen pár sekund: tip
+  // Googlu, z jazyka do němčiny a do angličtiny (kontrola přepisu).
+  return Promise.all([google(t, 'auto', 'de'), google(t, zdroj, 'de'), google(t, zdroj, 'en')]).then(function(r){
+    var g = r[0], p = r[1], e = r[2];
+    if (g && g.zdroj === 'de' && g.jistota >= 0.9) return null;   // už je německy
+    // Vietnamštinu bez tónových znamének Google vždy uhodne jako jiná slova.
+    if (g && g.zdroj === 'vi' && jazykPodlePismen(t) !== 'vi') return null;
+    if (g && g.jistota >= 0.9 && NEPLETE_SE.indexOf(g.zdroj) >= 0 && prelozeno(g.text, t)) return g.text;
+    // Přepis neznámého slova („Bourani" → „Burans"): Google ho nezná a jen
+    // ho přepíše — anglicky vyjde stejně. To není překlad.
+    if (p && prelozeno(p.text, t) && !(e && bezHacku(e.text) === bezHacku(p.text))) return p.text;
+    if (g && g.jistota >= 0.9 && prelozeno(g.text, t)) return g.text;
+    return null;
+  }).then(function(de){ mezipamet[t] = de || null; return mezipamet[t]; });
 }
 
 var DATA = null;
