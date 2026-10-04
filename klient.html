@@ -278,19 +278,28 @@ function prelozeno(vystup, vstup){
   String(vystup).split(PISMENA).forEach(function(w){ if (w) ve[bezHacku(w)] = true; });
   return slova.filter(function(w){ return ve[w]; }).length / slova.length < 0.5;
 }
-function google(t, sl, tl){
+// JSON z jedné adresy s limitem 3,5 s, nebo null.
+function stahni(adresa, nastaveni){
   var ac = new AbortController();
   var casovac = setTimeout(function(){ try{ac.abort()}catch(e){} }, 3500);
-  return fetch('https://translate.googleapis.com/translate_a/single?client=gtx&sl=' + sl + '&tl=' + tl + '&dt=t&q='
-      + encodeURIComponent(t), { signal: ac.signal, referrerPolicy: 'no-referrer' })
+  nastaveni = nastaveni || {}; nastaveni.signal = ac.signal;
+  return fetch(adresa, nastaveni)
     .then(function(r){ return r.ok ? r.json() : null })
+    .catch(function(){ return null })
+    .finally(function(){ clearTimeout(casovac) });
+}
+// Nejdřív přes náš server (api/preklad.js — z adresy kanceláře Google 4. 10.
+// 2026 neodpovídal), když ten nedá odpověď ve tvaru Googlu, přímo.
+function google(t, sl, tl){
+  var url = 'https://translate.googleapis.com/translate_a/single?client=gtx&sl=' + sl + '&tl=' + tl + '&dt=t&q=' + encodeURIComponent(t);
+  return stahni('/api/preklad?u=' + encodeURIComponent(url))
+    .then(function(d){ return Array.isArray(d) ? d : stahni(url, { referrerPolicy: 'no-referrer' }); })
     .then(function(d){
       if (!d || !d[0]) return null;
       var v = d[0].map(function(s){ return (s && s[0]) || '' }).join('').trim();
       return v ? { text: v, zdroj: typeof d[2] === 'string' ? d[2] : sl, jistota: typeof d[6] === 'number' ? d[6] : 0 } : null;
     })
-    .catch(function(){ return null })
-    .finally(function(){ clearTimeout(casovac) });
+    .catch(function(){ return null });
 }
 // Písmena, která má jen jeden z jazyků lidí ve firmě (stejně jako appka,
 // _jazykPodlePismen). Společná (á, č, š, ž, ö, ü, ß) nerozhodují.

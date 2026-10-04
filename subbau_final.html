@@ -4850,7 +4850,7 @@ async function submitAdminSignatureWithPlacement() {
 // Po nahrání nové verze se snadno pozná, jestli se opravdu nasadila: otevřete
 // appku, zmáčkněte F12 (na Macu ⌥⌘I) a v konzoli je vypsané tohle datum. Když
 // tam svítí starší, prohlížeč nebo GitHub drží starou verzi.
-const SUBBAU_VERZE = '2026-10-04 c — Překlady popisu práce ve výkazech a na faktuře'
+const SUBBAU_VERZE = '2026-10-04 d — Překlad popisu práce přes náš server'
 console.log('SubBau docházka — verze ' + SUBBAU_VERZE)
 // Verze i dole v menu správce. Když někdo novinku „nevidí", podle ní se hned
 // pozná, jestli nemá otevřenou starou kopii appky — bez hledání v konzoli.
@@ -36774,16 +36774,27 @@ function _prekladPust() {
     Promise.resolve().then(fn).then(ok, ne).finally(() => { _prekladBezi--; _prekladPust() })
   }
 }
-// JSON z překladové služby, nebo null (chyba, vypršení, nečitelná odpověď).
+// JSON z jedné adresy, nebo null (chyba, vypršení, nečitelná odpověď).
 // Limit platí i na čtení těla — fetch bez něj čeká klidně minuty.
+async function _prekladStahni(adresa) {
+  const ac = typeof AbortController !== 'undefined' ? new AbortController() : null
+  const casovac = setTimeout(() => { try { ac && ac.abort() } catch (e) {} }, _PREKLAD_LIMIT_DOTAZU)
+  try {
+    const res = await fetch(adresa, ac ? { signal: ac.signal } : undefined)
+    return res.ok ? await res.json() : null
+  } catch (e) { return null } finally { clearTimeout(casovac) }
+}
+// Odpověď překladové služby, nebo null. NEJDŘÍV PŘES NÁŠ SERVER
+// (api/preklad.js): z adresy kanceláře Google ani MyMemory 4. 10. 2026
+// neodpovídaly (blokace po záplavě dotazů staré verze), odjinud tytéž popisy
+// prošly. Server se ptá za ni a CDN si odpověď pamatuje. Když server nedá
+// odpověď ve tvaru služby (není nasazený, ukázka /demo ho odchytí, výpadek),
+// zkusí se služba přímo z prohlížeče.
 function _prekladJson(url, novy) {
   return _prekladVeFronte(async () => {
-    const ac = typeof AbortController !== 'undefined' ? new AbortController() : null
-    const casovac = setTimeout(() => { try { ac && ac.abort() } catch (e) {} }, _PREKLAD_LIMIT_DOTAZU)
-    try {
-      const res = await fetch(url, ac ? { signal: ac.signal } : undefined)
-      return res.ok ? await res.json() : null
-    } finally { clearTimeout(casovac) }
+    const zeServeru = await _prekladStahni('/api/preklad?u=' + encodeURIComponent(url))
+    const tvarSluzby = url.startsWith('https://translate.googleapis.com/') ? Array.isArray(zeServeru) : !!(zeServeru && zeServeru.responseData)
+    return tvarSluzby ? zeServeru : _prekladStahni(url)
   }, novy).catch(e => { console.warn('[překlad] dotaz selhal:', e?.message); return null })
 }
 
