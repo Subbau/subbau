@@ -380,6 +380,16 @@ body.ubyt-tahne,body.ubyt-tahne *{cursor:grabbing!important;user-select:none!imp
 .ubyt-clovek:hover{background:var(--bg)}
 .ubyt-clovek.ubyt-tazena{opacity:.35}
 .ubyt-duch.ubyt-clovek-duch{background:#fff;border:1.5px solid var(--brd);border-radius:10px;padding:4px 10px 4px 4px}
+/* Plánovaný přesun (4. 10. 2026): štítek „→ kam od kdy", výběr lidí, cílová karta. */
+.ubyt-plan{display:inline-flex;align-items:center;min-height:28px;padding:2px 9px;border:1.5px dashed var(--blue);border-radius:14px;background:#fff;color:var(--blue);font-size:11.5px;font-weight:800;cursor:pointer;font-family:inherit;white-space:nowrap;max-width:100%;overflow:hidden;text-overflow:ellipsis}
+.ubyt-plan:hover{background:var(--blue-l,#eef3f9)}
+.ubyt-plan.ubyt-plan--pozde{border-color:var(--red);color:var(--red)}
+.ubyt-vyber{cursor:pointer}
+.ubyt-vyber-znak{font-size:20px;color:var(--blue);padding:0 6px;flex-shrink:0}
+.ubyt-vybran{background:var(--blue-l,#eef3f9);box-shadow:0 0 0 2px var(--blue)}
+.ubyt-vyber-chip{min-height:40px;padding:6px 12px;border:1.5px solid var(--brd);border-radius:20px;background:#fff;font-size:13px;font-weight:700;cursor:pointer;font-family:inherit}
+.ubyt-vyber-chip.ubyt-vybran{border-color:var(--blue)}
+.ubyt-plan-cil{outline:3px solid var(--blue);outline-offset:2px}
 .toast{pointer-events:none;position:fixed;bottom:100px;left:50%;transform:translateX(-50%);background:#211D1A;color:#fff;padding:12px 20px;border-radius:12px;font-size:14px;font-weight:700;z-index:999999;opacity:0;transition:opacity .2s;white-space:normal;overflow-wrap:anywhere;line-height:1.35;max-width:90vw;text-align:center;box-shadow:0 4px 20px rgba(0,0,0,0.3)}
 .toast.on{opacity:1}
 
@@ -4840,7 +4850,7 @@ async function submitAdminSignatureWithPlacement() {
 // Po nahrání nové verze se snadno pozná, jestli se opravdu nasadila: otevřete
 // appku, zmáčkněte F12 (na Macu ⌥⌘I) a v konzoli je vypsané tohle datum. Když
 // tam svítí starší, prohlížeč nebo GitHub drží starou verzi.
-const SUBBAU_VERZE = '2026-10-04 a — Přetahování lidí mezi ubytováními'
+const SUBBAU_VERZE = '2026-10-04 b — Plánovaný přesun mezi ubytováními'
 console.log('SubBau docházka — verze ' + SUBBAU_VERZE)
 // Verze i dole v menu správce. Když někdo novinku „nevidí", podle ní se hned
 // pozná, jestli nemá otevřenou starou kopii appky — bez hledání v konzoli.
@@ -10294,11 +10304,11 @@ async function loadWorkers() {
 const SKUPINKY_BARVY = ['#2a5d8f', '#2f6f4e', '#9c3b22', '#8a5a10', '#6b3fa0', '#0f766e',
   '#a03050', '#4a7a35', '#b06010', '#1f6a7a', '#7a3f8f', '#455a8f']
 const SKUPINKY_DRUH = {
-  ubytovani: { ikona: '🏠', jedno: 'ubytování', nove: 'Nové ubytování', bez: 'Bez ubytování', mista: 'míst' },
-  auto: { ikona: '🚗', jedno: 'auto', nove: 'Nové auto', bez: 'Bez auta', mista: 'míst v autě' }
+  ubytovani: { ikona: '🏠', jedno: 'ubytování', nove: 'Nové ubytování', bez: 'Bez ubytování', mista: 'míst', jinam: 'do jiného ubytování', prijedou: 'Přijedou', adresa: true },
+  auto: { ikona: '🚗', jedno: 'auto', nove: 'Nové auto', bez: 'Bez auta', mista: 'míst v autě', jinam: 'do jiného auta', prijedou: 'Pojedou', adresa: false }
 }
 let _druhSkupinek = 'ubytovani'
-let _skupinky = { kdy: 0, seznam: [], clenove: [], chybi: false }
+let _skupinky = { kdy: 0, seznam: [], clenove: [], chybi: false, presuny: [] }
 let _skupinkyBezi = null
 
 const SKUPINKY_DOPLNKY = ', cizi_pocet, cizi_jmena, zaplaceno_od, zaplaceno_do'
@@ -10333,10 +10343,36 @@ function nactiSkupinky(vynutit) {
       const dotaz = sloupce => sb.from('skupinky').select(sloupce).eq('aktivni', true).order('nazev')
       const zkusitDoplnky = Date.now() - _skupinkyBezDoplnkuOd > 600000
       const zkusitPozice = zkusitDoplnky && Date.now() - _skupinkyBezPoziceOd > 600000
-      let [s, c] = await Promise.all([
+      const clenove = () => sb.from('skupinky_lide').select('skupinka_id, worker_id, druh')
+      const plany = () => sb.from('skupinky_presuny').select('id, worker_id, cil_skupinka_id, druh, od')
+      let [s, c, pr] = await Promise.all([
         dotaz(zakladni + (zkusitDoplnky ? SKUPINKY_DOPLNKY : '') + (zkusitPozice ? SKUPINKY_POZICE : '')),
-        sb.from('skupinky_lide').select('skupinka_id, worker_id, druh')
+        clenove(), plany()
       ])
+      // PLÁNOVANÝ PŘESUN (supabase-migrace-ubytovani-presuny.sql). Nastal-li u
+      // někoho den, provede ho databáze (skupinky_proved_presuny) a čte se znovu
+      // — člověk se tak přesune „sám", jakmile ten den kdokoli otevře docházku.
+      // Bez SQL se plány jen nenabízejí; ubytování jede dál jako dřív.
+      const bezPresunu = !!(pr.error && jeChybiSkupinky(pr.error))
+      let presuny = pr.error ? [] : (pr.data || [])
+      // Den v čase firmy (jako databáze), ne v čase prohlížeče. Zkouší se
+      // nejvýš jednou za 10 minut: když databáze nic neprovede nebo spadne,
+      // nemá se ptát při každé tiché obnově.
+      const dnes = dnesVPraze()
+      if (presuny.some(x => String(x.od) <= dnes) && Date.now() - _presunyZkusenoOd > 600000) {
+        _presunyZkusenoOd = Date.now()
+        const pv = await sb.rpc('skupinky_proved_presuny')
+        if (pv.error) {
+          // Tichá chyba = „nic se nestalo a nikdo neví proč". Správce to musí vidět.
+          console.warn('[ubytovani] plánované přesuny se neprovedly', pv.error)
+          showToast('⚠️ Plánované přesuny se neprovedly: ' + (pv.error.message || 'chyba serveru'))
+        } else {
+          if (Number(pv.data) > 0) showToast('📅 Podle plánu přesunuto: ' + Number(pv.data))
+          const [c2, pr2] = await Promise.all([clenove(), plany()])
+          if (!c2.error) c = c2
+          if (!pr2.error) presuny = pr2.data || []
+        }
+      }
       // DOPLŇKY (cizí lidé, zaplaceno od–do) přidává supabase-migrace-ubytovani-
       // doplnky.sql. Dokud neproběhla, čte se jako dřív a okno je nenabízí —
       // ubytování musí fungovat dál i bez ní. Chybějící SLOUPEC se pozná dřív
@@ -10354,7 +10390,7 @@ function nactiSkupinky(vynutit) {
         if (jeChybiSkupinky(chyba)) _skupinky = { kdy: Date.now(), seznam: [], clenove: [], chybi: true }
         return _skupinky   // jiný výpadek: platí, co bylo načtené minule
       }
-      _skupinky = { kdy: Date.now(), seznam: s.data || [], clenove: c.data || [], chybi: false, bezDoplnku, bezPozice }
+      _skupinky = { kdy: Date.now(), seznam: s.data || [], clenove: c.data || [], chybi: false, bezDoplnku, bezPozice, presuny, bezPresunu }
     } catch (e) {}
     return _skupinky
   })().finally(() => { _skupinkyBezi = null })
@@ -10383,6 +10419,11 @@ function skupinkyCipyHtml(workerId) {
     const s = skupinkaCloveka(workerId, d)
     if (!s) return ''
     return `<span title="${escAttr(SKUPINKY_DRUH[d].jedno + ': ' + s.nazev + (s.adresa ? ' — ' + s.adresa : ''))}" style="display:inline-block;margin:2px 4px 0 0;padding:0 6px;border-radius:8px;border:1.5px solid ${barvaSkupinky(s)};background:${tonSkupinky(s, 0.12)};color:#2b2622;font-size:10.5px;font-weight:700;line-height:16px;white-space:nowrap;max-width:100%;overflow:hidden;text-overflow:ellipsis">${SKUPINKY_DRUH[d].ikona} ${escAttr(s.nazev)}</span>`
+  }).join('') + ['ubytovani', 'auto'].map(d => {
+    // Plánovaný přesun je vidět i v Pracovnících (oponent 4. 10.: „plán je vidět jen v Ubytování").
+    const p = planCloveka(workerId, d)
+    const c = p && _skupinky.seznam.find(x => String(x.id) === String(p.cil_skupinka_id))
+    return c ? `<span data-plan-cip title="Plánovaný přesun" style="display:inline-block;margin:2px 4px 0 0;padding:0 6px;border-radius:8px;border:1.5px dashed var(--blue);color:var(--blue);font-size:10.5px;font-weight:700;line-height:16px;white-space:nowrap;max-width:100%;overflow:hidden;text-overflow:ellipsis">📅 → ${escAttr(c.nazev)} od ${escAttr(datumPlanu(p.od))}</span>` : ''
   }).join('')
 }
 
@@ -10549,6 +10590,8 @@ function vykresliUbytovani() {
   }
   const D = SKUPINKY_DRUH[_druhSkupinek]
   const skupiny = _skupinky.seznam.filter(s => s.druh === _druhSkupinek)
+  // Výběr do plánu platí jen pro tentýž druh a dokud cílová karta existuje.
+  if (_ubytPlan && (_ubytPlan.druh !== _druhSkupinek || !skupiny.some(x => String(x.id) === String(_ubytPlan.cil)))) _ubytPlan = null
   const hledat = textKHledani(_ubytHledat)
   const sedi = t => !hledat || textKHledani(t).includes(hledat)
   const podleId = {}
@@ -10577,7 +10620,7 @@ function vykresliUbytovani() {
     const plno = s.pocet_mist && obsazenoSkupinky(s) > s.pocet_mist
     const mapa = s.adresa ? `<a href="https://www.google.com/maps/search/?api=1&amp;query=${encodeURIComponent(s.adresa)}" target="_blank" rel="noopener" style="color:inherit">${escAttr(s.adresa)}</a>` : ''
     const misto = rozlozit ? rozlozeni.mapa.get(s.id) : null
-    return `<div class="ubyt-karta" data-id="${escAttr(s.id)}" style="${misto ? `grid-column:${misto.x + 1};grid-row:${misto.y + 1};` : ''}border:1.5px solid var(--brd);border-left:7px solid ${barvaSkupinky(s)};border-radius:12px;background:#fff;padding:12px 14px;display:flex;flex-direction:column;gap:8px">
+    return `<div class="ubyt-karta${_ubytPlan && String(_ubytPlan.cil) === String(s.id) ? ' ubyt-plan-cil' : ''}" data-id="${escAttr(s.id)}" style="${misto ? `grid-column:${misto.x + 1};grid-row:${misto.y + 1};` : ''}border:1.5px solid var(--brd);border-left:7px solid ${barvaSkupinky(s)};border-radius:12px;background:#fff;padding:12px 14px;display:flex;flex-direction:column;gap:8px">
       <div style="display:flex;align-items:flex-start;gap:8px">
         <div style="flex:1;min-width:0">
           <div style="font-size:15px;font-weight:800">${D.ikona} ${escAttr(s.nazev)}</div>
@@ -10590,14 +10633,16 @@ function vykresliUbytovani() {
         ${rozlozit ? `<button type="button" class="ubyt-uchop" data-uchop="${escAttr(s.id)}" title="Chyťte a přetáhněte kartu, kam potřebujete" aria-label="Přesunout kartu" onpointerdown="zacniPresunKarty(event,'${jsStr(String(s.id))}')">⠿</button>` : ''}
       </div>
       <div style="display:flex;flex-direction:column;gap:4px">
-        ${lide.length ? lide.map(w => `<div data-ubyt-clovek="${escAttr(String(w.id))}"${hledat && sedi(w.full_name) ? ' data-nalezen' : ''} class="ubyt-clovek" title="Chyťte a přetáhněte do jiného ${escAttr(D.jedno)}" onpointerdown="zacniPresunCloveka(event,'${jsStr(String(s.id))}','${jsStr(String(w.id))}')" style="display:flex;align-items:center;gap:10px;font-size:14px;border-radius:8px${hledat && sedi(w.full_name) ? ';background:#fff3c4;box-shadow:0 0 0 4px #fff3c4' : ''}">${fotkaHtml(w.avatar_url, w.full_name, 44, false)}<span style="flex:1;min-width:0;display:flex;align-items:center"><span style="min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;cursor:pointer;font-weight:600" onclick="openWorkerModal('${jsStr(String(w.id))}')">${escAttr(w.full_name || '')}</span>${vlajkaZaJmenemHtml(w.id)}</span><button onclick="odeberZeSkupinky('${jsStr(String(s.id))}','${jsStr(String(w.id))}')" title="Odebrat z ${escAttr(D.jedno)}" style="border:none;background:none;color:var(--text3);cursor:pointer;font-size:15px;padding:2px 6px;min-height:28px">✕</button></div>`).join('')
+        ${lide.length ? lide.map(w => radekClovekaUbytHtml(s, w, D, hledat && sedi(w.full_name))).join('')
           : '<div style="font-size:12.5px;color:var(--text3)">Zatím tu nikdo není.</div>'}
         ${neviditelnych ? `<div data-neviditelni style="font-size:12px;color:var(--text3)">＋ ${neviditelnych} další (neaktivní nebo ze schované firmy)</div>` : ''}
         ${ciziSkupinky(s) ? `<div data-cizi style="font-size:12.5px;color:var(--text2);padding:6px 8px;border:1.5px dashed var(--brd);border-radius:8px">👤 Cizí lidé na pokoji: <b>${ciziSkupinky(s)}</b>${s.cizi_jmena ? ' — ' + escAttr(s.cizi_jmena) : ''}</div>` : ''}
+        ${prijedouHtml(s, podleId)}
       </div>
       <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:2px">
         <button onclick="pridatLideDoSkupinky('${jsStr(String(s.id))}')" class="btn-pri" style="padding:7px 12px;font-size:13px">＋ Přidat lidi</button>
         <button onclick="upravSkupinku('${jsStr(String(s.id))}')" style="padding:7px 12px;font-size:13px;border:1.5px solid var(--brd);border-radius:8px;background:#fff;cursor:pointer;font-family:inherit;font-weight:700">✎ Upravit</button>
+        ${_skupinky.bezPresunu || _ubytPlan ? '' : `<button data-planovat="${escAttr(String(s.id))}" onclick="planujPresunSem('${jsStr(String(s.id))}')" style="padding:7px 12px;font-size:13px;border:1.5px solid var(--blue);border-radius:8px;background:#fff;color:var(--blue);cursor:pointer;font-family:inherit;font-weight:700">📅 Plánovat přesun sem</button>`}
       </div>
     </div>`
   }).join('')
@@ -10613,15 +10658,18 @@ function vykresliUbytovani() {
         : `<div style="display:flex;flex-wrap:wrap;gap:8px">${viditelneFirmy.map(f => { const on = f.resime_ubytovani === true; return `<button type="button" data-firma="${escAttr(String(f.id))}" aria-pressed="${on}" onclick="prepniFirmuUbytovani('${jsStr(String(f.id))}')" style="min-height:44px;padding:8px 14px;border-radius:22px;border:2px solid ${on ? 'var(--blue)' : 'var(--brd)'};background:${on ? 'var(--blue)' : '#fff'};color:${on ? '#fff' : 'var(--text)'};font-size:13.5px;font-weight:700;cursor:pointer;font-family:inherit">${on ? '✓ ' : ''}${escAttr(cleanTeamName(f.name || ''))}</button>` }).join('')}</div>
       <div style="font-size:12px;color:var(--text3);margin-top:8px">${vybrane.size ? 'Dole a v „Přidat lidi" jsou jen lidi z vybraných firem.' : 'Žádná firma není vybraná — ukazují se lidi ze všech firem.'}</div>`}
     </div>` : ''
-  box.innerHTML = `${firmyHtml}
+  box.innerHTML = `${planListaHtml()}${firmyHtml}
     ${!skupiny.length ? `<div style="padding:16px;color:var(--text3)">Zatím tu není žádné ${escAttr(D.jedno)}. Založte ho tlačítkem „＋ ${escAttr(D.nove)}".</div>`
       : karty ? `<div id="ubyt-mrizka" data-sloupcu="${rozlozit ? sloupcu : 0}" style="display:grid;${rozlozit ? `grid-template-columns:repeat(${sloupcu},minmax(0,1fr));grid-template-rows:repeat(${rozlozeni.radku},auto)` : 'grid-template-columns:repeat(auto-fill,minmax(280px,1fr))'};gap:12px">${karty}</div>
         ${_skupinky.bezPozice && !_skupinky.bezDoplnku && !hledat ? '<div data-bez-rozlozeni style="font-size:12px;color:var(--text3);margin-top:8px">Přesouvání karet půjde po spuštění SQL supabase-migrace-ubytovani-rozlozeni.sql.</div>' : ''}`
       : `<div data-nic-nenalezeno style="padding:16px;color:var(--text3)">Na „${escAttr(_ubytHledat.trim())}" se nic nenašlo.</div>`}
     <div data-bez-ubytovani style="margin-top:16px;padding:12px 14px;border-radius:12px;background:var(--bg,#f4efe7);${hledat && !bez.length ? 'display:none' : ''}">
       <div style="font-size:13px;font-weight:800;margin-bottom:6px">${D.ikona} ${escAttr(D.bez)}: ${bez.length}${jinychFirem ? `<span data-jinych-firem style="font-weight:400;color:var(--text3)"> · ${jinychFirem} z ostatních firem se neukazuje</span>` : ''}</div>
-      <div style="font-size:12.5px;color:var(--text2);line-height:1.7">${bez.map(w => escAttr(w.full_name || '')).join(' · ') || '—'}</div>
-    </div>`
+      ${_ubytPlan ? `<div data-bez-vyber style="display:flex;flex-wrap:wrap;gap:6px">${bez.map(w => vyberBezHtml(w)).join('') || '—'}</div>`
+        : `<div style="font-size:12.5px;color:var(--text2);line-height:1.7">${bez.map(w => escAttr(w.full_name || '') + planBezHtml(w)).join(' · ') || '—'}</div>`}
+    </div>
+    ${_skupinky.bezPresunu && !_skupinky.chybi ? '<div data-bez-presunu style="font-size:12px;color:var(--text3);margin-top:8px">Plánovaný přesun půjde po spuštění SQL supabase-migrace-ubytovani-presuny.sql.</div>' : ''}
+    ${_ubytPlan ? '<div data-plan-misto style="height:110px"></div>' : ''}`
 }
 
 // Kam která karta patří při `sloupcu` sloupcích: nejdřív uložená místa (vejdou-li
@@ -10694,7 +10742,7 @@ function zacniPresunKarty(e, id) {
   }
   // U horního a dolního okraje se stránka posouvá sama — jinak by se karta
   // nedala dotáhnout do řádku, který není vidět.
-  const svitek = mrizka.closest('.view') || document.scrollingElement
+  const svitek = rolujiciPredek(mrizka)
   const rolovani = setInterval(() => {
     if (posledniY > innerHeight - 70) svitek.scrollTop += 14
     else if (posledniY < 70) svitek.scrollTop -= 14
@@ -10755,10 +10803,11 @@ async function presunKartu(id, cil) {
 // a dostane do profilu novou adresu. Mimo karty se nestane nic.
 let _ubytPotlacKlik = 0
 function zacniPresunCloveka(e, odkudId, workerId) {
-  if (_ubytTahne || (e.pointerType === 'mouse' && e.button !== 0)) return
+  if (_ubytTahne || _ubytPlan || (e.pointerType === 'mouse' && e.button !== 0)) return
   if (e.target.closest && e.target.closest('button, a')) return   // ✕ a odkazy mají svou práci
-  const radek = e.currentTarget
+  let radek = e.currentTarget
   const dotyk = e.pointerType === 'touch'
+  const pid = e.pointerId   // druhý prst tažení prvního nesmí řídit
   // Myš: žádné označování textu ani tažení obrázku. Prst ne — tam musí
   // fungovat posouvání stránky, dokud se člověk nepodrží.
   if (!dotyk) e.preventDefault()
@@ -10773,6 +10822,12 @@ function zacniPresunCloveka(e, odkudId, workerId) {
     return null
   }
   const zacni = () => {
+    // Tichá obnova během podržení prstem řádek překreslí — vezme se nový, nebo nic.
+    if (!radek.isConnected) {
+      const novy = document.querySelector(`.ubyt-karta[data-id="${CSS.escape(String(odkudId))}"] [data-ubyt-clovek="${CSS.escape(String(workerId))}"]`)
+      if (!novy) { uklid(false); return false }
+      radek = novy
+    }
     tahne = true; _ubytTahne = true
     document.body.classList.add('ubyt-tahne')
     const r = radek.getBoundingClientRect()
@@ -10783,24 +10838,28 @@ function zacniPresunCloveka(e, odkudId, workerId) {
     duch.style.left = r.left + 'px'; duch.style.top = r.top + 'px'; duch.style.width = r.width + 'px'
     document.body.appendChild(duch)
     radek.classList.add('ubyt-tazena')
-    const svitek = radek.closest('.view') || document.scrollingElement
+    const svitek = rolujiciPredek(radek)
     rolovani = setInterval(() => {
       if (posledniY > innerHeight - 70) svitek.scrollTop += 14
       else if (posledniY < 70) svitek.scrollTop -= 14
     }, 30)
+    return true
   }
   // Prst: podržet. Pohne-li se dřív, je to posouvání stránky a nic se nechytá.
   let drzeni = dotyk ? setTimeout(() => { drzeni = null; zacni() }, 400) : null
   // Během tažení prstem se stránka nesmí posouvat (jinak prohlížeč tažení zruší).
   const brzdaPosunu = ev => { if (tahne) ev.preventDefault() }
-  if (dotyk) window.addEventListener('touchmove', brzdaPosunu, { passive: false })
+  // Android po dlouhém podržení obrázku otevře kontextové menu a dotyk zruší.
+  const bezMenu = ev => { ev.preventDefault() }
+  if (dotyk) { window.addEventListener('touchmove', brzdaPosunu, { passive: false }); window.addEventListener('contextmenu', bezMenu, true) }
   const pohyb = ev => {
+    if (ev.pointerId !== pid) return
     posledniY = ev.clientY
     if (!tahne) {
       const daleko = Math.abs(ev.clientX - x0) > 6 || Math.abs(ev.clientY - y0) > 6
       if (dotyk) { if (daleko && drzeni) { clearTimeout(drzeni); drzeni = null; uklid(false) } return }
       if (!daleko) return
-      zacni()
+      if (zacni() === false) return
     }
     duch.style.left = (ev.clientX - odDuchu.x) + 'px'; duch.style.top = (ev.clientY - odDuchu.y) + 'px'
     const novy = najdiCil(ev.clientX, ev.clientY)
@@ -10813,7 +10872,7 @@ function zacniPresunCloveka(e, odkudId, workerId) {
     window.removeEventListener('pointermove', pohyb)
     window.removeEventListener('pointerup', konec)
     window.removeEventListener('pointercancel', konec)
-    if (dotyk) window.removeEventListener('touchmove', brzdaPosunu)
+    if (dotyk) { window.removeEventListener('touchmove', brzdaPosunu); window.removeEventListener('contextmenu', bezMenu, true) }
     if (rolovani) clearInterval(rolovani)
     if (duch) duch.remove()
     if (cil) cil.classList.remove('ubyt-cil')
@@ -10822,6 +10881,7 @@ function zacniPresunCloveka(e, odkudId, workerId) {
     if (prekreslit) vykresliUbytovani()
   }
   const konec = ev => {
+    if (ev.pointerId !== pid) return
     const kam = tahne && ev.type === 'pointerup' && cil ? cil.dataset.id : null
     const tahnul = tahne
     uklid(false)
@@ -10851,22 +10911,212 @@ async function presunCloveka(workerId, odkudId, kamId) {
       !confirm('V „' + kam.nazev + '" je plno (' + obsazenoSkupinky(kam) + ' / ' + kam.pocet_mist + ').\n\nPřesunout ' + jmeno + ' i tak?')) {
     vykresliUbytovani(); return
   }
+  // PLÁN A RUČNÍ PŘESUN (oponent 4. 10.): přesun přímo do cíle plánu plán
+  // splní (zapisClenstvi ho smaže); přesun jinam se zeptá — jinak by ho v den
+  // plánu databáze vrátila zpátky podle starého rozhodnutí.
+  const plan = planCloveka(workerId, kam.druh)
+  let zrusitPlan = null
+  if (plan && String(plan.cil_skupinka_id) !== String(kam.id)) {
+    if (confirm(jmeno + ' má naplánovaný přesun do „' + nazevSkupinky(plan.cil_skupinka_id) + '" od ' + datumPlanu(plan.od) + '\n\nOK = plán zrušit · Zrušit = plán nechat')) zrusitPlan = plan
+  }
   // Hned je vidět, kam dopadl; databáze dobíhá za tím. Když neuloží, načte
   // se znovu, co v ní opravdu je (jako u přesunu karet).
+  const predchozi = { [String(workerId)]: odkud && odkud.adresa ? odkud.adresa : null }
   const clen = _skupinky.clenove.find(c => String(c.worker_id) === String(workerId) && c.druh === kam.druh)
   if (clen) clen.skupinka_id = kam.id
   vykresliUbytovani()
-  const chyba = await zapisClenstvi(kam, [workerId], [])
+  const chyba = await zapisClenstvi(kam, [workerId], [], predchozi)
   if (chyba) { showToast(chyba); zneplatniSkupinky(); loadUbytovani(true); return }
-  // Nové ubytování bez adresy: stará adresa v profilu by lhala — smaže se,
-  // ale jen když to byla adresa toho, odkud odešel.
-  if (kam.druh === 'ubytovani' && !kam.adresa && odkud && odkud.adresa) {
-    await sb.from('profiles').update({ accommodation_address: null }).eq('id', workerId).eq('accommodation_address', odkud.adresa).select('id')
+  if (zrusitPlan) {
+    const { error } = await sb.from('skupinky_presuny').delete().eq('id', zrusitPlan.id).select('id')
+    if (error) showToast('⚠️ Přesunuto, ale plán se nezrušil: ' + error.message)
+    else _skupinky.presuny = (_skupinky.presuny || []).filter(x => x.id !== zrusitPlan.id)
   }
+  vykresliUbytovani()
   showToast('✅ ' + jmeno + ' → ' + kam.nazev)
   // Zápis je ověřený (zapisClenstvi hlídá počet uložených řádků), takže zůstává,
   // co je vidět — jako u přesunu karet. Příští načtení vezme čerstvá data.
   zneplatniSkupinky()
+}
+
+// ── PLÁNOVANÝ PŘESUN (majitel 4. 10. 2026) ─────────────────────────────────
+// „Dám, že se bude přesouvat — tlačítko — a ty osoby, na který kliknu, se tam
+// zařadí; bude u nich napsaný datum, od kdy se tam budou přesouvat."
+// Postup: na kartě „📅 Plánovat přesun sem" → od kdy → klikání na lidi (v
+// kartách i dole bez ubytování) → Uložit plán. U člověka je pak štítek
+// „→ kam od kdy", v cílové kartě „Přijedou". Do obsazenosti se nepočítá, dokud
+// den nenastane; ten den ho přesune databáze sama (viz nactiSkupinky).
+// Jeden plán na člověka a druh: nový plán starý nahradí.
+let _ubytPlan = null   // { cil, druh, od, vybrani: Set, uklada } — právě se vybírá
+let _presunyZkusenoOd = 0   // kdy se naposled zkoušelo provést splatné plány
+function dnesVPraze() {
+  try { return new Intl.DateTimeFormat('sv-SE', { timeZone: 'Europe/Prague' }).format(new Date()) } catch (e) { return localDateStr(new Date()) }
+}
+function nazevSkupinky(id) { const s = _skupinky.seznam.find(x => String(x.id) === String(id)); return s ? s.nazev : '?' }
+function jmenoUbyt(workerId) { const w = _ubytLide.find(x => String(x.id) === String(workerId)); return (w && w.full_name) || 'Pracovník' }
+// Co při tažení u okraje opravdu roluje: první předek, který se dá posouvat,
+// jinak celá stránka (.view na Ubytování neroluje — posouvat ho nedělalo nic).
+function rolujiciPredek(el) {
+  for (let x = el && el.parentElement; x && x !== document.body; x = x.parentElement) {
+    const o = getComputedStyle(x).overflowY
+    if ((o === 'auto' || o === 'scroll') && x.scrollHeight > x.clientHeight) return x
+  }
+  return document.scrollingElement || document.documentElement
+}
+function planCloveka(workerId, druh) {
+  return (_skupinky.presuny || []).find(p => String(p.worker_id) === String(workerId) && p.druh === druh) || null
+}
+function datumPlanu(d) {
+  const [y, m, dd] = String(d || '').split('-').map(Number)
+  return y && m && dd ? dd + '. ' + m + '.' : String(d || '')
+}
+function stitekPlanuHtml(p, text, pozde = false) {
+  return `<button type="button" class="ubyt-plan${pozde ? ' ubyt-plan--pozde' : ''}" data-plan="${escAttr(String(p.id))}" onclick="zrusPlanPresunu('${jsStr(String(p.id))}')" title="Plánovaný přesun — kliknutím ho zrušíte">${text}</button>`
+}
+// Řádek člověka v kartě. DVA REŽIMY: běžný (chytit a přetáhnout, jméno otevře
+// kartu pracovníka, ✕ odebere) a výběr do plánu (klik vybere / zruší výběr —
+// jméno ani fotka nic jiného neotvírají, ať se nedá minout).
+function radekClovekaUbytHtml(s, w, D, nalezen) {
+  const wid = String(w.id)
+  const zvyrazneni = nalezen ? ';background:#fff3c4;box-shadow:0 0 0 4px #fff3c4' : ''
+  const vlajka = vlajkaZaJmenemHtml(w.id)
+  if (_ubytPlan && String(_ubytPlan.cil) !== String(s.id)) {
+    const vybran = _ubytPlan.vybrani.has(wid)
+    // Dosavadní plán musí být vidět i při výběru — uložení ho nahradí.
+    const dosavadni = planCloveka(w.id, _ubytPlan.druh)
+    const poznamka = dosavadni ? `<span data-dosavadni-plan style="font-size:11.5px;color:var(--blue);font-weight:700;white-space:nowrap">📅 má plán → ${escAttr(nazevSkupinky(dosavadni.cil_skupinka_id))} od ${escAttr(datumPlanu(dosavadni.od))}</span>` : ''
+    // Fotka v běžném režimu otevírá náhled (onclick se stopPropagation) — při výběru by klik spolkla.
+    const fotka = fotkaHtml(w.avatar_url, w.full_name, 44, false).replace(/ onclick="event\.stopPropagation\(\);showAvatarPreview\([^"]*\)"/, '')
+    return `<div data-ubyt-clovek="${escAttr(wid)}" class="ubyt-clovek ubyt-vyber${vybran ? ' ubyt-vybran' : ''}" role="checkbox" aria-checked="${vybran}" tabindex="0" onclick="vyberDoPlanu('${jsStr(wid)}')" onkeydown="if(event.key===' '||event.key==='Enter'){event.preventDefault();vyberDoPlanu('${jsStr(wid)}')}" style="display:flex;align-items:center;gap:10px;font-size:14px;border-radius:8px${zvyrazneni}">${fotka}<span style="flex:1;min-width:0;display:flex;align-items:center;flex-wrap:wrap;gap:2px 6px"><span style="min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:600">${escAttr(w.full_name || '')}</span>${vlajka}${poznamka}</span><span class="ubyt-vyber-znak" aria-hidden="true">${vybran ? '☑' : '☐'}</span></div>`
+  }
+  const plan = planCloveka(w.id, s.druh)
+  const cil = plan && String(plan.cil_skupinka_id) !== String(s.id) ? _skupinky.seznam.find(x => String(x.id) === String(plan.cil_skupinka_id)) : null
+  // Plán, jehož den už minul, se neprovedl (chyba, nebo ještě neproběhl ranní běh) — musí to být vidět.
+  const pozde = cil && String(plan.od) < dnesVPraze()
+  const stitek = cil ? stitekPlanuHtml(plan, `${pozde ? '⚠️' : '📅'} → ${escAttr(cil.nazev)} od ${escAttr(datumPlanu(plan.od))}${pozde ? ' — neprovedeno' : ''}`, pozde) : ''
+  return `<div data-ubyt-clovek="${escAttr(wid)}"${nalezen ? ' data-nalezen' : ''} class="ubyt-clovek" title="Chyťte a přetáhněte ${escAttr(D.jinam)}" onpointerdown="zacniPresunCloveka(event,'${jsStr(String(s.id))}','${jsStr(wid)}')" style="display:flex;align-items:center;gap:10px;font-size:14px;border-radius:8px${zvyrazneni}">${fotkaHtml(w.avatar_url, w.full_name, 44, false)}<span style="flex:1;min-width:0;display:flex;align-items:center;flex-wrap:wrap;gap:2px 6px"><span style="min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;cursor:pointer;font-weight:600" onclick="openWorkerModal('${jsStr(wid)}')">${escAttr(w.full_name || '')}</span>${vlajka}${stitek}</span><button onclick="odeberZeSkupinky('${jsStr(String(s.id))}','${jsStr(wid)}')" title="Odebrat z ${escAttr(D.jedno)}" style="border:none;background:none;color:var(--text3);cursor:pointer;font-size:15px;padding:2px 6px;min-height:28px">✕</button></div>`
+}
+// Kdo do karty přijede (a od kdy). Jména jen viditelných lidí, ostatní číslem.
+function prijedouHtml(s, podleId) {
+  // Kdo už v kartě je (přesunut ručně dřív), do „Přijedou" nepatří.
+  const uz = new Set(clenoveSkupinky(s.id).map(String))
+  const plany = (_skupinky.presuny || []).filter(p => String(p.cil_skupinka_id) === String(s.id) && p.druh === s.druh && !uz.has(String(p.worker_id)))
+  if (!plany.length) return ''
+  const videt = plany.filter(p => podleId[p.worker_id]).sort((a, b) => (String(a.od) < String(b.od) ? -1 : String(a.od) > String(b.od) ? 1 : 0))
+  const skryto = plany.length - videt.length
+  return `<div data-prijedou style="font-size:12.5px;color:var(--text2);padding:6px 8px;border:1.5px dashed var(--blue);border-radius:8px;display:flex;flex-wrap:wrap;gap:6px;align-items:center"><span style="font-weight:800">📅 ${escAttr(SKUPINKY_DRUH[s.druh].prijedou)}:</span>${videt.map(p => stitekPlanuHtml(p, `${escAttr(podleId[p.worker_id].full_name || '')} od ${escAttr(datumPlanu(p.od))}`)).join('')}${skryto ? `<span>＋ ${skryto} další</span>` : ''}</div>`
+}
+function planBezHtml(w) {
+  const p = planCloveka(w.id, _druhSkupinek)
+  const cil = p && _skupinky.seznam.find(x => String(x.id) === String(p.cil_skupinka_id))
+  return cil ? ` <span data-plan-bez style="color:var(--blue);font-weight:700">(📅 → ${escAttr(cil.nazev)} od ${escAttr(datumPlanu(p.od))})</span>` : ''
+}
+function vyberBezHtml(w) {
+  const wid = String(w.id), v = !!(_ubytPlan && _ubytPlan.vybrani.has(wid))
+  const dosavadni = _ubytPlan && planCloveka(w.id, _ubytPlan.druh)
+  return `<button type="button" class="ubyt-vyber-chip${v ? ' ubyt-vybran' : ''}" data-ubyt-bez="${escAttr(wid)}" aria-pressed="${v}" onclick="vyberDoPlanu('${jsStr(wid)}')">${v ? '☑' : '☐'} ${escAttr(w.full_name || '')}${dosavadni ? ` <span data-dosavadni-plan style="color:var(--blue)">(📅 má plán → ${escAttr(nazevSkupinky(dosavadni.cil_skupinka_id))})</span>` : ''}</button>`
+}
+function planListaHtml() {
+  if (!_ubytPlan) return ''
+  const cil = _skupinky.seznam.find(x => String(x.id) === String(_ubytPlan.cil))
+  const n = _ubytPlan.vybrani.size
+  const uklada = !!_ubytPlan.uklada
+  const volno = cil && cil.pocet_mist ? Math.max(0, cil.pocet_mist - obsazenoSkupinky(cil)) : null
+  // DOLE A NAPEVNO (oponent 4. 10.): nahoře v kartě s overflow:hidden se lišta
+  // nepřilepí a horní lišta appky by ji zakryla. Dole je vždy vidět a na
+  // telefonu je pod palcem. Konec obsahu má místo navíc, ať nic nezakryje.
+  return `<div data-plan-lista style="position:fixed;left:50%;transform:translateX(-50%);bottom:calc(12px + env(safe-area-inset-bottom));width:min(860px, calc(100vw - 24px));box-sizing:border-box;z-index:9000;padding:12px 14px;border:2px solid var(--blue);border-radius:12px;background:#fff;box-shadow:0 10px 30px rgba(0,0,0,.25);display:flex;flex-wrap:wrap;align-items:center;gap:8px 12px">
+    <div style="flex:1;min-width:200px"><div style="font-size:14.5px;font-weight:800">📅 Přesun do „${escAttr(cil ? cil.nazev : '')}" od ${escAttr(datumPlanu(_ubytPlan.od))}</div><div style="font-size:12.5px;color:var(--text2);margin-top:2px">Klikněte na lidi, kteří se přesunou — v kartách i dole v seznamu „${escAttr(SKUPINKY_DRUH[_ubytPlan.druh].bez)}". Vybráno: <b data-plan-pocet>${n}</b>${volno !== null ? ` · volno teď: <b data-plan-volno>${volno}</b>` : ''}</div></div>
+    <button type="button" data-plan-zrusit onclick="zrusVyberPlanu()" ${uklada ? 'disabled' : ''} style="min-height:40px;padding:8px 14px;border:1.5px solid var(--brd);border-radius:9px;background:#fff;font-size:14px;font-weight:700;cursor:pointer;font-family:inherit">Zrušit</button>
+    <button type="button" data-plan-ulozit onclick="ulozPlanPresunu()" ${n && !uklada ? '' : 'disabled'} class="btn-pri" style="min-height:40px;padding:8px 16px;font-size:14px">${uklada ? 'Ukládám…' : 'Uložit plán'}</button>
+  </div>`
+}
+function planujPresunSem(id) {
+  const s = _skupinky.seznam.find(x => String(x.id) === String(id))
+  if (!s) return
+  // Dnešek v čase firmy — stejně jako databáze, která plán provede.
+  const dnes = dnesVPraze()
+  const z = new Date(dnes + 'T12:00:00'); z.setDate(z.getDate() + 1)
+  const zitra = localDateStr(z)
+  document.getElementById('ubyt-plan-overlay')?.remove()
+  const ov = document.createElement('div')
+  ov.id = 'ubyt-plan-overlay'
+  ov.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:10050;display:flex;align-items:center;justify-content:center;padding:16px'
+  ov.innerHTML = `<div style="background:#fff;border-radius:14px;max-width:420px;width:100%;padding:18px">
+    <div style="font-size:16px;font-weight:800">📅 Přesun do: ${escAttr(s.nazev)}</div>
+    <label style="display:block;margin-top:12px;font-size:13.5px;font-weight:700">Od kdy
+      <input type="date" data-od value="${zitra}" min="${dnes}" style="display:block;margin-top:6px;padding:9px 11px;border:1.5px solid var(--brd);border-radius:9px;font-size:15px;font-family:inherit;width:100%;box-sizing:border-box"></label>
+    <div style="font-size:12.5px;color:var(--text3);margin-top:8px;line-height:1.5">Pak klikáte na lidi, kteří se přesunou. Ten den je appka přesune sama — ráno kolem 8:00, nebo dřív, jakmile docházku otevře někdo z kanceláře${SKUPINKY_DRUH[s.druh].adresa ? ' (i s adresou v profilu)' : ''}. Do té doby jde plán zrušit kliknutím na štítek.</div>
+    <div style="display:flex;gap:10px;justify-content:flex-end;margin-top:14px">
+      <button type="button" data-zrusit style="padding:10px 16px;border:1.5px solid var(--brd);border-radius:9px;background:#fff;font-size:14px;font-weight:700;cursor:pointer;font-family:inherit">Zrušit</button>
+      <button type="button" data-dal style="padding:10px 16px;border:none;border-radius:9px;background:var(--blue);color:#fff;font-size:14px;font-weight:800;cursor:pointer;font-family:inherit">Vybrat lidi →</button>
+    </div></div>`
+  document.body.appendChild(ov)
+  const zavri = () => ov.remove()
+  ov.addEventListener('click', e => { if (e.target === ov) zavri() })
+  ov.querySelector('[data-zrusit]').onclick = zavri
+  ov.querySelector('[data-dal]').onclick = () => {
+    const od = ov.querySelector('[data-od]').value
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(od) || od < dnes) { showToast('Vyberte datum od dneška dál'); return }
+    zavri()
+    _ubytPlan = { cil: s.id, druh: s.druh, od, vybrani: new Set() }
+    vykresliUbytovani()
+    document.querySelector('[data-plan-lista]')?.scrollIntoView({ block: 'nearest' })
+  }
+}
+function vyberDoPlanu(workerId) {
+  if (!_ubytPlan || _ubytPlan.uklada) return
+  const k = String(workerId)
+  if (_ubytPlan.vybrani.has(k)) _ubytPlan.vybrani.delete(k); else _ubytPlan.vybrani.add(k)
+  // Klávesnicí (mezerník/Enter) se pokračuje na tomtéž řádku i po překreslení.
+  const ds = (document.activeElement && document.activeElement.dataset) || {}
+  const fokus = ds.ubytClovek ? `[data-ubyt-clovek="${CSS.escape(ds.ubytClovek)}"]` : ds.ubytBez ? `[data-ubyt-bez="${CSS.escape(ds.ubytBez)}"]` : null
+  vykresliUbytovani()
+  if (fokus) document.querySelector('#ubyt-obsah ' + fokus)?.focus()
+}
+function zrusVyberPlanu() { _ubytPlan = null; vykresliUbytovani() }
+async function ulozPlanPresunu() {
+  const pl = _ubytPlan
+  if (!pl || !pl.vybrani.size || pl.uklada) return
+  const cil = _skupinky.seznam.find(x => String(x.id) === String(pl.cil))
+  const vybrani = [...pl.vybrani]
+  // Jeden plán na člověka a druh: dosavadní se nahradí — ať se to neděje potichu.
+  const nahradi = vybrani.map(w => planCloveka(w, pl.druh)).filter(p => p && !(String(p.cil_skupinka_id) === String(pl.cil) && String(p.od) === String(pl.od)))
+  if (nahradi.length && !confirm('U ' + nahradi.length + (nahradi.length === 1 ? ' člověka' : ' lidí') + ' se nahradí dosavadní plán:\n\n'
+      + nahradi.map(p => '• ' + jmenoUbyt(p.worker_id) + ' → ' + nazevSkupinky(p.cil_skupinka_id) + ' od ' + datumPlanu(p.od)).join('\n') + '\n\nPokračovat?')) return
+  // Místa: kolik jich v cíli bude od toho dne (členové + cizí + kdo do té doby přijede + vybraní).
+  if (cil && cil.pocet_mist) {
+    const clenove = new Set(clenoveSkupinky(cil.id).map(String))
+    const prijdou = new Set((_skupinky.presuny || []).filter(p => String(p.cil_skupinka_id) === String(cil.id) && String(p.od) <= String(pl.od)).map(p => String(p.worker_id)))
+    vybrani.forEach(w => prijdou.add(String(w)))
+    const bude = obsazenoSkupinky(cil) + [...prijdou].filter(w => !clenove.has(w)).length
+    if (bude > cil.pocet_mist && !confirm('V „' + cil.nazev + '" bude od ' + datumPlanu(pl.od) + ' obsazeno ' + bude + ' / ' + cil.pocet_mist + '.\n\nUložit plán i tak?')) return
+  }
+  pl.uklada = true; vykresliUbytovani()   // žádný dvojklik ani výběr během ukládání
+  const radky = vybrani.map(w => ({ worker_id: w, cil_skupinka_id: pl.cil, druh: pl.druh, od: pl.od }))
+  const { data, error } = await sb.from('skupinky_presuny').upsert(radky, { onConflict: 'worker_id,druh' }).select('id')
+  if (error || !data || data.length !== radky.length) {
+    pl.uklada = false; vykresliUbytovani()
+    showToast(error && jeChybiSkupinky(error) ? '❌ Spusťte SQL supabase-migrace-ubytovani-presuny.sql'
+      : '❌ Plán se neuložil' + (error ? ': ' + error.message : ' — zkontrolujte oprávnění'))
+    return
+  }
+  _ubytPlan = null
+  showToast('✅ Naplánováno: ' + radky.length + ' → ' + ((cil && cil.nazev) || '') + ' od ' + datumPlanu(pl.od))
+  // Plán na dnešek se provede hned při tomhle načtení (nactiSkupinky) — bez brzdy.
+  _presunyZkusenoOd = 0
+  zneplatniSkupinky(); await loadUbytovani(true)
+}
+async function zrusPlanPresunu(planId) {
+  const p = (_skupinky.presuny || []).find(x => String(x.id) === String(planId))
+  if (!p) return
+  const w = _ubytLide.find(x => String(x.id) === String(p.worker_id))
+  const cil = _skupinky.seznam.find(x => String(x.id) === String(p.cil_skupinka_id))
+  if (!confirm('Zrušit plánovaný přesun?\n\n' + ((w && w.full_name) || 'Pracovník') + ' → ' + ((cil && cil.nazev) || '') + ' od ' + datumPlanu(p.od))) return
+  const { data, error } = await sb.from('skupinky_presuny').delete().eq('id', p.id).select('id')
+  if (error) { showToast('❌ Plán se nezrušil: ' + error.message); return }
+  if (!data || !data.length) { showToast('Plán už neexistuje — mezitím se provedl, nebo ho zrušil někdo jiný.'); zneplatniSkupinky(); loadUbytovani(true); return }
+  showToast('✅ Plán zrušen'); zneplatniSkupinky(); loadUbytovani(true)
 }
 
 // Jiná šířka okna = jiný počet sloupců: karty se přeskládají.
@@ -11041,7 +11291,11 @@ function pridatLideDoSkupinky(id) {
   const ov = document.createElement('div')
   ov.id = 'skupinka-lide-overlay'
   ov.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:10050;display:flex;align-items:center;justify-content:center;padding:16px'
-  const jinde = w => { const j = skupinkaCloveka(w.id, s.druh); return j && j.id !== id ? `<div style="font-size:11.5px;color:var(--amber);margin-top:1px">teď: ${escAttr(j.nazev)} — zaškrtnutím se přesune sem</div>` : '' }
+  const jinde = w => {
+    const j = skupinkaCloveka(w.id, s.druh), pl = planCloveka(w.id, s.druh)
+    return (j && j.id !== id ? `<div style="font-size:11.5px;color:var(--amber);margin-top:1px">teď: ${escAttr(j.nazev)} — zaškrtnutím se přesune sem</div>` : '')
+      + (pl ? `<div style="font-size:11.5px;color:var(--blue);margin-top:1px">📅 plán → ${escAttr(nazevSkupinky(pl.cil_skupinka_id))} od ${escAttr(datumPlanu(pl.od))}</div>` : '')
+  }
   ov.innerHTML = `<div style="background:#fff;border-radius:14px;max-width:460px;width:100%;max-height:88vh;display:flex;flex-direction:column;padding:18px">
     <div style="font-size:16px;font-weight:800">${D.ikona} Kdo patří do: ${escAttr(s.nazev)}</div>
     ${s.pocet_mist ? `<div style="font-size:12px;color:var(--text3);margin-top:4px">Míst celkem: ${s.pocet_mist}</div>` : ''}
@@ -11085,9 +11339,18 @@ function pridatLideDoSkupinky(id) {
     const odebrat = [...uz].filter(x => videt.has(x) && !vybrane.has(x))
     if (!pridat.length && !odebrat.length) { zavri(); return }
     if (s.pocet_mist && vybrane.size > s.pocet_mist && !confirm('Vybráno ' + vybrane.size + ' lidí, ale míst je jen ' + s.pocet_mist + '.\n\nUložit i tak?')) return
+    // Jako u přetažení: kdo má plán JINAM, toho by ten den databáze odvezla
+    // zpátky podle starého rozhodnutí — zeptat se, jestli plán zrušit.
+    const planyJinam = pridat.map(w => planCloveka(w, s.druh)).filter(p => p && String(p.cil_skupinka_id) !== String(s.id))
+    const zrusitPlany = planyJinam.length && confirm((planyJinam.length === 1 ? '1 člověk má' : planyJinam.length + ' lidí má') + ' naplánovaný přesun jinam:\n\n'
+      + planyJinam.map(p => '• ' + jmenoUbyt(p.worker_id) + ' → ' + nazevSkupinky(p.cil_skupinka_id) + ' od ' + datumPlanu(p.od)).join('\n') + '\n\nOK = plán zrušit · Zrušit = plán nechat') ? planyJinam : []
     e.target.disabled = true; e.target.textContent = 'Ukládám…'
     const chyba = await zapisClenstvi(s, pridat, odebrat)
     if (chyba) { e.target.disabled = false; e.target.textContent = 'Uložit'; showToast(chyba); return }
+    if (zrusitPlany.length) {
+      const { error } = await sb.from('skupinky_presuny').delete().in('id', zrusitPlany.map(p => p.id)).select('id')
+      if (error) showToast('⚠️ Uloženo, ale plán se nezrušil: ' + error.message)
+    }
     zavri()
     showToast('✅ Uloženo — ' + s.nazev + ': ' + vybrane.size + (s.pocet_mist ? ' / ' + s.pocet_mist : ''))
     zneplatniSkupinky(); loadUbytovani(true)
@@ -11095,8 +11358,14 @@ function pridatLideDoSkupinky(id) {
 }
 // Zápis členství. V jednom druhu je člověk jen jednou — přidání ho přesune.
 // Adresa ubytování jde i do profilu.
-async function zapisClenstvi(s, pridat, odebrat) {
+async function zapisClenstvi(s, pridat, odebrat, predchoziAdresy = null) {
   if (pridat.length) {
+    // Odkud kdo přichází (kvůli staré adrese v profilu). Volající, který už
+    // členství předběžně přepsal (přetažení), ji pošle sám.
+    const predchozi = predchoziAdresy || Object.fromEntries(pridat.map(w => {
+      const j = skupinkaCloveka(w, s.druh)
+      return [String(w), j && String(j.id) !== String(s.id) ? j.adresa : null]
+    }))
     // Jeden řádek na člověka a druh (unikátní v databázi) — přesun z jiného
     // ubytování je tak jediný zápis, ne „smazat a vložit" (nic se neztratí).
     const { data, error: e2 } = await sb.from('skupinky_lide')
@@ -11109,6 +11378,20 @@ async function zapisClenstvi(s, pridat, odebrat) {
     if (s.druh === 'ubytovani' && s.adresa) {
       const { error: e3 } = await sb.from('profiles').update({ accommodation_address: s.adresa }).in('id', pridat).select('id')
       if (e3) showToast('⚠️ Přiřazeno, ale adresa se lidem do profilu nezapsala: ' + e3.message)
+    } else if (s.druh === 'ubytovani') {
+      // Nové ubytování bez adresy: stará adresa v profilu by lhala — smaže se,
+      // ale jen když to byla adresa toho, odkud člověk odešel. Platí stejně
+      // pro přetažení, „Přidat lidi" i plánovaný přesun (funkce v databázi).
+      for (const w of pridat) {
+        const stara = predchozi[String(w)]
+        if (stara) await sb.from('profiles').update({ accommodation_address: null }).eq('id', w).eq('accommodation_address', stara).select('id')
+      }
+    }
+    // Kdo je teď tam, kam měl plán, ten plán splnil.
+    const splnene = (_skupinky.presuny || []).filter(p => pridat.map(String).includes(String(p.worker_id)) && String(p.cil_skupinka_id) === String(s.id))
+    if (splnene.length) {
+      const { error: e5 } = await sb.from('skupinky_presuny').delete().in('id', splnene.map(p => p.id)).select('id')
+      if (!e5) _skupinky.presuny = (_skupinky.presuny || []).filter(p => !splnene.includes(p))
     }
   }
   if (odebrat.length) {

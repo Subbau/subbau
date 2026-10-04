@@ -256,6 +256,24 @@ module.exports = async function handler(req, res) {
     return;
   }
 
+  // PLÁNOVANÉ PŘESUNY MEZI UBYTOVÁNÍMI (majitel 4. 10. 2026: „ten den se
+  // přesune sám"). Ranní běh provede plány, kterým nastal den — i když ten den
+  // nikdo z kanceláře appku neotevře. Funkce v databázi (supabase-migrace-
+  // ubytovani-presuny.sql) běží pod serverem, takže se do historie úprav zapíše
+  // jako „server". Chyba tady nesmí zastavit hlídání dokladů; jen se vrátí ve
+  // výsledku (dokud SQL neproběhlo, přijde 404 a nic se neděje).
+  let presuny = null;
+  try {
+    const r = await fetch(`${SUPABASE_URL}/rest/v1/rpc/skupinky_proved_presuny`, {
+      method: 'POST',
+      headers: { apikey: serviceKey, Authorization: `Bearer ${serviceKey}`, 'Content-Type': 'application/json' },
+      body: '{}',
+    });
+    presuny = r.ok ? { provedeno: await r.json() } : { chyba: r.status };
+  } catch (e) {
+    presuny = { chyba: String(e?.message || e) };
+  }
+
   const today = midnight(new Date());
   const limit = new Date(today.getTime() + WARN_DAYS * 86400000);
   const toIso = (d) => d.toISOString().slice(0, 10);
@@ -277,7 +295,7 @@ module.exports = async function handler(req, res) {
       .catch((e) => ({ chyba: String(e?.message || e) }));
 
     if (!docs?.length) {
-      res.status(200).json({ ok: true, checked: 0, notified: 0, upominky, message: 'Žádné končící doklady' });
+      res.status(200).json({ ok: true, checked: 0, notified: 0, upominky, presuny, message: 'Žádné končící doklady' });
       return;
     }
 
@@ -397,8 +415,8 @@ module.exports = async function handler(req, res) {
     // heslo někdy dostalo ven, ať s ním neunikne rovnou seznam lidí ve firmě.
     // Podrobnosti zůstávají v logu nasazení ve Vercelu.
     const problemy = results.filter((r) => r.error).map((r) => r.error);
-    res.status(200).json({ ok: true, checked: docs.length, notified: results.length, upominky, problemy });
+    res.status(200).json({ ok: true, checked: docs.length, notified: results.length, upominky, presuny, problemy });
   } catch (e) {
-    res.status(500).json({ ok: false, error: String(e?.message || e) });
+    res.status(500).json({ ok: false, error: String(e?.message || e), presuny });
   }
 };
