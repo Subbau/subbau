@@ -5557,7 +5557,7 @@ async function submitAdminSignatureWithPlacement() {
 // Po nahrání nové verze se snadno pozná, jestli se opravdu nasadila: otevřete
 // appku, zmáčkněte F12 (na Macu ⌥⌘I) a v konzoli je vypsané tohle datum. Když
 // tam svítí starší, prohlížeč nebo GitHub drží starou verzi.
-const SUBBAU_VERZE = '2026-10-05 b — Národnost Uzbekistán'
+const SUBBAU_VERZE = '2026-10-05 c — Rychlejší nástěnka a návrat do okna'
 console.log('StavKo docházka — verze ' + SUBBAU_VERZE)
 // Verze i dole v menu správce. Když někdo novinku „nevidí", podle ní se hned
 // pozná, jestli nemá otevřenou starou kopii appky — bez hledání v konzoli.
@@ -6495,10 +6495,13 @@ let adminRealtimeSub = null
 let _rtRetryTimer = null       // naplánované obnovení spojení
 let _rtRetryDelay = 2000       // za jak dlouho zkusit znovu (postupně se prodlužuje)
 let _rtWatchdogInt = null      // hlídač, že spojení opravdu běží
-function _debouncedRefresh(key, fn, delay = 400) {
+// maxWait: nejdéle tolik ms od PRVNÍ změny (vlna změn jinak odkládá donekonečna).
+function _debouncedRefresh(key, fn, delay = 400, maxWait = 0) {
   const T = window._adminRefreshTimers
-  if (T[key]) clearTimeout(T[key])
-  T[key] = setTimeout(() => { try { fn() } catch(e) { console.warn('[realtime refresh]', key, e?.message) } }, delay)
+  const F = window._adminRefreshFirst || (window._adminRefreshFirst = {})
+  if (T[key]) clearTimeout(T[key]); else F[key] = Date.now()
+  const za = maxWait ? Math.max(0, Math.min(delay, F[key] + maxWait - Date.now())) : delay
+  T[key] = setTimeout(() => { delete T[key]; delete F[key]; try { fn() } catch(e) { console.warn('[realtime refresh]', key, e?.message) } }, za)
 }
 let invoiceRealtimeSub = null
 function startInvoiceRealtime() {
@@ -6615,10 +6618,7 @@ function _onAdminDbChange(table, payload) {
   }
   // Otevřená karta pracovníka se dorovná bez ohledu na to, která sekce je vidět
   _refreshOpenWorkerCard(table, payload)
-  // Statistiky na dashboardu se týkají skoro všeho — drž je svěží
-  if (view === 'dashboard') {
-    _debouncedRefresh('dashboard', () => { loadDashboard(); checkDocumentAlerts(); loadDocumentAlertsStat() })
-  }
+  // Nástěnku obnovuje obnovOtevrenouSekci() dole — jednou (dřív 2× a doklady 4–8×).
   switch (table) {
     case 'vacations':
       // Nahlášená nepřítomnost — okno si samo ověří, jestli si ji zapsal pracovník
@@ -6633,7 +6633,7 @@ function _onAdminDbChange(table, payload) {
       break
     case 'documents':
       if (view === 'dokumenty') _debouncedRefresh('docs', loadDocuments)
-      _debouncedRefresh('docstat', () => { checkDocumentAlerts(); loadDocumentAlertsStat() })
+      if (view !== 'dashboard') _debouncedRefresh('docstat', loadDocumentAlertsStat)   // nástěnka je má v loadDashboard
       break
     case 'teams':
     case 'team_assignments':
@@ -6647,7 +6647,6 @@ function _onAdminDbChange(table, payload) {
       if (view === 'smlouvy') _debouncedRefresh('contracts', loadAdminContracts)
       break
     case 'attendance':
-      if (view === 'dashboard') _debouncedRefresh('dashboard', loadDashboard)
       if (view === 'dochazka') _debouncedRefresh('dochazka', () => {
         if (typeof loadTodayTimeline === 'function') loadTodayTimeline()
         if (typeof loadKWData === 'function') loadKWData()
@@ -6685,7 +6684,7 @@ function obnovOtevrenouSekci() {
   _debouncedRefresh('sekce:' + sekce, () => {
     if (_adminEditInProgress()) { setTimeout(obnovOtevrenouSekci, 4000); return }
     try { loadAdminViewData(sekce) } catch (e) { console.warn('[obnova sekce]', sekce, e?.message) }
-  })
+  }, sekce === 'dashboard' ? 1500 : 400, sekce === 'dashboard' ? 5000 : 0)   // ranní vlna příchodů = pár obnov, ne desítky
 }
 
 // Po ruční úpravě/smazání/přidání docházky adminem: propíše se hned všude, kde
@@ -6907,7 +6906,7 @@ function startAdminRealtime() {
           if (st !== 'joined' && st !== 'joining') { _rtRetryDelay = 2000; startAdminRealtime() }
         }
         const v = _activeAdminView()
-        if (v) _onAdminDbChange('profiles')  // odlehčené dorovnání nejčastější sekce
+        // otevřenou sekci dorovná _obnovaPriNavratu (jednou za návrat, ne 68 dotazů)
       }
     })
     // Po obnovení internetu se připoj hned, ne až za 30 s
@@ -10924,6 +10923,11 @@ async function loadWorkers() {
     sb.from('teams').select('id,name'),
     sb.from('subteams').select('id,name,team_id')
   ])
+  // První „jsem online" pracovníka po otevření appky už není „změna profilu":
+  // otisk se založí z načteného seznamu (jen kde žádný není — zprávu ze živého
+  // spojení nepřepíše). Dřív každý první heartbeat spustil celé přenačtení
+  // (46 dotazů, 2,4 MB); ranní vlna držela nástěnku zamrzlou třetinu času.
+  ;(data || []).forEach(w => { if (w && w.id != null && !_profilOtisky.has(String(w.id))) _profilOtisky.set(String(w.id), _otiskProfilu(w)) })
   const tbody = document.getElementById('workers-table')
   const cntEl = document.getElementById('workers-count')
   // Počet bez schovaných firem — jinak by nadpis ukazoval 12 a tabulka 8.
@@ -24422,7 +24426,7 @@ function loadAdminViewData(name) {
   if(name === 'dochazka') { fillKWSelect(true); loadAttendanceWorkers() }
   if(name === 'kalendar') { renderCalendar() }
   if(name === 'cekajici-registrace') { loadPendingRegistrationsPage() }
-  if(name === 'dashboard') { loadDashboard(); checkDocumentAlerts(); loadDocumentAlertsStat(); refreshPendingRegistrations() }
+  if(name === 'dashboard') { loadDashboard(); refreshPendingRegistrations() }   // doklady si loadDashboard načte sám
   if(name === 'pracovnici') { loadWorkers() }
   if(name === 'ubytovani') { loadUbytovani() }
   if(name === 'dokumenty') { loadDocuments() }
@@ -28515,7 +28519,17 @@ async function saveManualAttendance() {
 // ============ CHAT ============
 
 // ============ DOCUMENT ALERTS ADMIN ============
-async function loadDocumentAlertsStat() {
+// Souběžná volání se slučují: běží-li výpočet, jen se poznamená „ještě jednou".
+let _ldasBezi = null, _ldasZnovu = false
+function loadDocumentAlertsStat() {
+  if (_ldasBezi) { _ldasZnovu = true; return _ldasBezi }
+  _ldasBezi = (async () => {
+    try { do { _ldasZnovu = false; await _loadDocumentAlertsStatTelo() } while (_ldasZnovu) }
+    finally { _ldasBezi = null }
+  })()
+  return _ldasBezi
+}
+async function _loadDocumentAlertsStatTelo() {
   const today = new Date()
   const todayStr = localDateStr(today)
   const in30days = localDateStr(new Date(today.getTime()+30*86400000))
@@ -28652,7 +28666,7 @@ async function loadDocumentAlertsStat() {
       + ' u ' + alerts.length + ' ' + (alerts.length === 1 ? 'člověka' : 'lidí')
       + (chybi ? ', z toho chybí ' + chybi + ' ' + slovo(chybi, 'doklad', 'doklady', 'dokladů') : '')
   }
-  list.innerHTML = alerts.map(({ worker, issues }) => `
+  const html = alerts.map(({ worker, issues }) => `
     <div style="padding:10px 0;border-bottom:1px solid var(--brd)">
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:5px">
         <b style="font-size:13px;cursor:pointer;color:var(--blue)" onclick="openWorkerModal('${worker.id}')">${escAttr(worker.full_name)} ↗</b>
@@ -28664,6 +28678,8 @@ async function loadDocumentAlertsStat() {
       </div>`).join('')}
     </div>
   `).join('')
+  // ~10 000 prvků: přepsat, jen když se opravdu změnily
+  if (list._posledniHtml !== html) { list.innerHTML = html; list._posledniHtml = html }
 }
 
 // Vykřížkuj (skryj) položku upozornění, ať nepřekáží. Uloží se do DB (fallback: session).
@@ -40176,11 +40192,24 @@ function tichaObnovaDat() {
 
 // každých 60 s (interval sám kontroluje viditelnost i přihlášení uvnitř tichaObnovaDat)
 setInterval(tichaObnovaDat, 60000)
-// při návratu k oknu
-window.addEventListener('focus', tichaObnovaDat)
-// při přepnutí zpět na záložku / probuzení telefonu
+// Při návratu k oknu / na záložku: focus i visibilitychange chodí naráz —
+// jedno dorovnání nejvýš jednou za 30 s; u správce jen otevřená sekce
+// (dřív 68 dotazů a 3,4 MB při každém návratu).
+function _obnovaPriNavratu() {
+  if (document.visibilityState !== 'visible') return
+  if (Date.now() - (window._navratKdy || 0) < 30000) return
+  window._navratKdy = Date.now()
+  const v = (typeof currentUser !== 'undefined' && currentUser && currentProfile && currentProfile.role === 'admin') ? _activeAdminView() : null
+  if (!v) { tichaObnovaDat(); return }
+  obnovOtevrenouSekci()
+  if (v !== 'dashboard') _debouncedRefresh('pendingreg', refreshPendingRegistrations)
+  if (typeof loadAnnouncement === 'function' && Date.now() - (window._annKontrolaKdy || 0) > 15000) {
+    window._annKontrolaKdy = Date.now(); loadAnnouncement()
+  }
+}
+window.addEventListener('focus', _obnovaPriNavratu)
 document.addEventListener('visibilitychange', () => {
-  if (document.visibilityState === 'visible') tichaObnovaDat()
+  if (document.visibilityState === 'visible') _obnovaPriNavratu()
 })
 
 </script>
