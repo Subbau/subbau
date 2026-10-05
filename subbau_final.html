@@ -2940,6 +2940,7 @@ setTimeout(function () {
         <div>
           <div style="font-size:18px;font-weight:700;color:#fff"><span id="wd-name">—</span><span id="wd-name-nemcina"></span></div>
           <div style="font-size:12px;color:rgba(255,255,255,.6)" id="wd-sub">—</div>
+          <div style="font-size:11.5px;color:rgba(255,255,255,.75);margin-top:3px" id="wd-souhlas"></div>
         </div>
       </div>
       <button class="x-close" onclick="closeWorkerModal()" style="background:rgba(255,255,255,.2);border:none;color:#fff;width:34px;height:34px;border-radius:50%;cursor:pointer;font-family:inherit;flex-shrink:0;display:flex;align-items:center;justify-content:center"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:20px;height:20px;display:block"><path d="M18 6L6 18M6 6l12 12"/></svg></button>
@@ -4850,7 +4851,7 @@ async function submitAdminSignatureWithPlacement() {
 // Po nahrání nové verze se snadno pozná, jestli se opravdu nasadila: otevřete
 // appku, zmáčkněte F12 (na Macu ⌥⌘I) a v konzoli je vypsané tohle datum. Když
 // tam svítí starší, prohlížeč nebo GitHub drží starou verzi.
-const SUBBAU_VERZE = '2026-10-04 e — Rychlé PDF hodin a faktury'
+const SUBBAU_VERZE = '2026-10-05 a — Potvrzení nových OSVČ při prvním přihlášení'
 console.log('SubBau docházka — verze ' + SUBBAU_VERZE)
 // Verze i dole v menu správce. Když někdo novinku „nevidí", podle ní se hned
 // pozná, jestli nemá otevřenou starou kopii appky — bez hledání v konzoli.
@@ -6267,7 +6268,7 @@ function showOsvec(profile) {
     if (window._osvecChatBadgeInt) clearInterval(window._osvecChatBadgeInt)
     window._osvecChatBadgeInt = setInterval(updateChatBadge, 20000)
     checkDocumentAlerts()
-    checkShowTutorial()
+    souhlasPredNavodem()   // nový člověk: nejdřív potvrzení (GDPR, poloha, OSVČ), pak návod
     checkInstallNudge()
     // Po přihlášení skryj badge — badge se zobrazí až přijde NOVÁ zpráva
     // Označí jako přečtené zprávy které pracovník již viděl
@@ -15516,6 +15517,221 @@ async function closeTutorialAndMark() {
     sb.from('profiles').update({ tutorial_done: true }).eq('id', currentUser.id)
       .then(() => {}, () => { /* DB sloupec ještě nemusí existovat */ })
   }
+}
+
+// ===== POTVRZENÍ PŘI PRVNÍM PŘIHLÁŠENÍ (osobní údaje, poloha, odběratel, OSVČ) =====
+// Majitel 5. 10. 2026: nový OSVČ nebo parťák musí potvrdit informace o osobních
+// údajích, poloze a prohlášení OSVČ, než začne appku používat; potvrzení se uloží
+// jako doklad (tabulka souhlasy: celý text, jeho otisk, body, čas ze serveru).
+// Potom naváže návod. „Jen noví": okno dostane jen ten, komu by se teď ukázal
+// návod (první přihlášení) — stávající lidé ho neuvidí. Bez potvrzení se dál
+// nedostane, může se jen odhlásit.
+// Dokud neproběhne migrace (tabulka souhlasy chybí), okno se neukazuje vůbec —
+// nesmí zamknout lidi kvůli SQL, které ještě nikdo nespustil.
+// Změna textu = nová SOUHLAS_VERZE (stará potvrzení zůstávají u své verze).
+// U bodů, které firma potřebuje ke smlouvě a ze zákona, je „beru na vědomí",
+// ne odvolatelný souhlas — odvoláním by jinak musela zpracování ukončit.
+const SOUHLAS_VERZE = '2026-10-05'
+const SOUHLAS_TEXT = {
+  nadpis: 'Než začnete: osobní údaje, poloha a prohlášení OSVČ',
+  uvod: 'Aplikaci docházky provozuje SubBau s.r.o. Přečtěte si prosím, jak zacházíme s vašimi údaji, a potvrďte čtyři body na konci. Potvrzení si uložíme i s datem a časem.',
+  oddily: [
+    ['Kdo vaše údaje zpracovává', [
+      'SubBau s.r.o., IČO 23549190, Plzeňská 3352/156, Smíchov, 150 00 Praha 5 (správce osobních údajů).',
+      'Dotazy k osobním údajům: info@subbau.cz.']],
+    ['Jaké údaje zpracováváme', [
+      'Jméno, e-mail, telefon, adresu, národnost, adresu ubytování a profilovou fotku.',
+      'Údaje o podnikání a doklady, které do aplikace nahrajete: IČO, DIČ, živnostenské oprávnění, Gewerbeschein, formulář A1, kopie občanského průkazu, pasu, povolení k pobytu nebo víza.',
+      'Bankovní účet (IBAN) pro platby.',
+      'Docházku: příchody, odchody, přestávky, odpracované hodiny, stavbu, popis práce, fotky ze stavby a polohu při příchodu a odchodu.',
+      'Nepřítomnost (dovolená, nemoc) — u nemoci jen to, že jste nemocní, žádnou diagnózu.',
+      'Faktury, výkazy hodin, sazby, smlouvy a podpisy.',
+      'Zprávy, které si v aplikaci vyměníte s kanceláří.',
+      'Kdy jste se přihlásili a kdy jste byli naposledy aktivní.']],
+    ['Proč to děláme', [
+      'Abychom s vámi mohli spolupracovat podle smlouvy: evidovat práci, vystavovat a proplácet faktury a dokládat hodiny odběratelům (plnění smlouvy, čl. 6 odst. 1 písm. b) GDPR).',
+      'Abychom splnili povinnosti ze zákona: účetnictví, daně, doklady pro práci v Německu a kontroly úřadů (čl. 6 odst. 1 písm. c) GDPR).',
+      'Abychom mohli doložit, kdo kdy a kde pracoval, a bránit se ve sporech o hodiny a platby (oprávněný zájem, čl. 6 odst. 1 písm. f) GDPR).',
+      'Bez těchto údajů s vámi nemůžeme spolupracovat ani vám platit.']],
+    ['Poloha telefonu (GPS)', [
+      'Polohu aplikace zjistí jen ve chvíli, kdy zapisujete příchod nebo odchod — nikdy průběžně, na pozadí ani mimo práci.',
+      'K záznamu docházky uloží souřadnice a adresu. Souřadnice vidí jen kancelář, odběratel vidí jen adresu.',
+      'Aby ze souřadnic zjistila adresu, pošle je aplikace službě OpenStreetMap (Nominatim) nebo BigDataCloud.',
+      'U některých firem je poloha při příchodu povinná. Slouží k ověření, že práce proběhla na stavbě, a k doložení hodin odběrateli.']],
+    ['Co vidí odběratel a účetní', [
+      'Odběratel (stavební firma v Německu), pro kterého pracujete, dostává výkaz: vaše jméno, dny a časy příchodů a odchodů, přestávky, hodiny, stavbu, adresu a popis práce. Do výkazu si k vám může přidat vlastní fotku, poznámku a hodnocení.',
+      'Fotky ze stavby vidí kancelář a může je předat odběrateli jako doklad o odvedené práci.',
+      'Faktury a výkazy posíláme účetní a daňovému poradci.']],
+    ['Komu údaje dál předáváme', [
+      'Odběratelům, účetní a daňovému poradci (viz výše) a úřadům, pokud to vyžaduje zákon.',
+      'Firmám, které pro nás aplikaci technicky provozují: Supabase (databáze a soubory, servery v EU), Vercel (provoz aplikace), Brevo (odesílání e-mailů).',
+      'Popis práce posíláme k automatickému překladu do němčiny a angličtiny službám Google Translate a MyMemory.',
+      'Některé z těchto firem sídlí mimo EU (např. v USA); údaje k nim mohou odcházet jen se zárukami, které vyžaduje GDPR.']],
+    ['Jak dlouho údaje uchováváme', [
+      'Po dobu spolupráce a potom jen tak dlouho, jak vyžadují zákony (účetní a daňové doklady až 10 let) nebo jak je potřeba k vyřízení případných sporů.']],
+    ['Vaše práva', [
+      'Máte právo vědět, jaké údaje o vás máme, nechat je opravit nebo smazat (pokud je nemusíme uchovávat ze zákona), omezit jejich zpracování, vznést námitku proti zpracování z oprávněného zájmu a dostat své údaje v běžném formátu. Napište na info@subbau.cz.',
+      'Stížnost můžete podat u Úřadu pro ochranu osobních údajů (Pplk. Sochora 27, 170 00 Praha 7, www.uoou.cz).']],
+    ['Prohlášení OSVČ', [
+      'Práci pro SubBau s.r.o. vykonávám jako osoba samostatně výdělečně činná na základě vlastního živnostenského oprávnění, vlastním jménem a na vlastní odpovědnost. Nejsem zaměstnancem SubBau s.r.o.',
+      'Daně, sociální a zdravotní pojištění si platím sám (sama).',
+      'Odpovídám za svou práci a za škodu, kterou případně způsobím.',
+      'Údaje, které do aplikace zadávám, jsou pravdivé, a jejich změny včas oznámím.']],
+  ],
+  body: [
+    { klic: 'gdpr', text: 'Přečetl(a) jsem si, jak SubBau s.r.o. zpracovává moje osobní údaje a doklady, a beru to na vědomí.' },
+    { klic: 'gps', text: 'Beru na vědomí, že aplikace při zápisu příchodu a odchodu zjistí a uloží polohu mého telefonu.' },
+    { klic: 'fotky', text: 'Beru na vědomí, že docházku, výkazy, popis práce a fotky ze stavby vidí kancelář a dostává je odběratel a účetní, jak je popsáno výše.' },
+    { klic: 'osvc', text: 'Prohlašuji, že pracuji jako OSVČ, jak je uvedeno v prohlášení výše, a že údaje, které zadávám, jsou pravdivé.' },
+  ],
+}
+
+// Celý text tak, jak ho člověk viděl — ukládá se k potvrzení a z něj je otisk.
+function souhlasJakoText() {
+  const T = SOUHLAS_TEXT
+  return [T.nadpis, '', T.uvod, '',
+    ...T.oddily.flatMap(([n, odst]) => [n.toUpperCase(), ...odst.map(o => '- ' + o), '']),
+    'POTVRZUJI:', ...T.body.map(b => '[x] ' + b.text), '', 'Verze textu: ' + SOUHLAS_VERZE].join(String.fromCharCode(10))
+}
+
+// Chybějící tabulka (migrace ještě neproběhla) — NE jakákoli chyba, kde se
+// tabulka jmenuje (třeba zamítnuté právo), to by pustilo dál bez dokladu.
+function souhlasChybiTabulka(e) {
+  const kod = String(e?.code || ''), msg = String(e?.message || '')
+  return kod === '42P01' || kod === 'PGRST205' || /does not exist|schema cache|could not find the table/i.test(msg)
+}
+
+function souhlasCasovyLimit(slib, ms) {
+  return Promise.race([slib, new Promise(r => setTimeout(() => r({ data: null, error: { message: 'timeout' } }), ms))])
+}
+
+// 'ma' = potvrdil, 'nema', 'neni-tabulka' = před migrací, 'chyba' = síť apod.
+async function souhlasStav() {
+  try {
+    const { data, error } = await souhlasCasovyLimit(sb.from('souhlasy').select('id')
+      .eq('worker_id', currentUser.id).eq('verze', SOUHLAS_VERZE).limit(1), 10000)
+    if (error) return souhlasChybiTabulka(error) ? 'neni-tabulka' : 'chyba'
+    return data && data.length ? 'ma' : 'nema'
+  } catch (e) { return 'chyba' }
+}
+
+// Volá se místo checkShowTutorial() po přihlášení pracovníka.
+async function souhlasPredNavodem() {
+  try {
+    if (window.__demoDATA) return checkShowTutorial()          // ukázka pro prodej: bez právního textu firmy
+    if (!currentUser?.id || !currentProfile || currentProfile.role === 'admin') return checkShowTutorial()
+    const novy = !lsGet('tutorial_seen_' + currentUser.id) && currentProfile.tutorial_done !== true
+    if (!novy) return checkShowTutorial()
+    const klicMistni = 'souhlas_' + currentUser.id + '_' + SOUHLAS_VERZE
+    if (lsGet(klicMistni)) return checkShowTutorial()
+    const stav = await souhlasStav()
+    if (stav === 'ma') { lsSet(klicMistni, '1'); return checkShowTutorial() }
+    if (stav === 'neni-tabulka') return checkShowTutorial()
+    ukazSouhlas()      // 'nema' i 'chyba': radši ukázat (dvojí potvrzení nevadí)
+  } catch (e) {
+    console.warn('[souhlas]', e?.message)
+    ukazSouhlas()
+  }
+}
+
+function ukazSouhlas() {
+  if (document.getElementById('souhlas-overlay')) return
+  const T = SOUHLAS_TEXT
+  const ov = document.createElement('div')
+  ov.id = 'souhlas-overlay'
+  ov.style.cssText = 'position:fixed;inset:0;z-index:100000;background:#FAF7F2;overflow-y:auto;-webkit-overflow-scrolling:touch'
+  ov.innerHTML = `<div style="max-width:640px;margin:0 auto;padding:22px 18px 40px;color:#211D1A;font-size:14.5px;line-height:1.5">
+    <h2 style="font-size:21px;font-weight:800;line-height:1.25;margin:4px 0 10px">${escAttr(T.nadpis)}</h2>
+    <p style="margin:0 0 14px;color:#4a4038">${escAttr(T.uvod)}</p>
+    ${T.oddily.map(([n, odst]) => `<div style="background:#fff;border:1px solid #e4dccf;border-radius:12px;padding:12px 14px;margin-bottom:10px">
+      <div style="font-weight:800;margin-bottom:5px">${escAttr(n)}</div>
+      ${odst.map(o => `<div style="margin:4px 0;padding-left:12px;position:relative"><span style="position:absolute;left:0">·</span>${escAttr(o)}</div>`).join('')}
+    </div>`).join('')}
+    <div style="background:#fff;border:2px solid #E8A13A;border-radius:12px;padding:12px 14px;margin:16px 0 12px">
+      <div style="font-weight:800;margin-bottom:6px">Potvrzuji</div>
+      ${T.body.map(b => `<label style="display:flex;gap:11px;align-items:flex-start;padding:9px 0;cursor:pointer;border-top:1px solid #f0eae0">
+        <input type="checkbox" data-bod="${escAttr(b.klic)}" style="width:24px;height:24px;flex-shrink:0;margin:1px 0 0;accent-color:#9C3B22">
+        <span>${escAttr(b.text)}</span></label>`).join('')}
+    </div>
+    <div id="souhlas-chyba" style="display:none;background:#f7e9e5;color:#9c3b22;border-radius:10px;padding:10px 12px;margin-bottom:10px;font-weight:700"></div>
+    <button id="souhlas-ok" disabled style="width:100%;padding:15px;border:none;border-radius:13px;background:#9c3b22;color:#fff;font-size:16px;font-weight:800;font-family:inherit;cursor:pointer;opacity:.45">Potvrzuji a pokračuji</button>
+    <button id="souhlas-ne" style="width:100%;margin-top:10px;padding:12px;border:1.5px solid #d8cfc2;border-radius:13px;background:#fff;color:#4a4038;font-size:14px;font-weight:700;font-family:inherit;cursor:pointer">Nesouhlasím — odhlásit se</button>
+    <p style="text-align:center;font-size:12.5px;color:#8a7f72;margin-top:14px">Dotazy: info@subbau.cz · verze textu ${SOUHLAS_VERZE}</p>
+  </div>`
+  document.body.appendChild(ov)
+  document.body.style.overflow = 'hidden'
+  const ok = ov.querySelector('#souhlas-ok')
+  ov.addEventListener('change', () => {
+    const vse = [...ov.querySelectorAll('input[data-bod]')].every(i => i.checked)
+    ok.disabled = !vse; ok.style.opacity = vse ? '1' : '.45'
+  })
+  ok.onclick = () => potvrdSouhlas(ov)
+  ov.querySelector('#souhlas-ne').onclick = () => {
+    if (!confirm('Bez potvrzení nelze aplikaci používat. Pokud máte otázky, napište na info@subbau.cz nebo zavolejte do kanceláře. Opravdu se odhlásit?')) return
+    ov.remove(); document.body.style.overflow = ''
+    doLogout()
+  }
+}
+
+async function potvrdSouhlas(ov) {
+  const ok = ov.querySelector('#souhlas-ok'), chyba = ov.querySelector('#souhlas-chyba')
+  ok.disabled = true; ok.textContent = 'Ukládám…'; chyba.style.display = 'none'
+  const text = souhlasJakoText()
+  let otisk = 'nedostupny'
+  try {
+    const h = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text))
+    otisk = [...new Uint8Array(h)].map(x => x.toString(16).padStart(2, '0')).join('')
+  } catch (e) {}
+  const body = {}
+  ov.querySelectorAll('input[data-bod]').forEach(i => { body[i.dataset.bod] = i.checked })
+  const zaznam = { worker_id: currentUser.id, verze: SOUHLAS_VERZE, text_otisk: otisk, text, body,
+    jmeno: currentProfile?.full_name || null, email: currentUser?.email || currentProfile?.email || null,
+    zarizeni: String(navigator.userAgent || '').slice(0, 400) }
+  let error = null
+  try { ({ error } = await souhlasCasovyLimit(sb.from('souhlasy').insert(zaznam), 15000)) } catch (e) { error = e }
+  if (error && souhlasChybiTabulka(error)) { console.warn('[souhlas] tabulka souhlasy chybí (migrace) — pouštím dál bez dokladu'); error = null }
+  if (error) {
+    console.warn('[souhlas] uložení selhalo:', error?.message)
+    ok.disabled = false; ok.textContent = 'Potvrzuji a pokračuji'
+    chyba.textContent = 'Potvrzení se nepodařilo uložit. Zkontrolujte připojení k internetu a zkuste to znovu.'
+    chyba.style.display = 'block'
+    return
+  }
+  lsSet('souhlas_' + currentUser.id + '_' + SOUHLAS_VERZE, '1')
+  ov.remove(); document.body.style.overflow = ''
+  checkShowTutorial()
+}
+
+// Kancelář: v kartě pracovníka, kdy co potvrdil (jen když potvrzení existuje).
+async function nactiSouhlasDoKarty(workerId) {
+  const el = document.getElementById('wd-souhlas')
+  if (!el) return
+  el.textContent = ''
+  try {
+    const { data, error } = await sb.from('souhlasy').select('verze, potvrzeno, text')
+      .eq('worker_id', workerId).order('potvrzeno', { ascending: false }).limit(1)
+    if (error || !data || !data.length || currentWorkerId !== workerId) return
+    window._souhlasKarty = data[0]
+    el.innerHTML = '✓ Potvrdil podmínky (osobní údaje, poloha, OSVČ) ' + escAttr(new Date(data[0].potvrzeno).toLocaleString('cs-CZ')) +
+      ' · <a href="#" onclick="ukazUlozenySouhlas();return false" style="color:inherit;text-decoration:underline">zobrazit text</a>'
+  } catch (e) {}
+}
+
+function ukazUlozenySouhlas() {
+  const s = window._souhlasKarty
+  if (!s) return
+  const ov = document.createElement('div')
+  ov.style.cssText = 'position:fixed;inset:0;z-index:100001;background:rgba(0,0,0,.55);display:flex;align-items:center;justify-content:center;padding:16px'
+  ov.innerHTML = `<div style="background:#fff;border-radius:14px;max-width:680px;width:100%;max-height:88vh;display:flex;flex-direction:column">
+    <div style="padding:14px 16px;border-bottom:1px solid #eee;font-weight:800;display:flex;justify-content:space-between;gap:10px;align-items:center">
+      <span>Potvrzeno ${escAttr(new Date(s.potvrzeno).toLocaleString('cs-CZ'))} · verze ${escAttr(s.verze)}</span>
+      <button style="border:none;background:#f2ede6;border-radius:8px;padding:6px 12px;font-weight:700;cursor:pointer;font-family:inherit">Zavřít</button>
+    </div>
+    <pre style="margin:0;padding:14px 16px;overflow:auto;white-space:pre-wrap;font-family:inherit;font-size:13px;line-height:1.5">${escAttr(s.text)}</pre>
+  </div>`
+  ov.querySelector('button').onclick = () => ov.remove()
+  ov.addEventListener('click', e => { if (e.target === ov) ov.remove() })
+  document.body.appendChild(ov)
 }
 
 // ============ SMLOUVY ============
@@ -35373,6 +35589,7 @@ async function openWorkerModal(id) {
   vykresliRadekZamestnance(w)
 
   document.getElementById('wd-name').textContent = w.full_name
+  nactiSouhlasDoKarty(w.id)
   const hlVl = document.getElementById('wd-avatar-vlajka'); if (hlVl) hlVl.innerHTML = vlajkaHtml(w.id, w.narodnost || null, false)
   const hlDe = document.getElementById('wd-name-nemcina'); if (hlDe) hlDe.innerHTML = nemcinaHtml(w.id, w.german_level || null)
   const coopFrom = w.cooperation_start || w.start_date
