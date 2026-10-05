@@ -128,6 +128,8 @@ const vrstva = soubory.map(f => {
   return c;
 }).join('\n');
 const prepinac = bezJmena(fs.readFileSync(path.join(kde, 'prepinac.js'), 'utf8'));
+// Ticho (bez pípání a vibrací) až za appku — přepisuje její funkce.
+const ticho = bezJmena(fs.readFileSync(path.join(kde, 'ticho.js'), 'utf8'));
 
 const kotva = '<script>';
 const kde1 = s.indexOf(kotva);
@@ -137,7 +139,7 @@ s = s.slice(0, kde1) + '<script>\n' + vrstva + '\n</script>\n' + s.slice(kde1);
 // --- 7) přepínač až na konec, po appce ---
 const konec = s.lastIndexOf('</body>');
 if (konec < 0) chyba('nenašel jsem </body>');
-s = s.slice(0, konec) + '<script>\n' + prepinac + '\n</script>\n' + s.slice(konec);
+s = s.slice(0, konec) + '<script>\n' + prepinac + '\n' + ticho + '\n</script>\n' + s.slice(konec);
 
 // --- 8) titulek a poznámka pro vyhledávače ---
 s = s.replace(/<title>[^<]*<\/title>/, `<title>${FIRMA} — ukázka docházkového systému</title>`);

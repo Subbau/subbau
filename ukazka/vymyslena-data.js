@@ -184,11 +184,8 @@
     { id: uuid(), worker_id: lideId[2], date_from: dnes(14), date_to: dnes(21), type: 'dovolena', note: 'Rodinná dovolená', created_at: new Date().toISOString() },
     { id: uuid(), worker_id: lideId[5], date_from: dnes(-3), date_to: dnes(-1), type: 'nemoc', note: 'Nemoc', created_at: new Date().toISOString() },
   ];
-  D.announcements = [{
-    id: uuid(), title: 'Vítejte v ukázce', is_active: true,
-    message: 'Tohle je ukázková verze systému ' + FIRMA + '. Všechna data jsou vymyšlená a nikam se neukládají — klidně si všechno vyzkoušejte.',
-    created_at: new Date().toISOString(),
-  }];
+  // Bez oznámení (majitel 5. 10. 2026: při předvádění nemá vyskakovat ani pípat).
+  D.announcements = [];
   D.chat_messages = [
     { id: uuid(), worker_id: lideId[0], message: 'Zítra potřebujeme na Riem ještě dva lidi.', created_at: new Date(Date.now() - 7200000).toISOString() },
     { id: uuid(), worker_id: id.sef, message: 'Domluveno, pošlu Martina a Tomáše.', created_at: new Date(Date.now() - 5400000).toISOString() },
