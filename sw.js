@@ -6,7 +6,7 @@
 // staré (viz 'activate' níže). Zvedněte ho pokaždé, když je podezření, že si
 // někdo drží poškozenou kopii appky — je to jediný způsob, jak mu ji zahodit
 // na dálku, aniž by sám mazal data v prohlížeči.
-const CACHE = 'subbau-v146';
+const CACHE = 'subbau-v147';
 const LIMIT_SITE = 3500;   // ms — jak dlouho se při otevření appky čeká na síť, než se ukáže uložená verze
 
 self.addEventListener('install', (event) => {

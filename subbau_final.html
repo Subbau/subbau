@@ -4851,7 +4851,7 @@ async function submitAdminSignatureWithPlacement() {
 // Po nahrání nové verze se snadno pozná, jestli se opravdu nasadila: otevřete
 // appku, zmáčkněte F12 (na Macu ⌥⌘I) a v konzoli je vypsané tohle datum. Když
 // tam svítí starší, prohlížeč nebo GitHub drží starou verzi.
-const SUBBAU_VERZE = '2026-10-05 d — Opravy z auditu (bezpečnost, chat, úpravy dne)'
+const SUBBAU_VERZE = '2026-10-06 a — Fotky lidí se samy dočtou'
 console.log('SubBau docházka — verze ' + SUBBAU_VERZE)
 // Verze i dole v menu správce. Když někdo novinku „nevidí", podle ní se hned
 // pozná, jestli nemá otevřenou starou kopii appky — bez hledání v konzoli.
@@ -12336,7 +12336,7 @@ function fotkaHtml(url, jmeno, px, obdelnik, workerId) {
   return `<span data-fotka="obal" onclick="event.stopPropagation();showAvatarPreview('${jsStr(url)}')" title="${zeme ? escAttr(zeme) + ' · k' : 'K'}liknutím zvětšíte"
       style="display:inline-flex;cursor:zoom-in;background:#e9e3d9;${obal}">
     ${iniciraly.replace('display:flex;', 'display:none;')}
-    <img src="${escAttr(fotkaDoSeznamu(url))}" alt="" decoding="async" style="position:absolute;inset:0;width:100%;height:100%;object-fit:cover" onerror="if(this.src.indexOf('/avatar-mini.jpg')>0){this.src=this.src.replace('/avatar-mini.jpg','/avatar.jpg');return}this.style.display='none';if(this.previousElementSibling)this.previousElementSibling.style.display='flex'">
+    <img src="${escAttr(fotkaAdresa(fotkaDoSeznamu(url)))}" alt="" decoding="async" style="position:absolute;inset:0;width:100%;height:100%;object-fit:cover" onerror="fotkaChyba(this)">
     ${vlajka}
   </span>`
 }
@@ -12347,6 +12347,95 @@ function fotkaHtml(url, jmeno, px, obdelnik, workerId) {
 // dostane značku m=1. Seznamy berou malou; zvětšení po kliknutí, karta pracovníka
 // a odkaz pro odběratele dál velkou. Fotka bez značky (uložená dřív) se ukazuje
 // velká jako doteď, dokud se nepřeuloží nebo neproběhne doplnZmenseninyFotek().
+// ── FOTKY, KTERÉ SE NENAČTOU (6. 10. 2026; majitel: „některé se nenačtou ani po obnovení, až když zavřu kartu") ─────────────────────────────
+// Fotka v seznamu může skončit dvěma způsoby:
+//  1) CHYBOU (5xx, 400 z úložiště, useknutý přenos, rozbitý JPEG) — přijde onerror.
+//     Dřív: zmenšenina → velká → hned iniciály, bez druhého pokusu.
+//  2) ZASEKNUTÍM — požadavek nikdy neskončí, onerror nepřijde a v řádku zůstane
+//     prázdný béžový čtverec (iniciály jsou pod fotkou schované). Tichá obnova
+//     (60 s / návrat do okna) vykreslí STEJNOU adresu a WebKit ji připojí ke
+//     stejnému visícímu načítání — nepřijde ani jeden nový požadavek.
+// Co dělá oprava:
+//  - zmenšenina selže → hned velká (jako dřív; zmenšenina u staré fotky nemusí být)
+//  - velká selže → nový pokus za 1,5 s (zmenšenina) a za 5 s (velká), vždy s &r=<čas>
+//    (jiná adresa = nové načtení, ne kopie z paměti prohlížeče); pak iniciály
+//  - visí-li fotka déle než FOTKA_ZASEKNUTI_MS, načte se znovu s &r= (změna src
+//    visící načítání zruší); nejvýš 2× na fotku, pak se už jen čeká (pomalá síť)
+//  - adresa, která se nakonec načetla, se zapamatuje → další překreslení ji použije
+//    rovnou (fotkaAdresa) a nevisí znova na starém načítání
+//  - pojistky proti zahlcení úložiště: nejvýš FOTKA_MAX_POKUSU opakování za život
+//    stránky; adresa, u které nedávno selhalo všechno (smazaná fotka), se při dalším
+//    překreslení už neopakuje — jen zmenšenina → velká → iniciály jako dřív
+const FOTKA_ODKLADY_MS = [1500, 5000]
+const FOTKA_ZASEKNUTI_MS = 10000
+const FOTKA_MAX_POKUSU = 40
+const FOTKA_VZDAT_NA_MS = 5 * 60 * 1000
+const _fotkaNahrada = new Map()     // adresa z appky → adresa, která se opravdu načetla
+const _fotkaVzdano = new Map()      // adresa z appky → kdy se naposled vzdalo
+let _fotkaPokusu = 0
+
+function fotkaAdresa(src) { return _fotkaNahrada.get(src) || src }
+function _fotkaBezR(u) { return String(u).replace(/[?&]r=[^&#]*/, m => m[0] === '?' ? '?' : '').replace('?&', '?').replace(/\?$/, '') }
+function _fotkaSR(u) { u = _fotkaBezR(u); return u + (u.includes('?') ? '&' : '?') + 'r=' + Date.now().toString(36) }
+function _fotkaInicialy(img) {
+  delete img.dataset.cekam
+  img.style.display = 'none'
+  if (img.previousElementSibling) img.previousElementSibling.style.display = 'flex'
+}
+function _fotkaPamatuj(img) {
+  const z = img.dataset.zdroj
+  if (z && img.naturalWidth > 0 && img.getAttribute('src') !== z) { _fotkaNahrada.set(z, img.getAttribute('src')); _fotkaVzdano.delete(z) }
+}
+
+function fotkaChyba(img) {
+  const d = img.dataset
+  const src = img.getAttribute('src') || ''
+  if (!d.p) d.p = _fotkaBezR(src)                           // adresa, jak ji appka vykreslila
+  if (!d.zdroj) d.zdroj = d.p
+  img.onload = () => { delete img.dataset.cekam; _fotkaPamatuj(img) }
+  // 1) zmenšenina → velká hned (bez čekání a bez započítání do pojistky)
+  if (!d.k && src.indexOf('/avatar-mini.jpg') > 0) { img.src = d.p = _fotkaBezR(src).replace('/avatar-mini.jpg', '/avatar.jpg'); return }
+  // 2) opakování velké s &r=
+  const k = Number(d.k || 0)
+  const nedavnoVzdano = Date.now() - (_fotkaVzdano.get(d.zdroj) || 0) < FOTKA_VZDAT_NA_MS
+  if (k >= FOTKA_ODKLADY_MS.length || nedavnoVzdano || _fotkaPokusu >= FOTKA_MAX_POKUSU) {
+    if (!nedavnoVzdano) _fotkaVzdano.set(d.zdroj, Date.now())
+    return _fotkaInicialy(img)
+  }
+  d.k = k + 1
+  d.cekam = '1'
+  _fotkaPokusu++
+  const odklad = FOTKA_ODKLADY_MS[k] * (1 + Math.random() * 0.3)   // ať 30 fotek nezkouší ve stejnou chvíli
+  // 1. opakování zkusí znovu zmenšeninu (~20 kB místo ~190 kB), 2. velkou — kdyby
+  // zmenšenina u fotky chyběla úplně, velká se stejně ještě zkusí
+  const dalsi = k === 0 ? d.zdroj : d.p
+  setTimeout(() => { if (img.isConnected) { delete img.dataset.cekam; img.src = _fotkaSR(dalsi) } }, odklad)
+}
+
+// Hlídač zaseknutých fotek (onerror u nich nepřijde). Visící načítání se musí
+// ZRUŠIT, ne jen zkusit vedle: na HTTP/1.1 visící požadavky drží spojení k úložišti
+// a další požadavky na stejný server (i s &r=) čekají ve frontě za nimi
+// (zkouška: 3 visící fotky → ani jeden nový požadavek za 30 s). Změna src načítání zruší.
+function _fotkaHlidac() {
+  if (document.visibilityState !== 'visible') return
+  const ted = Date.now()
+  for (const img of document.querySelectorAll('img[onerror="fotkaChyba(this)"]')) {
+    if (img.complete || img.dataset.cekam || img.style.display === 'none') { delete img.dataset.od; continue }
+    const src = img.getAttribute('src')
+    if (!img.dataset.od || img.dataset.odSrc !== src) { img.dataset.od = String(ted); img.dataset.odSrc = src; continue }
+    if (ted - Number(img.dataset.od) < FOTKA_ZASEKNUTI_MS) continue
+    const h = Number(img.dataset.h || 0)
+    if (h >= 2 || _fotkaPokusu >= FOTKA_MAX_POKUSU) continue   // dál už jen čekat (může to být jen pomalá síť)
+    img.dataset.h = String(h + 1)
+    _fotkaPokusu++
+    if (!img.dataset.p) img.dataset.p = _fotkaBezR(src)
+    if (!img.dataset.zdroj) img.dataset.zdroj = img.dataset.p
+    img.onload = () => { delete img.dataset.cekam; _fotkaPamatuj(img) }
+    img.src = _fotkaSR(src)
+  }
+}
+setInterval(_fotkaHlidac, 2000)
+
 function fotkaDoSeznamu(url) {
   const u = String(url || '')
   if (!/[?&]m=1(&|$)/.test(u)) return u
@@ -35892,6 +35981,10 @@ async function openWorkerModal(id) {
   const wdAvatarWrap = document.getElementById('wd-avatar-wrap')
   if (wdAvatarImg && wdAvatarInit) {
     if (w.avatar_url) {
+      // Starou fotku pryč hned — při pomalém načítání by v kartě zůstala fotka
+      // předchozího člověka; nenačte-li se, ukážou se iniciály.
+      wdAvatarImg.removeAttribute('src')
+      wdAvatarImg.onerror = () => { wdAvatarImg.style.display = 'none'; wdAvatarInit.style.display = 'block'; wdAvatarInit.textContent = (w.full_name||'?').split(' ').map(n=>n[0]).join('').slice(0,2).toUpperCase() }
       wdAvatarImg.src = w.avatar_url
       wdAvatarImg.style.display = 'block'
       wdAvatarInit.style.display = 'none'
