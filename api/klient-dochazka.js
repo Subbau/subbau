@@ -29,9 +29,146 @@
 // funkce vůbec nemá.
 //
 // OBDOBÍ: jen aktuální týden. Týden si klient nevybírá, počítá ho server.
+//
+// OD 7. 10. 2026 PRACOVNÍ DOKLADY PRO STAVBYPLÁN — viz oddíl níž. Stránka
+// klient.html je nikdy nedostane: jdou ven jen se zvláštní hlavičkou, kterou
+// zná jen server stavbyplánu.
 // =====================================================================
 
+const crypto = require('crypto');
+
 const SUPABASE_URL = 'https://ceefzlkjnrclfpmhgdmr.supabase.co';
+
+// =====================================================================
+// PRACOVNÍ DOKLADY PRO STAVBYPLÁN (od 7. 10. 2026)
+//
+// Odběratel používá stavbyplán, který si z tohohle odkazu bere lidi a
+// docházku. Teď potřebuje i jejich PRACOVNÍ doklady, aby si je mohl
+// zobrazit a stáhnout.
+//
+//   GET ?t=TOKEN&doklady=1                          → seznam dokladů
+//   GET ?t=TOKEN&doklad=<id>&strana=predni|zadni    → podepsaná adresa na 5 minut
+//
+// PŘÍSTUP: jen s hlavičkou x-stavbyplan-klic, která se shoduje s proměnnou
+// STAVBYPLAN_KLIC na Vercelu. Volá to SERVER stavbyplánu, ne prohlížeč —
+// proto se nepřidává žádné CORS. Bez parametrů doklady/doklad se odkaz chová
+// přesně jako dřív, ať hlavička je, nebo není. Když proměnná na Vercelu
+// chybí, doklady nedostane nikdo.
+//
+// JEN PRACOVNÍ DOKLADY: živnosťák, A1, žádost o A1, Freistellung, řidičák.
+// NIKDY občanka, pas, povolení k pobytu, vízum ani „jiný dokument". Zamítnuté
+// (rejected i starší unreadable — appka je bere stejně) se vynechávají.
+// Jen lidé z part odkazu, bez těch, kdo jsou mimo výkaz — tentýž výběr jako
+// u docházky níž. Čísla dokladů ani adresy souborů v seznamu nejsou.
+//
+// KAŽDÝ SOUBOR MÁ V DATABÁZI SVŮJ ŘÁDEK. Appka ukládá zadní stranu (a další
+// listy A1 od správce) jako samostatný řádek dokladu, sloupec „zadní strana"
+// v tabulce documents není. Proto má každý doklad v seznamu nejvýš jednu
+// stranu: list 1 (nebo neoznačený) je „predni", list 2 a další „zadni".
+//
+// CHYBA = CHYBA. Když se nepovede přečíst, kdo do odkazu patří nebo kdo je
+// mimo výkaz, doklady skončí 500 chyba_serveru — nikdy „ok" s prázdným nebo
+// neúplným seznamem (docházka si svou dřívější shovívavost nechává).
+// Stavbyplán nemá doklady mazat jen proto, že v odpovědi chybí.
+// =====================================================================
+
+// Druh v databázi → druh, který jde ven. `gewerbeschein` je starý název
+// živnosťáku z dřívějších nahrání (appka ho tak pořád zobrazuje, viz
+// DOC_LABELS v subbau_final.html), ven jde jako „zivnost".
+const DRUHY_DOKLADU = new Map([
+  ['zivnost', 'zivnost'], ['gewerbeschein', 'zivnost'],
+  ['a1', 'a1'], ['a1_zadost', 'a1_zadost'],
+  ['freistellung', 'freistellung'], ['ridicak', 'ridicak'],
+]);
+// Německé názvy do názvu souboru — stejné jako DOC_LABELS_DE v appce.
+const NAZVY_DOKLADU_DE = {
+  zivnost: 'Gewerbeschein', a1: 'A1-Bescheinigung', a1_zadost: 'A1-Antrag',
+  freistellung: 'Freistellungsbescheinigung', ridicak: 'Fuehrerschein',
+};
+const PLATNOST_ADRESY_S = 5 * 60;
+const SLOUPCE_DOKLADU = 'id,worker_id,doc_type,status,valid_until,file_name,file_path,file_url';
+// Id dokladu: uuid, případně celé číslo. Nic jiného do dotazu nejde.
+const TVAR_ID_DOKLADU = /^(?:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|\d{1,18})$/i;
+
+// Hlavička od stavbyplánu. Porovnává se v KONSTANTNÍM ČASE: obě strany se
+// nejdřív zahashují na stejnou délku, takže z doby odpovědi nejde vyčíst
+// ani shodu začátku, ani délku klíče. Bílé znaky okolo se ořezávají —
+// proměnná na Vercelu umí mít na konci nový řádek.
+function klicStavbyplanuSedi(hlavicka) {
+  const cekany = String(process.env.STAVBYPLAN_KLIC || '').trim();
+  if (!cekany) return false;                       // bez nastaveného klíče nikdo
+  const dany = String(hlavicka == null ? '' : hlavicka).trim();
+  const a = crypto.createHash('sha256').update(dany, 'utf8').digest();
+  const b = crypto.createHash('sha256').update(cekany, 'utf8').digest();
+  return crypto.timingSafeEqual(a, b) && dany.length > 0;
+}
+
+function druhDokladu(d) {
+  return (d && DRUHY_DOKLADU.get(String(d.doc_type || ''))) || null;
+}
+function dokladZamitnuty(d) {
+  return d.status === 'rejected' || d.status === 'unreadable';
+}
+// Strana podle značky, kterou appka dává do názvu: pracovník nahrává
+// „a1_strana2_2026-10-01.pdf" (cesta „…_strana2.pdf"), správce „scan.pdf (strana 2)".
+function stranaDokladu(d) {
+  const n = String(d.file_name || ''), c = String(d.file_path || '');
+  const m = n.match(/_strana(\d+)_/) || n.match(/\(strana (\d+)\)\s*$/) || c.match(/_strana(\d+)\.[a-z0-9]+$/i);
+  return m && parseInt(m[1], 10) >= 2 ? 'zadni' : 'predni';
+}
+// Cesta k souboru v úložišti `documents`, jak ji má řádek zapsanou. Bere se
+// file_path, a když tam je celá adresa (starší řádky), vyčte se z ní —
+// stejně jako při mazání v appce. Nic nekontroluje, jen vyčte.
+function cestaVKosi(d) {
+  let c = String(d.file_path || '').trim();
+  if (!c || /^https?:/i.test(c)) {
+    const u = (/^https?:/i.test(c) ? c : String(d.file_url || '').trim()).split('?')[0];
+    const pred = SUPABASE_URL + '/storage/v1/object/public/documents/';
+    if (!u.startsWith(pred)) return '';
+    try { c = decodeURIComponent(u.slice(pred.length)); } catch (e) { return ''; }
+  }
+  return c;
+}
+// Jak appka doklady do úložiště pojmenovává (subbau_final.html):
+//   pracovník: <druh>_<Date.now()>.<přípona>, zadní strana <druh>_<Date.now()>_strana2.pdf
+//   správce:   <Date.now()>_<bezpečné jméno souboru>   (listy 2–5: Date.now()+N)
+// U pracovníka musí být <druh> PRACOVNÍ — soubor „op_…", „pas_…", „other_…"
+// ani faktura „faktura_…"/„zaloha_…" (leží ve stejné složce) tudy neprojde,
+// ani když si pracovník k němu sám založí řádek „a1".
+const NAHRANO_PRACOVNIKEM = /^(?:zivnost|gewerbeschein|a1|a1_zadost|freistellung|ridicak)_\d{10,16}(?:_strana\d{1,2})?\.[a-z0-9]{1,5}$/i;
+const NAHRANO_SPRAVCEM = /^\d{10,16}_[a-z0-9._-]{1,200}$/i;
+// Cesta k souboru PRACOVNÍHO dokladu, nebo '' když soubor ven nesmí.
+// Soubor MUSÍ ležet ve složce toho člověka: řádek si pracovník zakládá sám,
+// a bez téhle kontroly by si do něj mohl zapsat cestu k cizímu souboru.
+// A jméno souboru musí vypadat jako nahraný pracovní doklad (viz výš) —
+// jinak by si mohl zapsat cestu ke své faktuře nebo občance.
+function cestaDokladu(d) {
+  const c = cestaVKosi(d);
+  const slozka = String(d.worker_id || '');
+  if (!c || !slozka || c.length > 500 || !c.startsWith(slozka + '/')) return '';
+  if (/[\u0000-\u001f\u007f\\]/.test(c)) return '';
+  const casti = c.split('/');
+  if (casti.length !== 2 || casti.some(k => !k || k === '.' || k === '..')) return '';
+  if (!NAHRANO_PRACOVNIKEM.test(casti[1]) && !NAHRANO_SPRAVCEM.test(casti[1])) return '';
+  return c;
+}
+function platnostDokladu(v) {
+  const s = String(v || '').slice(0, 10);
+  return /^\d{4}-\d{2}-\d{2}$/.test(s) ? s : '';
+}
+const TYPY_SOUBORU = {
+  pdf: 'application/pdf', jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png',
+  webp: 'image/webp', heic: 'image/heic', heif: 'image/heif', gif: 'image/gif',
+};
+function priponaSouboru(cesta) {
+  const m = String(cesta).match(/\.([a-z0-9]{1,5})$/i);
+  return m ? m[1].toLowerCase() : '';
+}
+// Stejně jako bezpecnyNazevSouboru v appce: bez háčků, jen písmena, číslice, podtržítko.
+function bezpecnyNazevSouboru(text) {
+  return String(text || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-zA-Z0-9]+/g, '_').replace(/^_+|_+$/g, '');
+}
 
 // Fotka pracovníka jde na odkaz, jen když je to odkaz do NAŠEHO úložiště
 // fotek (bucket avatars). Profil si pracovník upravuje sám, takže do
@@ -242,6 +379,22 @@ async function db(cesta, klic) {
   return t ? JSON.parse(t) : [];
 }
 
+// Všechny řádky, po stránkách. Supabase vrací nejvýš „max-rows" řádků
+// (výchozí 1000) a zbytek POTICHU zahodí. U dokladů by to znamenalo, že
+// nejstarší doklady ze seznamu zmizí bez jediné chyby. Čte se proto, dokud
+// nepřijde prázdná stránka — funguje to při jakémkoli stropu. `cesta` musí
+// mít jednoznačné řazení (order …,id), jinak by se stránky mohly překrývat.
+const STRANKA_DB = 1000;
+async function dbVsechno(cesta, klic) {
+  const vse = [];
+  for (let strana = 0; strana < 50; strana++) {
+    const kus = await db(`${cesta}&limit=${STRANKA_DB}&offset=${vse.length}`, klic);
+    if (!kus || !kus.length) return vse;
+    vse.push(...kus);
+  }
+  throw new Error('příliš mnoho řádků: ' + cesta.split('?')[0]);
+}
+
 module.exports = async (req, res) => {
   // Odpověď se nesmí nikde uložit do mezipaměti. Kdyby se uložila, klient by
   // po zneplatnění odkazu koukal na data dál z paměti prohlížeče.
@@ -261,6 +414,16 @@ module.exports = async (req, res) => {
 
   const token = String((req.query && req.query.t) || '');
   if (!TVAR_TOKENU.test(token)) { res.status(404).json({ ok: false, chyba: 'neplatny' }); return; }
+
+  // Doklady pro stavbyplán (oddíl nahoře). Klíč se kontroluje dřív, než se
+  // sáhne do databáze; neplatný odkaz s dobrým klíčem pak dopadne stejně
+  // jako dnes (404 neplatny). Jen čtení — POST na tohle nereaguje.
+  const dotaz = req.query || {};
+  const chceSoubor = req.method === 'GET' && dotaz.doklad != null && String(dotaz.doklad) !== '';
+  const rezimDokladu = chceSoubor || (req.method === 'GET' && String(dotaz.doklady || '') === '1');
+  if (rezimDokladu && !klicStavbyplanuSedi(req.headers && req.headers['x-stavbyplan-klic'])) {
+    res.status(403).json({ ok: false, chyba: 'bez_klice' }); return;
+  }
 
   try {
     const odkazy = await db(
@@ -382,10 +545,13 @@ module.exports = async (req, res) => {
 
       // Druhé kolo: nic z toho nepotřebuje znát party.
       slibMimo = potom(db(`profiles?select=id&ve_vykazu=is.false`, klic));
-      slibPoznamky = nactiPoznamky();
-      slibUhrazeno = potom(db(
-        `client_link_weeks?select=uhrazeno&link_id=eq.${odkaz.id}` +
-        `&kw=eq.${kw}&rok=eq.${rok}&limit=1`, klic));
+      // Doklady nepotřebují poznámky ani stav týdne.
+      if (!rezimDokladu) {
+        slibPoznamky = nactiPoznamky();
+        slibUhrazeno = potom(db(
+          `client_link_weeks?select=uhrazeno&link_id=eq.${odkaz.id}` +
+          `&kw=eq.${kw}&rok=eq.${rok}&limit=1`, klic));
+      }
     }
 
     const vazby = await db(
@@ -612,24 +778,136 @@ module.exports = async (req, res) => {
       `&work_date=gte.${odDne}&work_date=lte.${doDne2}&order=work_date.${poradi}&limit=5000`, klic));
 
     // Třetí kolo: docházka s partou (a týdny s partou) souběžně s lidmi.
-    const dochSPartou = teamIds.length ? sPartou(SLOUPCE_DOCHAZKY, od, doDne) : null;
-    const tydnySPartou = (prvniOtevreni && teamIds.length)
+    // (U dokladů se docházka nečte — viz rezimDokladu níž.)
+    const dochSPartou = (teamIds.length && !rezimDokladu) ? sPartou(SLOUPCE_DOCHAZKY, od, doDne) : null;
+    const tydnySPartou = (prvniOtevreni && teamIds.length && !rezimDokladu)
       ? sPartou(SLOUPCE_TYDNU, '2000-01-01', nyni.den, 'desc') : null;
     if (teamIds.length) {
       try {
         const p = await db(
           `profiles?select=id&team_id=in.(${teamIds.map(encodeURIComponent).join(',')})`, klic);
         lideVeSkupinach = (p || []).map(x => x.id).filter(Boolean);
-      } catch (e) { console.warn('[klient] lidé ve skupinách:', e.message); }
+      } catch (e) {
+        // U dokladů NE potichu: prázdný seznam by stavbyplán vzal jako
+        // „nikdo nemá doklady". Radši 500 (chyba_serveru). Docházka beze změny.
+        if (rezimDokladu) throw e;
+        console.warn('[klient] lidé ve skupinách:', e.message);
+      }
     }
 
     const mimoVykaz = new Set();
     try {
       const v = vybal(await slibMimo);
       (v || []).forEach(x => { if (x.id) mimoVykaz.add(x.id); });
-    } catch (e) { console.warn('[klient] ve_vykazu se nenačetlo (migrace?):', e.message); }
+    } catch (e) {
+      // U docházky se při chybě nevyřadí nikdo (tak to bylo vždycky). U dokladů
+      // by tím ven šly doklady lidí, kteří ve výkazu být nemají — proto 500.
+      if (rezimDokladu) throw e;
+      console.warn('[klient] ve_vykazu se nenačetlo (migrace?):', e.message);
+    }
     if (mimoVykaz.size) {
       lideVeSkupinach = lideVeSkupinach.filter(id => !mimoVykaz.has(id));
+    }
+
+    // ---------------------------------------------------------------
+    // DOKLADY PRO STAVBYPLÁN — lidé jsou TÍŽ jako u docházky výš (party
+    // odkazu bez těch mimo výkaz). Klíč už je ověřený. Návštěva se
+    // nezapisuje: tohle je stavbyplán, ne odběratel u stránky.
+    // ---------------------------------------------------------------
+    if (rezimDokladu) {
+      const lideOdkazu = new Set(lideVeSkupinach);
+      const seznamLidi = [...lideOdkazu].map(encodeURIComponent).join(',');
+      const druhyVDotazu = [...DRUHY_DOKLADU.keys()].join(',');
+      // Soubory, na které ukazuje NEPRACOVNÍ řádek (občanka, pas, jiný…)
+      // těch lidí. Takový soubor nejde ven, ani když na něj ukazuje i řádek
+      // „a1" — správce nahrává všechno jako <čas>_<jméno>, takže občanka
+      // od správce má jméno stejného tvaru jako A1. Čtou se jen cesty.
+      const zakazaneSoubory = async (lide) => {
+        const radky = await dbVsechno(`documents?select=file_path,file_url` +
+          `&worker_id=in.(${lide})&or=(doc_type.is.null,doc_type.not.in.(${druhyVDotazu}))` +
+          `&order=id.asc`, klic);
+        return new Set((radky || []).map(cestaVKosi).filter(Boolean));
+      };
+
+      if (!chceSoubor) {
+        const doklady = {};
+        if (lideOdkazu.size) {
+          const [radkyD, zakazane] = await Promise.all([
+            dbVsechno(`documents?select=${SLOUPCE_DOKLADU}` +
+              `&worker_id=in.(${seznamLidi})&doc_type=in.(${druhyVDotazu})` +
+              `&order=uploaded_at.desc,id.asc`, klic),
+            zakazaneSoubory(seznamLidi),
+          ]);
+          const videne = new Set();   // řádek přidaný mezi stránkami se může zopakovat
+          for (const d of (radkyD || [])) {
+            // Databáze už filtrovala — tady to platí ještě jednou, ať jedna
+            // chyba v dotazu nepustí ven občanku nebo cizího člověka.
+            const druh = druhDokladu(d);
+            if (!druh || dokladZamitnuty(d) || !lideOdkazu.has(d.worker_id)) continue;
+            if (videne.has(String(d.id))) continue;
+            videne.add(String(d.id));
+            const cesta = cestaDokladu(d);
+            (doklady[d.worker_id] = doklady[d.worker_id] || []).push({
+              id: d.id, druh, platnost_do: platnostDokladu(d.valid_until),
+              strany: (cesta && !zakazane.has(cesta)) ? [stranaDokladu(d)] : [],
+            });
+          }
+        }
+        res.status(200).json({ ok: true, doklady });
+        return;
+      }
+
+      // Jeden soubor. Cokoli nesedí — cizí člověk, nepovolený druh,
+      // zamítnutý doklad, strana bez souboru — je navenek totéž: 404.
+      const nenalezen = () => res.status(404).json({ ok: false, chyba: 'doklad_nenalezen' });
+      const idDokladu = String(dotaz.doklad);
+      const strana = String(dotaz.strana || '');
+      if (!TVAR_ID_DOKLADU.test(idDokladu) || (strana !== 'predni' && strana !== 'zadni') ||
+          !lideOdkazu.size) { nenalezen(); return; }
+      const nalez = await db(`documents?select=${SLOUPCE_DOKLADU}` +
+        `&id=eq.${encodeURIComponent(idDokladu)}` +
+        `&worker_id=in.(${seznamLidi})&doc_type=in.(${druhyVDotazu})&limit=1`, klic);
+      const d = nalez && nalez[0];
+      const druh = d && druhDokladu(d);
+      const cesta = druh ? cestaDokladu(d) : '';
+      if (!d || String(d.id).toLowerCase() !== idDokladu.toLowerCase() || !druh ||
+          dokladZamitnuty(d) || !lideOdkazu.has(d.worker_id) || !cesta ||
+          stranaDokladu(d) !== strana) { nenalezen(); return; }
+      if ((await zakazaneSoubory(encodeURIComponent(d.worker_id))).has(cesta)) { nenalezen(); return; }
+
+      // Podepsaná adresa na 5 minut. Soubor zůstává v SubBau, stavbyplán si
+      // ho jen na chvíli vypůjčí.
+      const r = await fetch(`${SUPABASE_URL}/storage/v1/object/sign/documents/` +
+                            cesta.split('/').map(encodeURIComponent).join('/'), {
+        method: 'POST',
+        headers: { apikey: klic, Authorization: `Bearer ${klic}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ expiresIn: PLATNOST_ADRESY_S }),
+      });
+      if (!r.ok) {
+        const t = await r.text().catch(() => '');
+        console.error('[klient] podpis dokladu:', r.status, t.slice(0, 300));
+        // Řádek je, soubor v úložišti ne → pro stavbyplán „doklad není".
+        if (r.status === 400 || r.status === 404) { nenalezen(); return; }
+        throw new Error('podpis ' + r.status);
+      }
+      const podpis = await r.json().catch(() => null);
+      const adresa = podpis && (podpis.signedURL || podpis.signedUrl);
+      if (typeof adresa !== 'string' || !adresa.startsWith('/object/sign/documents/')) {
+        throw new Error('podpis bez adresy');
+      }
+
+      let jmeno = '';
+      try {
+        const p = await db(`profiles?select=full_name&id=eq.${encodeURIComponent(d.worker_id)}&limit=1`, klic);
+        jmeno = (p && p[0] && p[0].full_name) || '';
+      } catch (e) { console.warn('[klient] jméno k dokladu:', e.message); }
+      const pripona = priponaSouboru(cesta);
+      const nazev = [NAZVY_DOKLADU_DE[druh], jmeno, strana === 'zadni' ? 'Rueckseite' : 'Vorderseite']
+        .map(bezpecnyNazevSouboru).filter(Boolean).join('_') + (pripona ? '.' + pripona : '');
+
+      res.status(200).json({ ok: true, url: SUPABASE_URL + '/storage/v1' + adresa,
+                             typ: TYPY_SOUBORU[pripona] || 'application/octet-stream', nazev });
+      return;
     }
 
     // Čtvrté kolo: stará docházka bez party (a týdny bez party).
