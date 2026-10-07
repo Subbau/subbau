@@ -4851,7 +4851,7 @@ async function submitAdminSignatureWithPlacement() {
 // Po nahrání nové verze se snadno pozná, jestli se opravdu nasadila: otevřete
 // appku, zmáčkněte F12 (na Macu ⌥⌘I) a v konzoli je vypsané tohle datum. Když
 // tam svítí starší, prohlížeč nebo GitHub drží starou verzi.
-const SUBBAU_VERZE = '2026-10-07 a — Souhlas: pracovní doklady pro odběratele'
+const SUBBAU_VERZE = '2026-10-07 b — Upozornění na vyfakturovaný týden'
 console.log('SubBau docházka — verze ' + SUBBAU_VERZE)
 // Verze i dole v menu správce. Když někdo novinku „nevidí", podle ní se hned
 // pozná, jestli nemá otevřenou starou kopii appky — bez hledání v konzoli.
@@ -9821,7 +9821,7 @@ function opravDlouhyDen(workerId, workDate, kw, kwYear, jmeno) {
 // proto se ptáme a v otázce je vidět, koho a který den se to týká.
 async function deleteLongDayRecord(id, workerId, jmeno, popis) {
   if (!id) return
-  if (!confirm('Opravdu SMAZAT celý záznam docházky?\n\n'
+  if (!await hlidejVyfakturovanyTyden(workerId, { ids: [id] }, 'Opravdu SMAZAT celý záznam docházky?\n\n'
     + (jmeno || 'Pracovník') + '\n' + (popis || '')
     + '\n\nHodiny tohoto dne se nenávratně ztratí.'
     + '\nPokud jen nesedí časy, dejte Zrušit a raději je opravte kliknutím na pracovníka.')) return
@@ -12122,7 +12122,7 @@ async function deleteTodayRecord(id, name) {
   const ids = String(id).split(',').filter(Boolean)
   if (!ids.length) return
   const kolik = ids.length > 1 ? '\n\nDen má ' + ids.length + ' záznamy — smažou se všechny.' : ''
-  if (!confirm('Opravdu smazat dnešní docházku pro ' + (name || 'tohoto pracovníka') + '?' + kolik + '\n\nTato akce je nevratná.')) return
+  if (!await hlidejVyfakturovanyTyden(null, { ids }, 'Opravdu smazat dnešní docházku pro ' + (name || 'tohoto pracovníka') + '?' + kolik + '\n\nTato akce je nevratná.')) return
   const { data: smazano, error } = await sb.from('attendance').delete().in('id', ids).select('id')
   if (error) { showToast('❌ Chyba mazání: ' + error.message); return }
   // 0 smazaných = databáze to nepustila (bez chyby). Dřív se hlásilo „smazán"
@@ -27713,6 +27713,84 @@ function odeberDalsiPauzu(i) {
   updateEditHoursPreview()
 }
 
+// VYFAKTUROVANÝ TÝDEN. Majitel 7. 10. 2026: pracovník si vystavil fakturu za
+// KW 39 a 40, kancelář mu potom upravila odchod a týden vyrostl o půl hodiny.
+// Faktura zůstala na starých hodinách a nikdo si toho nevšiml.
+// Než tedy správce změní docházku v týdnu, za který už je faktura OD TOHO
+// ČLOVĚKA (nebo od jeho zaměstnavatele — ten fakturuje hodiny svých lidí),
+// zeptá se. Týden bez faktury se neptá na nic navíc.
+//   kde    = 'RRRR-MM-DD' | { kw, kw_year, work_date } | { ids: [id řádků docházky] }
+//            | null = neptat se (mění se jen stavba nebo popis práce)
+//   otazka = dosavadní potvrzení akce („Opravdu smazat…“). Spojí se s varováním,
+//            ať se správce ptá jednou; bez faktury se položí samo jako dřív.
+// Vrací true = pokračovat, false = zrušeno (nic se nezapíše).
+// Když faktury nejdou přečíst, NEBRZDÍ to — jen console.warn a jede se dál.
+async function hlidejVyfakturovanyTyden(workerId, kde, otazka) {
+  // Zjišťování má strop 8 s: neodpoví-li databáze, uloží se jako dřív bez
+  // kontroly — upozornění nesmí zablokovat uložení docházky.
+  const zjisti = async () => {
+    const varovani = []
+    let tydny = []
+    if (kde && Array.isArray(kde.ids)) {
+      // Člověka i týden bereme z řádku: v okně z karty pracovníka je pole týdne
+      // staré a datum se dá přepsat, den si ale drží svoje původní datum.
+      const { data, error } = await sb.from('attendance').select('worker_id, work_date, kw, kw_year').in('id', kde.ids)
+      if (error) throw error
+      tydny = (data || []).map(r => ({ w: r.worker_id || workerId, kw: r.kw, rok: r.kw_year, den: r.work_date }))
+    } else if (kde) {
+      tydny = [typeof kde === 'string' ? { w: workerId, den: kde }
+        : { w: workerId, kw: kde.kw, rok: kde.kw_year, den: kde.work_date }]
+    }
+    const cislo = (x, haler) => (Number(x) || 0).toLocaleString('cs-CZ',
+      haler ? { minimumFractionDigits: 2, maximumFractionDigits: 2 } : { maximumFractionDigits: 2 })
+    const popis = f => 'faktura ' + (f.invoice_number || 'bez čísla') + ': ' + cislo(f.total_hours) + ' h, '
+      + cislo(f.total_amount, true) + ' €' + (f.status === 'paid' ? ', už zaplacená' : '')
+    const videno = new Set()
+    for (const t of tydny) {
+      if (!(parseInt(t.kw) && parseInt(t.rok)) && t.den) {
+        const k = getKW(new Date(String(t.den).slice(0, 10) + 'T00:00:00')); t.kw = k.week; t.rok = k.year
+      }
+      const kw = parseInt(t.kw), rok = parseInt(t.rok)
+      // Jen cizí docházka. Svoji si člověk mění příchodem a odchodem — tam se neptáme.
+      if (!t.w || !kw || !rok || (currentUser && t.w === currentUser.id)) continue
+      if (videno.has(t.w + '|' + kw + '|' + rok)) continue
+      videno.add(t.w + '|' + kw + '|' + rok)
+      // select('*'): před migrací firma-zamestnanci sloupec zamestnavatel_id chybí
+      // a výběr po jménu by spadl — pak se hlídá aspoň faktura toho člověka.
+      const { data: kdo, error: chybaKdo } = await sb.from('profiles').select('*').eq('id', t.w).maybeSingle()
+      if (chybaKdo) console.warn('[vyfakturovaný týden] profil nejde přečíst:', chybaKdo.message)
+      const sefId = (kdo && kdo.zamestnavatel_id && kdo.zamestnavatel_id !== t.w) ? kdo.zamestnavatel_id : null
+      const [fakt, sef] = await Promise.all([
+        sb.from('worker_invoices').select('worker_id, invoice_number, total_hours, total_amount, status, kw, kw_year')
+          .in('worker_id', sefId ? [t.w, sefId] : [t.w]).eq('kw', kw).eq('kw_year', rok),
+        sefId ? sb.from('profiles').select('full_name, company_name').eq('id', sefId).maybeSingle() : { data: null }
+      ])
+      if (fakt.error) { console.warn('[vyfakturovaný týden] faktury nejdou přečíst — ukládám bez kontroly:', fakt.error.message); continue }
+      const jeho = (fakt.data || []).filter(f => f.worker_id === t.w)
+      const firmy = sefId ? (fakt.data || []).filter(f => f.worker_id === sefId) : []
+      if (!jeho.length && !firmy.length) continue
+      const firma = (sef && sef.data && (sef.data.company_name || sef.data.full_name)) || 'zaměstnavatele'
+      varovani.push('Pozor: týden KW ' + kw + '/' + rok + ' má ' + ((kdo && kdo.full_name) || 'pracovník') + ' už vyfakturovaný'
+        + (jeho.length ? ' (' + jeho.map(popis).join('; ') + ')' : '')
+        + (firmy.length ? (jeho.length ? ' a' : '') + ' přes zaměstnavatele ' + firma + ' (' + firmy.map(popis).join('; ') + ')' : '')
+        + '.')
+    }
+    return varovani
+  }
+  let varovani = []
+  try {
+    const vysledek = await Promise.race([zjisti(), new Promise(r => setTimeout(() => r(null), 8000))])
+    if (vysledek) varovani = vysledek
+    else console.warn('[vyfakturovaný týden] kontrola faktury nestihla 8 s — ukládám bez ní')
+  } catch (e) {
+    console.warn('[vyfakturovaný týden] kontrola faktury neproběhla — ukládám bez ní:', e && e.message)
+  }
+  if (!varovani.length) return otazka ? confirm(otazka) : true
+  return confirm(varovani.join('\n\n')
+    + '\n\nZměna docházky se do vystavené faktury nepropíše — fakturu bude potřeba opravit nebo rozdíl doplatit.\n\n'
+    + (otazka || 'Uložit změnu?'))
+}
+
 async function saveEditAttRecord() {
   const id = document.getElementById('edit-att-id').value
   const ci = document.getElementById('edit-att-ci').value
@@ -27731,10 +27809,12 @@ async function saveEditAttRecord() {
 
   // Pracovník mohl mezitím ťuknout Odchod nebo pauzu. Okno ukazuje stav
   // z otevření — bez kontroly by uložení jeho zápis tiše přepsalo.
+  let puvodniRadek = null   // den, jak je teď v databázi (pro kontrolu faktury níž)
   if (id && _editAttOtisk && _editAttOtisk.id === String(id)) {
     const { data: tedRadky, error: tedErr } = await sb.from('attendance').select('*').eq('id', id)
     if (tedErr) { showToast('❌ Nepodařilo se ověřit, jestli se den mezitím nezměnil — zkuste Uložit znovu'); return }
     const ted = tedRadky && tedRadky[0]
+    puvodniRadek = ted || null
     if (ted) {
       const nove = otiskDneProUpravu(ted), stare = _editAttOtisk
       const popisky = { prichod: 'Příchod', odchod: 'Odchod', pauzy: 'Přestávky', hodiny: 'Hodiny', stavba: 'Stavba', popis: 'Popis práce' }
@@ -27782,6 +27862,7 @@ async function saveEditAttRecord() {
   // Srážka za puntíky a změněné hodiny: částku, kterou správce v okně nechal
   // beze změny, přepočítat z nových hodin. Kterou přepsal sám, ta platí.
   const caEl = document.getElementById('edit-att-castka')
+  let srazkaOtazka = null   // položí se spolu s kontrolou faktury — jedna otázka na uložení
   const srHDne = srazkaZaPuntikyHodin(vyjimka)
   if (id && hours != null && caEl && srHDne && caEl.dataset.hodiny !== ''
       && castkaRaw === String(caEl.dataset.puvodni || '').replace(',', '.').trim()
@@ -27789,10 +27870,35 @@ async function saveEditAttRecord() {
     let nova
     try { nova = await castkaSrazkyDne(caEl.dataset.pracovnik || workerId, dateStr, srHDne, hours) }
     catch (e) { showToast('❌ Den má srážku za puntíky a sazbu se nepodařilo načíst — nic se neuložilo. Zkuste to prosím znovu.'); return }
-    if (!confirm('Den má srážku ' + srHDne + ' h za černé puntíky a mění se mu hodiny (' + caEl.dataset.hodiny + ' h → ' + hours + ' h).\n\n'
-        + 'Částka dne se přepočítá: ' + castkaDne + ' € → ' + nova.castka + ' € (' + nova.hPo + ' h × ' + nova.sazba + ' €).\n\nUložit?')) return
+    srazkaOtazka = ('Den má srážku ' + srHDne + ' h za černé puntíky a mění se mu hodiny (' + caEl.dataset.hodiny + ' h → ' + hours + ' h).\n\n'
+        + 'Částka dne se přepočítá: ' + castkaDne + ' € → ' + nova.castka + ' € (' + nova.hPo + ' h × ' + nova.sazba + ' €).\n\nUložit?')
     vyjimka.vyplata_castka = nova.castka
   }
+
+  // Vyfakturovaný týden (7. 10. 2026). Ptát se jen, když se mění něco, co je
+  // na faktuře — časy, přestávky, hodiny nebo výjimka ve výplatě. Samotná
+  // stavba nebo popis práce fakturu nemění.
+  let tydenFaktury = null
+  if (id) {
+    if (!puvodniRadek) {
+      try { const { data } = await sb.from('attendance').select('*').eq('id', id); puvodniRadek = (data && data[0]) || null }
+      catch (e) { console.warn('[vyfakturovaný týden] den nejde přečíst:', e && e.message) }
+    }
+    const penize = r => [!!r.bez_vyplaty, !!r.bez_provize_den,
+      (r.vyplata_castka == null || r.vyplata_castka === '') ? '' : String(Number(r.vyplata_castka))].join('|')
+    const pred = puvodniRadek && otiskDneProUpravu(puvodniRadek)
+    const po = otiskDneProUpravu({ id, check_in: ci, check_out: co || null, breaks: pauzyProVypocet, total_hours: hours })
+    const meniSeFaktura = !pred || ['prichod', 'odchod', 'pauzy', 'hodiny'].some(k => pred[k] !== po[k])
+      || penize(puvodniRadek) !== penize(vyjimka)
+    if (meniSeFaktura) tydenFaktury = puvodniRadek
+      ? { kw: puvodniRadek.kw, kw_year: puvodniRadek.kw_year, work_date: puvodniRadek.work_date }
+      : { ids: [id] }
+  } else if (workerId && dateStr) {
+    // Nový den z týdenního přehledu
+    tydenFaktury = { kw: parseInt(document.getElementById('edit-att-kw').value) || null,
+      kw_year: parseInt(document.getElementById('edit-att-kwyear').value) || null, work_date: dateStr }
+  }
+  if (!await hlidejVyfakturovanyTyden((puvodniRadek && puvodniRadek.worker_id) || workerId, tydenFaktury, srazkaOtazka)) return
 
   // Pole "breaks" má při zobrazování PŘEDNOST před break_start/break_end (kvůli
   // více pauzám za směnu) — pokud bychom ho tady nepřepsali, staré pauzy z
@@ -27901,7 +28007,8 @@ async function deleteAttRecord() {
     if (workerId) { showToast('Tento den nemá žádný záznam'); return }
     return
   }
-  if (!confirm('Opravdu smazat tento záznam docházky?')) return
+  // Vyfakturovaný týden — člověka a týden zjistí z řádku (platí pro oba režimy okna).
+  if (!await hlidejVyfakturovanyTyden(workerId, { ids: [id] }, 'Opravdu smazat tento záznam docházky?')) return
   const { data: smazano, error } = await sb.from('attendance').delete().eq('id', id).select('id')
   if (error) { showToast('❌ Chyba: ' + error.message); return }
   if (!smazano || !smazano.length) { showToast('❌ Záznam se nesmazal — databáze to nepovolila'); return }
@@ -28089,7 +28196,8 @@ async function saveManualAttendance() {
         castkaInfo = `\n\nPozor: den má ručně nastavenou částku ${staraCastka} €${existing.vyplata_poznamka ? ' (' + existing.vyplata_poznamka + ')' : ''}. Zůstane i s novými hodinami — změnit ji jde v úpravě dne.`
       }
     }
-    if (!confirm(`Pro tento den již existuje záznam (${existing.check_in?.slice(0,5)} → ${existing.check_out?.slice(0,5)||'?'})${countMsg}. Přepsat?${castkaInfo}`)) return
+    // Přepis i smazání duplicit dne jsou jedna akce — jedna otázka (i na fakturu).
+    if (!await hlidejVyfakturovanyTyden(workerId, { kw: kw.week, kw_year: kw.year }, `Pro tento den již existuje záznam (${existing.check_in?.slice(0,5)} → ${existing.check_out?.slice(0,5)||'?'})${countMsg}. Přepsat?${castkaInfo}`)) return
     window.zapisProbiha = true
     let error, zapsano
     try {
@@ -28132,6 +28240,7 @@ async function saveManualAttendance() {
     showToast('✅ Záznam aktualizován — ' + hours + 'h' + (novaSrazka ? ' · srážka přepočítaná na ' + novaSrazka.castka + ' €' : ''))
   } else {
     // Nový záznam
+    if (!await hlidejVyfakturovanyTyden(workerId, { kw: kw.week, kw_year: kw.year })) return
     window.zapisProbiha = true
     let error
     try {
@@ -37187,7 +37296,8 @@ async function odecistSrazku(workerId, den, jmeno) {
   const hPo = Math.max(0, Math.round((h - SRAZKA_HODIN) * 100) / 100)
   const castka = Math.round(hPo * sazba * 100) / 100
   const eur = (x) => x.toLocaleString('cs-CZ', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + ' €'
-  if (!confirm('Srážka ' + SRAZKA_HODIN + ' h — ' + (jmeno || '') + ', ' + new Date(den + 'T00:00:00').toLocaleDateString('cs-CZ') + '\n\n'
+  // Hodiny zůstanou, ale částka dne klesne — vystavená faktura by nesouhlasila.
+  if (!await hlidejVyfakturovanyTyden(workerId, { kw: r.kw, kw_year: r.kw_year, work_date: r.work_date }, 'Srážka ' + SRAZKA_HODIN + ' h — ' + (jmeno || '') + ', ' + new Date(den + 'T00:00:00').toLocaleDateString('cs-CZ') + '\n\n'
       + 'Teď: ' + h + ' h × ' + eur(sazba) + ' = ' + eur(h * sazba) + '\n'
       + 'Po srážce: ' + hPo + ' h × ' + eur(sazba) + ' = ' + eur(castka) + '\n\n'
       + 'Zapíše se jako ručně nastavená částka dne. Odběratel dál vidí odpracované hodiny beze změny.')) return false
@@ -37914,7 +38024,7 @@ async function loadWdForemanSheet(week, year) {
 async function deleteWorkerDay(id, workDate) {
   if (!id) return
   const dateLabel = workDate ? new Date(workDate).toLocaleDateString('cs-CZ', {weekday:'long', day:'2-digit', month:'2-digit', year:'numeric'}) : 'tento den'
-  if (!confirm('Opravdu smazat docházku za ' + dateLabel + '?\n\nTato akce je nevratná.')) return
+  if (!await hlidejVyfakturovanyTyden(currentWorkerId, { ids: [id] }, 'Opravdu smazat docházku za ' + dateLabel + '?\n\nTato akce je nevratná.')) return
   const { data: smazano, error } = await sb.from('attendance').delete().eq('id', id).select('id')
   if (error) { showToast('❌ Chyba mazání: ' + error.message); return }
   if (!smazano || !smazano.length) { showToast('❌ Den se nesmazal — databáze to nepovolila'); return }
