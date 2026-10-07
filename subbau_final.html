@@ -4851,7 +4851,7 @@ async function submitAdminSignatureWithPlacement() {
 // Po nahrání nové verze se snadno pozná, jestli se opravdu nasadila: otevřete
 // appku, zmáčkněte F12 (na Macu ⌥⌘I) a v konzoli je vypsané tohle datum. Když
 // tam svítí starší, prohlížeč nebo GitHub drží starou verzi.
-const SUBBAU_VERZE = '2026-10-07 c — Hledání bez oprav slov'
+const SUBBAU_VERZE = '2026-10-07 d — Stažené soubory německy'
 console.log('SubBau docházka — verze ' + SUBBAU_VERZE)
 // Verze i dole v menu správce. Když někdo novinku „nevidí", podle ní se hned
 // pozná, jestli nemá otevřenou starou kopii appky — bez hledání v konzoli.
@@ -8370,7 +8370,11 @@ async function generateProvizeFirmReport(firmName, mode) {
       </table>
       <div style="margin-top:20px;font-size:10px;color:#999">Vygenerováno ${new Date().toLocaleString('cs-CZ')} · SubBau Provize</div>
     </body></html>`
-    printInPage(html)
+    // Německy: Provisionsabrechnung_KW39_2026_Firma (měsíc 2026-10, den 2026-10-07)
+    const kwP = getKW(anchor)
+    const obdobiDe = mode === 'week' ? 'KW' + kwP.week + '_' + kwP.year
+      : (mode === 'day' ? localDateStr(anchor) : localDateStr(anchor).slice(0, 7))
+    printInPage(html, ['Provisionsabrechnung', obdobiDe, bezpecnyNazevSouboru(firmName)].filter(Boolean).join('_') + '.html')
   } catch (e) {
     console.error('[provize report]', e)
     showToast('❌ Chyba: ' + (e.message || e))
@@ -13737,6 +13741,36 @@ function bezpecnyNazevSouboru(text) {
   return String(text || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '')
     .replace(/[^a-zA-Z0-9]+/g, '_').replace(/^_+|_+$/g, '')
 }
+// Kolikátá strana dokladu (1 = přední). Pracovník má značku v názvu
+// „op_strana2_2026-10-01.pdf" (v cestě „…_strana2.pdf"), správce
+// „scan.pdf (strana 2)". Čte se stejně jako v api/klient-dochazka.js.
+function stranaDokladu(d) {
+  const n = String(d?.file_name || ''), c = String(d?.file_path || d?.file_url || '').split('?')[0]
+  const m = n.match(/_strana(\d+)_/) || n.match(/\(strana (\d+)\)\s*$/) || c.match(/_strana(\d+)\.[a-z0-9]+$/i)
+  return m ? (parseInt(m[1], 10) || 1) : 1
+}
+// Strana v názvu staženého souboru — stejně jako odkaz pro odběratele
+// (api/klient-dochazka.js): doklad s přední a zadní stranou (MULTISIDE_TYPES)
+// má „Vorderseite", druhý list „Rueckseite". Správce může nahrát až pět
+// listů — třetí a další dostanou „Seite3"…, ať se v ZIPu nepletou se zadní
+// stranou. Jednostranný doklad (pas, vízum, jiný) bez přípony.
+function stranaDokladuDe(docType, strana) {
+  const n = parseInt(strana, 10) || 1
+  if (n >= 3) return 'Seite' + n
+  if (n === 2) return 'Rueckseite'
+  return MULTISIDE_TYPES.includes(docType) ? 'Vorderseite' : ''
+}
+// Název fotky ze stavby bez přípony: Baustellenfoto_2026-10-05_Jan_Novak.
+// Stažení i tisk (Uložit jako PDF) ho mají stejný. „Neznámý pracovník" je jen
+// náhradní popisek v galerii — česky, do názvu souboru nepatří.
+// Datum podle místního času jako u smluv (localDateStr) — UTC by fotce
+// z 0:30 v noci dalo předchozí den.
+function nazevFotkyStavby(author, createdAt) {
+  const d = createdAt ? new Date(createdAt) : new Date()
+  const datum = isNaN(d) ? '' : localDateStr(d)
+  const jmeno = author === 'Neznámý pracovník' ? '' : bezpecnyNazevSouboru(author)
+  return ['Baustellenfoto', datum, jmeno].filter(Boolean).join('_')
+}
 // Nabídka typů pro <select> (pracovník i admin vidí stejné pořadí i názvy)
 function docTypeOptions(selected) {
   return DOC_TYPES.map(t =>
@@ -13821,7 +13855,7 @@ function renderSitePhotosAdmin() {
         <div style="font-size:10px;color:var(--text3);margin-top:3px">🕑 ${when}</div>
         <div style="display:flex;gap:6px;margin-top:8px">
           <button onclick="downloadSitePhoto('${jsStr(url)}','${safeAuthor}','${p.created_at||''}')" style="flex:1;display:flex;align-items:center;justify-content:center;gap:5px;padding:7px 8px;font-size:11.5px;font-weight:700;border:1px solid var(--brd);border-radius:7px;background:#fff;color:var(--text);cursor:pointer;font-family:inherit"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:14px;height:14px"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="M7 10l5 5 5-5"/><path d="M12 15V3"/></svg>Stáhnout</button>
-          <button onclick="printSitePhoto('${jsStr(url)}','${safeAuthor}')" title="Vytisknout fotku" style="display:flex;align-items:center;justify-content:center;padding:7px 10px;font-size:11.5px;font-weight:700;border:1px solid var(--brd);border-radius:7px;background:#fff;color:var(--text);cursor:pointer;font-family:inherit"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:14px;height:14px"><path d="M6 9V2h12v7"/><path d="M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2"/><rect x="6" y="14" width="12" height="8"/></svg></button>
+          <button onclick="printSitePhoto('${jsStr(url)}','${safeAuthor}','${jsStr(p.created_at||'')}')" title="Vytisknout fotku" style="display:flex;align-items:center;justify-content:center;padding:7px 10px;font-size:11.5px;font-weight:700;border:1px solid var(--brd);border-radius:7px;background:#fff;color:var(--text);cursor:pointer;font-family:inherit"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:14px;height:14px"><path d="M6 9V2h12v7"/><path d="M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2"/><rect x="6" y="14" width="12" height="8"/></svg></button>
         </div>
         <button onclick="deleteSitePhoto('${jsStr(p.id)}','${jsStr(url)}')" style="width:100%;display:flex;align-items:center;justify-content:center;gap:5px;margin-top:6px;padding:7px 8px;font-size:11.5px;font-weight:700;border:1px solid var(--red);border-radius:7px;background:var(--red-l);color:var(--red);cursor:pointer;font-family:inherit"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:14px;height:14px"><path d="M3 6h18M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6M14 11v6"/></svg>Smazat</button>
       </div>
@@ -13867,9 +13901,8 @@ async function downloadSitePhoto(url, author, createdAt) {
     if (!res.ok) throw new Error('HTTP ' + res.status)
     const blob = await res.blob()
     const ext = (blob.type && blob.type.split('/')[1]) ? blob.type.split('/')[1].replace('jpeg','jpg') : 'jpg'
-    const datePart = createdAt ? new Date(createdAt).toISOString().slice(0,10) : new Date().toISOString().slice(0,10)
-    const safeName = (author || 'foto').replace(/[^\p{L}\p{N}]+/gu, '_').replace(/^_+|_+$/g, '') || 'foto'
-    const fname = `SubBau_${safeName}_${datePart}.${ext}`
+    // Německy, jako ostatní stahované soubory: Baustellenfoto_datum_jméno
+    const fname = nazevFotkyStavby(author, createdAt) + '.' + ext
     const objUrl = URL.createObjectURL(blob)
     const a = document.createElement('a')
     a.href = objUrl
@@ -13887,12 +13920,13 @@ async function downloadSitePhoto(url, author, createdAt) {
 }
 
 // Otevře fotku v tiskovém okně a vyvolá tisk
-function printSitePhoto(url, author) {
+function printSitePhoto(url, author, createdAt) {
   url = bezpecnaFotkaStavby(url)
   if (!url) return
   const w = window.open('', '_blank')
   if (!w) { showToast('⚠️ Povolte vyskakovací okna pro tisk'); return }
-  w.document.write(`<!DOCTYPE html><html><head><meta charset="utf-8"><title>Tisk fotky — ${escAttr(author || 'SubBau')}</title>
+  // Titulek = název souboru při „Uložit jako PDF" — stejný jako stažená fotka
+  w.document.write(`<!DOCTYPE html><html><head><meta charset="utf-8"><title>${escAttr(nazevFotkyStavby(author, createdAt))}</title>
     <style>
       @page { margin: 12mm; }
       body { margin:0; font-family: Arial, sans-serif; text-align:center; }
@@ -16364,6 +16398,13 @@ function nahledZalohoveFaktury() {
   zobrazZalohovyDoklad(d)
 }
 
+// Název souboru zálohové faktury: Anzahlungsrechnung_<číslo>_<dodavatel>.pdf.
+// Bez jména dodavatele (nebo čísla) se podtržítko navíc nedává.
+function zalohovaFakturaNazev(d) {
+  return ['Anzahlungsrechnung', String(d?.cislo || '').replace(/[^a-zA-Z0-9_-]/g, ''),
+    bezpecnyNazevSouboru(d?.dodavatel?.jmeno)].filter(Boolean).join('_') + '.pdf'
+}
+
 // Stažení PDF z otevřeného náhledu zálohové faktury.
 async function stahniZalohovePdf() {
   const d = window._zfNahled
@@ -16371,10 +16412,7 @@ async function stahniZalohovePdf() {
   showToast('⏳ Připravuji PDF…')
   try {
     const out = await buildInvoicePdf()
-    const jmeno = 'Anzahlungsrechnung_' + String(d.cislo).replace(/[^a-zA-Z0-9_-]/g, '')
-      + '_' + String(d.dodavatel.jmeno || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '')
-        .replace(/[^a-zA-Z0-9]+/g, '_').replace(/^_+|_+$/g, '') + '.pdf'
-    out.pdf.save(jmeno)
+    out.pdf.save(zalohovaFakturaNazev(d))
     showToast('✅ PDF uloženo')
   } catch (e) {
     showToast('❌ PDF se nepodařilo vytvořit: ' + (e?.message || e))
@@ -16757,7 +16795,7 @@ function tiskSoupisuFaktur(kw, rok) {
 <tbody>${telo}</tbody>
 <tfoot><tr><td colspan="4">Celkem za KW ${e(kw)}/${e(rok)}</td><td class="c">${cislo(hod)} h</td><td class="c">${cislo(kc)} €${zal > 0 ? `<div class="m">zálohy −${cislo(zal)} €</div>` : ''}</td><td colspan="2"></td></tr></tfoot>
 </table></body></html>`
-  showPrintPreview(html, 'soupis-faktur-KW' + kw + '-' + rok + '.html')
+  showPrintPreview(html, 'Rechnungsuebersicht_KW' + kw + '_' + rok + '.html')
 }
 
 function renderWorkerInvoices() {
@@ -16914,7 +16952,7 @@ function renderWorkerInvoices() {
         <div style="display:flex;gap:4px;flex-wrap:wrap">
           ${r.pdf_url ? `<button onclick="openPdfUrl('${jsStr(r.pdf_url)}')" style="font-size:11px;padding:3px 8px;border:1px solid var(--blue);border-radius:6px;cursor:pointer;background:var(--bg2);color:var(--blue);font-family:inherit"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:1em;height:1em;flex-shrink:0;vertical-align:-2px"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg> Zobrazit</button>` : '<span style="font-size:11px;color:var(--text3)">bez PDF</span>'}
           ${r.pdf_url ? `<button onclick="downloadInvoicePdf('${jsStr(r.id)}')" style="font-size:11px;padding:3px 8px;border:1px solid var(--brd);border-radius:6px;cursor:pointer;background:#fff;font-family:inherit"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:1em;height:1em;flex-shrink:0;vertical-align:-2px"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="M7 10l5 5 5-5"/><path d="M12 15V3"/></svg> Stáhnout</button>` : ''}
-          ${r.pdf_url ? `<button onclick="printInvoicePdf('${jsStr(r.pdf_url)}')" style="font-size:11px;padding:3px 8px;border:1px solid var(--brd);border-radius:6px;cursor:pointer;background:#fff;font-family:inherit"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:1em;height:1em;flex-shrink:0;vertical-align:-2px"><path d="M6 9V2h12v7M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2"/><rect x="6" y="14" width="12" height="8"/></svg> Tisk</button>` : ''}
+          ${r.pdf_url ? `<button onclick="printInvoicePdf('${jsStr(r.pdf_url)}','${jsStr(r.id)}')" style="font-size:11px;padding:3px 8px;border:1px solid var(--brd);border-radius:6px;cursor:pointer;background:#fff;font-family:inherit"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:1em;height:1em;flex-shrink:0;vertical-align:-2px"><path d="M6 9V2h12v7M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2"/><rect x="6" y="14" width="12" height="8"/></svg> Tisk</button>` : ''}
           ${r.original_pdf_url ? `<button onclick="openPdfUrl('${jsStr(r.original_pdf_url)}')" title="Faktura tak, jak ji poslal pracovník — ještě bez zálohy" style="font-size:11px;padding:3px 8px;border:1px dashed var(--brd);border-radius:6px;cursor:pointer;background:#fff;color:var(--text3);font-family:inherit"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:1em;height:1em;flex-shrink:0;vertical-align:-2px"><path d="M3 3v5h5"/><path d="M3.05 13A9 9 0 1 0 6 5.3L3 8"/><path d="M12 7v5l3 2"/></svg> Původní</button>` : ''}
           <button onclick="openInvoiceEdit('${jsStr(r.id)}')" title="Upravit fakturu — záloha v hotovosti" style="font-size:11px;padding:3px 8px;border:1px solid var(--brd);border-radius:6px;cursor:pointer;background:#fff;font-family:inherit"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:1em;height:1em;flex-shrink:0;vertical-align:-2px"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/></svg> Upravit</button>
           ${(r.status || 'new') === 'new' ? `<button onclick="setInvoiceStatus('${jsStr(r.id)}','seen')" style="font-size:11px;padding:3px 8px;border:1px solid var(--green);border-radius:6px;cursor:pointer;background:var(--green-l);color:var(--green);font-family:inherit"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:1em;height:1em;flex-shrink:0;vertical-align:-2px"><path d="M20 6 9 17l-5-5"/></svg> Vyřídit</button>` : ''}
@@ -17112,11 +17150,119 @@ async function downloadInvoicePdf(id) {
   }
 }
 
-// Tisk faktury ze složky. PDF pošleme do skrytého rámu a vytiskneme; kdyby to
-// prohlížeč nedovolil (bývá to u PDF z jiné domény), otevře se v nové záložce.
-function printInvoicePdf(rawUrl) {
+// Tisk faktury ze složky. „Uložit jako PDF" pojmenuje soubor podle titulku
+// tištěné stránky — PDF z úložiště by se uložilo pod názvem v úložišti
+// (faktura_<č>_<čas>.pdf, česky). Proto se PDF stáhne, jeho stránky se
+// vykreslí (pdf.js) do obyčejné stránky s titulkem Rechnung_<č>_<jméno> —
+// stejně jako „Stáhnout" — a vytiskne se ta. V úložišti se nic nemění.
+// Když stažení nebo vykreslení nevyjde, tiskne se postaru (tiskPdfZUloziste).
+async function printInvoicePdf(rawUrl, id) {
   const url = safeInvoiceUrl(rawUrl)
   if (!url) { showToast('⚠️ U této faktury není PDF'); return }
+  const r = (id && _invCache.find(x => x.id === id)) || _invCache.find(x => x.pdf_url === rawUrl)
+  const nazev = nazevFakturyZeSlozky(r)
+  // Okno se otevře hned v kliknutí — po čekání na stažení by ho Safari
+  // zablokoval. Do té doby v něm stojí „Připravuji…" (už s německým titulkem).
+  const w = window.open('', '_blank')
+  if (w) {
+    try {
+      w.document.title = nazev
+      if (w.document.body) w.document.body.innerHTML = '<p style="font-family:Arial,sans-serif;padding:24px">⏳ Připravuji fakturu k tisku…</p>'
+    } catch (_) {}
+  } else showToast('⏳ Připravuji fakturu k tisku…')
+  let stranky = null
+  try { stranky = await pdfStrankyJakoObrazky(url) }
+  catch (e) { console.warn('[faktury] PDF k tisku se nepřipravilo, tisknu přímo z úložiště:', e?.message) }
+  if (!stranky || !stranky.length) {
+    // Jako dřív: PDF přímo z úložiště
+    if (w) { if (!w.closed) { try { w.opener = null } catch (_) {} w.location.replace(url) } }
+    else tiskPdfZUloziste(url)
+    return
+  }
+  const html = obalTiskuPdf(nazev, stranky)
+  if (w) {
+    // Admin okno mezitím zavřel = tisk si rozmyslel
+    if (!w.closed) { w.document.open(); w.document.write(html); w.document.close() }
+    return
+  }
+  // Vyskakovací okno prohlížeč nepustil — stejná stránka ve skrytém rámu.
+  // Některé prohlížeče pojmenují tisk rámu podle titulku hlavní stránky,
+  // proto ho dostane na dobu tisku i ona.
+  const old = document.getElementById('inv-print-frame')
+  if (old) old.remove()
+  const frame = document.createElement('iframe')
+  frame.id = 'inv-print-frame'
+  frame.style.cssText = 'position:fixed;right:0;bottom:0;width:0;height:0;border:0;visibility:hidden'
+  document.body.appendChild(frame)
+  try { const fd = frame.contentDocument; fd.open(); fd.write(html); fd.close() }
+  catch (e) { console.warn('[faktury] tiskový rám nejde naplnit:', e?.message); frame.remove(); tiskPdfZUloziste(url); return }
+  // Rám se vytiskne sám po načtení obrázků (onload v obalTiskuPdf)
+  titulekNaDobuTisku(nazev, frame.contentWindow)
+}
+
+// Název faktury ze složky bez přípony — stejný jako u „Stáhnout"
+// (downloadInvoicePdf): Rechnung_<číslo>_<jméno>.
+function nazevFakturyZeSlozky(r) {
+  const cis = String(r?.invoice_number || '').replace(/[^a-zA-Z0-9_-]/g, '')
+  return ['Rechnung', cis, bezpecnyNazevSouboru(r?.worker?.full_name || r?.supplier_name)].filter(Boolean).join('_')
+}
+
+// Stáhne PDF a vykreslí každou jeho stránku do obrázku (pdf.js, 2× zvětšení
+// kvůli ostrosti tisku). Vrací [{ src, sirkaMm, vyskaMm }].
+async function pdfStrankyJakoObrazky(url) {
+  const resp = await fetch(url)
+  if (!resp.ok) throw new Error('HTTP ' + resp.status)
+  const data = await resp.arrayBuffer()
+  if (typeof pdfjsLib === 'undefined') await ensureLib('pdfjs')
+  if (typeof pdfjsLib === 'undefined') throw new Error('pdf.js se nenačetl')
+  pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js'
+  const doc = await pdfjsLib.getDocument({ data }).promise
+  try {
+    const stranky = []
+    for (let i = 1; i <= doc.numPages; i++) {
+      const strana = await doc.getPage(i)
+      const vp1 = strana.getViewport({ scale: 1 })
+      const vp = strana.getViewport({ scale: 2 })
+      const c = document.createElement('canvas')
+      c.width = Math.ceil(vp.width); c.height = Math.ceil(vp.height)
+      const g = c.getContext('2d')
+      g.fillStyle = '#fff'; g.fillRect(0, 0, c.width, c.height)
+      await strana.render({ canvasContext: g, viewport: vp }).promise
+      stranky.push({ src: c.toDataURL('image/png'),
+        sirkaMm: Math.round(vp1.width / 72 * 254) / 10, vyskaMm: Math.round(vp1.height / 72 * 254) / 10 })
+      c.width = c.height = 0
+    }
+    return stranky
+  } finally { try { doc.destroy() } catch (_) {} }
+}
+
+// Tisková stránka z obrázků stránek PDF. <title> = název souboru při
+// „Uložit jako PDF". Po načtení se sama vytiskne; tlačítko nahoře pro
+// případ, že tiskový dialog zavřel dřív, než chtěl.
+function obalTiskuPdf(nazev, stranky) {
+  const s = stranky[0]
+  return `<!DOCTYPE html><html><head><meta charset="utf-8"><title>${escAttr(nazev)}</title>
+<style>
+  @page { size: ${s.sirkaMm}mm ${s.vyskaMm}mm; margin: 0; }
+  html, body { margin: 0; background: #6b6157; }
+  .lista { position: sticky; top: 0; z-index: 9; display: flex; justify-content: flex-end; padding: 10px 14px; background: #211D1A; }
+  .lista button { padding: 8px 16px; background: #E8A13A; color: #211D1A; border: 0; border-radius: 8px; font: 700 14px Arial, sans-serif; cursor: pointer; }
+  img { display: block; width: 100%; max-width: ${s.sirkaMm}mm; margin: 12px auto; background: #fff; }
+  @media print {
+    html, body { background: #fff; }
+    .lista { display: none; }
+    img { width: auto; max-width: 100%; max-height: 99vh; margin: 0 auto; break-after: page; page-break-after: always; }
+    img:last-of-type { break-after: auto; page-break-after: auto; }
+  }
+</style></head><body onload="setTimeout(function(){window.print()},250)">
+<div class="lista"><button onclick="window.print()">Drucken · Vytisknout</button></div>
+${stranky.map(x => `<img src="${x.src}" alt="">`).join('\n')}
+</body></html>`
+}
+
+// Původní tisk ze složky: PDF z úložiště do skrytého rámu; kdyby to prohlížeč
+// nedovolil (bývá to u PDF z jiné domény), otevře se v nové záložce.
+function tiskPdfZUloziste(url) {
   const old = document.getElementById('inv-print-frame')
   if (old) old.remove()
   const frame = document.createElement('iframe')
@@ -19276,7 +19422,7 @@ async function generateTeamAttendancePdf(teamId, teamName) {
   <div style="margin-top:14px;font-size:9px;color:#aaa">${new Date().toLocaleString('cs-CZ')} | SubBau Attendance System</div>
   </body></html>`
 
-  printInPage(printHTML)
+  printInPage(printHTML, ['Stundennachweis', 'KW' + week, year, bezpecnyNazevSouboru(teamName)].filter(Boolean).join('_') + '.html')
 }
 
 function openNewTeamModal() {
@@ -25608,7 +25754,7 @@ async function exportKW() {
 </body></html>`
 
   // Otevři print okno
-  printInPage(printHTML)
+  printInPage(printHTML, 'Stundennachweis_KW' + week + '_' + year + '.html')
 }
 
 // ============ FLEXIBILNÍ EXPORT DOCHÁZKY ============
@@ -25762,11 +25908,12 @@ async function generateAttendanceExport() {
   if (!checked.length) { showToast('⚠️ Vyberte aspoň jednoho pracovníka'); return }
   const ids = checked.map(c => c.value)
 
-  let startStr, endStr, periodLabel
+  let startStr, endStr, periodLabel, obdobiDe
   if (period === 'day') {
     const d = document.getElementById('export-date')?.value
     if (!d) { showToast('⚠️ Vyberte datum'); return }
     startStr = endStr = d
+    obdobiDe = d
     periodLabel = new Date(d).toLocaleDateString(lang==='en'?'en-GB':'cs-CZ', {weekday:'long', day:'2-digit', month:'2-digit', year:'numeric'})
   } else {
     const kw = document.getElementById('export-kw')?.value
@@ -25774,6 +25921,7 @@ async function generateAttendanceExport() {
     const [week, year] = kw.split('-').map(Number)
     const sd = getWeekStartDate(week, year); const ed = new Date(sd); ed.setDate(ed.getDate()+6)
     startStr = localDateStr(sd); endStr = localDateStr(ed)
+    obdobiDe = 'KW' + week + '_' + year
     periodLabel = `KW${week}/${year} (${sd.toLocaleDateString('cs-CZ')} – ${ed.toLocaleDateString('cs-CZ')})`
   }
 
@@ -25964,7 +26112,9 @@ async function generateAttendanceExport() {
   if (!sections || sections.length < 10) {
     showToast('⚠️ Výkaz je prázdný — žádná data k zobrazení')
   }
-  printInPage(printHTML)
+  // Německy; u jednoho pracovníka i s jeho jménem
+  const jmenoDe = ids.length === 1 ? bezpecnyNazevSouboru(att[0]?.worker?.full_name) : ''
+  printInPage(printHTML, ['Stundennachweis', obdobiDe, jmenoDe].filter(Boolean).join('_') + '.html')
 }
 
 function getWeekStartDate(week, year) {
@@ -26144,16 +26294,17 @@ async function saveWorkerInvoiceCustomer() {
 
 
 // -- PRINT BEZ POPUP - funguje v Safari anonymním okně --
-function printInPage(html) {
+function printInPage(html, nazev) {
   // Náhled přímo v aplikaci (žádné vyskakovací okno — Safari ho blokuje).
-  showPrintPreview(html, 'vykaz-hodin.html')
+  // Název souboru německy — výkaz jde odběrateli a účetní do Německa.
+  showPrintPreview(html, nazev || 'Stundennachweis.html')
 }
 
 function showPrintPreviewOLD(html) {
-  showPrintPreview(html, 'prehled-hodin.html')
+  showPrintPreview(html, 'Stundenuebersicht.html')
 }
 
-function printViaOverlay(html) { showPrintPreview(html, 'prehled-hodin.html') }
+function printViaOverlay(html) { showPrintPreview(html, 'Stundenuebersicht.html') }
 
 // Náhled v overlay + spolehlivý tisk přes iframe (funguje i v Safari)
 function showPrintPreview(html, filename) {
@@ -26455,7 +26606,7 @@ async function savePdfDirect(html, filename) {
       }
     }
 
-    pdf.save((filename || 'vykaz').replace(/\.html?$/, '') + '.pdf')
+    pdf.save((filename || 'Stundennachweis').replace(/\.html?$/, '') + '.pdf')
     showToast('✅ PDF uloženo')
   } catch(e) {
     console.error('[savePdfDirect]', e)
@@ -26537,6 +26688,17 @@ function printViaIframe(html) {
   iframe.srcdoc = cleanHtml
 }
 
+// Titulek tiskového okna = název souboru, který prohlížeč nabídne při
+// „Tisk → Uložit jako PDF". Výkazy mají <title> česky nebo anglicky
+// („Přehled hodin KW…", „Soupis faktur KW…", „Provize …") — v tiskovém okně
+// se nahradí německým názvem souboru bez přípony. Obsah výkazu se nemění.
+function tiskovyTitulek(html, nazev) {
+  const t = '<title>' + escAttr(String(nazev || 'Stundennachweis').replace(/\.(html?|pdf)$/i, '')) + '</title>'
+  const s = String(html || '')
+  if (/<title[^>]*>[\s\S]*?<\/title>/i.test(s)) return s.replace(/<title[^>]*>[\s\S]*?<\/title>/i, () => t)
+  return /<head[^>]*>/i.test(s) ? s.replace(/<head[^>]*>/i, m => m + t) : s
+}
+
 // Otevře výkaz v nové záložce a počká, až se vykreslí (i obrázek podpisu).
 function openPrintWindow(html) {
   const bar = `<div class="no-print" style="position:sticky;top:0;z-index:99;display:flex;gap:10px;justify-content:center;padding:12px;background:#211D1A">
@@ -26563,7 +26725,8 @@ function openPrintWindow(html) {
       });
     })();
   <\/script>`
-  const htmlOut = html
+  // Název z náhledu (Stundenuebersicht_KW…, Rechnungsuebersicht_KW…, Provisionsabrechnung_…)
+  const htmlOut = tiskovyTitulek(html, window._lastPrintName)
     .replace('<body>', '<body>' + bar)
     .replace('</head>', '<style>@media print{.no-print{display:none!important}}@page{size:A4 portrait;margin:10mm}</style>' + waitScript + '</head>')
 
@@ -26575,7 +26738,7 @@ function openPrintWindow(html) {
       const blob = new Blob([htmlOut], { type: 'text/html;charset=utf-8' })
       const url = URL.createObjectURL(blob)
       const a = document.createElement('a')
-      a.href = url; a.download = (window._lastPrintName || 'vykaz.html')
+      a.href = url; a.download = (window._lastPrintName || 'Stundennachweis.html')
       document.body.appendChild(a); a.click(); document.body.removeChild(a)
       showToast('📥 Výkaz stažen — otevřete ho a dejte Tisk → Uložit jako PDF')
     } catch(e) { showToast('❌ Povolte vyskakovací okna pro tisk') }
@@ -26594,7 +26757,8 @@ function printHtmlViaIframe(html) {
     <button onclick="window.print()" style="padding:8px 16px;background:#E8A13A;color:#211D1A;border:none;border-radius:8px;cursor:pointer;font-size:14px;font-weight:700;font-family:Arial"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:1em;height:1em;flex-shrink:0;vertical-align:-2px"><path d="M6 9V2h12v7M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2"/><rect x="6" y="14" width="12" height="8"/></svg> Vytisknout / Uložit PDF</button>
     <button class="x-close" onclick="window.close()" style="padding:8px 16px;background:#fff;color:#211D1A;border:1px solid #ccc;border-radius:8px;cursor:pointer;font-size:14px;font-weight:700;font-family:Arial"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:20px;height:20px;display:block"><path d="M18 6L6 18M6 6l12 12"/></svg> Zavřít</button>
   </div>`
-  const htmlWithBar = html
+  // Sem se jde z náhledu, když chybí překryv — název souboru má náhled připravený
+  const htmlWithBar = tiskovyTitulek(html, window._lastPrintName)
     .replace('<body>', '<body>' + bar)
     .replace('</head>', '<style>@media print{.no-print{display:none!important}} @page{size:A4 portrait;margin:10mm}</style></head>')
 
@@ -26862,7 +27026,7 @@ async function _exportWorkerKWTed(workerId, workerName, week, year, lang, forema
     } catch(e) { console.error('[hour-sheet] insert výjimka:', e?.message) }
   }
 
-  printInPage(printHTML)
+  printInPage(printHTML, ['Stundennachweis', 'KW' + week, year, bezpecnyNazevSouboru(workerName)].filter(Boolean).join('_') + '.html')
 }
 
 
@@ -32901,7 +33065,58 @@ function printInvoiceOnePage() {
     fitInvoicePreview()
   }
   window.addEventListener('afterprint', restore, { once: true })
-  setTimeout(() => { window.print(); setTimeout(restore, 1500) }, 80)
+  // „Tisk → Uložit jako PDF" (na iPhonu Sdílet → Uložit do Souborů) pojmenuje
+  // soubor podle titulku stránky — ten je česky („SubBau – Docházkový systém").
+  // Na dobu tisku proto titulek = německý název faktury. Zpátky ho vrací
+  // titulekNaDobuTisku až po návratu do appky, ne s tiskovými styly po 1,5 s.
+  const titulekTisku = nazevTiskuFaktury()
+  setTimeout(() => { titulekNaDobuTisku(titulekTisku); window.print(); setTimeout(restore, 1500) }, 80)
+}
+
+// Název faktury pro tisk (bez .pdf): Rechnung_<č>_<jméno>, otevřená zálohová
+// faktura Anzahlungsrechnung_<č>_<jméno> — stejně jako při stažení PDF.
+function nazevTiskuFaktury() {
+  const zaloha = window._zfNahled && !window._lastInvoice
+  return (zaloha ? zalohovaFakturaNazev(window._zfNahled) : invoiceFileName()).replace(/\.pdf$/i, '')
+}
+
+// Dočasný titulek stránky na dobu tisku = název PDF při „Uložit jako PDF".
+// Na iPhonu window.print() hned vrací a tiskový list se otevře až potom;
+// kdyby se titulek vrátil po 1,5 s, mohl by si iPhone při „Uložit do
+// Souborů" vzít zase ten český. Zpátky se proto vrací až PO tisku
+// (afterprint) při první známce, že je člověk zpátky v appce — návrat okna,
+// dotyk nebo klik. Nejpozději za minutu. Vrací se jen titulek, který je
+// pořád náš; druhý tisk mezitím nejdřív vrátí ten první. `okno` = další
+// okno, jehož konec tisku se počítá (skrytý tiskový rám — afterprint
+// přichází jemu, ne hlavní stránce).
+let _titulekTiskuKonec = null
+function titulekNaDobuTisku(titulek, okno) {
+  if (_titulekTiskuKonec) _titulekTiskuKonec()
+  const puvodni = document.title
+  document.title = titulek
+  let hotovo = false
+  const zpet = () => { if (document.visibilityState !== 'hidden') konec() }
+  const hlidej = zapnout => {
+    const f = zapnout ? 'addEventListener' : 'removeEventListener'
+    window[f]('focus', zpet, true)
+    window[f]('pointerdown', zpet, true)
+    document[f]('visibilitychange', zpet, true)
+  }
+  const poTisku = () => hlidej(true)
+  const okna = [window, okno].filter(Boolean)
+  const konec = () => {
+    if (hotovo) return
+    hotovo = true
+    clearTimeout(pojistka)
+    okna.forEach(o => { try { o.removeEventListener('afterprint', poTisku) } catch (_) {} })
+    hlidej(false)
+    if (_titulekTiskuKonec === konec) _titulekTiskuKonec = null
+    if (document.title === titulek) document.title = puvodni
+  }
+  const pojistka = setTimeout(konec, 60000)
+  okna.forEach(o => { try { o.addEventListener('afterprint', poTisku, { once: true }) } catch (_) {} })
+  _titulekTiskuKonec = konec
+  return konec
 }
 
 async function loadInvoiceWeeks() {
@@ -33267,10 +33482,12 @@ function contractPublicUrl(path) {
   catch (e) { return '' }
 }
 
-// Název souboru bez háčků a mezer, ať ho stáhne každý systém bez reptání.
-function safeFileName(s) {
-  return String(s == null ? '' : s).normalize('NFD').replace(/[\u0300-\u036f]/g, '')
-    .replace(/[^a-zA-Z0-9]+/g, '_').replace(/^_+|_+$/g, '') || 'smlouva'
+// Verze smlouvy v názvu staženého souboru — německy, smlouvu dostává
+// i německá strana. Název smlouvy se do souboru nedává, bývá česky.
+function verzeSmlouvyDe(f) {
+  const n = { bez_podpisu: 'ohne_Unterschrift', podpis_subbau: 'unterschrieben_SubBau',
+              podpis_osvc: 'unterschrieben', podpis_firma: 'unterschrieben_Firma', aktualni: 'aktuell' }
+  return n[f] || String(f || '').replace(/^doplneno/, 'ausgefuellt')
 }
 
 // Odloží stranou původní verzi smlouvy — jen jednou, podruhé už se nepřepíše.
@@ -33312,7 +33529,7 @@ async function downloadPdfUrl(url, filename) {
     const objUrl = URL.createObjectURL(blob)
     const a = document.createElement('a')
     a.href = objUrl
-    a.download = (filename || 'smlouva') + '.pdf'
+    a.download = (filename || 'Vertrag') + '.pdf'
     document.body.appendChild(a); a.click(); a.remove()
     setTimeout(() => URL.revokeObjectURL(objUrl), 5000)
     showToast('✅ Smlouva stažena')
@@ -33448,7 +33665,12 @@ function contractVersions(c, idx) {
 function contractVersionsHtml(c, idx, workerName) {
   const vers = contractVersions(c, idx)
   if (!vers.length) return ''
-  const base = safeFileName(workerName) + '_' + safeFileName(c.title)
+  // Vertrag_<jméno>_<datum smlouvy>_<verze>. Datum odliší dvě smlouvy
+  // jednoho člověka. Bere se den založení — ten se nemění; podpis OSVČ se
+  // při novém odeslání maže (signed_at: null) a název by se pak měnil.
+  const datumSml = [c.created_at, c.signed_at, c.admin_signed_at]
+    .filter(t => t && !isNaN(new Date(t))).map(t => localDateStr(t))[0] || ''
+  const base = ['Vertrag', bezpecnyNazevSouboru(workerName), datumSml].filter(Boolean).join('_')
   const hasOriginal = vers.some(v => v.file === 'bez_podpisu')
   const eyeIco = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:14px;height:14px;display:block"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>'
   const dlIco = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:14px;height:14px;display:block"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="M7 10l5 5 5-5"/><path d="M12 15V3"/></svg>'
@@ -33463,7 +33685,7 @@ function contractVersionsHtml(c, idx, workerName) {
       + '<span style="display:block;font-size:10px;color:var(--text3)">' + v.desc + '</span>'
       + '</span>'
       + '<button onclick="event.stopPropagation();openPdfUrl(\'' + jsStr(v.url) + '\')" title="Zobrazit v prohlížeči" style="' + btn + ';color:var(--blue)">' + eyeIco + '</button>'
-      + '<button onclick="event.stopPropagation();downloadPdfUrl(\'' + jsStr(v.url) + '\',\'' + jsStr(base + '_' + v.file) + '\')" title="Stáhnout do počítače" style="' + btn + ';color:#211D1A">' + dlIco + '</button>'
+      + '<button onclick="event.stopPropagation();downloadPdfUrl(\'' + jsStr(v.url) + '\',\'' + jsStr(base + '_' + verzeSmlouvyDe(v.file)) + '\')" title="Stáhnout do počítače" style="' + btn + ';color:#211D1A">' + dlIco + '</button>'
       + '</div>'
   }).join('')
   const note = hasOriginal ? ''
@@ -33513,6 +33735,13 @@ async function openHourSheet(url) {
       <button class="x-close" onclick="window.close()" style="padding:8px 16px;background:#fff;color:#211D1A;border:1px solid #ccc;border-radius:8px;cursor:pointer;font-size:14px;font-weight:700;font-family:Arial"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:20px;height:20px;display:block"><path d="M18 6L6 18M6 6l12 12"/></svg> Zavřít</button>
     </div>`
     if (html.includes('<body>')) html = html.replace('<body>', '<body>' + bar)
+    // „Vytisknout / Uložit PDF" pojmenuje soubor podle <title>. Uložený výkaz
+    // má „Weekly Report <jméno s háčky> KW40/2026" — v otevřeném okně se
+    // přepíše na Stundennachweis_KW40_2026_Jan_Novak. Uložený soubor se nemění.
+    const tv = html.match(/<title[^>]*>\s*Weekly Report ([\s\S]*?) KW(\d+)\/(\d+)\s*<\/title>/i)
+    html = tiskovyTitulek(html, tv
+      ? ['Stundennachweis', 'KW' + tv[2], tv[3], bezpecnyNazevSouboru(tv[1].replace(/&(amp|quot|lt|gt|#39);/g, ' '))].filter(Boolean).join('_')
+      : 'Stundennachweis')
     const blob = new Blob([html], { type: 'text/html;charset=utf-8' })
     const blobUrl = URL.createObjectURL(blob)
     const w = window.open(blobUrl, '_blank')
@@ -34293,7 +34522,7 @@ async function pdfFillSave() {
     if (upErr || !publicUrl) {
       // Fallback: nabídni stažení, když upload selže
       const dlUrl = URL.createObjectURL(blob)
-      const a = document.createElement('a'); a.href = dlUrl; a.download = 'smlouva_vyplnena.pdf'; a.click()
+      const a = document.createElement('a'); a.href = dlUrl; a.download = 'Vertrag_ausgefuellt.pdf'; a.click()
       showToast('⚠️ Upload selhal, PDF staženo do zařízení')
     } else {
       // Aktualizuj smlouvu — nahraď file_url vyplněnou verzí
@@ -38393,7 +38622,7 @@ async function loadWdDocs(id) {
     </div>
     <div style="display:flex;align-items:center;gap:7px;flex-wrap:wrap">
       ${d.file_url?`<button onclick="openPdfUrl('${jsStr(d.file_url)}')" style="flex:1;min-width:90px;font-size:12px;padding:9px;border:1.5px solid #211D1A;border-radius:10px;cursor:pointer;background:#fff;color:#211D1A;font-family:inherit;font-weight:700;display:flex;align-items:center;justify-content:center;gap:6px"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:15px;height:15px"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>Zobrazit</button>`:''}
-      ${d.file_url?`<button onclick="downloadOneDoc('${jsStr(d.file_url)}','${jsStr((types[d.doc_type]||d.doc_type).replace(/'/g,''))}','${jsStr(d.doc_type||'')}','${jsStr(jmenoProSoubor.replace(/'/g,''))}')" title="Stáhnout tento dokument" style="font-size:12px;padding:9px 11px;border:1.5px solid #211D1A;border-radius:10px;cursor:pointer;background:#fff;color:#211D1A;font-family:inherit"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:15px;height:15px"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="M7 10l5 5 5-5"/><path d="M12 15V3"/></svg></button>`:''}
+      ${d.file_url?`<button onclick="downloadOneDoc('${jsStr(d.file_url)}','${jsStr((types[d.doc_type]||d.doc_type).replace(/'/g,''))}','${jsStr(d.doc_type||'')}','${jsStr(jmenoProSoubor.replace(/'/g,''))}',${stranaDokladu(d)})" title="Stáhnout tento dokument" style="font-size:12px;padding:9px 11px;border:1.5px solid #211D1A;border-radius:10px;cursor:pointer;background:#fff;color:#211D1A;font-family:inherit"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:15px;height:15px"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="M7 10l5 5 5-5"/><path d="M12 15V3"/></svg></button>`:''}
       ${d.status!=='ok'?`<button onclick="approveDocWd('${d.id}','${id||currentWorkerId}')" style="flex:1;min-width:90px;font-size:12px;padding:9px;border:none;border-radius:10px;cursor:pointer;background:#3f7d54;color:#fff;font-family:inherit;font-weight:700;display:flex;align-items:center;justify-content:center;gap:6px"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" style="width:15px;height:15px"><path d="M20 6 9 17l-5-5"/></svg>Schválit</button>`:''}
       ${d.status!=='rejected'&&d.status!=='unreadable'?`<button class="x-close" onclick="rejectDocWd('${d.id}','${id||currentWorkerId}')" style="font-size:12px;padding:9px 12px;border:1.5px solid #9c3b22;border-radius:10px;cursor:pointer;background:#fff;color:#9c3b22;font-family:inherit;font-weight:700;display:flex;align-items:center;justify-content:center;gap:6px"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:15px;height:15px"><path d="M18 6L6 18M6 6l12 12"/></svg>Odmítnout</button>`:''}
       <button onclick="deleteDocument('${d.id}')" style="font-size:12px;padding:9px 11px;border:1.5px solid var(--brd);border-radius:10px;cursor:pointer;background:#fff;color:#9c3b22;font-family:inherit" title="Smazat dokument"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:15px;height:15px"><path d="M3 6h18M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6M14 11v6"/></svg></button>
@@ -38402,7 +38631,7 @@ async function loadWdDocs(id) {
 }
 
 // Stáhne jeden dokument napřímo do počítače
-async function downloadOneDoc(url, label, docType, jmeno) {
+async function downloadOneDoc(url, label, docType, jmeno, strana) {
   try {
     const resp = await fetch(url)
     const blob = await resp.blob()
@@ -38411,9 +38640,11 @@ async function downloadOneDoc(url, label, docType, jmeno) {
     a.href = URL.createObjectURL(blob)
     // Německý název dokladu a k němu jméno člověka — soubor jde rovnou
     // účetní do Německa a nikdo ho nemusí přejmenovávat.
-    const nazev = docType
-      ? bezpecnyNazevSouboru(docLabelDe(docType)) + (jmeno ? '_' + bezpecnyNazevSouboru(jmeno) : '')
-      : bezpecnyNazevSouboru(label || 'Dokument')
+    // Bez typu se název z popisku nebere — popisek je česky. Strana stejně
+    // jako v odkazu pro odběratele: _Vorderseite / _Rueckseite (další listy
+    // _Seite3…), ať se přední a zadní při stažení nepřepíšou.
+    const nazev = [docLabelDe(docType), jmeno, stranaDokladuDe(docType, strana)]
+      .map(bezpecnyNazevSouboru).filter(Boolean).join('_')
     a.download = (nazev || 'Dokument') + '.' + ext
     document.body.appendChild(a); a.click(); a.remove()
     setTimeout(() => URL.revokeObjectURL(a.href), 4000)
@@ -38433,16 +38664,15 @@ async function downloadAllDocs(workerId) {
     if (!docs || !docs.length) { showToast('Žádné dokumenty ke stažení'); if(btn){btn.disabled=false;btn.innerHTML=orig} return }
 
     // Jméno pracovníka pro název ZIPu
-    let wName = 'pracovnik'
+    let wName = ''
     try {
       const { data: w } = await sb.from('profiles').select('full_name').eq('id', workerId).maybeSingle()
       if (w?.full_name) wName = w.full_name
     } catch(e) {}
-    const safeW = wName.normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/[^a-zA-Z0-9._-]/g,'_')
 
     await ensureLib('jszip')
     const zip = new window.JSZip()
-    const typeNames = {op:'Obcansky_prukaz',pas:'Cestovni_pas',zivnost:'Zivnostenske_opravneni',gewerbeschein:'Gewerbeschein',a1:'Formular_A1',a1_zadost:'Zadost_o_A1',pobyt:'Povoleni_k_pobytu',vizum:'Vizum',freistellung:'Freistellung',other:'Jiny_dokument'}
+    const jmenoDe = bezpecnyNazevSouboru(wName)
     const used = {}
     let added = 0
     for (const d of docs) {
@@ -38451,10 +38681,13 @@ async function downloadAllDocs(workerId) {
         const resp = await fetch(d.file_url)
         const blob = await resp.blob()
         const ext = (d.file_url.split('?')[0].match(/\.([a-z0-9]+)$/i)?.[1]) || (blob.type.includes('pdf') ? 'pdf' : 'jpg')
-        let base = typeNames[d.doc_type] || (d.doc_type||'dokument')
+        // Německy, stejně jako jeden stažený doklad: Personalausweis_jméno_
+        // Vorderseite / _Rueckseite (jako odkaz pro odběratele). Jde to účetní do Německa.
+        let base = [docLabelDe(d.doc_type), jmenoDe, stranaDokladuDe(d.doc_type, stranaDokladu(d))]
+          .map(bezpecnyNazevSouboru).filter(Boolean).join('_')
         used[base] = (used[base]||0) + 1
         if (used[base] > 1) base += '_' + used[base]
-        zip.file(safeW + '_' + base + '.' + ext, blob)
+        zip.file(base + '.' + ext, blob)
         added++
       } catch(e) { console.warn('Nešlo stáhnout:', d.file_url, e) }
     }
@@ -38463,7 +38696,7 @@ async function downloadAllDocs(workerId) {
     const content = await zip.generateAsync({ type: 'blob' })
     const a = document.createElement('a')
     a.href = URL.createObjectURL(content)
-    a.download = 'Dokumenty_' + safeW + '.zip'
+    a.download = ['Dokumente', jmenoDe].filter(Boolean).join('_') + '.zip'
     document.body.appendChild(a); a.click(); a.remove()
     setTimeout(() => URL.revokeObjectURL(a.href), 6000)
     showToast('✅ Staženo ' + added + ' dokumentů')
@@ -38534,7 +38767,7 @@ async function loadWdContracts(id) {
   const sL = { admin_pending:'⏳ Čeká na admina', pending:'⏳ Čeká na OSVČ', signed_electronic:'✅ Podepsána', signed_scan:'✅ Podepsána (sken)', rejected:'❌ Zamítnuta' }
   const sP = { admin_pending:'pa', pending:'pa', signed_electronic:'pg', signed_scan:'pg', rejected:'pr' }
   const stIdx = await loadContractStorageIndex()
-  const wName = (typeof currentWorkerProfile !== 'undefined' && currentWorkerProfile?.full_name) || 'smlouva'
+  const wName = (typeof currentWorkerProfile !== 'undefined' && currentWorkerProfile?.full_name) || ''
   div.innerHTML = data.map(c => `
     <div style="padding:10px 12px;border-bottom:1px solid var(--brd)">
      <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">

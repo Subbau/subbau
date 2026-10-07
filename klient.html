@@ -7,7 +7,7 @@
      cizí doménu, na kterou by stránka sáhla (třeba na překladač). -->
 <meta name="referrer" content="no-referrer">
 <meta name="robots" content="noindex, nofollow">
-<title>Anwesenheit · Docházka — SubBau</title>
+<title>Anwesenheit</title>
 <style>
   :root{
     --tmava:#211D1A; --zlata:#E8A13A; --seda:#9a9082; --seda2:#6b6157;
@@ -474,7 +474,7 @@ function vykreslit(d, preklady){
   }
 
   html += '<div class="tlacitka">'
-    + '<button class="hlavni" onclick="window.print()">📄 Als PDF speichern · Uložit do PDF</button>'
+    + '<button class="hlavni" onclick="ulozitPdf()">📄 Als PDF speichern · Uložit do PDF</button>'
     + '<button onclick="stahnoutCsv()">📊 Excel (CSV)</button>'
     + '<button onclick="nacti(true)">🔄 Aktualisieren · Obnovit</button>'
     + '<span id="stav-obnovy" class="de" style="align-self:center"></span>'
@@ -1006,6 +1006,48 @@ function zmenTyden(v){
   stav('Wird geladen…');
   nacti(true);
 }
+
+// „Als PDF speichern": prohlížeč pojmenuje PDF podle titulku stránky. Na dobu
+// tisku je titulek stejný jako název CSV vedle (Anwesenheit_KW40_2026) —
+// německy, bez háčků a mezer. Na iPhonu window.print() hned vrací a tiskový
+// list se otevře až potom, proto se titulek nevrací hned: až po tisku
+// (afterprint) při první známce, že je odběratel zpátky (návrat okna, dotyk,
+// klik), nejpozději za minutu. Stejně jako tisk faktury v appce.
+function nazevPdf(){
+  return DATA ? 'Anwesenheit_KW' + DATA.kw + '_' + DATA.rok : 'Anwesenheit';
+}
+var titulekTiskuKonec = null;
+function titulekNaDobuTisku(){
+  if (titulekTiskuKonec) titulekTiskuKonec();
+  var puvodni = document.title, nas = nazevPdf(), hotovo = false, pojistka = null;
+  document.title = nas;
+  function zpet(){ if (document.visibilityState !== 'hidden') konec(); }
+  function hlidej(zapnout){
+    var f = zapnout ? 'addEventListener' : 'removeEventListener';
+    window[f]('focus', zpet, true);
+    window[f]('pointerdown', zpet, true);
+    document[f]('visibilitychange', zpet, true);
+  }
+  function poTisku(){ hlidej(true); }
+  function konec(){
+    if (hotovo) return;
+    hotovo = true;
+    clearTimeout(pojistka);
+    window.removeEventListener('afterprint', poTisku);
+    hlidej(false);
+    if (titulekTiskuKonec === konec) titulekTiskuKonec = null;
+    if (document.title === nas) document.title = puvodni;
+  }
+  pojistka = setTimeout(konec, 60000);
+  window.addEventListener('afterprint', poTisku);
+  titulekTiskuKonec = konec;
+}
+function ulozitPdf(){
+  titulekNaDobuTisku();
+  window.print();
+}
+// I tisk z nabídky prohlížeče (Cmd+P, Ctrl+P) má dostat německý název.
+window.addEventListener('beforeprint', function(){ if (!titulekTiskuKonec) titulekNaDobuTisku(); });
 
 function stahnoutCsv(){
   if (!DATA) return;

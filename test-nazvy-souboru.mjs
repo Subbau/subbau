@@ -20,7 +20,7 @@ console.log('\n1) Kód')
 ok(/const name = 'Rechnung_' \+ cis/.test(zdroj), 'faktura se stahuje jako Rechnung_číslo_jméno')
 ok(!/const name = 'Faktura_'/.test(zdroj), 'a už ne česky')
 ok(/function docLabelDe/.test(zdroj), 'doklady mají německé názvy')
-ok(/downloadOneDoc\(url, label, docType, jmeno\)/.test(zdroj), 'stahování dokladu zná typ i jméno')
+ok(/downloadOneDoc\(url, label, docType, jmeno, strana\)/.test(zdroj), 'stahování dokladu zná typ i jméno')
 ok(!/TAKOVY_NAZEV_NEEXISTUJE/.test(zdroj), 'kontrolní měření: test umí i nenajít')
 
 console.log('\n2) Jak se ty soubory pojmenují')

@@ -67,7 +67,7 @@ const isEmail = (v) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(v ?? '').trim())
 const safeFileName = (v) => {
   const base = String(v ?? '').split(/[\\/]/).pop() || '';
   const clean = base.replace(/[^a-zA-Z0-9._-]/g, '_').slice(0, 120);
-  return /\.pdf$/i.test(clean) ? clean : (clean || 'faktura') + '.pdf';
+  return /\.pdf$/i.test(clean) ? clean : (clean || 'Rechnung') + '.pdf';
 };
 
 const applyCors = (req, res) => {
