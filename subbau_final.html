@@ -1441,7 +1441,7 @@ setTimeout(function () {
             <div id="cal-content" class="kal-obsah">
               <div style="text-align:center;color:var(--text3);padding:20px">Načítám kalendář...</div>
             </div>
-            <div class="kal-poznamka">Číslo v políčku = odpracované hodiny za den, vpravo součet za období. ▶ = směna právě běží, ! = chybí odchod nebo hodiny. Klepnutím na jméno otevřete profil (tam se zapisuje dovolená a nemoc), na políčko úpravu hodin toho dne, na den v záhlaví nebo v řádku „V práci" seznam, kdo ten den byl v práci.</div>
+            <div class="kal-poznamka">Číslo v políčku = odpracované hodiny za den, vpravo součet za období. ▶ = směna právě běží, ! = chybí odchod nebo hodiny. Klepnutím na jméno otevřete profil (tam se zapisuje a upravuje dovolená a nemoc, upravit ji jde i z okna dne), na políčko úpravu hodin toho dne, na den v záhlaví nebo v řádku „V práci" seznam, kdo ten den byl v práci.</div>
           </div>
         </div>
 
@@ -2364,7 +2364,7 @@ setTimeout(function () {
       </div>
     </div>
 
-<!-- Vyskakovací upozornění na chybějící povinné dokumenty (zavře se jen křížkem) -->
+<!-- Vyskakovací upozornění na chybějící povinné dokumenty (zavře se křížkem nebo „Dohraju dokument později“ — to platí do zítřka) -->
     <div id="docs-alert-overlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:9999;align-items:center;justify-content:center;padding:18px">
       <div style="background:#fff;border-radius:18px;max-width:420px;width:100%;padding:20px;box-shadow:0 18px 50px rgba(0,0,0,.25);position:relative">
         <button onclick="closeDocsAlert()" aria-label="Zavřít" style="position:absolute;top:10px;right:10px;width:34px;height:34px;border:none;border-radius:50%;background:#f4efe7;color:#211D1A;font-size:18px;line-height:1;cursor:pointer;font-family:inherit">✕</button>
@@ -2377,6 +2377,7 @@ setTimeout(function () {
         </p>
         <div id="docs-alert-list" style="margin-bottom:14px"></div>
         <button onclick="goUploadFromAlert()" style="width:100%;padding:14px;background:#9c3b22;color:#fff;border:none;border-radius:12px;font-size:15px;font-weight:800;cursor:pointer;font-family:inherit">Nahrát teď</button>
+        <button id="docs-alert-later" onclick="dohrajuDokladPozdeji()" style="width:100%;margin-top:9px;padding:13px;background:none;color:#6b6157;border:1.5px solid var(--brd);border-radius:12px;font-size:14px;font-weight:700;cursor:pointer;font-family:inherit">Dohraju dokument později</button>
       </div>
     </div>
 
@@ -4851,7 +4852,7 @@ async function submitAdminSignatureWithPlacement() {
 // Po nahrání nové verze se snadno pozná, jestli se opravdu nasadila: otevřete
 // appku, zmáčkněte F12 (na Macu ⌥⌘I) a v konzoli je vypsané tohle datum. Když
 // tam svítí starší, prohlížeč nebo GitHub drží starou verzi.
-const SUBBAU_VERZE = '2026-10-07 d — Stažené soubory německy'
+const SUBBAU_VERZE = '2026-10-08 a — Úprava dovolené, doklady jen chybějící, souhlas jednou fajfkou'
 console.log('SubBau docházka — verze ' + SUBBAU_VERZE)
 // Verze i dole v menu správce. Když někdo novinku „nevidí", podle ní se hned
 // pozná, jestli nemá otevřenou starou kopii appky — bez hledání v konzoli.
@@ -6771,6 +6772,9 @@ function closeAdminDrawer() {
 
 async function doLogout() {
   console.log('[doLogout] called')
+  // Okno s chybějícími doklady patří přihlášenému — po odhlášení pryč.
+  { const d = document.getElementById('docs-alert-overlay'); if (d) d.style.display = 'none' }
+  window._dokladyPoSouhlasu = false
   stopHeartbeat()
   appInitialized = false
   authHandling = false
@@ -9435,6 +9439,7 @@ async function loadVacationAlerts() {
           <div style="font-size:13px;color:var(--text2)"><b style="color:${info.color}">${info.label}</b> · ${kdy}</div>
           ${pozn ? `<div style="font-size:12.5px;color:var(--text3);margin-top:2px">${escAttr(pozn)}</div>` : ''}
         </div>
+        <button type="button" data-upravit-nepritomnost="${escAttr(v.id)}" title="Upravit datum, druh nebo poznámku" style="flex:0 0 auto;align-self:center;padding:6px 11px;background:#fff;border:1px solid var(--brd);border-radius:8px;font-size:12.5px;font-weight:700;cursor:pointer;font-family:inherit;color:#211D1A;display:inline-flex;align-items:center;gap:5px"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:1em;height:1em;flex-shrink:0;vertical-align:-2px"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/></svg> Upravit</button>
       </div>`
   }).join('')
 
@@ -9450,6 +9455,9 @@ async function loadVacationAlerts() {
     </div>`
   document.body.appendChild(ov)
   ov.querySelector('#vac-alert-ok').onclick = () => closeVacationAlert(ids)
+  ov.querySelectorAll('[data-upravit-nepritomnost]').forEach(b => {
+    b.onclick = () => { closeVacationAlert(ids); upravitNepritomnost(b.dataset.upravitNepritomnost) }
+  })
   playAdminBeep()
 }
 
@@ -13616,19 +13624,38 @@ function showDayDetail(dateStr) {
   const [Y,M,D] = dateStr.split('-').map(Number)
   const dateLabel = new Date(Y, M-1, D).toLocaleDateString('cs-CZ', {weekday:'long', day:'2-digit', month:'2-digit', year:'numeric'})
 
-  const section = (title, list, color) => list.length
+  // U dovolené a nemoci jde záznam rovnou upravit (majitel 8. 10. 2026).
+  // Hledá se stejně jako v dayStatusFor, ať se upraví ten, podle kterého je den obarvený.
+  // ROZPOR: docházka má v dayStatusFor přednost, takže kdo má ten den směnu
+  // A ZÁROVEŇ zapsanou dovolenou/nemoc, je pod „Byl v práci" / „Problém
+  // s časem". V mřížce je to políčko „POZOR: zapsaná … i práce" — a právě
+  // tady správce dovolenou opravuje. Proto i tam upozornění a Upravit.
+  // (Hledá se stejně jako najdiVolno v mřížce.)
+  const czDen = ds => { const p = String(ds || '').slice(0, 10).split('-'); return p.length === 3 ? Number(p[2]) + '. ' + Number(p[1]) + '.' : String(ds || '') }
+  const radekDne = (w, upravit) => {
+    const abs = upravit ? vacList.find(v => v.worker_id === w.id && dateStr >= v.date_from && dateStr <= v.date_to) : null
+    if (!abs) return `<div style="font-size:13px;padding:4px 0;border-bottom:1px solid var(--brd)">${escAttr(w.full_name)}</div>`
+    const rozpor = upravit === 'rozpor'
+      ? `<span data-rozpor-nepritomnost="${escAttr(abs.id)}" style="display:block;font-size:11.5px;font-weight:600;color:var(--red);margin-top:2px">⚠️ Zapsaná ${absType(abs) === 'nemoc' ? 'nemoc' : 'dovolená/volno'} i práce · ${czDen(abs.date_from)} → ${czDen(abs.date_to)}</span>`
+      : ''
+    return `<div style="font-size:13px;padding:4px 0;border-bottom:1px solid var(--brd);display:flex;justify-content:space-between;align-items:center;gap:8px">
+      <span style="min-width:0">${escAttr(w.full_name)}${rozpor}</span>
+      <button type="button" data-upravit-nepritomnost="${escAttr(abs.id)}" onclick="upravitNepritomnost('${jsStr(abs.id)}')" title="Upravit datum, druh nebo poznámku" style="flex-shrink:0;padding:3px 9px;background:#fff;border:1px solid var(--brd);border-radius:6px;font-size:11.5px;font-weight:700;cursor:pointer;font-family:inherit;color:#211D1A;display:inline-flex;align-items:center;gap:4px"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:1em;height:1em;flex-shrink:0;vertical-align:-2px"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/></svg> Upravit</button>
+    </div>`
+  }
+  const section = (title, list, color, upravit) => list.length
     ? `<div style="margin-bottom:14px">
          <div style="font-size:13px;font-weight:700;color:${color};margin-bottom:6px">${escAttr(title)} (${list.length})</div>
-         ${list.map(w=>`<div style="font-size:13px;padding:4px 0;border-bottom:1px solid var(--brd)">${escAttr(w.full_name)}</div>`).join('')}
+         ${list.map(w => radekDne(w, upravit)).join('')}
        </div>` : ''
 
   const any = Object.values(groups).some(g => g.length)
   const body = any
-    ? section('🟢 Byl v práci', groups.worked, 'var(--green)') +
+    ? section('🟢 Byl v práci', groups.worked, 'var(--green)', 'rozpor') +
       section('🟩 Plán (měl by být)', groups.plan, '#5fa463') +
-      section('⚠️ Problém s časem', groups.bad, '#c79a00') +
-      section('🔵 Dovolená/volno', groups.vac, 'var(--blue)') +
-      section('🟣 Nemoc', groups.sick, '#6a4c93') +
+      section('⚠️ Problém s časem', groups.bad, '#c79a00', 'rozpor') +
+      section('🔵 Dovolená/volno', groups.vac, 'var(--blue)', true) +
+      section('🟣 Nemoc', groups.sick, '#6a4c93', true) +
       section('🏠 Odpočinek (víkend)', groups.rest, '#a08c70') +
       section('⚪ Volno (turnus)', groups.off, '#888')
     : '<div style="text-align:center;color:var(--text3);padding:20px;font-size:13px">Pro tento den nejsou žádné záznamy ani turnus.</div>'
@@ -15721,14 +15748,15 @@ async function closeTutorialAndMark() {
 // U bodů, které firma potřebuje ke smlouvě a ze zákona, je „beru na vědomí",
 // ne odvolatelný souhlas — odvoláním by jinak musela zpracování ukončit.
 // 2026-10-07: odběratel dostává i pracovní doklady (Stavbyplán) — nová věta.
-const SOUHLAS_VERZE = '2026-10-07'
+// 2026-10-08: majitel — jedna fajfka místo čtyř bodů (text oddílů beze změny).
+const SOUHLAS_VERZE = '2026-10-08'
 // Zaměstnanec firmy a dodavatel jako s.r.o. OSVČ nejsou — prohlášení OSVČ by
 // podepsali nepravdivě. Dostanou text bez něj pod vlastní verzí, aby z dokladu
 // bylo jasné, co přesně viděli.
-const SOUHLAS_VERZE_BEZ_OSVC = '2026-10-07-bez-osvc'
+const SOUHLAS_VERZE_BEZ_OSVC = '2026-10-08-bez-osvc'
 const SOUHLAS_TEXT = {
   nadpis: 'Než začnete: osobní údaje, poloha a prohlášení OSVČ',
-  uvod: 'Aplikaci docházky provozuje SubBau s.r.o. Přečtěte si prosím, jak zacházíme s vašimi údaji, a potvrďte čtyři body na konci. Potvrzení si uložíme i s datem a časem.',
+  uvod: 'Aplikaci docházky provozuje SubBau s.r.o. Přečtěte si prosím, jak zacházíme s vašimi údaji, a na konci to jedním zaškrtnutím potvrďte. Potvrzení si uložíme i s datem a časem.',
   oddily: [
     ['Kdo vaše údaje zpracovává', [
       'SubBau s.r.o., IČO 23549190, Plzeňská 3352/156, Smíchov, 150 00 Praha 5 (správce osobních údajů).',
@@ -15773,12 +15801,10 @@ const SOUHLAS_TEXT = {
       'Odpovídám za svou práci a za škodu, kterou případně způsobím.',
       'Údaje, které do aplikace zadávám, jsou pravdivé, a jejich změny včas oznámím.']],
   ],
-  body: [
-    { klic: 'gdpr', text: 'Přečetl(a) jsem si, jak SubBau s.r.o. zpracovává moje osobní údaje a doklady, a beru to na vědomí.' },
-    { klic: 'gps', text: 'Beru na vědomí, že aplikace při zápisu příchodu a odchodu zjistí a uloží polohu mého telefonu.' },
-    { klic: 'fotky', text: 'Beru na vědomí, že docházku, výkazy, popis práce, fotky ze stavby a pracovní doklady vidí kancelář a dostává je odběratel a účetní, jak je popsáno výše.' },
-    { klic: 'osvc', text: 'Prohlašuji, že pracuji jako OSVČ, jak je uvedeno v prohlášení výše, a že údaje, které zadávám, jsou pravdivé.' },
-  ],
+  // Majitel 8. 10. 2026: jedna fajfka. Věta pokrývá všechno, co dřív čtyři
+  // body; ty se do dokladu uloží dál jako true (staré přehledy je čtou).
+  body: ['gdpr', 'gps', 'fotky', 'osvc'],
+  potvrzeni: 'Přečetl(a) jsem si vše výše a beru na vědomí, jak SubBau s.r.o. zpracovává moje osobní údaje a doklady, že aplikace při zápisu příchodu a odchodu zjistí polohu mého telefonu a že docházku, výkazy, popis práce, fotky ze stavby a pracovní doklady vidí kancelář a dostává je odběratel a účetní. Prohlašuji, že pracuji jako OSVČ a že údaje, které zadávám, jsou pravdivé.',
 }
 
 // Je to skutečná OSVČ? Ne, když je zaměstnanec firmy, nebo když je firma
@@ -15802,9 +15828,10 @@ function souhlasTextPro(osvc) {
   if (osvc) return T
   return {
     nadpis: 'Než začnete: osobní údaje a poloha',
-    uvod: 'Aplikaci docházky provozuje SubBau s.r.o. Přečtěte si prosím, jak zacházíme s vašimi údaji, a potvrďte tři body na konci. Potvrzení si uložíme i s datem a časem.',
+    uvod: T.uvod,
     oddily: T.oddily.filter(([n]) => n !== 'Prohlášení OSVČ'),
-    body: T.body.filter(b => b.klic !== 'osvc'),
+    body: T.body.filter(k => k !== 'osvc'),
+    potvrzeni: 'Přečetl(a) jsem si vše výše a beru na vědomí, jak SubBau s.r.o. zpracovává moje osobní údaje a doklady, že aplikace při zápisu příchodu a odchodu zjistí polohu mého telefonu a že docházku, výkazy, popis práce, fotky ze stavby a pracovní doklady vidí kancelář a dostává je odběratel a účetní.',
   }
 }
 
@@ -15813,7 +15840,7 @@ function souhlasJakoText(osvc = souhlasJeOsvc(currentProfile)) {
   const T = souhlasTextPro(osvc)
   return [T.nadpis, '', T.uvod, '',
     ...T.oddily.flatMap(([n, odst]) => [n.toUpperCase(), ...odst.map(o => '- ' + o), '']),
-    'POTVRZUJI:', ...T.body.map(b => '[x] ' + b.text), '', 'Verze textu: ' + souhlasVerze(osvc)].join(String.fromCharCode(10))
+    'POTVRZUJI:', '[x] ' + T.potvrzeni, '', 'Verze textu: ' + souhlasVerze(osvc)].join(String.fromCharCode(10))
 }
 
 // Chybějící tabulka (migrace ještě neproběhla) — NE jakákoli chyba, kde se
@@ -15874,9 +15901,9 @@ function ukazSouhlas() {
     </div>`).join('')}
     <div style="background:#fff;border:2px solid #E8A13A;border-radius:12px;padding:12px 14px;margin:16px 0 12px">
       <div style="font-weight:800;margin-bottom:6px">Potvrzuji</div>
-      ${T.body.map(b => `<label style="display:flex;gap:11px;align-items:flex-start;padding:9px 0;cursor:pointer;border-top:1px solid #f0eae0">
-        <input type="checkbox" data-bod="${escAttr(b.klic)}" style="width:24px;height:24px;flex-shrink:0;margin:1px 0 0;accent-color:#9C3B22">
-        <span>${escAttr(b.text)}</span></label>`).join('')}
+      <label style="display:flex;gap:11px;align-items:flex-start;padding:9px 0;cursor:pointer;border-top:1px solid #f0eae0">
+        <input type="checkbox" data-bod="vse" style="width:24px;height:24px;flex-shrink:0;margin:1px 0 0;accent-color:#9C3B22">
+        <span>${escAttr(T.potvrzeni)}</span></label>
     </div>
     <div id="souhlas-chyba" style="display:none;background:#f7e9e5;color:#9c3b22;border-radius:10px;padding:10px 12px;margin-bottom:10px;font-weight:700"></div>
     <button id="souhlas-ok" disabled style="width:100%;padding:15px;border:none;border-radius:13px;background:#9c3b22;color:#fff;font-size:16px;font-weight:800;font-family:inherit;cursor:pointer;opacity:.45">Potvrzuji a pokračuji</button>
@@ -15887,7 +15914,7 @@ function ukazSouhlas() {
   document.body.style.overflow = 'hidden'
   const ok = ov.querySelector('#souhlas-ok')
   ov.addEventListener('change', () => {
-    const vse = [...ov.querySelectorAll('input[data-bod]')].every(i => i.checked)
+    const vse = !!ov.querySelector('input[data-bod="vse"]')?.checked
     ok.disabled = !vse; ok.style.opacity = vse ? '1' : '.45'
   })
   ok.onclick = () => potvrdSouhlas(ov)
@@ -15908,8 +15935,9 @@ async function potvrdSouhlas(ov) {
     const h = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text))
     otisk = [...new Uint8Array(h)].map(x => x.toString(16).padStart(2, '0')).join('')
   } catch (e) {}
-  const body = {}
-  ov.querySelectorAll('input[data-bod]').forEach(i => { body[i.dataset.bod] = i.checked })
+  const vse = !!ov.querySelector('input[data-bod="vse"]')?.checked
+  const body = { vse }
+  souhlasTextPro(osvc).body.forEach(k => { body[k] = vse })
   const zaznam = { worker_id: currentUser.id, verze, text_otisk: otisk, text, body,
     jmeno: currentProfile?.full_name || null, email: currentUser?.email || currentProfile?.email || null,
     zarizeni: String(navigator.userAgent || '').slice(0, 400) }
@@ -15926,6 +15954,7 @@ async function potvrdSouhlas(ov) {
   lsSet('souhlas_' + currentUser.id + '_' + verze, '1')
   ov.remove(); document.body.style.overflow = ''
   checkShowTutorial()
+  if (window._dokladyPoSouhlasu) { window._dokladyPoSouhlasu = false; setTimeout(checkMissingDocsAlert, 1500) }
 }
 
 // Kancelář: v kartě pracovníka, kdy co potvrdil (jen když potvrzení existuje).
@@ -21299,7 +21328,7 @@ async function loadMobWeek() {
 // ---------------------------------------------------------------------------
 // Upozornění na chybějící povinné dokumenty
 // Panel se seznamem je v sekci Dokumenty, kam ale pracovník nechodí – proto po
-// přihlášení vyskočí okno, které musí zavřít křížkem.
+// přihlášení vyskočí okno. Zavře ho křížkem nebo „Dohraju dokument později".
 // ---------------------------------------------------------------------------
 // Povinné doklady bez pasu — pas je náhrada za občanku, ne samostatná povinnost
 const REQUIRED_DOC_TYPES = DOC_TYPES.filter(t => t.required && t.id !== 'pas').map(t => t.id)
@@ -21315,6 +21344,44 @@ function povinneDokladyPro(profil) {
 }
 const REQUIRED_DOC_LABELS = {}
 REQUIRED_DOC_TYPES.forEach(id => { REQUIRED_DOC_LABELS[id] = id === 'op' ? 'Občanský průkaz / Pas' : docLabel(id) })
+
+// Které povinné doklady člověku OPRAVDU chybí. Počítají se všechny jeho
+// doklady, i ty, které mu nahrál správce — majitel 8. 10. 2026: „když už
+// dokumenty nahrajeme my, ať je po něm appka nechce, jen ten, co chybí."
+// Dřív to bylo opsané na třech místech (okno, panel, upomínka) a každé místo
+// se mohlo rozejít.
+//   • Občanka a pas jsou zaměnitelné — stačí jeden z nich.
+//   • `gewerbeschein` je starý název živnosťáku z dřívějších nahrání — je to
+//     tentýž doklad, tak ho po člověku nechceme podruhé.
+//   • Odmítnutý nebo nečitelný doklad se nepočítá, jako by nebyl.
+//   • Propadlý doklad tu NEchybí — na ten upozorňuje panel „Vyžaduje akci"
+//     (nahrát nový), stejně jako dosud.
+function chybejiciDoklady(profil, doklady) {
+  return povinneDokladyPro(profil).filter(typ => !(doklady || []).some(d => {
+    const sedi = typ === 'op' ? (d.doc_type === 'op' || d.doc_type === 'pas')
+      : typ === 'zivnost' ? (d.doc_type === 'zivnost' || d.doc_type === 'gewerbeschein')
+      : d.doc_type === typ
+    return sedi && d.status !== 'rejected' && d.status !== 'unreadable'
+  }))
+}
+// Co přihlášenému pracovníkovi chybí — naposledy zjištěné. Podle toho se
+// v nahrávání značí dlaždice „Chybí" a „Už máme". null = ještě nevíme.
+let mojeChybejiciDoklady = null
+
+// „Dohraju dokument později" — odloží doklady do zítřka. Pamatuje se v telefonu
+// zvlášť pro každého (na jednom telefonu se můžou přihlašovat dva lidé) a platí
+// do půlnoci místního času; zítra se okno ukáže znovu, pokud doklad pořád chybí.
+// Příchod ani odchod to nijak neblokuje.
+function dokladyOdlozeneDnes() {
+  return !!currentUser && lsGet('doklady-pozdeji-' + currentUser.id) === localDateStr()
+}
+function dohrajuDokladPozdeji() {
+  if (currentUser) lsSet('doklady-pozdeji-' + currentUser.id, localDateStr())
+  const overlay = document.getElementById('docs-alert-overlay')
+  if (overlay) overlay.style.display = 'none'
+  showToast('Dobře — připomeneme to zítra. Nahrát ho můžete kdykoli v sekci Dokumenty.')
+  try { loadMobDocs() } catch (e) {}
+}
 
 // ═══ TÝDENNÍ UPOMÍNKA NA CHYBĚJÍCÍ DOKLADY ═══════════════════════════════
 // Majitel: „ať jim to jednou týdně připomene, že nemají nahrané doklady."
@@ -21376,12 +21443,8 @@ async function upomenChybejiciDoklady(rucne) {
     for (const w of lide) {
       if (uzDnes.has(w.id)) continue
       const moje = (doklady || []).filter(d => d.worker_id === w.id)
-      const chybi = povinneDokladyPro(w).filter(typ => !moje.some(d => {
-        // Občanka a pas jsou zaměnitelné — stačí jeden z nich.
-        const sedi = typ === 'op' ? (d.doc_type === 'op' || d.doc_type === 'pas') : d.doc_type === typ
-        // Odmítnutý nebo nečitelný doklad se nepočítá, jako by nebyl.
-        return sedi && d.status !== 'rejected' && d.status !== 'unreadable'
-      }))
+      // Co mu nahrál správce, se počítá taky — připomíná se jen to, co chybí.
+      const chybi = chybejiciDoklady(w, moje)
       if (!chybi.length) continue
       const seznam = chybi.map(t => REQUIRED_DOC_LABELS[t] || docLabel(t)).join(', ')
       radky.push({
@@ -21416,6 +21479,9 @@ async function upomenChybejiciDoklady(rucne) {
 async function checkMissingDocsAlert() {
   try {
     if (!currentUser) return
+    // Nový člověk nejdřív potvrdí podmínky — okno s doklady by viselo pod
+    // souhlasem (a po „Nesouhlasím" i přes přihlášení). Ukáže se po potvrzení.
+    if (document.getElementById('souhlas-overlay')) { window._dokladyPoSouhlasu = true; return }
     const role = (currentProfile?.role || '').trim().toLowerCase()
     if (role === 'admin') return   // adminovi nic nevyskakuje
 
@@ -21424,15 +21490,15 @@ async function checkMissingDocsAlert() {
     // startu PWA, klidně pětkrát denně, a pracovník ho začne odklikávat naslepo.
     const todayKey = 'docs-alert-' + new Date().toISOString().slice(0, 10)
     if (lsGet(todayKey) === 'zavreno') return
+    // „Dohraju dokument později" — dnes už se neptat.
+    if (dokladyOdlozeneDnes()) return
 
     const { data, error } = await sb.from('documents').select('doc_type,status').eq('worker_id', currentUser.id)
     if (error) return
 
-    const docs = data || []
-    // OP a pas jsou zaměnitelné – stačí jeden z nich, ať se druhý nehlásí jako chybějící.
-    const missing = povinneDokladyPro(currentProfile).filter(type => !docs.some(d =>
-      (type === 'op' ? (d.doc_type === 'op' || d.doc_type === 'pas') : d.doc_type === type)
-      && d.status !== 'unreadable' && d.status !== 'rejected'))
+    // Jen to, co opravdu chybí — co nahrál správce, se po něm nechce.
+    const missing = chybejiciDoklady(currentProfile, data || [])
+    mojeChybejiciDoklady = missing
 
     if (!missing.length) return
 
@@ -21476,16 +21542,11 @@ async function loadMobDocs() {
   // Povinné dokumenty, které musí OSVČ nahrát
   const REQUIRED_DOCS = povinneDokladyPro(currentProfile)
   const docsArr = data || []
-  function hasValidDoc(type) {
-    return docsArr.some(d => {
-      // Občanka a pas jsou zaměnitelné — stačí jeden z nich.
-      const sedi = type === 'op' ? (d.doc_type === 'op' || d.doc_type === 'pas') : d.doc_type === type
-      if (!sedi) return false
-      if (d.status === 'unreadable' || d.status === 'rejected') return false
-      return true
-    })
-  }
-  const missing = REQUIRED_DOCS.filter(t => !hasValidDoc(t))
+  // Co nahrál správce, se počítá taky (chybejiciDoklady).
+  const missing = chybejiciDoklady(currentProfile, docsArr)
+  mojeChybejiciDoklady = missing
+  function hasValidDoc(type) { return !missing.includes(type) }
+  const odlozeno = missing.length && dokladyOdlozeneDnes()
   const reqHeadIco = missing.length
     ? '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:18px;height:18px"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><path d="M12 9v4M12 17h.01"/></svg>'
     : '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" style="width:18px;height:18px"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><path d="M22 4L12 14.01l-3-3"/></svg>'
@@ -21502,6 +21563,9 @@ async function loadMobDocs() {
           ${ok ? '' : `<button onclick="openUploadForm('${jsStr(t)}')" style="font-size:12px;padding:6px 14px;border:none;border-radius:9px;background:#9c3b22;color:#fff;font-weight:800;cursor:pointer;font-family:inherit">Nahrát</button>`}
         </div>`
       }).join('')}
+      ${!missing.length ? '' : odlozeno
+        ? '<div style="font-size:12px;color:#6b6157;margin-top:8px">Odloženo do zítřka — nahrát ho můžete kdykoli i teď.</div>'
+        : '<button id="mob-docs-later" onclick="dohrajuDokladPozdeji()" style="width:100%;margin-top:9px;padding:11px;background:none;color:#6b6157;border:1.5px solid rgba(0,0,0,.15);border-radius:11px;font-size:13px;font-weight:700;cursor:pointer;font-family:inherit">Dohraju dokument později</button>'}
       <label style="display:flex;align-items:center;gap:9px;margin-top:10px;padding-top:9px;border-top:1px dashed rgba(0,0,0,.12);font-size:12.5px;color:#6b6157;cursor:pointer">
         <input type="checkbox" ${currentProfile && currentProfile.bez_ridicaku ? 'checked' : ''}
                onchange="prohlasBezRidicaku(this)"
@@ -22490,16 +22554,32 @@ function showTypePicker() {
   const body = document.getElementById('upload-body')
   const tiles = document.getElementById('upload-type-tiles')
   if (tiles) {
-    const sorted = DOC_TYPES.slice().sort((a, b) => (b.required ? 1 : 0) - (a.required ? 1 : 0))
-    tiles.innerHTML = sorted.map(t => `
-      <button onclick="pickDocType('${t.id}')" style="display:flex;align-items:center;gap:12px;width:100%;padding:14px;background:#fff;border:1.5px solid ${t.required ? '#e8a13a' : 'var(--brd)'};border-radius:13px;cursor:pointer;font-family:inherit;text-align:left">
+    // Když víme, co člověku chybí, jsou chybějící doklady nahoře. Co už máme
+    // (třeba nahrané správcem), je „Už máme" a nesvítí jako povinné.
+    const chybi = mojeChybejiciDoklady
+    const stav = t => {
+      if (!t.required) return 'nepovinne'
+      if (!chybi) return 'povinne'   // ještě nevíme — jako dřív
+      const typ = t.id === 'pas' ? 'op' : t.id
+      if (chybi.includes(typ)) return 'chybi'
+      return povinneDokladyPro(currentProfile).includes(typ) ? 'mame' : 'nepovinne'
+    }
+    const poradi = { chybi: 2, povinne: 1, mame: 0, nepovinne: 0 }
+    const sorted = DOC_TYPES.slice().sort((a, b) => poradi[stav(b)] - poradi[stav(a)])
+    tiles.innerHTML = sorted.map(t => {
+      const st = stav(t), zlute = st === 'chybi' || st === 'povinne', op = t.id === 'op' || t.id === 'pas'
+      const popis = st === 'mame' ? 'Už máme — nahrávat nemusíte' : st === 'nepovinne' ? 'Nepovinné'
+        : st === 'chybi' ? (op ? 'Chybí — stačí občanka nebo pas' : 'Chybí — povinný doklad')
+        : (op ? 'Povinné — stačí občanka nebo pas' : 'Povinný doklad')
+      return `
+      <button onclick="pickDocType('${t.id}')" data-stav="${st}" style="display:flex;align-items:center;gap:12px;width:100%;padding:14px;background:#fff;border:1.5px solid ${zlute ? '#e8a13a' : 'var(--brd)'};border-radius:13px;cursor:pointer;font-family:inherit;text-align:left">
         <span style="font-size:22px;flex-shrink:0">${t.icon}</span>
         <span style="flex:1;min-width:0">
           <span style="display:block;font-size:14px;font-weight:800;color:#211D1A;line-height:1.25">${t.label}</span>
-          <span style="display:block;font-size:11.5px;color:${t.required ? '#9a6b15' : 'var(--text3)'};font-weight:${t.required ? '700' : '500'};margin-top:1px">${t.required ? (t.id === 'op' || t.id === 'pas' ? 'Povinné — stačí občanka nebo pas' : 'Povinný doklad') : 'Nepovinné'}</span>
+          <span style="display:block;font-size:11.5px;color:${zlute ? '#9a6b15' : st === 'mame' ? '#2f6b45' : 'var(--text3)'};font-weight:${zlute || st === 'mame' ? '700' : '500'};margin-top:1px">${popis}</span>
         </span>
         <svg viewBox="0 0 24 24" fill="none" stroke="#9c3b22" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" style="width:17px;height:17px;flex-shrink:0"><path d="M9 18l6-6-6-6"/></svg>
-      </button>`).join('')
+      </button>` }).join('')
   }
   if (picker) picker.style.display = 'block'
   if (chosen) chosen.style.display = 'none'
@@ -36159,6 +36239,12 @@ async function saveWorkerTurnus() {
 
 // Admin — načtení dovolených a nemocí pracovníka v detailu
 let _wdVacType = 'dovolena'
+// Rozpracovaná ÚPRAVA zapsané nepřítomnosti (majitel 8. 10. 2026: „nemůžu
+// upravit dovolenou, a ne abych ji psal znova"). null = formulář zapisuje
+// nový záznam. Jinak { id, worker_id, date_from, date_to, note, type } —
+// formulář je vyplněný tímhle záznamem a Uložit ho přepíše (UPDATE).
+let _wdVacEdit = null
+let _wdVacUklada = false
 function wdVacSetType(t) {
   _wdVacType = t
   const dov = document.getElementById('wd-vac-type-dovolena')
@@ -36166,7 +36252,7 @@ function wdVacSetType(t) {
   if (dov) { dov.style.background = t === 'dovolena' ? 'var(--blue)' : '#fff'; dov.style.color = t === 'dovolena' ? '#fff' : '#211D1A' }
   if (nem) { nem.style.background = t === 'nemoc' ? ABSENCE.nemoc.color : '#fff'; nem.style.color = t === 'nemoc' ? '#fff' : '#211D1A' }
   const btn = document.getElementById('wd-vac-save-btn')
-  if (btn) btn.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:1em;height:1em;flex-shrink:0;vertical-align:-2px"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><path d="M17 21v-8H7v8M7 3v5h8"/></svg> Uložit ' + (t === 'nemoc' ? 'nemoc' : 'dovolenou')
+  if (btn) btn.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:1em;height:1em;flex-shrink:0;vertical-align:-2px"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><path d="M17 21v-8H7v8M7 3v5h8"/></svg> Uložit ' + (_wdVacEdit ? 'změny' : (t === 'nemoc' ? 'nemoc' : 'dovolenou'))
   const note = document.getElementById('wd-vac-note')
   if (note) note.placeholder = t === 'nemoc' ? 'např. chřipka, úraz…' : 'např. rodinná dovolená'
 }
@@ -36184,9 +36270,9 @@ async function loadWdVacations() {
 
   // Formulář — admin může nepřítomnost zapsat sám (třeba když mu pracovník volá)
   const form = `
-    <div style="border:1.5px solid var(--brd);border-radius:10px;padding:14px;margin-bottom:18px">
-      <div style="font-size:13px;font-weight:700;margin-bottom:4px">Zapsat nepřítomnost pracovníkovi</div>
-      <p style="font-size:12px;color:var(--text2);margin:0 0 10px">Pracovník dostane do aplikace zprávu, že mu byla zapsaná.</p>
+    <div id="wd-vac-form" style="border:1.5px solid var(--brd);border-radius:10px;padding:14px;margin-bottom:18px">
+      <div id="wd-vac-form-title" style="font-size:13px;font-weight:700;margin-bottom:4px">Zapsat nepřítomnost pracovníkovi</div>
+      <p id="wd-vac-form-hint" style="font-size:12px;color:var(--text2);margin:0 0 10px">Pracovník dostane do aplikace zprávu, že mu byla zapsaná.</p>
       <label style="font-size:11px;color:var(--text3);display:block;margin-bottom:6px">Důvod nepřítomnosti</label>
       <div style="display:flex;gap:8px;margin-bottom:12px">
         <button type="button" id="wd-vac-type-dovolena" onclick="wdVacSetType('dovolena')" style="flex:1;padding:9px 8px;border:1.5px solid var(--brd);border-radius:8px;font-size:12.5px;font-weight:700;cursor:pointer;font-family:inherit;display:flex;align-items:center;justify-content:center;gap:6px;background:var(--blue);color:#fff">
@@ -36211,6 +36297,7 @@ async function loadWdVacations() {
         <input type="text" id="wd-vac-note" placeholder="např. rodinná dovolená" style="width:100%;padding:8px;border:1.5px solid var(--brd);border-radius:8px;font-size:13px;font-family:inherit">
       </div>
       <button onclick="wdAddVacation()" id="wd-vac-save-btn" class="btn-pri" style="width:100%;padding:10px;font-size:13px"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:1em;height:1em;flex-shrink:0;vertical-align:-2px"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><path d="M17 21v-8H7v8M7 3v5h8"/></svg> Uložit dovolenou</button>
+      <button type="button" id="wd-vac-cancel-btn" onclick="wdZrusUpravuNepritomnosti()" style="display:none;width:100%;margin-top:8px;padding:9px;background:none;border:1.5px solid var(--brd);border-radius:8px;font-size:13px;font-weight:600;cursor:pointer;font-family:inherit;color:var(--text2)">Zrušit úpravu</button>
     </div>`
 
   const list = !data?.length
@@ -36220,23 +36307,39 @@ async function loadWdVacations() {
         const days = Math.ceil((new Date(v.date_to) - new Date(v.date_from)) / 86400000) + 1
         const isPast = v.date_to < today
         const isNow = v.date_from <= today && v.date_to >= today
-        return `<div style="display:flex;justify-content:space-between;align-items:center;gap:10px;padding:10px 0;border-bottom:1px solid var(--brd)">
-          <div style="min-width:0">
+        return `<div data-vac-radek="${escAttr(v.id)}" style="display:flex;flex-wrap:wrap;justify-content:space-between;align-items:center;gap:8px 10px;padding:10px 0;border-bottom:1px solid var(--brd)">
+          <div style="min-width:0;flex:1 1 auto">
             <div style="display:inline-flex;align-items:center;gap:5px;background:${info.bg};border:1px solid ${info.color};color:${info.color};font-size:10.5px;font-weight:800;padding:2px 8px;border-radius:20px;margin-bottom:4px">${info.icon}${info.label}</div>
             <div style="font-weight:600;font-size:13px">${cz(v.date_from)} → ${cz(v.date_to)}</div>
             <div style="font-size:12px;color:var(--text2)">${days} ${days===1?'den':'dní'}${absNote(v)?' · '+absNote(v):''}</div>
           </div>
-          <div style="display:flex;align-items:center;gap:8px;flex-shrink:0">
+          <div style="display:flex;align-items:center;gap:8px;flex-shrink:0;margin-left:auto">
             <span class="pill ${isNow?'pb':isPast?'pq':'pg'}">${isNow?'Probíhá':isPast?'Proběhla':'Naplánována'}</span>
+            <button type="button" data-upravit-nepritomnost="${escAttr(v.id)}" onclick="upravitNepritomnost('${jsStr(v.id)}')" title="Upravit datum, druh nebo poznámku" style="padding:4px 9px;background:none;border:1px solid var(--brd);border-radius:6px;color:var(--text);font-size:11px;font-weight:600;cursor:pointer;font-family:inherit;display:inline-flex;align-items:center;gap:4px"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:1em;height:1em;flex-shrink:0;vertical-align:-2px"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/></svg> Upravit</button>
             <button onclick="wdDeleteVacation('${v.id}','${jsStr(t)}')" title="Smazat záznam" style="padding:4px 9px;background:none;border:1px solid var(--red);border-radius:6px;color:var(--red);font-size:11px;cursor:pointer;font-family:inherit"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:1em;height:1em;flex-shrink:0;vertical-align:-2px"><path d="M3 6h18M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6M14 11v6"/></svg></button>
           </div>
         </div>`
       }).join('')
 
+  // Co má správce v rozpracované úpravě napsané, si vezmeme z formuláře dřív,
+  // než se přepíše. Úprava končí, když záznam mezitím zmizel nebo je otevřená
+  // karta jiného pracovníka.
+  if (_wdVacEdit) {
+    const staryForm = document.getElementById('wd-vac-form')
+    if (staryForm && staryForm.dataset.upravuje === String(_wdVacEdit.id)) {
+      _wdVacEdit.date_from = document.getElementById('wd-vac-from')?.value || ''
+      _wdVacEdit.date_to = document.getElementById('wd-vac-to')?.value || ''
+      _wdVacEdit.note = document.getElementById('wd-vac-note')?.value || ''
+      _wdVacEdit.type = _wdVacType
+    }
+    if (String(_wdVacEdit.worker_id) !== String(currentWorkerId)
+        || !(data || []).some(v => String(v.id) === String(_wdVacEdit.id))) _wdVacEdit = null
+  }
   div.innerHTML = form +
     '<div style="font-size:11px;font-weight:700;color:var(--text3);text-transform:uppercase;letter-spacing:1px;margin-bottom:4px">Přehled nepřítomností</div>' +
     list
   wdVacSetType('dovolena')   // po překreslení formuláře znovu zvýrazni výchozí druh
+  if (_wdVacEdit) wdVacNastavUpravu()   // rozpracovaná úprava → vyplnit formulář
 }
 
 // Admin zapíše dovolenou nebo nemoc za pracovníka
@@ -36247,6 +36350,10 @@ async function wdAddVacation() {
   const note = document.getElementById('wd-vac-note')?.value.trim() || null
   if (!from || !to) { showToast('⚠️ Vyplňte datum od i do'); return }
   if (to < from) { showToast('⚠️ Datum „do" musí být stejné nebo pozdější než „od"'); return }
+
+  // Úprava zapsaného záznamu: kontroly výš jsou tytéž jako při zápisu, ale
+  // ukládá se do TOHO SAMÉHO řádku — nový se nezakládá.
+  if (_wdVacEdit) { await wdUlozUpravuNepritomnosti(from, to, note); return }
 
   const info = ABSENCE[_wdVacType]
   const { error, degraded } = await insertAbsence({
@@ -36296,6 +36403,155 @@ async function wdDeleteVacation(id, type) {
   }
   showToast('🗑 ' + info.label + ' smazána')
   loadWdVacations()
+}
+
+// ===== ÚPRAVA ZAPSANÉ NEPŘÍTOMNOSTI (správce) =====
+// Majitel 8. 10. 2026: „nemůžu upravit dovolenou, a ne abych ji psal znova".
+// Upravit jde odevšad, kde správce nepřítomnost vidí (karta pracovníka,
+// okno nahlášených nepřítomností, okno dne v kalendáři) — vždycky se otevře
+// TENTÝŽ formulář v kartě pracovníka, jako se zapisuje nová.
+//
+// Ukládá se do stejného řádku: id i created_by zůstávají. Podle created_by
+// se pozná, kdo nepřítomnost nahlásil — úprava správcem to nesmí přepsat.
+//
+// POZOR NA PRÁVA: úprava, kterou databáze nepustí (chybí pravidlo pro UPDATE),
+// v Postgresu NECHYBUJE — jen nezmění nic. Proto .select('id') a počet řádků.
+// Pravidlo zakládá supabase-migrace-uprava-dovolene.sql.
+const NEPRITOMNOST_BEZ_PRAV = '❌ Úprava se neuložila — databáze ji nepovolila. V Supabase chybí oprávnění, aby správce mohl nepřítomnost upravit: spusťte v SQL Editoru soubor supabase-migrace-uprava-dovolene.sql'
+
+// Uloží změnu do řádku `id`. Vrací { error } | { zamitnuto } | { smazano } | { degraded }.
+async function updateAbsence(id, zmeny, type) {
+  const chybiSloupec = e => /column|schema cache/i.test(e?.message || '')
+  let degraded = false
+  let { data, error } = await sb.from('vacations').update({ ...zmeny, type }).eq('id', id).select('id')
+  if (error && chybiSloupec(error)) {
+    // Bez sloupce `type` (neproběhla migrace) se nemoc pozná z poznámky —
+    // stejně jako při zápisu (insertAbsence).
+    console.warn('[nepřítomnost] sloupec type chybí, upravuji bez něj:', error.message)
+    const fallbackNote = type === 'nemoc' ? ('Nemoc' + (zmeny.note ? ' — ' + zmeny.note : '')) : zmeny.note
+    ;({ data, error } = await sb.from('vacations').update({ ...zmeny, note: fallbackNote || null }).eq('id', id).select('id'))
+    degraded = !error
+  }
+  if (error) return { error }
+  if (data && data.length) return { error: null, degraded }
+  // 0 řádků bez chyby: buď záznam mezitím někdo smazal, nebo úpravu nepustila práva
+  const { data: jeTam, error: e2 } = await sb.from('vacations').select('id').eq('id', id).maybeSingle()
+  return (jeTam || e2) ? { zamitnuto: true } : { smazano: true }
+}
+
+// Otevře kartu pracovníka na záložce Dovolená/volno s formulářem vyplněným
+// záznamem `id`. Volá se z karty, z okna nahlášených i z kalendáře.
+async function upravitNepritomnost(id) {
+  if (!id) return
+  const { data: v, error } = await sb.from('vacations').select('*').eq('id', id).maybeSingle()
+  if (error || !v) {
+    showToast(error ? '❌ Záznam se nenačetl: ' + error.message : '❌ Záznam už neexistuje — mezitím ho někdo smazal')
+    return
+  }
+  // Okno dne z kalendáře by zůstalo viset přes kartu
+  const dd = document.getElementById('day-detail-dialog'); if (dd) dd.style.display = 'none'
+  if (!_wdCardOpen() || String(currentWorkerId) !== String(v.worker_id)) {
+    await openWorkerModal(v.worker_id)
+    if (!_wdCardOpen() || String(currentWorkerId) !== String(v.worker_id)) {
+      showToast('❌ Kartu pracovníka se nepodařilo otevřít')
+      return
+    }
+  }
+  _wdVacEdit = {
+    id: v.id, worker_id: v.worker_id,
+    date_from: String(v.date_from || '').slice(0, 10), date_to: String(v.date_to || '').slice(0, 10),
+    note: absNote(v), type: absType(v), posun: true
+  }
+  // Formulář vyplnit z databáze, ne z toho, co v něm zrovna je
+  const staryForm = document.getElementById('wd-vac-form'); if (staryForm) delete staryForm.dataset.upravuje
+  wdTab('dovolena', document.querySelector('.wd-tab[onclick*="dovolena"]'))
+}
+
+// Přepne formulář v kartě do úpravy a vyplní ho
+function wdVacNastavUpravu() {
+  const e = _wdVacEdit
+  const f = document.getElementById('wd-vac-form')
+  if (!e || !f) return
+  f.dataset.upravuje = String(e.id)
+  f.style.borderColor = ABSENCE.dovolena.color
+  const nadpis = document.getElementById('wd-vac-form-title'); if (nadpis) nadpis.textContent = 'Upravit zapsanou nepřítomnost'
+  const hint = document.getElementById('wd-vac-form-hint')
+  if (hint) { hint.textContent = 'Mění se tento záznam — nový se nepřidá. Pracovník dostane zprávu o změně.'; hint.style.color = 'var(--text2)' }
+  const od = document.getElementById('wd-vac-from'); if (od) od.value = e.date_from || ''
+  const doo = document.getElementById('wd-vac-to'); if (doo) doo.value = e.date_to || ''
+  const pozn = document.getElementById('wd-vac-note'); if (pozn) pozn.value = e.note || ''
+  wdVacSetType(e.type === 'nemoc' ? 'nemoc' : 'dovolena')   // nastaví i „Uložit změny"
+  const zrus = document.getElementById('wd-vac-cancel-btn'); if (zrus) zrus.style.display = 'block'
+  document.querySelectorAll('#wdt-dovolena [data-vac-radek]').forEach(r => {
+    r.style.background = r.dataset.vacRadek === String(e.id) ? ABSENCE.dovolena.bg : ''
+  })
+  if (e.posun) { e.posun = false; setTimeout(() => f.scrollIntoView({ behavior: 'smooth', block: 'start' }), 60) }
+}
+
+function wdZrusUpravuNepritomnosti() {
+  _wdVacEdit = null
+  loadWdVacations()
+}
+
+// Uloží rozpracovanou úpravu (kontroly už proběhly ve wdAddVacation)
+async function wdUlozUpravuNepritomnosti(from, to, note) {
+  const e = _wdVacEdit
+  if (!e || _wdVacUklada) return
+  const type = _wdVacType === 'nemoc' ? 'nemoc' : 'dovolena'
+  const info = ABSENCE[type]
+  const btn = document.getElementById('wd-vac-save-btn')
+  _wdVacUklada = true
+  if (btn) btn.disabled = true
+  let r
+  try { r = await updateAbsence(e.id, { date_from: from, date_to: to, note }, type) }
+  catch (err) { r = { error: { message: err?.message || String(err) } } }
+  finally { _wdVacUklada = false; if (btn) btn.disabled = false }
+
+  if (r.smazano) {
+    showToast('❌ Záznam mezitím někdo smazal — nic se neuložilo')
+    _wdVacEdit = null
+    loadWdVacations()
+    return
+  }
+  if (r.zamitnuto || r.error) {
+    // Nic se neuložilo. Formulář zůstává vyplněný, ať se napsané neztratí.
+    const jeOpravneni = r.zamitnuto || /row-level security|policy|permission/i.test(r.error?.message || '')
+    const zprava = jeOpravneni ? NEPRITOMNOST_BEZ_PRAV : '❌ Chyba: ' + r.error.message
+    showToast(zprava)
+    const hint = document.getElementById('wd-vac-form-hint')
+    if (hint) { hint.textContent = zprava; hint.style.color = 'var(--red)' }
+    return
+  }
+
+  // Pracovník ať o změně ví — jinak by se mu dovolená v appce posunula bez vysvětlení
+  try {
+    const czd = d => { const p = String(d).slice(0,10).split('-'); return p[2]+'. '+p[1]+'. '+p[0] }
+    const jeNemoc = type === 'nemoc'
+    await sb.from('notifications').insert({
+      worker_id: e.worker_id,
+      title: (jeNemoc ? '🩺 Upravená nemoc' : '☀️ Upravená dovolená'),
+      message: 'SubBau vám upravil ' + (jeNemoc ? 'nemoc' : 'dovolenou') + ' — teď ' + czd(from) + ' → ' + czd(to) + (note ? ' (' + note + ')' : '') + '.',
+      type: 'obecna',
+      is_read: false
+    })
+  } catch(err) { console.warn('[nepřítomnost] upozornění pracovníkovi se neodeslalo:', err?.message) }
+
+  _wdVacEdit = null
+  showToast(r.degraded
+    ? '⚠️ ' + info.label + ' upravena, ale zatím se nerozlišuje — spusťte migraci supabase-migrace-VSE.sql'
+    : '✅ ' + info.label + ' upravena')
+  loadWdVacations()
+  obnovPohledyNepritomnosti()
+}
+
+// Kalendář a týdenní přehled pod kartou ukazují nepřítomnost taky — dorovnat.
+// (Okno nahlášených se čte vždy znovu z databáze, takže starou podobu neukáže.)
+function obnovPohledyNepritomnosti() {
+  const view = _activeAdminView()
+  try {
+    if (view === 'kalendar' && typeof renderCalendar === 'function') renderCalendar(true)
+    if (view === 'dochazka' && typeof loadKWData === 'function') loadKWData()
+  } catch (err) { console.warn('[nepřítomnost] obnova přehledů:', err?.message) }
 }
 
 // ============ WORKER DETAIL MODAL ============
@@ -36420,6 +36676,7 @@ async function openWorkerModal(id) {
 
 function closeWorkerModal() {
   document.getElementById('worker-modal').style.display = 'none'
+  _wdVacEdit = null
   document.body.style.overflow = ''
   currentWorkerId = null
   // Rozpracované další položky faktury patří tomuhle člověku — ne dalšímu.
