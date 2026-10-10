@@ -9,7 +9,7 @@ NUTNE=(
   subbau_final.html    # samotná appka
   klient.html          # odkaz pro odběratele
   sw.js manifest.json
-  favicon.ico icon-192.png icon-512.png apple-touch-icon.png
+  favicon.ico favicon-32.png icon-192.png icon-512.png apple-touch-icon.png
   api/klient-dochazka.js api/send-invoice.js
   api/admin-update-worker.js api/check-expiring-docs.js
   supabase.js

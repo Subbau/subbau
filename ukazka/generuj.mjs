@@ -99,8 +99,10 @@ console.log(`   vložená loga vyměněna: ${obrazku}×`);
 
 // Ikona na ploše a manifest ze serveru patří skutečné firmě — odpojit.
 s = s.replace(/<link[^>]*rel="manifest"[^>]*>/g, '<!-- ukázka: bez manifestu -->');
-s = s.replace(/<link[^>]*href="\/favicon\.ico"[^>]*>/g, '<!-- ukázka: bez ikony ze serveru -->');
-s = s.replace(/<link[^>]*href="\/apple-touch-icon\.png"[^>]*>/g, '<!-- ukázka: bez ikony ze serveru -->');
+s = s.replace(/<link[^>]*href="\/favicon[^"]*"[^>]*>/g, '<!-- ukázka: bez ikony ze serveru -->');
+s = s.replace(/<link[^>]*href="\/apple-touch-icon[^"]*"[^>]*>/g, '<!-- ukázka: bez ikony ze serveru -->');
+// Ukázka má vlastní neutrální ikonu (appka ji od 11. 10. 2026 bere jen ze souborů).
+s = s.replace('<!-- ukázka: bez ikony ze serveru -->', '<link rel="icon" type="image/svg+xml" href="' + logoSvg('#E8A13A', '#211D1A') + '">');
 
 // --- 4c) SKUTEČNÉ OSOBNÍ ÚDAJE
 // V appce jsou natvrdo telefony na vedení, jména a údaje německého odběratele
