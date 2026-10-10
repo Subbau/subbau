@@ -764,6 +764,7 @@ setTimeout(function () {
       <div id="form-login">
         <div style="display:flex;align-items:center;gap:8px;margin-bottom:20px"><div style="width:8px;height:8px;background:#C4573A;border-radius:50%"></div><div style="width:8px;height:8px;background:#E8A13A;border-radius:50%"></div><span style="font-size:11px;color:#B8A898;letter-spacing:.5px">Systém</span></div><h3>Přihlásit se</h3>
         <p>Zadejte přihlašovací údaje</p>
+        <div id="login-znovu" style="display:none;background:#eef5ec;border:1.5px solid #9cc39a;border-radius:10px;padding:12px 14px;margin-bottom:14px;font-size:14px;line-height:1.45;color:#22301f"><b>Pořád jste přihlášeni.</b> Jen se teď nepodařilo načíst aplikaci — nejspíš slabé spojení. Heslo psát nemusíte.<button type="button" onclick="zkusZnovuNacist()" style="display:block;width:100%;margin-top:10px;padding:11px;border:none;border-radius:9px;background:#3f7a3a;color:#fff;font-size:15px;font-weight:700;font-family:inherit;cursor:pointer">Zkusit znovu</button></div>
         <div id="login-err" class="err-box" style="display:none"></div>
         <div class="fg"><label>E-mail</label><input type="email" id="login-email" placeholder="vas@email.cz" autocomplete="username" inputmode="email" autocapitalize="none" autocorrect="off"></div>
         <div class="fg"><label>Heslo</label><input type="password" id="login-pwd" placeholder="••••••••" autocomplete="current-password" autocapitalize="none" autocorrect="off" spellcheck="false"></div>
@@ -774,6 +775,7 @@ setTimeout(function () {
         <div style="margin-top:8px;text-align:center;font-size:13px;color:var(--text2)">
           Ještě nemáte účet? <a href="#" onclick="showRegForm()" style="color:var(--blue);font-weight:700">Registrovat se</a>
         </div>
+        <details id="login-denik" style="display:none;margin-top:14px;font-size:11.5px;line-height:1.5;color:#8a7f72;text-align:left"></details>
         <!-- Stáhnout aplikaci na plochu (PWA) -->
         <div id="install-app-wrap" style="margin-top:16px;text-align:center;display:none">
           <button onclick="installApp()" style="width:100%;padding:13px;background:#fff;color:#211D1A;border:2px solid #211D1A;border-radius:12px;font-size:14px;font-weight:700;cursor:pointer;font-family:inherit;display:flex;align-items:center;justify-content:center;gap:8px"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:1em;height:1em;flex-shrink:0;vertical-align:-2px"><rect x="5" y="2" width="14" height="20" rx="2"/><path d="M12 18h.01"/></svg> Stáhnout aplikaci do telefonu</button>
@@ -4852,7 +4854,7 @@ async function submitAdminSignatureWithPlacement() {
 // Po nahrání nové verze se snadno pozná, jestli se opravdu nasadila: otevřete
 // appku, zmáčkněte F12 (na Macu ⌥⌘I) a v konzoli je vypsané tohle datum. Když
 // tam svítí starší, prohlížeč nebo GitHub drží starou verzi.
-const SUBBAU_VERZE = '2026-10-08 a — Úprava dovolené, doklady jen chybějící, souhlas jednou fajfkou'
+const SUBBAU_VERZE = '2026-10-10 e — Přihlášení drží, dvě směny, tolerance 30 min'
 console.log('SubBau docházka — verze ' + SUBBAU_VERZE)
 // Verze i dole v menu správce. Když někdo novinku „nevidí", podle ní se hned
 // pozná, jestli nemá otevřenou starou kopii appky — bez hledání v konzoli.
@@ -4874,13 +4876,57 @@ function lsRemove(key) { try { localStorage.removeItem(key) } catch(e) {} }
 const SUPABASE_URL = 'https://ceefzlkjnrclfpmhgdmr.supabase.co'
 const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImNlZWZ6bGtqbnJjbGZwbWhnZG1yIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzY3MTkxODYsImV4cCI6MjA5MjI5NTE4Nn0.fIewYds5zd3AICHWSpbcfOKk_SfGHuP1I-YR1yKW4NI'
 
+// ===== DENÍK PŘIHLÁŠENÍ =====
+// 10. 10. 2026 admini hlásili, že je to odhlašuje. V databázi přitom jejich
+// staré relace dál platily — o přihlášení tedy přišel prohlížeč (knihovna
+// zahodí relaci, když server odmítne její obnovu), nebo appka ukázala
+// přihlašovací obrazovku zbytečně (pomalý start). Zpětně se to nedalo zjistit,
+// proto si appka posledních 40 událostí kolem přihlášení pamatuje v tomhle
+// prohlížeči. Žádná hesla ani tokeny — jen čas, co se stalo a stav odpovědi.
+const DENIK_KLIC = 'denik-prihlaseni'
+// Klíč, pod kterým knihovna drží přihlášení (ukázka má adresu prázdnou).
+const KLIC_RELACE = (() => { try { return 'sb-' + new URL(SUPABASE_URL).hostname.split('.')[0] + '-auth-token' } catch (e) { return 'sb-bez-serveru-auth-token' } })()
+function zapisDenik(co, detail) {
+  try {
+    const d = JSON.parse(localStorage.getItem(DENIK_KLIC) || '[]')
+    const z = { t: new Date().toISOString(), co: String(co).slice(0, 80) }
+    if (detail != null && detail !== '') z.d = String(detail).slice(0, 160)
+    d.push(z)
+    localStorage.setItem(DENIK_KLIC, JSON.stringify(d.slice(-40)))
+  } catch (e) {}
+}
+// Všechny dotazy jdou dál beze změny; jen u přihlašovacího serveru (/auth/v1/)
+// se zapíše, co odpověděl na obnovu přihlášení a na odhlášení, a každá chyba.
+function _sbFetch(vstup, nastaveni) {
+  const p = fetch(vstup, nastaveni)
+  let url = ''
+  try { url = String((vstup && vstup.url) || vstup) } catch (e) {}
+  if (url.indexOf('/auth/v1/') < 0) return p
+  let cesta = url.split('/auth/v1/')[1] || ''
+  const druh = /grant_type=([a-z_]+)/.exec(cesta)
+  cesta = cesta.split('?')[0] + (druh ? ' ' + druh[1] : '')
+  return p.then(r => {
+    try {
+      if (!r.ok) {
+        r.clone().json()
+          .then(j => zapisDenik('server ' + cesta, r.status + ' ' + (j.error_code || j.code || j.error || '') + ' ' + (j.msg || j.message || j.error_description || '')))
+          .catch(() => zapisDenik('server ' + cesta, r.status))
+      } else if (/^(token|logout)/.test(cesta)) {
+        zapisDenik('server ' + cesta, r.status)
+      }
+    } catch (e) {}
+    return r
+  }, e => { zapisDenik('bez spojení: ' + cesta, e && e.message); throw e })
+}
+
 const { createClient } = supabase
 const sb = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
   auth: {
     persistSession: true,
     autoRefreshToken: true,
     detectSessionInUrl: true
-  }
+  },
+  global: { fetch: _sbFetch }
 })
 
 // ===== LAZY-LOAD PDF KNIHOVEN =====
@@ -5387,7 +5433,7 @@ window.addEventListener('load', async () => {
           try { await sb.auth.signOut({ scope: 'local' }) } catch(e) {}
           appInitialized = false
           authHandling = false
-          showLogin()
+          showLogin('start: přihlášení neplatí (' + stav + ')')
         } else {
           console.warn('[startup] server teď neodpověděl (' + stav + '), přihlášení nechávám být:', userErr.message)
         }
@@ -5397,7 +5443,7 @@ window.addEventListener('load', async () => {
     // Sem se dostaneme jen při nečekané výjimce. Ukázat přihlášení ano —
     // ale relaci nemazat, o tom tahle větev nemá jak rozhodnout.
     console.warn('[startup] kontrola session selhala:', e)
-    showLogin()
+    showLogin('start: výjimka ' + (e && e.message || e))
   }
 })
 
@@ -5416,7 +5462,7 @@ function startAuthTimeout() {
       // Ukázat přihlášení ano, ale relaci nemazat. Že se start nestihl do 50 s
       // znamená pomalou linku nebo zaseknutý dotaz — ne že by přihlášení neplatilo.
       // Dřív se tu odhlašovalo, a to na všech zařízeních toho člověka naráz.
-      showLogin()
+      showLogin('aplikace se nenačetla do 50 s')
     }
   }, 50000)  // dost času na opakované pokusy o načtení profilu (pomalý/uspaný Supabase)
 }
@@ -5426,6 +5472,7 @@ function clearAuthTimeout() {
 
 sb.auth.onAuthStateChange(async (event, session) => {
   console.log('[auth] event:', event, '| session:', !!session)
+  zapisDenik('událost ' + event, session ? 's relací' : 'bez relace')
 
   if (event === 'SIGNED_OUT') {
     // Chrome občas pošle SIGNED_OUT i když session pořád platí (falešný poplach
@@ -5443,7 +5490,7 @@ sb.auth.onAuthStateChange(async (event, session) => {
     currentUser = null
     currentProfile = null
     todayAttId = null
-    showLogin()
+    showLogin(Date.now() - (window._vlastniOdhlaseni || 0) < 15000 ? 'tlačítko Odhlásit' : 'prohlížeč přišel o přihlášení (SIGNED_OUT)')
     return
   }
 
@@ -5459,7 +5506,7 @@ sb.auth.onAuthStateChange(async (event, session) => {
   }
 
   if (event === 'SIGNED_IN' || event === 'INITIAL_SESSION') {
-    if (!session?.user) { showLogin(); return }
+    if (!session?.user) { showLogin('nepřihlášen'); return }
     if (registrationInProgress) { console.log('[auth] skip - registration in progress'); return }
     // Pokud je recovery mode - počkej na PASSWORD_RECOVERY event, nespouštěj app
     if (isRecoveryMode) {
@@ -5558,7 +5605,7 @@ async function _initAppInner(user) {
     clearAuthTimeout()
     authHandling = false
     const loginErr = document.getElementById('login-err')
-    showLogin()
+    showLogin('profil se nenačetl')
     if (loginErr) {
       loginErr.style.display = 'block'
       // Buď je pomalá síť, nebo účet nemá řádek v profiles — a to druhé se
@@ -5680,12 +5727,13 @@ async function doPasswordRecovery() {
       currentProfile = null
       try { await sb.auth.signOut() } catch(e) {}
       document.getElementById('recovery-app').style.display = 'none'
-      showLogin()
+      showLogin('nové heslo')
     }, 2000)
   }
 }
 
-function showLogin() {
+function showLogin(duvod) {
+  zapisDenik('přihlašovací obrazovka', duvod || '?')
   if (window.skryjBoot) window.skryjBoot()   // úvodní obrazovka pryč — víme, co ukázat
   document.getElementById('login').style.display = 'flex'
   document.getElementById('app').style.display = 'none'
@@ -5711,6 +5759,76 @@ function showLogin() {
   const tut2 = document.getElementById('tutorial-overlay')
   if (tut2) tut2.style.display = 'none'
   stopClock()
+  nabidniZnovuNacteni()
+}
+
+// POŘÁD PŘIHLÁŠENÝ, JEN SE NENAČETLO. Když prohlížeč relaci pořád drží
+// (pomalý start, profil se nenačetl, výjimka při startu), nemá člověk psát
+// heslo znovu — každé nové přihlášení navíc zakládá další relaci a ta stará
+// zůstane viset. Místo toho tlačítko „Zkusit znovu“ a pár pokusů samo
+// (po návratu spojení a nejvýš 6× po 30 s). Po tlačítku Odhlásit nebo když
+// relaci zahodí knihovna, v prohlížeči žádná není a nic z toho se neukáže.
+let _znovuBezi = false, _znovuInt = null, _znovuPokusu = 0
+function nabidniZnovuNacteni() {
+  const box = document.getElementById('login-znovu')
+  const maRelaci = !!lsGet(KLIC_RELACE)
+  if (box) box.style.display = maRelaci ? 'block' : 'none'
+  if (_znovuInt) { clearInterval(_znovuInt); _znovuInt = null }
+  if (maRelaci) {
+    _znovuPokusu = 0
+    _znovuInt = setInterval(() => {
+      const login = document.getElementById('login')
+      if (!login || login.style.display === 'none' || !lsGet(KLIC_RELACE) || ++_znovuPokusu > 6) {
+        clearInterval(_znovuInt); _znovuInt = null; return
+      }
+      if (document.visibilityState === 'visible' && navigator.onLine !== false) zkusZnovuNacist(true)
+    }, 30000)
+  }
+  ukazDenikNaPrihlaseni()
+}
+window.addEventListener('online', () => {
+  const login = document.getElementById('login')
+  if (login && login.style.display !== 'none' && lsGet(KLIC_RELACE)) zkusZnovuNacist(true)
+})
+async function zkusZnovuNacist(samo) {
+  if (_znovuBezi || initAppRunning || authHandling) return
+  _znovuBezi = true
+  const box = document.getElementById('login-znovu')
+  const btn = box && box.querySelector('button')
+  if (btn) { btn.disabled = true; btn.textContent = 'Načítám…' }
+  try {
+    const { data } = await sb.auth.getSession()
+    const u = data && data.session && data.session.user
+    if (!u) { if (box) box.style.display = 'none'; return }
+    zapisDenik('zkouším znovu', samo ? 'samo' : 'tlačítkem')
+    appInitialized = true
+    authHandling = true
+    startAuthTimeout()
+    try { await initApp(u) } finally { clearAuthTimeout(); authHandling = false }
+  } catch (e) {
+    zapisDenik('zkouším znovu — chyba', e && e.message)
+  } finally {
+    _znovuBezi = false
+    if (btn) { btn.disabled = false; btn.textContent = 'Zkusit znovu' }
+  }
+}
+// Pro kancelář: pod přihlášením drobně posledních pár záznamů deníku,
+// ať jde vyfotit, proč to člověka odhlásilo.
+function ukazDenikNaPrihlaseni() {
+  const el = document.getElementById('login-denik')
+  if (!el) return
+  let d = []
+  try { d = JSON.parse(lsGet(DENIK_KLIC) || '[]') } catch (e) {}
+  const vcera = Date.now() - 24 * 3600 * 1000
+  d = d.filter(z => Date.parse(z.t) > vcera).slice(-8)
+  // Jen když se stalo něco nečekaného — ne u prvního otevření nebo po Odhlásit.
+  const necekane = d.some(z => (/^(server|bez spojení)/.test(z.co) && !/^2/.test(z.d || '')) ||
+    (z.co === 'přihlašovací obrazovka' && !/^(nepřihlášen|tlačítko Odhlásit|\?)$/.test(z.d || '')))
+  if (!necekane) { el.style.display = 'none'; return }
+  const cas = t => { const x = new Date(t); return x.toLocaleDateString('cs-CZ', { day: 'numeric', month: 'numeric' }) + ' ' + x.toLocaleTimeString('cs-CZ', { hour: '2-digit', minute: '2-digit' }) }
+  el.innerHTML = '<summary style="cursor:pointer">Proč mě to odhlásilo?</summary>' +
+    d.map(z => '<div>' + escAttr(cas(z.t) + ' · ' + z.co + (z.d ? ' · ' + z.d : '')) + '</div>').join('')
+  el.style.display = 'block'
 }
 
 function showAdmin(profile) {
@@ -6803,8 +6921,13 @@ async function doLogout() {
   // Odemčené Provize platí jen pro toho, kdo heslo zadal. Bez tohohle by se
   // na stejném počítači dostal k sazbám a odměnám i další přihlášený správce.
   try { sessionStorage.removeItem('provizeUnlocked') } catch(e) {}
-  try { await sb.auth.signOut() } catch(e) { console.error('signOut error:', e) }
-  showLogin()  // Vždy přejdi na login, i kdyby event selhal
+  // Odhlásit JEN tohle zařízení. signOut() bez parametru je v Supabase „global“
+  // a zruší přihlášení na všech zařízeních toho člověka: kdo se odhlásil
+  // v mobilu, tomu do hodiny spadl i počítač (jakmile mu vypršel přístupový
+  // token a obnova byla odmítnutá). Admini to hlásili 10. 10. 2026.
+  window._vlastniOdhlaseni = Date.now()
+  try { await sb.auth.signOut({ scope: 'local' }) } catch(e) { console.error('signOut error:', e) }
+  showLogin('tlačítko Odhlásit')  // Vždy přejdi na login, i kdyby event selhal
 }
 
 
@@ -12049,7 +12172,7 @@ async function loadTodayTimeline() {
           // Odchylka se počítá z nejdřívějšího příchodu a nejpozdějšího odchodu
           // dne — tedy z toho, co je v řádku vidět.
           const odch = odchylkaOdDoby({ check_in: g.check_in, check_out: g.check_out,
-                                        odchylka_ok: g.okVse }, g.tym)
+                                        odchylka_ok: g.okVse, worker_id: g.worker_id }, g.tym)
           // Do hledání patří i firma a podskupina, ať jde vypsat celá parta najednou
           const searchKey = [g.name, g.firm, g.sub].filter(Boolean).join(' ')
           return groupHead + `
@@ -18441,6 +18564,14 @@ function renderTeamMembers(t, members, qWorker, profLabels) {
     const vyk = patriDoVykazu(m)
     const match = qWorker && (m.full_name||'').toLowerCase().includes(qWorker)
     const mv = subs.length ? moveOptions(m.subteam_id).replace('%MID%', m.id) : ''
+    const sm = smenaClena(t, m.id)
+    const smVyber = dvaSmenyTymu(t) ? `<select onclick="event.stopPropagation()" onchange="event.stopPropagation();nastavSmenuClena('${t.id}', '${m.id}', this.value, this)"
+        title="Jakou směnu tenhle člověk dělá. Podle ní se hlídá, jestli přišel a odešel včas. Bez směny se nehlídá."
+        style="font-size:11px;padding:2px 4px;border:1.5px solid ${sm ? 'var(--brd)' : 'var(--amber)'};border-radius:6px;background:${sm ? 'var(--bg2)' : '#fdf3e3'};color:var(--text2);cursor:pointer;font-family:inherit;font-weight:700">
+        <option value="" ${!sm ? 'selected' : ''}>⏰ směna?</option>
+        <option value="1" ${sm === 1 ? 'selected' : ''}>⏰ 1. směna</option>
+        <option value="2" ${sm === 2 ? 'selected' : ''}>⏰ 2. směna</option>
+      </select>` : ''
     return `
       <div style="display:flex;justify-content:space-between;align-items:center;gap:6px;padding:8px 10px;background:${match?'#fff8cc':'var(--bg)'};border-radius:8px">
         <div onclick="openWorkerModal('${m.id}')" style="cursor:pointer;flex:1;min-width:0" title="Zobrazit detail pracovníka">
@@ -18454,6 +18585,7 @@ function renderTeamMembers(t, members, qWorker, profLabels) {
         <select onclick="event.stopPropagation()" onchange="event.stopPropagation();nastavRezimPrestavky('${m.id}', this.value, this)" title="Jak tenhle člověk zapisuje přestávku v mobilu. „30 min" = jedno tlačítko na půl hodiny. „1 hodina" = jedno tlačítko na hodinu. „30 min, i víckrát" = může si dát půlhodinových pauz víc. „začátek a konec" = původní způsob na dva kliky." style="font-size:11px;padding:2px 4px;border:1px solid var(--brd);border-radius:6px;background:var(--bg2);color:var(--text2);cursor:pointer;font-family:inherit;max-width:120px">
           ${rezimOptions(rezimPrestavky(m))}
         </select>
+        ${smVyber}
         ${mv}
         <button class="x-close" onclick="event.stopPropagation();removeFromTeam('${m.id}')" title="Odebrat z týmu" style="padding:2px 8px;font-size:11px;border:1px solid var(--brd);border-radius:6px;cursor:pointer;background:none;font-family:inherit;flex-shrink:0"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:20px;height:20px;display:block"><path d="M18 6L6 18M6 6l12 12"/></svg></button>
       </div>`
@@ -18777,7 +18909,7 @@ function pravidlaFirmyHtml(t) {
     ${maPodskupiny ? `<div style="font-size:11.5px;color:var(--text3);margin-bottom:4px">Jen jednu podskupinu zapnete přímo u ní výš.</div>` : ''}
     <div style="display:flex;align-items:center;gap:7px;flex-wrap:wrap;font-size:12.5px;font-weight:700;color:var(--text2)"
       title="Kdo přijde nebo odejde mimo tuhle dobu, bude ve výkazu svítit modře, dokud to neopravíte nebo neoznačíte jako v pořádku. Na hodiny ani faktury to vliv nemá.">
-      <span>⏰ Běžná pracovní doba</span>
+      <span>⏰ ${dvaSmenyTymu(t) ? 'Směna 1' : 'Běžná pracovní doba'}</span>
       <input type="time" id="tym-od-${t.id}" value="${hhmm(t.prac_doba_od)}" ${vyp} onchange="nastavPracDobuTymu('${t.id}')"
         style="min-height:40px;padding:6px 8px;border:1.5px solid var(--brd);border-radius:8px;font-family:inherit;font-size:13px">
       <span>–</span>
@@ -18786,9 +18918,63 @@ function pravidlaFirmyHtml(t) {
       ${t.prac_doba_od || t.prac_doba_do ? `<button onclick="event.stopPropagation();nastavPracDobuTymu('${t.id}', true)" ${vyp}
         style="min-height:40px;padding:6px 10px;border:1px solid var(--brd);border-radius:8px;background:#fff;cursor:pointer;font-family:inherit;font-size:12px">zrušit</button>` : ''}
     </div>
+    ${smena2Html(t)}
     ${firma ? podpisFirmyHtml(firma) : ''}
     ${migrace}${migrace2}
   </div>`
+}
+
+// Druhá směna skupiny. Nabídne se, až má skupina vyplněnou směnu 1.
+function smena2Html(t) {
+  if (!t || !t.prac_doba_od || !t.prac_doba_do) return ''
+  const hhmm = (v) => (v ? String(v).slice(0, 5) : '')
+  const maSloupce = ('prac_doba2_od' in t) && ('smeny' in t)
+  const vyp = maSloupce ? '' : 'disabled'
+  const dve = dvaSmenyTymu(t)
+  const bezSmeny = dve ? (_workersCache || []).filter(w => String(w.team_id) === String(t.id)
+    && w.is_active !== false && w.can_track_hours !== false && !smenaClena(t, w.id)).length : 0
+  return `<div style="display:flex;align-items:center;gap:7px;flex-wrap:wrap;font-size:12.5px;font-weight:700;color:var(--text2)"
+      title="Když se u firmy dělají dvě pracovní doby: vyplňte směnu 2 a u každého člověka výš vyberte, jakou směnu má. Kdo vybranou nemá, nehlídá se.">
+      <span>⏰ Směna 2</span>
+      <input type="time" id="tym-od2-${t.id}" value="${hhmm(t.prac_doba2_od)}" ${vyp} onchange="nastavPracDobuTymu('${t.id}', false, 2)"
+        style="min-height:40px;padding:6px 8px;border:1.5px solid var(--brd);border-radius:8px;font-family:inherit;font-size:13px">
+      <span>–</span>
+      <input type="time" id="tym-do2-${t.id}" value="${hhmm(t.prac_doba2_do)}" ${vyp} onchange="nastavPracDobuTymu('${t.id}', false, 2)"
+        style="min-height:40px;padding:6px 8px;border:1.5px solid var(--brd);border-radius:8px;font-family:inherit;font-size:13px">
+      ${t.prac_doba2_od || t.prac_doba2_do ? `<button onclick="event.stopPropagation();nastavPracDobuTymu('${t.id}', true, 2)" ${vyp}
+        style="min-height:40px;padding:6px 10px;border:1px solid var(--brd);border-radius:8px;background:#fff;cursor:pointer;font-family:inherit;font-size:12px">zrušit</button>` : ''}
+    </div>
+    ${maSloupce ? '' : `<span style="font-size:11px;color:var(--amber);font-weight:700">⚠️ pro dvě směny spusťte migraci supabase-migrace-dve-smeny.sql</span>`}
+    ${dve ? `<div style="font-size:11.5px;color:${bezSmeny ? 'var(--amber)' : 'var(--text3)'};font-weight:600">${bezSmeny
+      ? '⚠️ ' + bezSmeny + (bezSmeny === 1 ? ' člověk nemá' : (bezSmeny < 5 ? ' lidé nemají' : ' lidí nemá')) + ' vybranou směnu — jejich příchody a odchody se nehlídají. Směnu vyberete u jména výš.'
+      : 'Každý ve skupině má vybranou směnu 1 nebo 2 (u jména výš).'}</div>` : ''}`
+}
+
+// Směna jednoho člověka (1, 2, nebo nic). Uloží se do teams.smeny; před
+// zápisem se načte čerstvý stav, ať si dva správci nepřepíšou změny.
+async function nastavSmenuClena(teamId, workerId, hodnota, el) {
+  const n = Number(hodnota)
+  const { data: cerstve, error: e1 } = await sb.from('teams').select('id, smeny').eq('id', teamId).maybeSingle()
+  if (e1 || !cerstve) {
+    showToast(e1 && /smeny|column|schema cache/i.test(e1.message || '')
+      ? '❌ Chybí sloupec — spusťte migraci supabase-migrace-dve-smeny.sql'
+      : '❌ Směna se neuložila' + (e1 ? ': ' + e1.message : ''))
+    renderTeams(); return
+  }
+  const smeny = Object.assign({}, (cerstve.smeny && typeof cerstve.smeny === 'object') ? cerstve.smeny : {})
+  if (n === 1 || n === 2) smeny[String(workerId)] = n
+  else delete smeny[String(workerId)]
+  const { data, error } = await sb.from('teams').update({ smeny }).eq('id', teamId).select('id, smeny')
+  if (error || !data || !data.length) {
+    showToast('❌ Směna se neuložila' + (error ? ': ' + error.message : ' — zkontrolujte oprávnění'))
+    renderTeams(); return
+  }
+  const t = (_teamsCache || []).find(x => String(x.id) === String(teamId))
+  if (t) t.smeny = data[0].smeny
+  const w = (_workersCache || []).find(x => String(x.id) === String(workerId))
+  showToast((n === 1 || n === 2 ? '⏰ ' + (w ? w.full_name + ': ' : '') + 'směna ' + n
+    : '⏰ ' + (w ? w.full_name + ': ' : '') + 'bez směny — nehlídá se'))
+  renderTeams()
 }
 
 // ✍️ PODPIS VÝKAZU U FIRMY (majitel 2. 10. 2026): „já si musím vybrat, u jaké
@@ -18884,9 +19070,10 @@ async function nastavGpsPodskupiny(subteamId, el) {
   renderTeams()
 }
 
-async function nastavPracDobuTymu(teamId, zrusit) {
-  const odEl = document.getElementById('tym-od-' + teamId)
-  const doEl = document.getElementById('tym-do-' + teamId)
+async function nastavPracDobuTymu(teamId, zrusit, smena) {
+  const dva = smena === 2
+  const odEl = document.getElementById((dva ? 'tym-od2-' : 'tym-od-') + teamId)
+  const doEl = document.getElementById((dva ? 'tym-do2-' : 'tym-do-') + teamId)
   const od = zrusit ? '' : (odEl?.value || '')
   const doo = zrusit ? '' : (doEl?.value || '')
   // Jeden čas bez druhého nic neznamená — neukládat, jen říct.
@@ -18896,17 +19083,21 @@ async function nastavPracDobuTymu(teamId, zrusit) {
   }
   // Noční směnu firma jako běžnou dobu nemá; začátek po konci je skoro jistě překlep.
   if (!zrusit && od >= doo) { showToast('⏰ Začátek musí být dřív než konec'); return }
-  const zapis = { prac_doba_od: od || null, prac_doba_do: doo || null }
-  const { data, error } = await sb.from('teams').update(zapis).eq('id', teamId).select('id, prac_doba_od, prac_doba_do')
+  const sOd = dva ? 'prac_doba2_od' : 'prac_doba_od', sDo = dva ? 'prac_doba2_do' : 'prac_doba_do'
+  const zapis = { [sOd]: od || null, [sDo]: doo || null }
+  // Zrušit směnu 1 a nechat jen směnu 2 nedává smysl — zruší se obě.
+  if (!dva && zrusit) { const t0 = (_teamsCache || []).find(x => x.id === teamId); if (t0 && ('prac_doba2_od' in t0)) { zapis.prac_doba2_od = null; zapis.prac_doba2_do = null } }
+  const { data, error } = await sb.from('teams').update(zapis).eq('id', teamId).select('id, ' + Object.keys(zapis).join(', '))
   if (error || !data || !data.length) {
     showToast(error && /prac_doba|column|schema cache/i.test(error.message || '')
-      ? '❌ Chybí sloupce — spusťte migraci supabase-migrace-tymy-oznameni-puntiky.sql'
+      ? '❌ Chybí sloupce — spusťte migraci ' + (dva ? 'supabase-migrace-dve-smeny.sql' : 'supabase-migrace-tymy-oznameni-puntiky.sql')
       : '❌ Pracovní doba se neuložila' + (error ? ': ' + error.message : ' — zkontrolujte oprávnění'))
     return
   }
   const t = (_teamsCache || []).find(x => x.id === teamId)
-  if (t) { t.prac_doba_od = data[0].prac_doba_od; t.prac_doba_do = data[0].prac_doba_do }
-  showToast(zrusit ? '✅ Běžná pracovní doba zrušena' : '✅ Běžná pracovní doba ' + od + '–' + doo)
+  if (t) Object.keys(zapis).forEach(k => { t[k] = data[0][k] })
+  const co = dva ? 'Směna 2' : (t && dvaSmenyTymu(t) ? 'Směna 1' : 'Běžná pracovní doba')
+  showToast(zrusit ? '✅ ' + co + ' zrušena' : '✅ ' + co + ' ' + od + '–' + doo)
   renderTeams()
 }
 
@@ -36768,7 +36959,27 @@ function stavBezPodpisu() {
   if (!stavBezPodpisu.s) stavBezPodpisu.s = { hodnota: null, kdy: 0 }
   return stavBezPodpisu.s
 }
-function jeBezPodpisu() { return stavBezPodpisu().hodnota === true }
+// Poslední známá odpověď se pamatuje i v prohlížeči (pro každého člověka
+// zvlášť). Majitel 10. 10. 2026: lidem u firmy bez podpisu v pátek pořád
+// svítilo červené „Nezapomeňte si podepsat výkaz" — po otevření appky
+// se rozsvítilo dřív, než přišla odpověď databáze, a na slabém signálu
+// (odpověď nedorazila do 5 s) svítilo dál. Teď se bere uložená odpověď
+// z minula a dokud není známá žádná, nic se nerozsvítí.
+function klicBezPodpisu() {
+  return 'bez-podpisu-' + ((typeof currentUser !== 'undefined' && currentUser && currentUser.id) || '')
+}
+function jeBezPodpisu() {
+  const st = stavBezPodpisu()
+  if (st.hodnota !== null) return st.hodnota === true
+  return lsGet(klicBezPodpisu()) === '1'
+}
+// Víme už, jestli firma podpis chce? (odpověď teď, uložená z minula, nebo
+// aspoň dokončený pokus — po neúspěšném pokusu bez uložené odpovědi se
+// připomínka ukáže jako dřív, ať o ni nepřijdou firmy, kde se podepisuje).
+function znamePodpisFirmy() {
+  const st = stavBezPodpisu()
+  return st.hodnota !== null || st.zkouseno === true || lsGet(klicBezPodpisu()) !== null
+}
 function vetaBezPodpisu() {
   return 'U této firmy není vyžadován podpis vašich odpracovaných hodin. Veškeré hodiny vedeme v elektronické podobě každý den.'
 }
@@ -36780,10 +36991,11 @@ async function mojeFirmaBezPodpisu(obnovit) {
       sb.rpc('muj_bez_podpisu_vykazu'),
       new Promise((_, ne) => setTimeout(() => ne(new Error('timeout')), 5000))
     ])
-    if (r?.error) return st.hodnota === true
-    stavBezPodpisu.s = { hodnota: r?.data === true, kdy: Date.now() }
+    if (r?.error) { st.zkouseno = true; return jeBezPodpisu() }
+    stavBezPodpisu.s = { hodnota: r?.data === true, kdy: Date.now(), zkouseno: true }
+    lsSet(klicBezPodpisu(), stavBezPodpisu.s.hodnota ? '1' : '0')
     return stavBezPodpisu.s.hodnota
-  } catch (e) { return st.hodnota === true }
+  } catch (e) { st.zkouseno = true; return jeBezPodpisu() }
 }
 // Karta výkazu k podpisu, nebo jen věta — podle pravidla firmy.
 function prepniKartuVykazu() {
@@ -36814,7 +37026,7 @@ function pripomenVykazVPatek(profil, datumProZkousku) {
   const p = profil || (typeof currentProfile !== 'undefined' ? currentProfile : null)
   if (p && p.role === 'admin') return
   // U firmy bez podpisu výkazu se v pátek nic nerozsvítí (majitel 2. 10. 2026).
-  const je = jePatek(datumProZkousku) && !jeBezPodpisu()
+  const je = jePatek(datumProZkousku) && znamePodpisFirmy() && !jeBezPodpisu()
   const navEl = document.getElementById('mob-nav-vykaz')
   const banner = document.getElementById('mob-vykaz-pripominka')
 
@@ -37554,12 +37766,41 @@ function attAllBreaks(r) {
 // Tolerance 10 minut, stejně jako „hájená doba" HAJENA_DOBA_MIN u příchodu —
 // ať se nesvítí kvůli minutě, o kterou se minulo tlačítko.
 const TOLERANCE_DOBY_MIN = 10
+// Dřívější PŘÍCHOD a pozdější ODCHOD svítí až po 30 minutách (majitel
+// 10. 10. 2026: „když půjde do práce o 30 min dřív, ukáže se to, i když
+// odejde o 30 min déle" — u směny 7:00–16:00 tedy před 6:30 a po 16:30).
+// Pozdní příchod a dřívější odchod dál s tolerancí 10 minut.
+const TOLERANCE_NAVIC_MIN = 30
+// DVĚ SMĚNY (majitel 10. 10. 2026: „u nějaké firmy se dělají dvě pracovní
+// doby — u každého v Týmech zaškrtnu, že má směnu 1 nebo 2"). Skupina má
+// směnu 1 (prac_doba_od/do) a může mít směnu 2 (prac_doba2_od/do); kdo má
+// jakou, je v teams.smeny ({ id pracovníka: 1 | 2 }). Dokud skupina směnu 2
+// nemá, platí směna 1 pro všechny (jako dřív). Když ji má, hlídá se jen ten,
+// komu je směna vybraná — kdo vybranou nemá, nehlídá se (majitel).
+function dvaSmenyTymu(tym) {
+  return !!(tym && tym.prac_doba_od && tym.prac_doba_do && tym.prac_doba2_od && tym.prac_doba2_do)
+}
+function smenaClena(tym, workerId) {
+  const m = (tym && tym.smeny && typeof tym.smeny === 'object') ? tym.smeny : {}
+  const n = Number(m[String(workerId)])
+  return n === 1 || n === 2 ? n : null
+}
+function dobaClena(tym, workerId) {
+  if (!tym || !tym.prac_doba_od || !tym.prac_doba_do) return null
+  if (!dvaSmenyTymu(tym)) return { od: tym.prac_doba_od, do: tym.prac_doba_do }
+  const n = smenaClena(tym, workerId)
+  if (n === 1) return { od: tym.prac_doba_od, do: tym.prac_doba_do }
+  if (n === 2) return { od: tym.prac_doba2_od, do: tym.prac_doba2_do }
+  return null
+}
 function odchylkaOdDoby(rec, tym) {
   const nic = { prichod: null, odchod: null }
-  if (!rec || !tym || !tym.prac_doba_od || !tym.prac_doba_do) return nic
+  if (!rec || !tym) return nic
+  const doba = dobaClena(tym, rec.worker_id)
+  if (!doba) return nic
   if (rec.odchylka_ok === true) return nic
-  const od = timeToMin(String(tym.prac_doba_od).slice(0, 5))
-  const doo = timeToMin(String(tym.prac_doba_do).slice(0, 5))
+  const od = timeToMin(String(doba.od).slice(0, 5))
+  const doo = timeToMin(String(doba.do).slice(0, 5))
   if (od == null || doo == null) return nic
   const ci = rec.check_in ? timeToMin(String(rec.check_in).slice(0, 5)) : null
   const co = rec.check_out ? timeToMin(String(rec.check_out).slice(0, 5)) : null
@@ -37568,8 +37809,8 @@ function odchylkaOdDoby(rec, tym) {
   const nocni = ci != null && co != null && co < ci
   const T = TOLERANCE_DOBY_MIN
   return {
-    prichod: ci == null ? null : (ci < od - T ? 'dřív' : (ci > od + T ? 'pozdě' : null)),
-    odchod: (co == null || nocni) ? null : (co < doo - T ? 'dřív' : (co > doo + T ? 'pozdě' : null))
+    prichod: ci == null ? null : (ci < od - TOLERANCE_NAVIC_MIN ? 'dřív' : (ci > od + T ? 'pozdě' : null)),
+    odchod: (co == null || nocni) ? null : (co < doo - T ? 'dřív' : (co > doo + TOLERANCE_NAVIC_MIN ? 'pozdě' : null))
   }
 }
 
