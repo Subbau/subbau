@@ -4854,7 +4854,7 @@ async function submitAdminSignatureWithPlacement() {
 // Po nahrání nové verze se snadno pozná, jestli se opravdu nasadila: otevřete
 // appku, zmáčkněte F12 (na Macu ⌥⌘I) a v konzoli je vypsané tohle datum. Když
 // tam svítí starší, prohlížeč nebo GitHub drží starou verzi.
-const SUBBAU_VERZE = '2026-10-10 e — Přihlášení drží, dvě směny, tolerance 30 min'
+const SUBBAU_VERZE = '2026-10-10 g — Faktury: Odložit, tisk k úhradě, směna u jména'
 console.log('SubBau docházka — verze ' + SUBBAU_VERZE)
 // Verze i dole v menu správce. Když někdo novinku „nevidí", podle ní se hned
 // pozná, jestli nemá otevřenou starou kopii appky — bez hledání v konzoli.
@@ -16909,25 +16909,32 @@ function firmaFaktury(r) {
 // týdnem; v hlavičce, kde je KW 39/26, tlačítko Vytisknout."
 // Tiskne se to, co je na obrazovce (hledání i filtry platí), jen ten týden,
 // po firmách jako v přehledu a se součty.
+// 10. 10. 2026 majitel: „ať je tam jméno, faktura, vzhled, počet hodin, číslo
+// týdne, firma a částka — a pozor, částky v tisku nesouhlasí s fakturovanou".
+// Nesouhlasily u faktur se zálohou: tisk ukazoval celkovou částku (total_amount),
+// faktura ale jako fakturovanou uvádí K ÚHRADĚ = celkem − záloha (cash_paid),
+// viz toPay při vykreslení faktury. Teď tisk ukazuje totéž co faktura.
 function tiskSoupisuFaktur(kw, rok) {
   const rows = (window._invZobrazene || []).filter(r => String(r.kw) === String(kw) && String(r.kw_year) === String(rok))
   if (!rows.length) { showToast('⚠️ V tomhle týdnu tu žádná faktura není'); return }
   const e = v => escAttr(v == null ? '' : String(v))
   const cislo = n => (Number(n) || 0).toFixed(2).replace('.', ',')
   const stav = { new: 'Nevyřízená', seen: 'Vyřízená', paid: 'Zaplacená' }
-  const datum = iso => { if (!iso) return '—'; const d = new Date(iso); return isNaN(d) ? '—' : d.toLocaleDateString('cs-CZ') }
   const firmy = new Map()
   rows.forEach(r => { const f = firmaFaktury(r); if (!firmy.has(f)) firmy.set(f, []); firmy.get(f).push(r) })
-  let hod = 0, kc = 0, zal = 0
+  const vzhled = r => { const i = Number(r.design_idx) || 1; return i + (NAZVY_VZHLEDU[i] ? ' — ' + NAZVY_VZHLEDU[i] : '') }
+  let hod = 0, kc = 0, zal = 0, celk = 0
   const telo = [...firmy.entries()].map(([firma, fr]) => {
     let fh = 0, fk = 0
     const radky = fr.map(r => {
       const h = Number(r.total_hours) || 0, c = Number(r.total_amount) || 0, z = Number(r.cash_paid) || 0
-      fh += h; fk += c; hod += h; kc += c; zal += z
+      const k = Math.round((c - z) * 100) / 100   // K ÚHRADĚ — jako na faktuře
+      fh += h; fk += k; hod += h; kc += k; zal += z; celk += c
       return `<tr><td>${e(r.worker?.full_name || r.supplier_name || '—')}${r.supplier_name && r.worker?.full_name && r.supplier_name !== r.worker.full_name ? `<div class="m">${e(r.supplier_name)}</div>` : ''}</td>
-        <td><b>${e(r.invoice_number || '—')}</b></td><td>KW ${e(r.kw)}/${e(r.kw_year)}</td><td>${e(r.customer_name || '—')}</td>
-        <td class="c">${cislo(h)} h</td><td class="c"><b>${cislo(c)} €</b>${z > 0 ? `<div class="m">záloha −${cislo(z)} €</div>` : ''}</td>
-        <td>${datum(r.sent_at)}</td><td>${e(stav[r.status || 'new'] || r.status)}</td></tr>`
+        <td><b>${e(r.invoice_number || '—')}</b></td><td>${e(vzhled(r))}</td>
+        <td class="c">${cislo(h)} h</td><td>KW ${e(r.kw)}/${e(r.kw_year)}</td><td>${e(r.customer_name || '—')}</td>
+        <td class="c"><b>${cislo(k)} €</b>${z > 0 ? `<div class="m">celkem ${cislo(c)} € − záloha ${cislo(z)} €</div>` : ''}</td>
+        <td>${e(stav[r.status || 'new'] || r.status)}${r.odlozeno_at ? '<div class="m">odloženo</div>' : ''}</td></tr>`
     }).join('')
     return `<tr class="f"><td colspan="8">${e(firma)} <span class="m">· ${fr.length} ${fr.length === 1 ? 'faktura' : (fr.length < 5 ? 'faktury' : 'faktur')} · ${cislo(fh)} h · ${cislo(fk)} €</span></td></tr>${radky}`
   }).join('')
@@ -16943,9 +16950,9 @@ function tiskSoupisuFaktur(kw, rok) {
 </style></head><body>
 <h1>Soupis faktur — KW ${e(kw)} / ${e(rok)}</h1>
 <p class="pod">SubBau s.r.o. · vytištěno ${new Date().toLocaleDateString('cs-CZ')} · ${rows.length} ${rows.length === 1 ? 'faktura' : (rows.length < 5 ? 'faktury' : 'faktur')}</p>
-<table><thead><tr><th>Pracovník</th><th>Číslo</th><th>Týden</th><th>Odběratel</th><th class="c">Hodiny</th><th class="c">Částka</th><th>Odesláno</th><th>Stav</th></tr></thead>
+<table><thead><tr><th>Jméno</th><th>Číslo faktury</th><th>Vzhled</th><th class="c">Hodiny</th><th>Týden</th><th>Firma</th><th class="c">Částka k úhradě</th><th>Stav</th></tr></thead>
 <tbody>${telo}</tbody>
-<tfoot><tr><td colspan="4">Celkem za KW ${e(kw)}/${e(rok)}</td><td class="c">${cislo(hod)} h</td><td class="c">${cislo(kc)} €${zal > 0 ? `<div class="m">zálohy −${cislo(zal)} €</div>` : ''}</td><td colspan="2"></td></tr></tfoot>
+<tfoot><tr><td colspan="3">Celkem za KW ${e(kw)}/${e(rok)}</td><td class="c">${cislo(hod)} h</td><td colspan="2"></td><td class="c">${cislo(kc)} €${zal > 0 ? `<div class="m">celkem ${cislo(celk)} € − zálohy ${cislo(zal)} €</div>` : ''}</td><td></td></tr></tfoot>
 </table></body></html>`
   showPrintPreview(html, 'Rechnungsuebersicht_KW' + kw + '_' + rok + '.html')
 }
@@ -17055,7 +17062,7 @@ function renderWorkerInvoices() {
       }
     }
     return oddelovac + `
-    <tr>
+    <tr${r.odlozeno_at ? ' data-odlozeno="1" style="background:#dbeafe" title="Odložená faktura"' : ''}>
       <!-- Fotka je tu 28 px, ne 40 jako v denním přehledu. Tahle tabulka má
            deset sloupců a při okně 1280 jí zbývá asi 1005 px, zatímco potřebuje
            nejmíň 1023 — každý pixel navíc znamená rolování do stran. Změřeno
@@ -17099,7 +17106,7 @@ function renderWorkerInvoices() {
         const t = dt(r.sent_at), i = t.lastIndexOf(' ')
         return i > 0 ? t.slice(0, i) + '<div style="font-size:11px;color:var(--text3)">' + t.slice(i + 1) + '</div>' : t
       })()}${r.sent_via === 'email' ? '<div style="font-size:11px;color:var(--text3)">e-mailem</div>' : ''}</td>
-      <td>${statusPill(r.status)}</td>
+      <td>${statusPill(r.status)}${r.odlozeno_at ? `<div style="font-size:11px;font-weight:800;color:#1d4ed8;margin-top:3px;white-space:nowrap">⏸ odloženo ${_invDmy(String(r.odlozeno_at).slice(0, 10))}</div>` : ''}</td>
       <td>
         <div style="display:flex;gap:4px;flex-wrap:wrap">
           ${r.pdf_url ? `<button onclick="openPdfUrl('${jsStr(r.pdf_url)}')" style="font-size:11px;padding:3px 8px;border:1px solid var(--blue);border-radius:6px;cursor:pointer;background:var(--bg2);color:var(--blue);font-family:inherit"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:1em;height:1em;flex-shrink:0;vertical-align:-2px"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg> Zobrazit</button>` : '<span style="font-size:11px;color:var(--text3)">bez PDF</span>'}
@@ -17110,6 +17117,9 @@ function renderWorkerInvoices() {
           ${(r.status || 'new') === 'new' ? `<button onclick="setInvoiceStatus('${jsStr(r.id)}','seen')" style="font-size:11px;padding:3px 8px;border:1px solid var(--green);border-radius:6px;cursor:pointer;background:var(--green-l);color:var(--green);font-family:inherit"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:1em;height:1em;flex-shrink:0;vertical-align:-2px"><path d="M20 6 9 17l-5-5"/></svg> Vyřídit</button>` : ''}
           ${(r.status || 'new') !== 'paid' ? `<button onclick="setInvoiceStatus('${jsStr(r.id)}','paid')" style="font-size:11px;padding:3px 8px;border:1px solid var(--amber);border-radius:6px;cursor:pointer;background:var(--amber-l);color:var(--amber);font-family:inherit">Zaplaceno</button>` : ''}
           ${(r.status || 'new') === 'paid' ? `<button onclick="setInvoiceStatus('${jsStr(r.id)}','seen')" style="font-size:11px;padding:3px 8px;border:1px solid var(--brd);border-radius:6px;cursor:pointer;background:#fff;color:var(--tx2);font-family:inherit">Zrušit zaplaceno</button>` : ''}
+          ${r.odlozeno_at
+            ? `<button onclick="odlozFakturu('${jsStr(r.id)}', false)" title="Zrušit odložení — řádek přestane být modrý" style="font-size:11px;padding:3px 8px;border:1px solid #1d4ed8;border-radius:6px;cursor:pointer;background:#fff;color:#1d4ed8;font-family:inherit;font-weight:700">↩ Zrušit odložení</button>`
+            : `<button onclick="odlozFakturu('${jsStr(r.id)}', true)" title="Odložit fakturu — řádek zmodrá, ať je vidět, že čeká. Na částky ani na Zaplaceno to nemá vliv." style="font-size:11px;padding:3px 8px;border:1px solid #1d4ed8;border-radius:6px;cursor:pointer;background:#dbeafe;color:#1d4ed8;font-family:inherit;font-weight:700">⏸ Odložit</button>`}
           <button onclick="deleteWorkerInvoice('${jsStr(r.id)}')" title="Smazat" style="font-size:11px;padding:3px 8px;border:1px solid var(--red);border-radius:6px;cursor:pointer;background:none;color:var(--red);font-family:inherit"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:1em;height:1em;flex-shrink:0;vertical-align:-2px"><path d="M3 6h18M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6M14 11v6"/></svg></button>
         </div>
       </td>
@@ -17233,6 +17243,30 @@ async function syncInvoicePaidFromProvizeDavka(ids, periodKey, paid) {
     refreshInvoiceBadge()
   }
   return { error, count: (data || []).length }
+}
+
+// ODLOŽIT FAKTURU (majitel 10. 10. 2026: „tlačítko odložit, a když na něj
+// kliknu, ať ten řádek zmodrá"). Jen značka pro kancelář, uložená u faktury
+// (worker_invoices.odlozeno_at), takže ji vidí všichni správci. Na částky,
+// Zaplaceno ani Provize nemá vliv. Druhým klikem se odložení zruší.
+async function odlozFakturu(id, zapnout) {
+  const kdy = zapnout ? new Date().toISOString() : null
+  const { data, error } = await sb.from('worker_invoices').update({ odlozeno_at: kdy }).eq('id', id).select('id, odlozeno_at')
+  if (error) {
+    showToast(/odlozeno_at|column|schema cache/i.test(error.message || '')
+      ? '❌ Chybí sloupec — spusťte migraci supabase-migrace-faktury-odlozit.sql'
+      : '❌ Neuložilo se: ' + error.message)
+    return
+  }
+  if (!data || !data.length) {
+    showToast('❌ Faktura se nezměnila — možná ji mezitím někdo smazal. Načítám znovu.')
+    loadWorkerInvoices()
+    return
+  }
+  const row = _invCache.find(r => r.id === id)
+  if (row) row.odlozeno_at = data[0].odlozeno_at
+  renderWorkerInvoices()
+  showToast(zapnout ? '⏸ Faktura odložená' : '↩ Odložení zrušeno')
 }
 
 async function setInvoiceStatus(id, status) {
@@ -18567,17 +18601,20 @@ function renderTeamMembers(t, members, qWorker, profLabels) {
     const sm = smenaClena(t, m.id)
     const smVyber = dvaSmenyTymu(t) ? `<select onclick="event.stopPropagation()" onchange="event.stopPropagation();nastavSmenuClena('${t.id}', '${m.id}', this.value, this)"
         title="Jakou směnu tenhle člověk dělá. Podle ní se hlídá, jestli přišel a odešel včas. Bez směny se nehlídá."
-        style="font-size:11px;padding:2px 4px;border:1.5px solid ${sm ? 'var(--brd)' : 'var(--amber)'};border-radius:6px;background:${sm ? 'var(--bg2)' : '#fdf3e3'};color:var(--text2);cursor:pointer;font-family:inherit;font-weight:700">
-        <option value="" ${!sm ? 'selected' : ''}>⏰ směna?</option>
-        <option value="1" ${sm === 1 ? 'selected' : ''}>⏰ 1. směna</option>
-        <option value="2" ${sm === 2 ? 'selected' : ''}>⏰ 2. směna</option>
+        style="flex:0 0 auto;width:auto;max-width:max-content;font-size:11px;padding:2px 4px;border:1.5px solid ${sm ? 'var(--brd)' : 'var(--amber)'};border-radius:6px;background:${sm ? 'var(--bg2)' : '#fdf3e3'};color:var(--text2);cursor:pointer;font-family:inherit;font-weight:700">
+        <option value="" ${!sm ? 'selected' : ''}>⏰ směna ?</option>
+        <option value="1" ${sm === 1 ? 'selected' : ''}>⏰ směna 1</option>
+        <option value="2" ${sm === 2 ? 'selected' : ''}>⏰ směna 2</option>
       </select>` : ''
     return `
-      <div style="display:flex;justify-content:space-between;align-items:center;gap:6px;padding:8px 10px;background:${match?'#fff8cc':'var(--bg)'};border-radius:8px">
-        <div onclick="openWorkerModal('${m.id}')" style="cursor:pointer;flex:1;min-width:0" title="Zobrazit detail pracovníka">
+      <div style="display:flex;flex-wrap:wrap;justify-content:space-between;align-items:center;gap:6px;padding:8px 10px;background:${match?'#fff8cc':'var(--bg)'};border-radius:8px">
+        <div onclick="openWorkerModal('${m.id}')" style="cursor:pointer;flex:1 1 150px;min-width:130px" title="Zobrazit detail pracovníka">
           <span style="font-size:13px;font-weight:${match?'800':'600'};color:var(--blue)">${escAttr(m.full_name)} ↗</span>
           <span style="font-size:11px;color:var(--text3);margin-left:6px">${profLabels[m.role]||''}</span>
         </div>
+        <!-- Ovládání pohromadě: když se do řádku nevejde, spadne celé pod jméno
+             (majitel 10. 10. 2026 — jména se mačkala a lezla přes zaškrtávátko). -->
+        <div style="display:flex;flex-wrap:wrap;align-items:center;justify-content:flex-end;gap:6px;flex:0 1 auto;margin-left:auto">
         <label onclick="event.stopPropagation()" title="Zaškrtnuto = tenhle člověk je ve výkazech hodin. Odškrtnutím ho z výkazů vyndáte — docházku si ale zapisuje dál a na provize ani faktury to nesahá. POZOR: platí to i zpětně, zmizí i z už odeslaných týdnů v odkazu pro odběratele." style="display:inline-flex;align-items:center;gap:4px;font-size:11px;color:${vyk?'var(--text3)':'var(--red)'};cursor:pointer;white-space:nowrap;font-weight:${vyk?'400':'700'}">
           <input type="checkbox" ${vyk?'checked':''} onchange="event.stopPropagation();prepniVeVykazu('${m.id}', this)" style="width:15px;height:15px;cursor:pointer;accent-color:var(--blue)">
           ${vyk ? 've výkazu' : 'mimo výkaz'}
@@ -18588,6 +18625,7 @@ function renderTeamMembers(t, members, qWorker, profLabels) {
         ${smVyber}
         ${mv}
         <button class="x-close" onclick="event.stopPropagation();removeFromTeam('${m.id}')" title="Odebrat z týmu" style="padding:2px 8px;font-size:11px;border:1px solid var(--brd);border-radius:6px;cursor:pointer;background:none;font-family:inherit;flex-shrink:0"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:20px;height:20px;display:block"><path d="M18 6L6 18M6 6l12 12"/></svg></button>
+        </div>
       </div>`
   }
 
