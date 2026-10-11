@@ -5570,7 +5570,7 @@ async function submitAdminSignatureWithPlacement() {
 // Po nahrání nové verze se snadno pozná, jestli se opravdu nasadila: otevřete
 // appku, zmáčkněte F12 (na Macu ⌥⌘I) a v konzoli je vypsané tohle datum. Když
 // tam svítí starší, prohlížeč nebo GitHub drží starou verzi.
-const SUBBAU_VERZE = '2026-10-11 d — Ubytování: lidé bez ubytování přetažením'
+const SUBBAU_VERZE = '2026-10-11 e — Firma v minulém týdnu podle docházky'
 console.log('StavKo docházka — verze ' + SUBBAU_VERZE)
 // Verze i dole v menu správce. Když někdo novinku „nevidí", podle ní se hned
 // pozná, jestli nemá otevřenou starou kopii appky — bez hledání v konzoli.
@@ -13474,6 +13474,15 @@ async function loadKWData() {
       days:{}, total:0 }
   })
 
+  // Firma v tomhle týdnu podle skupiny zapsané u docházky (poslední den týdne
+  // se zapsanou skupinou), ne podle dnešního zařazení — viz „firma v minulém
+  // týdnu" (majitel 11. 10. 2026). Podskupina je dnešní, takže u jiné firmy se nepíše.
+  const tymTydne = {}
+  ;(data||[]).forEach(r => {
+    if (!r.team_id || !(r.team_id in kwTeamName)) return
+    const d = tymTydne[r.worker_id]
+    if (!d || r.work_date >= d.den) tymTydne[r.worker_id] = { den: r.work_date, team: r.team_id }
+  })
   ;(data||[]).forEach(r => {
     const wid = r.worker_id
     if (jeSkrytaFirmaPracovnika(r.worker)) return   // schovaná firma
@@ -13481,6 +13490,13 @@ async function loadKWData() {
     // pracovník. Řádek mu vytvoříme, ať hodiny z přehledu nezmizí.
     if (!workers[wid]) workers[wid] = { id: wid, name: r.worker?.full_name, prof: r.worker?.profession, fotka: r.worker?.avatar_url || '',
       byvaly: r.worker?.is_active === false, days:{}, total:0 }
+    const tt = tymTydne[wid]
+    if (tt && !workers[wid]._firmaTydne) {
+      const dnes = (allWorkers.find(w => w.id === wid) || {}).team_id
+      workers[wid].firm = kwTeamName[tt.team] || ''
+      if (String(dnes || '') !== String(tt.team)) workers[wid].sub = ''
+      workers[wid]._firmaTydne = true
+    }
     const rawDay = new Date(r.work_date).getDay()
     const day = rawDay === 0 ? 7 : rawDay   // neděle 0 → 7 (poslední den týdne)
     let h = r.total_hours || 0
@@ -17579,6 +17595,7 @@ async function loadWorkerInvoices() {
   // ještě seznamem ID lidí ze schovaných firem — ať filtr nepovolí tiše.
   const skrytiFakt = await skrytiLideIds()
   _invCache = (data || []).filter(r => !jeSkrytaFirmaPracovnika(r.worker) && !skrytiFakt.has(r.worker_id))
+  await nactiTymyFaktur(_invCache)   // firma v týdnu faktury podle docházky
   fillInvoiceYearFilter()
   // Tabulka faktur má stovky řádků (480 faktur = ~31 000 prvků, ~190 ms zaseknutí).
   // Kreslí se jen do OTEVŘENÉ složky — při startu a obnově na pozadí se dřív kreslila
@@ -17616,11 +17633,33 @@ function _invSortValue(r, key) {
   }
 }
 
-// Firma (skupina) pracovníka u faktury. Bere se ŽIVĚ z _teamsCache, ne z řádku
-// faktury — firma je vlastnost člověka, ne dokladu, takže když se přeřadí,
-// projeví se to i u starších faktur. Stejně to dělá barva o kus níž.
+// Firma (skupina) pracovníka u faktury. OD 11. 10. 2026 podle toho, kde člověk
+// v týdnu faktury PRACOVAL (skupina zapsaná u docházky toho týdne, viz „firma
+// v minulém týdnu"), ne podle dnešního zařazení — po přesunu by se jinak
+// faktura za 40. týden ukázala, sčítala a hromadně platila u nové firmy.
+// Bez docházky se zapsanou skupinou platí dnešní zařazení jako dřív.
+const _tymFakturyTydne = new Map()   // 'worker|kw|rok' → team_id
+const _tymFakturyNacteno = new Set()  // 'worker|kw|rok', na které už se ptalo
+async function nactiTymyFaktur(radky) {
+  const chybi = (radky || []).filter(r => r.worker_id && r.kw && r.kw_year && !_tymFakturyNacteno.has(r.worker_id + '|' + r.kw + '|' + r.kw_year))
+  if (!chybi.length) return
+  const lide = [...new Set(chybi.map(r => r.worker_id))]
+  const roky = [...new Set(chybi.map(r => Number(r.kw_year)))]
+  try {
+    for (let od = 0; od < 100000; od += 1000) {
+      const { data, error } = await sb.from('attendance').select('worker_id, kw, kw_year, team_id, work_date')
+        .in('worker_id', lide).in('kw_year', roky).not('team_id', 'is', null)
+        .order('work_date', { ascending: true }).order('id').range(od, od + 999)
+      if (error) return
+      ;(data || []).forEach(a => _tymFakturyTydne.set(a.worker_id + '|' + a.kw + '|' + a.kw_year, a.team_id))   // poslední den týdne vyhrává
+      if (!data || data.length < 1000) break
+    }
+    chybi.forEach(r => _tymFakturyNacteno.add(r.worker_id + '|' + r.kw + '|' + r.kw_year))
+  } catch (e) { /* zůstane dnešní zařazení */ }
+}
 function firmaFaktury(r) {
-  const tid = r && (r.worker?.team_id ?? r.team_id)
+  const zTydne = r && r.worker_id && r.kw ? _tymFakturyTydne.get(r.worker_id + '|' + r.kw + '|' + r.kw_year) : null
+  const tid = zTydne ?? (r && (r.worker?.team_id ?? r.team_id))
   if (tid == null) return 'Bez firmy'
   const t = (_teamsCache || []).find(x => String(x.id) === String(tid))
   return (t && t.name) || 'Bez firmy'
@@ -20070,6 +20109,31 @@ function renderTeams() {
 }
 
 // Naplní rozbalovátka týdnů u každého týmu — jen týdny, kdy jeho členové reálně pracovali (mají docházku).
+// Docházka skupiny za období podle skupiny ZAPSANÉ u záznamu (viz výše „firma
+// v minulém týdnu"). Vrací pole, nebo null při chybě. Když databáze sloupec
+// team_id u docházky nezná, vrátí se k dnešním členům (jako dřív).
+async function dochazkaTymuZaObdobi(teamId, clenoveTed, od, doo, sloupce) {
+  const zaklad = () => sb.from('attendance').select(sloupce)
+  let q1 = zaklad().eq('team_id', teamId)
+  if (od) q1 = q1.gte('work_date', od)
+  if (doo) q1 = q1.lte('work_date', doo)
+  let q2 = clenoveTed.length ? zaklad().in('worker_id', clenoveTed).is('team_id', null) : null
+  if (q2 && od) q2 = q2.gte('work_date', od)
+  if (q2 && doo) q2 = q2.lte('work_date', doo)
+  const [a, b] = await Promise.all([q1, q2 || Promise.resolve({ data: [] })])
+  if (a.error && /team_id/i.test(a.error.message || '') && clenoveTed.length) {
+    let q = zaklad().in('worker_id', clenoveTed)
+    if (od) q = q.gte('work_date', od)
+    if (doo) q = q.lte('work_date', doo)
+    const c = await q
+    return c.error ? null : (c.data || [])
+  }
+  if (a.error || b.error) return null
+  const videno = new Set(), vse = []
+  ;[...(a.data || []), ...(b.data || [])].forEach(r => { if (r.id == null || !videno.has(r.id)) { videno.add(r.id); vse.push(r) } })
+  return vse
+}
+
 async function populateTeamPdfWeeks() {
   const selects = [...document.querySelectorAll('.team-pdf-week')]
   if (!selects.length) return
@@ -20079,18 +20143,20 @@ async function populateTeamPdfWeeks() {
     const teamId = sel.getAttribute('data-team-id')
     // Odškrtnutí lidé (Týmy → „mimo výkaz") se do výkazu nepočítají.
     const memberIds = workers.filter(w => w.team_id === teamId && patriDoVykazu(w)).map(w => w.id)
-    if (!memberIds.length) {
-      sel.innerHTML = '<option value="">— žádní členové —</option>'
-      continue
-    }
     try {
-      // NEJNOVĚJŠÍ NAPŘED: databáze vrací nejvýš 1000 řádků — bez řazení by
-      // u větší party v nabídce mohly chybět právě poslední týdny (1. 10. 2026).
-      const { data: rows } = await sb.from('attendance')
-        .select('kw, kw_year')
-        .in('worker_id', memberIds)
-        .not('kw', 'is', null)
-        .order('work_date', { ascending: false })
+      // Týdny podle skupiny ZAPSANÉ u docházky (i lidé, co jsou dnes jinde),
+      // plus dny bez zapsané skupiny u dnešních členů. NEJNOVĚJŠÍ NAPŘED:
+      // databáze vrací nejvýš 1000 řádků (1. 10. 2026).
+      const [z1, z2] = await Promise.all([
+        sb.from('attendance').select('kw, kw_year, worker_id').eq('team_id', teamId)
+          .not('kw', 'is', null).order('work_date', { ascending: false }),
+        memberIds.length ? sb.from('attendance').select('kw, kw_year, worker_id').in('worker_id', memberIds).is('team_id', null)
+          .not('kw', 'is', null).order('work_date', { ascending: false }) : Promise.resolve({ data: [] })
+      ])
+      const veVykazu = id => patriDoVykazu(workers.find(w => String(w.id) === String(id)))
+      const rows = (z1.error && memberIds.length
+        ? ((await sb.from('attendance').select('kw, kw_year, worker_id').in('worker_id', memberIds).not('kw', 'is', null).order('work_date', { ascending: false })).data || [])
+        : [...(z1.data || []), ...(z2.data || [])]).filter(r => veVykazu(r.worker_id))
       const map = new Map()
       ;(rows || []).forEach(r => {
         if (r.kw == null || r.kw_year == null) return
@@ -20126,11 +20192,18 @@ async function generateTeamAttendancePdf(teamId, teamName) {
   // kdo kolik odpracoval. Dokud tam žádný přístup není, nezamyká se nic.
   if (!await odemkniExportPdf()) { showToast('🔒 Generování PDF zrušeno'); return }
 
+  // FIRMA V MINULÉM TÝDNU (majitel 11. 10. 2026: „když přehodím lidi z týmu do
+  // týmu, Bibi vygeneruje PDF a ti lidi už jsou v té nové firmě — to je katastrofa,
+  // to už je vyfakturované; musí si to pamatovat, kde ten člověk v tom týdnu byl").
+  // Kde člověk v týdnu pracoval, říká skupina zapsaná u jeho docházky
+  // (attendance.team_id). Dnešní zařazení (profiles.team_id) platí jen tam, kde
+  // u docházky skupina zapsaná není (staré záznamy).
+  // Do PDF týmu za týden tedy patří dny zapsané pod tuto skupinu — i u toho,
+  // kdo je dnes jinde — a dny bez zapsané skupiny u dnešních členů.
   const workers = _workersCache || []
   // Kdo je v Týmech odškrtnutý, ve výkazu není — i když hodiny odpracoval.
-  const members = workers.filter(w => w.team_id === teamId && patriDoVykazu(w))
-  if (!members.length) { showToast('⚠️ Tým nemá žádné členy'); return }
-  const ids = members.map(m => m.id)
+  const veVykazu = id => patriDoVykazu(workers.find(w => String(w.id) === String(id)))
+  const clenoveTed = workers.filter(w => w.team_id === teamId).map(w => w.id)
 
   showToast('⏳ Generuji PDF docházky týmu…')
 
@@ -20140,13 +20213,14 @@ async function generateTeamAttendancePdf(teamId, teamName) {
   const endStr = localDateStr(ed)
   const periodLabel = `KW${week}/${year} (${sd.toLocaleDateString('cs-CZ')} – ${ed.toLocaleDateString('cs-CZ')})`
 
-  const { data: att } = await sb.from('attendance')
-    .select('*, worker:profiles!worker_id(full_name, profession, hourly_rate_worker)')
-    .in('worker_id', ids)
-    .gte('work_date', startStr).lte('work_date', endStr)
-    .order('work_date').order('check_in')
+  const att = await dochazkaTymuZaObdobi(teamId, clenoveTed, startStr, endStr,
+    '*, worker:profiles!worker_id(full_name, profession, hourly_rate_worker)')
+  if (att === null) { showToast('❌ Docházku týmu se nepodařilo načíst — zkuste to znovu'); return }
+  for (let i = att.length - 1; i >= 0; i--) if (!veVykazu(att[i].worker_id)) att.splice(i, 1)
+  att.sort((a, b) => String(a.work_date).localeCompare(String(b.work_date)) || String(a.check_in || '').localeCompare(String(b.check_in || '')))
+  const ids = [...new Set(att.map(r => r.worker_id))]
 
-  if (!att?.length) { showToast('❌ Žádná docházka pro tým v týdnu ' + week + '/' + year); return }
+  if (!att.length) { showToast('❌ Žádná docházka pro tým v týdnu ' + week + '/' + year); return }
 
   // Podpisy vedoucího z výkazů OSVČ pro daný týden
   const foremanByWorker = {}
@@ -21555,6 +21629,34 @@ async function skupinaPracovnika(workerId) {
     const { data } = await sb.from('profiles').select('team_id').eq('id', workerId).maybeSingle()
     return (data && data.team_id) || null
   } catch (e) { return null }
+}
+
+// Skupina pro záznam KONKRÉTNÍHO dne — když správce doplní den zpětně.
+// Dřív dostal den skupinu, kde je člověk DNES: den doplněný do 40. týdne po
+// přesunu tak spadl pod novou firmu (majitel 11. 10. 2026). Pořadí:
+// 1) jiný den téhož člověka v tom týdnu se zapsanou skupinou (nejbližší),
+// 2) historie zařazení (team_assignments) k tomu dni,
+// 3) dnešní zařazení.
+async function skupinaPracovnikaVDen(workerId, den) {
+  if (!workerId || !den || String(den) >= localDateStr()) return skupinaPracovnika(workerId)
+  try {
+    const k = getKW(new Date(den + 'T12:00:00'))
+    const { data } = await sb.from('attendance').select('team_id, work_date')
+      .eq('worker_id', workerId).eq('kw', k.week).eq('kw_year', k.year).not('team_id', 'is', null).limit(50)
+    if (data && data.length) {
+      const cil = Date.parse(den + 'T12:00:00')
+      data.sort((a, b) => Math.abs(Date.parse(a.work_date + 'T12:00:00') - cil) - Math.abs(Date.parse(b.work_date + 'T12:00:00') - cil))
+      return data[0].team_id
+    }
+  } catch (e) { /* zkusí se historie */ }
+  try {
+    const konecDne = den + 'T23:59:59'
+    const { data } = await sb.from('team_assignments').select('team_id, assigned_at, removed_at')
+      .eq('worker_id', workerId).lte('assigned_at', konecDne).order('assigned_at', { ascending: false }).limit(5)
+    const h = (data || []).find(x => !x.removed_at || String(x.removed_at) > konecDne)
+    if (h && h.team_id) return h.team_id
+  } catch (e) { /* zůstane dnešní zařazení */ }
+  return skupinaPracovnika(workerId)
 }
 
 // Zápis docházky, který se NESMÍ nepovést. Když databáze o sloupci team_id ještě
@@ -29216,7 +29318,7 @@ async function saveEditAttRecord() {
       const kw = parseInt(document.getElementById('edit-att-kw').value) || getKW(new Date(dateStr)).week
       const kwYear = parseInt(document.getElementById('edit-att-kwyear').value) || getKW(new Date(dateStr)).year
       const zaklad = { worker_id: workerId, work_date: dateStr, kw, kw_year: kwYear,
-                       team_id: await skupinaPracovnika(workerId) }
+                       team_id: await skupinaPracovnikaVDen(workerId, dateStr) }
       ;({ data: updData, error } = await dochazkaInsert({ ...payloadSVyjimkou, ...zaklad }, { vratitSeznam: true }))
       if (error && /bez_vyplaty|bez_provize_den|vyplata_castka|vyplata_poznamka|dlouhy_den_potvrzen/i.test(error.message || '')) {
         bezVyjimky = true
@@ -29508,7 +29610,7 @@ async function saveManualAttendance() {
     try {
       ;({ error } = await dochazkaInsert({
         worker_id: workerId,
-        team_id: await skupinaPracovnika(workerId),
+        team_id: await skupinaPracovnikaVDen(workerId, date),
         work_date: date,
         check_in: ci+':00',
         check_out: co+':00',
