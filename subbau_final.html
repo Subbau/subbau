@@ -4867,7 +4867,7 @@ async function submitAdminSignatureWithPlacement() {
 // Po nahrání nové verze se snadno pozná, jestli se opravdu nasadila: otevřete
 // appku, zmáčkněte F12 (na Macu ⌥⌘I) a v konzoli je vypsané tohle datum. Když
 // tam svítí starší, prohlížeč nebo GitHub drží starou verzi.
-const SUBBAU_VERZE = '2026-10-11 e — Firma v minulém týdnu podle docházky'
+const SUBBAU_VERZE = '2026-10-13 d — Pojistka proti rozjeté pauze u pevného režimu'
 console.log('SubBau docházka — verze ' + SUBBAU_VERZE)
 // Verze i dole v menu správce. Když někdo novinku „nevidí", podle ní se hned
 // pozná, jestli nemá otevřenou starou kopii appky — bez hledání v konzoli.
@@ -5777,10 +5777,14 @@ function showLogin(duvod) {
 
 // POŘÁD PŘIHLÁŠENÝ, JEN SE NENAČETLO. Když prohlížeč relaci pořád drží
 // (pomalý start, profil se nenačetl, výjimka při startu), nemá člověk psát
-// heslo znovu — každé nové přihlášení navíc zakládá další relaci a ta stará
-// zůstane viset. Místo toho tlačítko „Zkusit znovu“ a pár pokusů samo
-// (po návratu spojení a nejvýš 6× po 30 s). Po tlačítku Odhlásit nebo když
-// relaci zahodí knihovna, v prohlížeči žádná není a nic z toho se neukáže.
+// heslo znovu — appka to zkouší sama, dokud appku nezavřete nebo relaci
+// nezahodí knihovna (pak v prohlížeči žádná není a nic z tohohle se neukáže).
+// 13. 10. 2026 majitel: „furt se mi to odhlašuje, nebaví mě to pořád zadávat
+// heslo" — dřív appka po 6 pokusech (3 minuty) obnovování vzdala a dál jen
+// čekala na ruční klik. Při delším výpadku (tunel, výtah, slabý signál celé
+// dopoledne) tak člověk zůstal koukat na přihlášení, i když appka sama
+// přestala zkoušet. Teď to zkouší pořád, interval se jen prodlužuje (ať
+// zbytečně nebuší na server), nejvýš jednou za 2 minuty.
 let _znovuBezi = false, _znovuInt = null, _znovuPokusu = 0
 function nabidniZnovuNacteni() {
   const box = document.getElementById('login-znovu')
@@ -5789,13 +5793,16 @@ function nabidniZnovuNacteni() {
   if (_znovuInt) { clearInterval(_znovuInt); _znovuInt = null }
   if (maRelaci) {
     _znovuPokusu = 0
-    _znovuInt = setInterval(() => {
+    const tik = () => {
       const login = document.getElementById('login')
-      if (!login || login.style.display === 'none' || !lsGet(KLIC_RELACE) || ++_znovuPokusu > 6) {
-        clearInterval(_znovuInt); _znovuInt = null; return
-      }
+      if (!login || login.style.display === 'none' || !lsGet(KLIC_RELACE)) { if (_znovuInt) clearInterval(_znovuInt); _znovuInt = null; return }
+      _znovuPokusu++
       if (document.visibilityState === 'visible' && navigator.onLine !== false) zkusZnovuNacist(true)
-    }, 30000)
+      // 30 s prvních pár pokusů, pak pomalu prodloužit až na 2 minuty — ne nikdy přestat.
+      const dalsi = Math.min(30000 * Math.ceil(_znovuPokusu / 3), 120000)
+      if (_znovuInt) { clearInterval(_znovuInt); _znovuInt = setInterval(tik, dalsi) }
+    }
+    _znovuInt = setInterval(tik, 30000)
   }
   ukazDenikNaPrihlaseni()
 }
@@ -12605,6 +12612,33 @@ function fotkaDoSeznamu(url) {
 }
 // Z hotové fotky udělá 300×400 a uloží ji vedle velké (stejná složka). Vrací true,
 // když se povedlo; jinak se fotka uloží bez značky a seznamy ukážou velkou.
+// NAHRÁT FOTKU A OVĚŘIT, ŽE DOŠLA CELÁ (majitel 13. 10. 2026: „opakovaně
+// nejsou vidět fotky — jsou jen do půlky, do tři čtvrtě, nebo vůbec").
+// `storage.upload()` bez chyby ZATÍM neznamená, že soubor dorazil celý — na
+// slabém signálu na stavbě se stávalo, že se uložil jen kus a appka to vzala
+// jako úspěch (přenos se tváří hotový, i když zůstal uprostřed). Po nahrání
+// se proto porovná velikost uloženého souboru s tím, co appka poslala; když
+// nesedí, zkusí se to znovu (nejvýš 3× celkem). Když se velikost nedá zjistit
+// (starší úložiště, jiný tvar odpovědi), bere se nahrání jako hotové jako dřív
+// — tohle jen PŘIDÁVÁ jistotu, nikdy nebrzdí víc, než musí.
+async function nahrajFotkuOverene(bucket, cesta, soubor, options) {
+  const i = cesta.lastIndexOf('/')
+  const slozkaCesty = i >= 0 ? cesta.slice(0, i) : '', jmeno = i >= 0 ? cesta.slice(i + 1) : cesta
+  let posledniChyba = null
+  for (let pokus = 0; pokus < 3; pokus++) {
+    const { error } = await sb.storage.from(bucket).upload(cesta, soubor, options)
+    if (error) { posledniChyba = error; continue }
+    try {
+      const { data } = await sb.storage.from(bucket).list(slozkaCesty, { search: jmeno, limit: 10 })
+      const polozka = (data || []).find(f => f.name === jmeno)
+      const velikost = polozka && polozka.metadata && polozka.metadata.size
+      if (velikost == null || velikost === soubor.size) return { error: null }
+      console.warn('[fotka] velikost po nahrání nesedí (' + velikost + ' / ' + soubor.size + ') — zkouším znovu')
+    } catch (e) { return { error: null } }   // ověření nejde (jiné úložiště) — nebrzdit kvůli tomu
+  }
+  return { error: posledniChyba || new Error('Nahrávání se opakovaně nepodařilo ověřit — zkuste to prosím na lepším signálu') }
+}
+
 async function _ulozZmenseninu(slozka, blob) {
   let adresa = null
   try {
@@ -12620,7 +12654,7 @@ async function _ulozZmenseninu(slozka, blob) {
     x.drawImage(obr, (300 - w) / 2, (400 - h) / 2, w, h)
     const mini = await new Promise((ok, ne) => { try { c.toBlob(ok, 'image/jpeg', 0.75) } catch (e) { ne(e) } })
     if (!mini) return false
-    const { error } = await sb.storage.from('avatars').upload(slozka + '/avatar-mini.jpg', mini, { contentType: 'image/jpeg', upsert: true })
+    const { error } = await nahrajFotkuOverene('avatars', slozka + '/avatar-mini.jpg', mini, { contentType: 'image/jpeg', upsert: true })
     return !error
   } catch (e) { return false } finally { try { if (adresa) URL.revokeObjectURL(adresa) } catch (e) {} }
 }
@@ -20445,7 +20479,7 @@ async function uploadCheckoutPhotos(attId) {
       // cesta podle pracovníka (stejně jako volné focení), ať RLS sedí
       const uid = currentUser?.id || attId
       const path = `${uid}/${Date.now()}_${i}.${ext}`
-      const { error: upErr } = await sb.storage.from('site-photos').upload(path, file, { contentType: file.type || 'image/jpeg', upsert: true })
+      const { error: upErr } = await nahrajFotkuOverene('site-photos', path, file, { contentType: file.type || 'image/jpeg', upsert: true })
       if (upErr) { console.warn('[fotky] upload chyba:', upErr.message); continue }
       const { data: urlData } = sb.storage.from('site-photos').getPublicUrl(path)
       const url = urlData?.publicUrl
@@ -20494,7 +20528,7 @@ async function onSitePhotos(input) {
     try {
       const ext = (file.name.split('.').pop() || 'jpg').toLowerCase().replace(/[^a-z0-9]/g, '') || 'jpg'
       const path = `${currentUser.id}/${Date.now()}_${i}.${ext}`
-      const { error: upErr } = await sb.storage.from('site-photos').upload(path, file, { contentType: file.type || 'image/jpeg', upsert: true })
+      const { error: upErr } = await nahrajFotkuOverene('site-photos', path, file, { contentType: file.type || 'image/jpeg', upsert: true })
       if (upErr) {
         console.warn('[site-photo] upload:', upErr.message)
         lastError = upErr.message || ''
@@ -20894,10 +20928,22 @@ function updateMobStav(rec, allToday) {
   }
 }
 
-// Hlavní tlačítko volá akci podle aktuálního stavu
+// Hlavní tlačítko volá akci podle aktuálního stavu.
+//
+// KRÁTKÉ ZAMČENÍ PO KLEPNUTÍ (majitel 13. 10. 2026: „příchod a rovnou mu to
+// hodí pauzu — nejspíš jak je to opožděný"). Tlačítko je po příchodu na
+// STEJNÉM místě jako pak pro pauzu — jen se mu změní popisek a barva. Když
+// síť chvíli váhá, lidi mají pocit, že klik nedošel, a klepnou znovu. Appka
+// mezitím stihla překreslit tlačítko na NOVOU akci, takže ten druhý klik už
+// spustí pauzu — ne zopakovaný příchod. Teď se po každém klepnutí tlačítko
+// na chvíli zamkne (900 ms), ať druhý, nechtěný klik nemá co spustit. Platí
+// jen pro tohle tlačítko — „Konec směny" je vedlejší a vlastní, nezamyká se.
+let _attZamcenoDo = 0
 function attMainAction() {
+  if (Date.now() < _attZamcenoDo) return
   const s = window._attState
   if (!s) return
+  _attZamcenoDo = Date.now() + 900
   mobCheckin(s)
 }
 
@@ -21211,6 +21257,21 @@ async function mobCheckin(type) {
 
       // Pracovní kopie pro aktualizace
       const updated = { ...current }
+
+      // POJISTKA PROTI ROZJETÉ PAUZE U PEVNÉHO REŽIMU (Lubomír Krška,
+      // 13. 10. 2026: appka mu dovolila jen „začátek pauzy", ačkoli má
+      // nastavenou pevnou 30minutovou — den pak zůstal s rozjetou pauzou bez
+      // konce a musel ho ručně dolaďovat admin). Tlačítko na obrazovce se
+      // rozhoduje podle toho, co appka věděla při POSLEDNÍM překreslení —
+      // při starší/zaseknuté stránce nebo souběhu dvou zařízení to nemusí
+      // sedět s tím, co teď opravdu platí. Těsně před zápisem se to proto
+      // ověří ZNOVU z toho, co appka právě má (current): je-li režim pevný,
+      // „začátek pauzy" se vezme jako celá pevná pauza — člověku se nikdy
+      // nerozjede pauza bez konce jen proto, že viděl staré tlačítko.
+      if (type === 'break-start') {
+        const rezPred = PRESTAVKA_REZIMY[rezimDne(current, currentProfile)] || PRESTAVKA_REZIMY['od-do']
+        if (rezPred.minut > 0) type = 'break-fix'
+      }
 
       if (type === 'break-fix') {
         // PŘESTÁVKA JEDNÍM KLIKEM. Zapíší se OBA časy naráz — začátek i konec —
@@ -40753,8 +40814,7 @@ async function otevriVyrezFotky(zdroj, workerId) {
 async function ulozFotkuPracovnika(workerId, blob) {
   try {
     const cesta = workerId + '/avatar.jpg'
-    const { error: chybaUp } = await sb.storage.from('avatars')
-      .upload(cesta, blob, { contentType: 'image/jpeg', upsert: true })
+    const { error: chybaUp } = await nahrajFotkuOverene('avatars', cesta, blob, { contentType: 'image/jpeg', upsert: true })
     if (chybaUp) {
       // Nejčastější důvod: úložiště nepouští admina do cizí složky. Řekni to
       // rovnou a jmenuj migraci — „new row violates row-level security" nikomu
@@ -40800,7 +40860,7 @@ async function uploadAvatar(input) {
     if (!userId) throw new Error('Nejste přihlášeni')
     const compressed = await compressImage(file, 600)
     const filePath = userId + '/avatar.jpg'
-    const { error: upErr } = await sb.storage.from('avatars').upload(filePath, compressed, { contentType:'image/jpeg', upsert:true })
+    const { error: upErr } = await nahrajFotkuOverene('avatars', filePath, compressed, { contentType:'image/jpeg', upsert:true })
     if (upErr) throw new Error(upErr.message)
     const { data: urlData } = sb.storage.from('avatars').getPublicUrl(filePath)
     const maMini = await _ulozZmenseninu(userId, compressed)   // zmenšenina pro seznamy u správce
