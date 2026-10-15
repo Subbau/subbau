@@ -8,6 +8,7 @@ NUTNE=(
   vercel.json          # bez něj Vercel nenajde appku a vrací 404
   subbau_final.html    # samotná appka
   klient.html          # odkaz pro odběratele
+  zasady.html          # veřejné zásady ochrany osobních údajů (App Store/Google Play)
   sw.js manifest.json
   favicon.ico favicon-32.png icon-192.png icon-512.png apple-touch-icon.png
   api/klient-dochazka.js api/send-invoice.js
@@ -42,3 +43,14 @@ if [ "$chyby" -gt 0 ]; then
   exit 1
 fi
 echo "✅ Všechny soubory nutné pro běh webu jsou na místě (${#NUTNE[@]})."
+
+# zasady.html se generuje z appky (SOUHLAS_TEXT) — po úpravě souhlasu se musí
+# spustit `node zasady/generuj.mjs` znovu, jinak veřejná stránka řekne lidem
+# jinou verzi textu, než jakou odsouhlasí v appce.
+if [ -f zasady.html ]; then
+  verze_appky=$(grep -o "SOUHLAS_VERZE = '[^']*'" subbau_final.html | head -1 | sed "s/.*= '//;s/'$//")
+  if ! grep -q "verze textu $verze_appky" zasady.html; then
+    echo "❌ zasady.html je stará (appka má souhlas verze $verze_appky) — spusťte: node zasady/generuj.mjs"
+    exit 1
+  fi
+fi
