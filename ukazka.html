@@ -4734,18 +4734,21 @@ async function submitWorkerSignWithPlacement() {
     }
 
     const filePath = `signed/${workerPdfState.contractId}_worker_signed.pdf`
-    const { error: upErr } = await sb.storage.from('contracts').upload(filePath, signedBlob, { contentType: 'application/pdf', upsert: true })
+    // Bez časového limitu by na slabém signálu na stavbě podpis smlouvy jen
+    // viselo donekonečna, beze slova — stejně jako sousední firemní větev výš.
+    const casOdpovedi = (p) => Promise.race([p, new Promise((_, rej) => setTimeout(() => rej(new Error('upload-timeout')), 12000))])
+    const { error: upErr } = await casOdpovedi(sb.storage.from('contracts').upload(filePath, signedBlob, { contentType: 'application/pdf', upsert: true }))
     if (upErr) throw new Error(upErr.message)
 
     const { data: urlData } = sb.storage.from('contracts').getPublicUrl(filePath)
     const signedUrl = urlData?.publicUrl
 
-    const { error: dbErr } = await updateContractFile(workerPdfState.contractId, {
+    const { error: dbErr } = await casOdpovedi(updateContractFile(workerPdfState.contractId, {
       file_url: signedUrl,
       signature_url: signedUrl,
       signed_at: new Date().toISOString(),
       status: 'signed_electronic'
-    })
+    }))
     if (dbErr) throw new Error(dbErr.message)
 
     showToast('✅ Smlouva úspěšně podepsána!')
@@ -4761,6 +4764,7 @@ async function submitWorkerSignWithPlacement() {
     } else {
       showToast('❌ Chyba: ' + e.message)
     }
+    zapisChybuAppky('podpis-smlouvy', e?.message)
   } finally {
     if (btn) { btn.textContent = signLangDE ? '✍️ Unterschrift speichern' : '✍️ Uložit podpis do smlouvy'; btn.disabled = false }
   }
@@ -5579,7 +5583,7 @@ async function submitAdminSignatureWithPlacement() {
 // Po nahrání nové verze se snadno pozná, jestli se opravdu nasadila: otevřete
 // appku, zmáčkněte F12 (na Macu ⌥⌘I) a v konzoli je vypsané tohle datum. Když
 // tam svítí starší, prohlížeč nebo GitHub drží starou verzi.
-const SUBBAU_VERZE = '2026-10-15 — Smlouvy, puntíky, odkazy na profil, rychlejší chat, pojistka na pauzu'
+const SUBBAU_VERZE = '2026-10-15 b — Podpis vedoucího a fotky stavby spolehlivěji, deník chyb appky'
 console.log('StavKo docházka — verze ' + SUBBAU_VERZE)
 // Verze i dole v menu správce. Když někdo novinku „nevidí", podle ní se hned
 // pozná, jestli nemá otevřenou starou kopii appky — bez hledání v konzoli.
@@ -8241,6 +8245,24 @@ async function removeExportAccess(id, email) {
 async function zapisBezpecnostniUdalost(typ) {
   try { await sb.rpc('zapis_bezpecnostni_udalost', { p_typ: typ }) }
   catch (e) { console.warn('[bezpečnostní událost]', e?.message) }
+}
+
+// TICHÝ DENÍK CHYB APPKY (majitel 15. 10. 2026: appka na slabém signálu na
+// stavbě umí narazit na chybu, kterou dřív jen potichu spolkla — a pracovník
+// to poznal, až se mu něco nikdy neuložilo. Teď se taková chyba zapíše sem,
+// ať to admin vidí sám, dřív než mu to někdo nahlásí. NEPOUŽÍVAT pro business
+// události (na to je historie úprav) — jen pro technické selhání appky.
+// Nikdy nesmí sama shodit to, co po ní následuje — kdyby se nepovedl ani
+// tenhle zápis, appka v tom nesmí uváznout.
+async function zapisChybuAppky(kde, zprava, detail) {
+  try {
+    await sb.from('chyby_appky').insert({
+      kdo: currentUser?.id || null,
+      kdo_jmeno: currentProfile?.full_name || null,
+      kde, zprava: String(zprava || '').slice(0, 500),
+      detail: detail || null
+    })
+  } catch (e) { console.warn('[chyby_appky] zápis se nepovedl:', e?.message) }
 }
 
 async function odemkniExportPdf() {
@@ -13367,18 +13389,24 @@ function fotkaDoSeznamu(url) {
 async function nahrajFotkuOverene(bucket, cesta, soubor, options) {
   const i = cesta.lastIndexOf('/')
   const slozkaCesty = i >= 0 ? cesta.slice(0, i) : '', jmeno = i >= 0 ? cesta.slice(i + 1) : cesta
+  // Bez časového limitu by jeden pokus na slabém signálu viselo donekonečna a
+  // zbylé 2 pokusy by se vůbec nespustily — celé 3× zkoušení by bylo k ničemu.
+  const withTimeout = (p, ms) => Promise.race([p, new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), ms))])
   let posledniChyba = null
   for (let pokus = 0; pokus < 3; pokus++) {
-    const { error } = await sb.storage.from(bucket).upload(cesta, soubor, options)
+    let error
+    try { ({ error } = await withTimeout(sb.storage.from(bucket).upload(cesta, soubor, options), 20000)) }
+    catch (e) { error = e }
     if (error) { posledniChyba = error; continue }
     try {
-      const { data } = await sb.storage.from(bucket).list(slozkaCesty, { search: jmeno, limit: 10 })
+      const { data } = await withTimeout(sb.storage.from(bucket).list(slozkaCesty, { search: jmeno, limit: 10 }), 15000)
       const polozka = (data || []).find(f => f.name === jmeno)
       const velikost = polozka && polozka.metadata && polozka.metadata.size
       if (velikost == null || velikost === soubor.size) return { error: null }
       console.warn('[fotka] velikost po nahrání nesedí (' + velikost + ' / ' + soubor.size + ') — zkouším znovu')
     } catch (e) { return { error: null } }   // ověření nejde (jiné úložiště) — nebrzdit kvůli tomu
   }
+  if (posledniChyba) zapisChybuAppky('nahravani-fotky', posledniChyba.message, { bucket, cesta })
   return { error: posledniChyba || new Error('Nahrávání se opakovaně nepodařilo ověřit — zkuste to prosím na lepším signálu') }
 }
 
@@ -13401,6 +13429,34 @@ async function _ulozZmenseninu(slozka, blob) {
     return !error
   } catch (e) { return false } finally { try { if (adresa) URL.revokeObjectURL(adresa) } catch (e) {} }
 }
+// Zmenšenina fotky ZE STAVBY pro galerii u správce (appka 15. 10. 2026: galerie
+// natahovala přímo originály z telefonu a byla kvůli tomu k ničemu pomalá).
+// Na rozdíl od avatarů se neořezává na pevný poměr stran — fotka ze stavby
+// může mít libovolnou kompozici a ořez by uřízl důležitou část záběru.
+// Originál zůstává beze změny pro stažení, tisk a otevření na celou obrazovku.
+async function _ulozZmenseninuFotkyStavby(cesta, blob) {
+  let adresa = null
+  try {
+    adresa = URL.createObjectURL(blob)
+    const obr = await new Promise((ok, ne) => { const i = new Image(); i.onload = () => ok(i); i.onerror = ne; i.src = adresa })
+    const MAX = 640
+    const m = Math.min(1, MAX / Math.max(obr.naturalWidth, obr.naturalHeight))
+    const w = Math.max(1, Math.round(obr.naturalWidth * m)), h = Math.max(1, Math.round(obr.naturalHeight * m))
+    const c = document.createElement('canvas'); c.width = w; c.height = h
+    const x = c.getContext('2d')
+    x.imageSmoothingQuality = 'high'
+    x.drawImage(obr, 0, 0, w, h)
+    const mini = await new Promise((ok, ne) => { try { c.toBlob(ok, 'image/jpeg', 0.75) } catch (e) { ne(e) } })
+    if (!mini) return null
+    const tecka = cesta.lastIndexOf('.')
+    const thumbCesta = (tecka >= 0 ? cesta.slice(0, tecka) : cesta) + '_thumb.jpg'
+    const { error } = await nahrajFotkuOverene('site-photos', thumbCesta, mini, { contentType: 'image/jpeg', upsert: true })
+    if (error) return null
+    const { data } = sb.storage.from('site-photos').getPublicUrl(thumbCesta)
+    return data?.publicUrl || null
+  } catch (e) { return null } finally { try { if (adresa) URL.revokeObjectURL(adresa) } catch (e) {} }
+}
+
 // JEDNORÁZOVÉ DOPLNĚNÍ zmenšenin ke starším fotkám. Spouští správce sám (např.
 // z konzole: doplnZmenseninyFotek()). Fotku jen přečte, zmenšeninu uloží vedle
 // a k adrese připíše m=1 — jen když se adresa mezitím nezměnila.
@@ -14813,9 +14869,13 @@ function renderSitePhotosAdmin() {
     const safeAuthor = jsStr(author)
     // Jen fotka z našeho úložiště; jinak karta bez obrázku (smazat jde dál)
     const url = bezpecnaFotkaStavby(p.url)
+    // Mřížka ukazuje zmenšeninu (appka 15. 10. 2026: galerie natahovala
+    // originály z telefonu a byla kvůli tomu pomalá) — klik dál otevírá
+    // originál v plné kvalitě, stejně jako stažení a tisk níž.
+    const nahled = bezpecnaFotkaStavby(p.thumb_url) || url
     return `<div style="border:1px solid var(--brd);border-radius:12px;overflow:hidden;background:#fff">
       ${url ? `<a href="${escAttr(url)}" target="_blank" rel="noopener" style="display:block;aspect-ratio:4/3;background:var(--bg)">
-        <img src="${escAttr(url)}" loading="lazy" style="width:100%;height:100%;object-fit:cover">
+        <img src="${escAttr(nahled)}" loading="lazy" style="width:100%;height:100%;object-fit:cover">
       </a>` : `<div style="aspect-ratio:4/3;background:var(--bg);display:flex;align-items:center;justify-content:center;color:var(--text3);font-size:12px">Fotku nejde zobrazit</div>`}
       <div style="padding:9px 11px">
         <div style="display:flex;align-items:center;gap:7px">
@@ -21114,11 +21174,16 @@ async function confirmCheckout() {
   // rozdělaná — zpětné dopisování dalších dnů appka nenabízí, to řeší StavKo ručně.
   window.zapisProbiha = true
   let savedRows, error, keptByAdmin = false
+  // Na slabém signálu na stavbě by tenhle zápis (konec směny) bez časového
+  // limitu klidně viselo donekonečna a appka by na odchodu mlčela.
+  const withTimeout = (p, ms) => Promise.race([
+    p, new Promise((_, rej) => setTimeout(() => rej(new Error('Vypršel čas — zkuste to prosím znovu')), ms))
+  ])
   try {
     // Co upravil StavKo, to platí — přečti záznam čerstvě, ať se jeho zápis nepřepíše
     let rec = null, chybaCteni = null
     try {
-      const { data: fresh, error: eFresh } = await sb.from('attendance').select('*').eq('id', attId).single()
+      const { data: fresh, error: eFresh } = await withTimeout(sb.from('attendance').select('*').eq('id', attId).single(), 15000)
       rec = fresh || null
       chybaCteni = eFresh || null
     } catch (e) { chybaCteni = e; console.warn('[checkout] záznam se nepodařilo načíst:', e?.message) }
@@ -21155,23 +21220,26 @@ async function confirmCheckout() {
     if (adminOwnsField(rec, 'work_description')) keptByAdmin = true
     else payload.work_description = desc
 
-    ;({ data: savedRows, error } = await sb.from('attendance').update(payload).eq('id', attId).select())
+    ;({ data: savedRows, error } = await withTimeout(sb.from('attendance').update(payload).eq('id', attId).select(), 15000))
     // Kdyby v databázi chyběl sloupec s popisem, pracovník by směnu neuzavřel vůbec —
     // ulož aspoň čas odchodu a hodiny a řekni to nahlas.
     if (error && /column|schema cache/i.test(error.message || '')) {
       console.warn('[checkout] popis se neuložil, chybí sloupec:', error.message)
-      const r2 = await sb.from('attendance').update({
+      const r2 = await withTimeout(sb.from('attendance').update({
         check_out: payload.check_out, total_hours: payload.total_hours
-      }).eq('id', attId).select()
+      }).eq('id', attId).select(), 15000)
       savedRows = r2.data; error = r2.error
       if (!error) showToast('⚠️ Hodiny uloženy, popis ne — v databázi chybí sloupec work_description')
     }
+  } catch (e) {
+    error = e
   } finally {
     window.zapisProbiha = false
   }
   if (error) {
     console.error('[checkout] update error:', error)
     showToast(chybaText(error, 'Směna se neuzavřela'))
+    zapisChybuAppky('konec-smeny', error?.message)
     return
   }
   // Zápis může „projít" a přitom nezměnit ani řádek — když záznam mezitím zmizel
@@ -21270,9 +21338,12 @@ async function uploadCheckoutPhotos(attId) {
       const url = urlData?.publicUrl
       if (!url) continue
       uploaded.push(url)
+      // Zmenšenina pro galerii u správce — nepovede se → galerie prostě
+      // zatím natáhne originál jako doteď (viz renderSitePhotosAdmin).
+      const thumbUrl = await _ulozZmenseninuFotkyStavby(path, file).catch(() => null)
       // Zapiš do galerie site_photos (ať to admin vidí, stejně jako focení z profilu)
       try {
-        await sb.from('site_photos').insert({
+        const radek = {
           worker_id: currentUser?.id || null,
           worker_name: currentProfile?.full_name || (currentUser?.email || ''),
           team_id: currentProfile?.team_id || null,
@@ -21280,7 +21351,15 @@ async function uploadCheckoutPhotos(attId) {
           location: currentProfile?.team?.location || '',
           url,
           created_at: new Date().toISOString()
-        })
+        }
+        if (thumbUrl) radek.thumb_url = thumbUrl
+        let { error: galErr } = await sb.from('site_photos').insert(radek)
+        // Starší databáze nemusí mít sloupec thumb_url — zapiš aspoň bez něj.
+        if (galErr && /thumb_url|column|schema cache/i.test(galErr.message || '') && thumbUrl) {
+          delete radek.thumb_url
+          ;({ error: galErr } = await sb.from('site_photos').insert(radek))
+        }
+        if (galErr) console.warn('[fotky] zápis do galerie selhal:', galErr.message)
       } catch (e) { console.warn('[fotky] zápis do galerie selhal:', e?.message) }
     } catch (e) { console.warn('[fotky] výjimka:', e) }
   }
@@ -21323,8 +21402,11 @@ async function onSitePhotos(input) {
       const { data: urlData } = sb.storage.from('site-photos').getPublicUrl(path)
       const url = urlData?.publicUrl
       if (!url) { lastError = 'Nepodařilo se získat odkaz na fotku.'; continue }
+      // Zmenšenina pro galerii u správce — nepovede se → galerie prostě
+      // zatím natáhne originál jako doteď (viz renderSitePhotosAdmin).
+      const thumbUrl = await _ulozZmenseninuFotkyStavby(path, file).catch(() => null)
       // Zapiš metadata (kdo fotil, tým, lokace) — ať to admin v galerii pozná
-      const { error: metaErr } = await sb.from('site_photos').insert({
+      const radek = {
         worker_id: currentUser.id,
         worker_name: currentProfile?.full_name || (currentUser.email || ''),
         team_id: currentProfile?.team_id || null,
@@ -21332,7 +21414,14 @@ async function onSitePhotos(input) {
         location: currentProfile?.team?.location || '',
         url,
         created_at: new Date().toISOString()
-      })
+      }
+      if (thumbUrl) radek.thumb_url = thumbUrl
+      let { error: metaErr } = await sb.from('site_photos').insert(radek)
+      // Starší databáze nemusí mít sloupec thumb_url — zapiš aspoň bez něj.
+      if (metaErr && /thumb_url|column|schema cache/i.test(metaErr.message || '') && thumbUrl) {
+        delete radek.thumb_url
+        ;({ error: metaErr } = await sb.from('site_photos').insert(radek))
+      }
       if (metaErr) {
         console.warn('[site-photo] metadata:', metaErr.message)
         lastError = 'Fotka se nahrála, ale neuložila se k pracovníkovi: ' + (metaErr.message || '')
@@ -22225,7 +22314,7 @@ async function mobCheckin(type) {
             const opr = { breaks: srovnane }
             if (srovnane[0]) { opr.break_start = srovnane[0].bs + ':00'; opr.break_end = srovnane[0].be + ':00' }
             if (srovnane[1]) { opr.break2_start = srovnane[1].bs + ':00'; opr.break2_end = srovnane[1].be + ':00' }
-            const { error: eOpr } = await sb.from('attendance').update(opr).eq('id', todayAttId)
+            const { error: eOpr } = await withTimeout(sb.from('attendance').update(opr).eq('id', todayAttId), 12000)
             if (!eOpr) { Object.assign(current, opr); Object.assign(updated, opr) }
             else console.warn('[pauza] srovnání konce pauzy s odchodem selhalo:', eOpr.message)
           }
@@ -22267,9 +22356,9 @@ async function mobCheckin(type) {
           // otevřená, hodiny se spočítaly bez ní a den vyšel o celou pauzu delší.
           // Teď se odchod bez uzavřené pauzy nezapíše — pracovník to zkusí znovu.
           const zavri = async (plne, zaloha) => {
-            const r1 = await sb.from('attendance').update(plne).eq('id', todayAttId).select('id')
+            const r1 = await withTimeout(sb.from('attendance').update(plne).eq('id', todayAttId).select('id'), 12000)
             if (!r1.error && r1.data && r1.data.length) return 'plne'
-            const r2 = await sb.from('attendance').update(zaloha).eq('id', todayAttId).select('id')
+            const r2 = await withTimeout(sb.from('attendance').update(zaloha).eq('id', todayAttId).select('id'), 12000)
             return (!r2.error && r2.data && r2.data.length) ? 'zaloha' : null
           }
           let pauzaUzavrena = true
@@ -22292,6 +22381,7 @@ async function mobCheckin(type) {
           } catch(e) { pauzaUzavrena = false }
           if (!pauzaUzavrena) {
             showToast('❌ Odchod se NEZAPSAL — nepodařilo se ukončit rozdělanou pauzu. Zkuste to prosím znovu.')
+            zapisChybuAppky('odchod-uzavreni-pauzy', 'nepodařilo se uzavřít rozdělanou pauzu při odchodu')
             updateMobStav(current, [current])
             checkinInProgress = false
             window.zapisProbiha = false
@@ -26487,15 +26577,20 @@ async function ziskejPolohuPovinne() {
 
 async function ulozPovinnouPolohuOdchodu(attId, poloha) {
   if (!attId || !poloha) return false
+  // Firma „jen s polohou" nepustí odchod bez tohohle zápisu (viz mobCheckin) —
+  // bez časového limitu by na slabém signálu na stavbě odchod visel donekonečna.
+  const withTimeout = (p, ms) => Promise.race([
+    p, new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), ms))
+  ])
   try {
-    const { data, error } = await sb.from('attendance').update({
+    const { data, error } = await withTimeout(sb.from('attendance').update({
       odchod_lat: poloha.lat, odchod_lng: poloha.lng, odchod_adresa: poloha.adresa,
       odchod_gps_cas: new Date().toISOString()
-    }).eq('id', attId).select('id')
-    if (error || !data || !data.length) return false
+    }).eq('id', attId).select('id'), 12000)
+    if (error || !data || !data.length) { zapisChybuAppky('poloha-odchodu', error?.message || 'žádný řádek'); return false }
     window._povinnaPolohaOdchodu = attId
     return true
-  } catch (e) { return false }
+  } catch (e) { zapisChybuAppky('poloha-odchodu', e?.message); return false }
 }
 
 // Zachytí polohu ve chvíli, kdy pracovník mačká konec směny. Ukládá se
@@ -28580,7 +28675,7 @@ function closeForemanSign() {
   if (dlg) dlg.style.display = 'none'
 }
 
-function saveForemanSign() {
+async function saveForemanSign() {
   const name = document.getElementById('foreman-dialog-name')?.value.trim()
   if (!name) { showToast('⚠️ Zadejte jméno vedoucího / Name des Bauleiters eingeben'); return }
   const canvas = document.getElementById('foreman-sign-canvas')
@@ -28634,17 +28729,29 @@ function saveForemanSign() {
     dataUrl = canvas.toDataURL('image/png')
   }
   console.log('[foreman] podpis uložen do paměti, délka:', dataUrl?.length || 0)
+  // Zůstává v paměti, i když zápis do databáze níž selže — při dalším pokusu
+  // se tak nemusí kreslit znovu, stačí zkusit Uložit podpis podruhé.
   foremanSignData = { name, dataUrl }
+
+  // NA STAVBĚ bývá slabý signál. Dřív appka hlásila „uloženo" a dialog
+  // zavřela HNED, ještě než se zápis do databáze vůbec zkusil — když se pak
+  // v tichosti nepovedl (nebo jen dlouho visel), nikdo si toho nevšiml a u
+  // admina podpis nikdy nebyl. Teď appka na skutečný výsledek počká.
+  const btn = document.getElementById('foreman-save-btn')
+  const label = document.getElementById('foreman-save-label')
+  const origLabel = label ? label.innerHTML : ''
+  if (btn) btn.disabled = true
+  if (label) label.textContent = 'Ukládám… / Speichern…'
+  const ok = await saveForemanSignToDb(name, dataUrl)
+  if (btn) btn.disabled = false
+  if (label) label.innerHTML = origLabel
+  if (!ok) return   // dialog zůstává otevřený — stačí zkusit Uložit podpis znovu, bez překreslení
+
   // Promítni do pole nahoře + status
   const topName = document.getElementById('mob-foreman-name'); if (topName) topName.value = name
   const status = document.getElementById('foreman-sign-status')
   if (status) { status.style.display = 'block'; status.textContent = '✅ Podpis vedoucího uložen / Unterschrift gespeichert: ' + name }
   closeForemanSign()
-
-  // Ulož podpis ROVNOU do databáze pro vybraný týden (i bez vytvoření výkazu).
-  // Tím se podpis nikdy neztratí a admin/seznam výkazů ho hned uvidí.
-  saveForemanSignToDb(name, dataUrl)
-
   showToast('✅ Podpis vedoucího uložen / Unterschrift gespeichert')
   // Pokud uživatel klikl "Vytvořit výkaz" a byl vyzván k podpisu, vygeneruj výkaz teď (už s podpisem)
   if (_exportAfterForemanSign) {
@@ -28654,38 +28761,49 @@ function saveForemanSign() {
   }
 }
 
-// Uloží/aktualizuje podpis vedoucího v databázi pro vybraný týden
+// Uloží/aktualizuje podpis vedoucího v databázi pro vybraný týden.
+// Vrací true/false — volající (saveForemanSign) na tom čeká a podle toho
+// teprve řekne pracovníkovi, jestli se podpis opravdu uložil.
 async function saveForemanSignToDb(name, dataUrl) {
   const sel = document.getElementById('mob-export-week')
-  if (!sel?.value) return
+  if (!sel?.value) return false
   const [week, year] = sel.value.split('/').map(Number)
-  if (!week || !year) return
+  if (!week || !year) return false
+  // Na stavbě bývá slabý signál — bez časového limitu by dotaz viselo klidně
+  // minuty a appka by mezitím nic neřekla (ani úspěch, ani chybu).
+  const withTimeout = (p, ms) => Promise.race([
+    p, new Promise((_, rej) => setTimeout(() => rej(new Error('Vypršel čas — zkuste to prosím znovu')), ms))
+  ])
   try {
     // Je už pro tento týden záznam? Pokud ano, aktualizuj; jinak vlož nový.
-    const { data: existing } = await sb.from('weekly_hour_sheets')
+    const { data: existing } = await withTimeout(sb.from('weekly_hour_sheets')
       .select('id').eq('worker_id', currentUser.id).eq('kw', week).eq('kw_year', year)
-      .order('created_at', { ascending: false }).limit(1)
+      .order('created_at', { ascending: false }).limit(1), 15000)
     let err
     if (existing && existing[0]) {
-      const r = await sb.from('weekly_hour_sheets').update({ foreman_name: name, foreman_signature: dataUrl }).eq('id', existing[0].id)
+      const r = await withTimeout(sb.from('weekly_hour_sheets').update({ foreman_name: name, foreman_signature: dataUrl }).eq('id', existing[0].id), 15000)
       err = r.error
     } else {
-      const r = await sb.from('weekly_hour_sheets').insert({
+      const r = await withTimeout(sb.from('weekly_hour_sheets').insert({
         worker_id: currentUser.id, kw: week, kw_year: year,
         foreman_name: name, foreman_signature: dataUrl, pdf_url: null
-      })
+      }), 15000)
       err = r.error
     }
     if (err) {
       console.error('[foreman] uložení do DB selhalo:', err.message)
       showToast('⚠️ Podpis se nepodařilo uložit: ' + err.message)
-      return
+      zapisChybuAppky('podpis-vedouciho', err.message, { kw: week, rok: year })
+      return false
     }
     console.log('[foreman] podpis uložen do DB pro KW', week + '/' + year)
     loadMySheets()  // obnov seznam výkazů, ať se ukáže "Podepsáno"
+    return true
   } catch(e) {
     console.error('[foreman] uložení do DB výjimka:', e?.message)
-    showToast('⚠️ Chyba ukládání podpisu: ' + (e?.message || e))
+    showToast('⚠️ ' + (e?.message || 'Chyba ukládání podpisu') + ' — zkuste to prosím znovu')
+    zapisChybuAppky('podpis-vedouciho', e?.message, { kw: week, rok: year })
+    return false
   }
 }
 
@@ -34280,6 +34398,7 @@ async function sendInvoiceToSubbau() {
     if (error) {
       console.error('[faktura] zápis selhal:', error)
       showToast(invoiceErrorText(error))
+      zapisChybuAppky('faktura-odeslat-subbau', error.message, { invoiceNum: d.invoiceNum, workerId: d.workerId })
       return
     }
     // Trvalé potvrzení pod tlačítky (kdyby si pracovník náhled otevřel znovu)
@@ -34332,6 +34451,7 @@ async function emailInvoiceToSubbau() {
       const error = await storeInvoiceRow(row)
       if (error) {
         console.warn('[faktura] e-mail odešel, zápis do složky ne:', error.message)
+        zapisChybuAppky('faktura-email-bez-zapisu', error.message, { invoiceNum: d.invoiceNum, workerId: d.workerId })
         _invSentNote = '⚠️ Odesláno e-mailem na ' + INVOICE_EMAIL + ', ale do složky Faktury se nezapsala — dejte prosím vědět StavKo.'
         updateInvoiceSendUi()
         showInvoiceSentModal('Faktura odešla e-mailem na ' + INVOICE_EMAIL + ', ale do složky Faktury se nezapsala. Dejte prosím vědět StavKo.', true)
@@ -34361,7 +34481,11 @@ async function emailInvoiceToSubbau() {
       }
     }
 
-    // 3) Poslední záchrana: ulož PDF a otevři rozepsaný e-mail
+    // 3) Poslední záchrana: ulož PDF a otevři rozepsaný e-mail. Appka si tu
+    // nijak neověří, že pracovník e-mail fakt odeslal — a nikam se přitom
+    // nezapíše faktura, takže u StavKo o ní nikdo neví. Aspoň se to zapíše
+    // do deníku chyb, ať je vidět, jak často se sem appka dostává.
+    zapisChybuAppky('faktura-email-posledni-zachrana', sent.reason || 'server e-mail neposlal', { invoiceNum: d.invoiceNum, workerId: d.workerId })
     try { out.pdf.save(out.filename) } catch (e) { console.warn('[faktura] uložení PDF:', e?.message) }
     const subj = encodeURIComponent('Faktura ' + (d.invoiceNum || '') + ' — ' + (d.workerName || ''))
     const body = encodeURIComponent(
@@ -41731,13 +41855,26 @@ async function uploadAvatar(input) {
     // `?v=` ukládáme i do profilu — jméno souboru je pořád stejné a bez něj by
     // se jinde (seznamy u správce, odkaz pro odběratele) držela stará fotka.
     const url = urlData.publicUrl + '?v=' + Date.now() + (maMini ? '&m=1' : '')
-    await sb.from('profiles').update({ avatar_url: url }).eq('id', userId)
+    // Na slabém signálu na stavbě zápis buď visí, nebo tiše neprojde — časový
+    // limit a kontrola chyby/změněného řádku, ať appka neřekne "uloženo", když
+    // se fotka k profilu ve skutečnosti nepřipsala (stejná chyba jako u
+    // podpisu vedoucího 15. 10. 2026 — appka dřív hlásila úspěch naslepo).
+    const withTimeout = (p, ms) => Promise.race([
+      p, new Promise((_, rej) => setTimeout(() => rej(new Error('Vypršel čas — zkuste to prosím znovu')), ms))
+    ])
+    const { data: radky, error: chybaDb } = await withTimeout(sb.from('profiles')
+      .update({ avatar_url: url }).eq('id', userId).select('id'), 15000)
+    if (chybaDb) throw new Error(chybaDb.message)
+    if (!radky || !radky.length) throw new Error('Fotka se nahrála, ale profil se nezměnil — zkuste to prosím znovu')
     document.querySelectorAll('#mob-avatar-img').forEach(img => { img.src = url; img.style.display='block' })
     if (currentProfile) currentProfile.avatar_url = url
     input.value = ''
     showToast('Fotka uložena ✓')
     loadMobProfil(currentProfile)
-  } catch(e) { showToast('Chyba: ' + e.message) }
+  } catch(e) {
+    showToast('Chyba: ' + e.message)
+    zapisChybuAppky('profil-fotka', e?.message)
+  }
 }
 function compressImage(file, maxSize) {
   return new Promise(resolve => {
@@ -42724,7 +42861,7 @@ document.addEventListener('visibilitychange', () => {
     </div>
     <div style="display:flex;gap:8px">
       <button onclick="clearForemanSign()" style="padding:10px 14px;background:none;border:2px solid #e0e0e0;border-radius:12px;font-size:12px;cursor:pointer;font-family:inherit;line-height:1.35">Vymazat<br><span style="font-weight:400;color:#999;font-size:10px">Löschen</span></button>
-      <button onclick="saveForemanSign()" style="flex:1;padding:10px;background:#211D1A;color:#E8A13A;border:none;border-radius:12px;font-size:14px;font-weight:800;cursor:pointer;font-family:inherit;line-height:1.35">Uložit podpis<br><span style="font-weight:600;font-size:10px;opacity:.85">Unterschrift speichern</span></button>
+      <button id="foreman-save-btn" onclick="saveForemanSign()" style="flex:1;padding:10px;background:#211D1A;color:#E8A13A;border:none;border-radius:12px;font-size:14px;font-weight:800;cursor:pointer;font-family:inherit;line-height:1.35"><span id="foreman-save-label">Uložit podpis<br><span style="font-weight:600;font-size:10px;opacity:.85">Unterschrift speichern</span></span></button>
       <button onclick="closeForemanSign()" style="padding:10px 14px;background:none;border:2px solid #e0e0e0;border-radius:12px;font-size:12px;cursor:pointer;font-family:inherit;line-height:1.35">Zrušit<br><span style="font-weight:400;color:#999;font-size:10px">Abbrechen</span></button>
     </div>
   </div>
