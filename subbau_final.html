@@ -4666,7 +4666,10 @@ async function saveAdminSignatureMemory() {
   const cloudAttempted = !!(blob && typeof currentUser !== 'undefined' && currentUser?.id)
   try {
     if (cloudAttempted) {
-      const { error } = await sb.storage.from('contracts').upload(adminSigStoragePath(), blob, { contentType: 'image/png', upsert: true })
+      const { error } = await Promise.race([
+        sb.storage.from('contracts').upload(adminSigStoragePath(), blob, { contentType: 'image/png', upsert: true }),
+        new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), 15000))
+      ])
       okCloud = !error
       if (error) { cloudErrMsg = error.message; console.warn('[admin sig] cloud upload:', error.message) }
     }
@@ -4888,7 +4891,7 @@ async function submitAdminSignatureWithPlacement() {
 // Po nahrání nové verze se snadno pozná, jestli se opravdu nasadila: otevřete
 // appku, zmáčkněte F12 (na Macu ⌥⌘I) a v konzoli je vypsané tohle datum. Když
 // tam svítí starší, prohlížeč nebo GitHub drží starou verzi.
-const SUBBAU_VERZE = '2026-10-15 c — Faktura e-mailem se zapíše vždy; Moje faktury'
+const SUBBAU_VERZE = '2026-10-15 d — Appka na slabém signálu nehlásí hotovo naslepo (celý sweep)'
 console.log('SubBau docházka — verze ' + SUBBAU_VERZE)
 // Verze i dole v menu správce. Když někdo novinku „nevidí", podle ní se hned
 // pozná, jestli nemá otevřenou starou kopii appky — bez hledání v konzoli.
@@ -14815,13 +14818,21 @@ async function sendChatMessage() {
   input.value = ''
   input.style.height = 'auto'
 
-  const { data: inserted, error } = await sb.from('chat_messages').insert({
-    worker_id: currentUser.id,
-    sender_id: currentUser.id,
-    sender_role: currentProfile?.role || 'osvec',
-    message: msg,
-    is_read: false
-  }).select().single()
+  // Bez časového limitu by na slabém signálu na stavbě odeslání jen viselo,
+  // tlačítko by zůstalo zamčené a text by se nevrátil do pole pro opravu.
+  const withTimeout = (p, ms) => Promise.race([
+    p, new Promise((_, rej) => setTimeout(() => rej(new Error('Vypršel čas — zkuste to prosím znovu')), ms))
+  ])
+  let inserted, error
+  try {
+    ;({ data: inserted, error } = await withTimeout(sb.from('chat_messages').insert({
+      worker_id: currentUser.id,
+      sender_id: currentUser.id,
+      sender_role: currentProfile?.role || 'osvec',
+      message: msg,
+      is_read: false
+    }).select().single(), 15000))
+  } catch (e) { error = e }
 
   if (btn) btn.disabled = false
 
@@ -14829,6 +14840,7 @@ async function sendChatMessage() {
     showToast('❌ Chyba odeslání: ' + error.message)
     input.value = msg
     console.error('[sendChatMessage]', error)
+    zapisChybuAppky('chat-odeslani', error?.message)
     return
   }
 
@@ -21843,10 +21855,14 @@ async function editMobAttEntry(attId, currentSite, currentDesc) {
 async function saveMobAttEntry(attId) {
   const site = document.getElementById('mob-edit-site')?.value.trim() || null
   const desc = document.getElementById('mob-edit-desc')?.value.trim() || null
+  // Bez časového limitu by na slabém signálu na stavbě zápis jen viselo.
+  const withTimeout = (p, ms) => Promise.race([
+    p, new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), ms))
+  ])
   // Do záznamu, který upravil SubBau, se z mobilu nesahá — jeho zápis je nadřazený
   let rec = null
   try {
-    const { data: fresh } = await sb.from('attendance').select('*').eq('id', attId).single()
+    const { data: fresh } = await withTimeout(sb.from('attendance').select('*').eq('id', attId).single(), 12000)
     rec = fresh || null
   } catch (e) { console.warn('[att-edit] záznam se nepodařilo načíst:', e?.message) }
   if (adminEditedAtt(rec)) {
@@ -21855,16 +21871,20 @@ async function saveMobAttEntry(attId) {
     loadMobWeek()
     return
   }
-  const { data: ulozeno, error } = await sb.from('attendance').update({
-    construction_site: site,
-    work_description: desc
-  }).eq('id', attId).eq('worker_id', currentUser.id).select('id')  // bezpečnostní check
+  let ulozeno, error
+  try {
+    ;({ data: ulozeno, error } = await withTimeout(sb.from('attendance').update({
+      construction_site: site,
+      work_description: desc
+    }).eq('id', attId).eq('worker_id', currentUser.id).select('id'), 12000))  // bezpečnostní check
+  } catch (e) { error = e }
   if (error || !ulozeno || !ulozeno.length) {
     // Panel necháme otevřený i s vyplněným textem, ať jde uložení rovnou zopakovat.
     // Prázdný výsledek bez chyby = záznam mezitím zmizel nebo na něj nemá právo;
     // tiše to spolknout nesmíme, pracovník by si myslel, že je uloženo.
     if (!error) console.error('[úprava dne] update neuložil žádný řádek, id:', attId)
     showToast('❌ Neuložilo se — zkuste to prosím znovu, text zůstal vyplněný')
+    zapisChybuAppky('uprava-dne-mobil', error?.message || 'žádný řádek', { attId })
     return
   }
   document.getElementById('mob-att-edit-overlay')?.remove()
@@ -23628,10 +23648,18 @@ async function uploadDocument() {
   }
 
   btn.textContent = '⏳ Nahrávám...'
+  // Bez časového limitu by na slabém signálu na stavbě nahrávání jen viselo
+  // a tlačítko zůstalo navždy "Nahrávám…".
+  const withTimeout = (p, ms) => Promise.race([
+    p, new Promise((_, rej) => setTimeout(() => rej(new Error('Vypršel čas — zkuste to prosím znovu')), ms))
+  ])
   const filePath = `${currentUser.id}/${docType}_${Date.now()}.${uploadExt}`
-  const { error: storageErr } = await sb.storage
-    .from('documents')
-    .upload(filePath, uploadBlob, { upsert: true, contentType: uploadContentType })
+  let storageErr
+  try {
+    ;({ error: storageErr } = await withTimeout(sb.storage
+      .from('documents')
+      .upload(filePath, uploadBlob, { upsert: true, contentType: uploadContentType }), 20000))
+  } catch (e) { storageErr = e }
 
   if (storageErr) {
     let sMsg = storageErr.message
@@ -23644,6 +23672,7 @@ async function uploadDocument() {
     showToast('❌ Nahrávání: ' + sMsg)
     if (status) { status.style.display='block'; status.style.background='var(--red-l)'; status.style.color='var(--red)'; status.textContent='❌ '+sMsg }
     btn.disabled = false; btn.textContent = '📤 Nahrát'; progress.style.display = 'none'
+    zapisChybuAppky('nahravani-dokumentu', storageErr?.message, { docType })
     return
   }
 
@@ -23653,23 +23682,27 @@ async function uploadDocument() {
 
   // 4. DB záznam pro přední stranu / dokument
   const frontName = docType + (isMulti ? '_strana1' : '') + '_' + new Date().toISOString().slice(0,10) + '.pdf'
-  const { error: dbErr } = await sb.from('documents').insert({
-    worker_id: currentUser.id,
-    doc_type: docType,
-    file_name: frontName,
-    file_path: filePath,
-    file_url: fileUrl,
-    valid_until: validUntil || null,
-    status: 'pending',
-    uploaded_by: currentUser.id,
-    uploaded_at: new Date().toISOString()
-  })
+  let dbErr
+  try {
+    ;({ error: dbErr } = await withTimeout(sb.from('documents').insert({
+      worker_id: currentUser.id,
+      doc_type: docType,
+      file_name: frontName,
+      file_path: filePath,
+      file_url: fileUrl,
+      valid_until: validUntil || null,
+      status: 'pending',
+      uploaded_by: currentUser.id,
+      uploaded_at: new Date().toISOString()
+    }), 15000))
+  } catch (e) { dbErr = e }
 
   if (dbErr) {
     // Soubor v úložišti, ke kterému není řádek v databázi, by nikdo nenašel — ukliď ho
     try { await sb.storage.from('documents').remove([filePath]) } catch(e) {}
     showToast('❌ ' + docSaveErrorText(dbErr))
     btn.disabled = false; btn.textContent = '📤 Nahrát'; progress.style.display = 'none'
+    zapisChybuAppky('nahravani-dokumentu', dbErr?.message, { docType })
     return
   }
 
@@ -23685,10 +23718,10 @@ async function uploadDocument() {
       const je2Obrazek = (selectedFile2.type || '').startsWith('image/') || /\.(jpe?g|png|heic|webp)$/i.test(selectedFile2.name || '')
       if (je2Obrazek) blob2 = await imagesToPdfBlob([selectedFile2])
       const filePath2 = `${currentUser.id}/${docType}_${Date.now()}_strana2.pdf`
-      const { error: stErr2 } = await sb.storage.from('documents').upload(filePath2, blob2, { upsert: true, contentType: 'application/pdf' })
+      const { error: stErr2 } = await withTimeout(sb.storage.from('documents').upload(filePath2, blob2, { upsert: true, contentType: 'application/pdf' }), 20000)
       if (stErr2) throw stErr2
       const { data: u2 } = sb.storage.from('documents').getPublicUrl(filePath2)
-      const { error: dbErr2 } = await sb.from('documents').insert({
+      const { error: dbErr2 } = await withTimeout(sb.from('documents').insert({
         worker_id: currentUser.id,
         doc_type: docType,
         file_name: docType + '_strana2_' + new Date().toISOString().slice(0,10) + '.pdf',
@@ -23698,7 +23731,7 @@ async function uploadDocument() {
         status: 'pending',
         uploaded_by: currentUser.id,
         uploaded_at: new Date().toISOString()
-      })
+      }), 15000)
       if (dbErr2) {
         // Soubor v úložišti bez řádku v databázi by nikdo nenašel — ukliď ho
         await sb.storage.from('documents').remove([filePath2]).catch(() => {})
@@ -23707,6 +23740,7 @@ async function uploadDocument() {
     } catch (e) {
       console.error('[uploadDocument] zadní strana selhala:', e)
       zadniStranaChyba = e?.message || 'neznámá chyba'
+      zapisChybuAppky('nahravani-dokumentu-zadni-strana', zadniStranaChyba, { docType })
     }
   }
 
@@ -23753,8 +23787,11 @@ function zadostOSmazaniHtml(profile) {
 async function pozadatOSmazaniUctu() {
   if (!currentUser) return
   if (!confirm('Opravdu chcete požádat o smazání účtu?\n\nKancelář SubBau žádost vyřídí a váš účet i docházku natrvalo smaže — nejde to pak vrátit zpátky. Dokud se tak nestane, appku dál běžně používáte a žádost můžete kdykoli zrušit.')) return
+  const withTimeout = (p, ms) => Promise.race([p, new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), ms))])
   const ted = new Date().toISOString()
-  const { data, error } = await sb.from('profiles').update({ smazani_zadost_at: ted }).eq('id', currentUser.id).select('id, smazani_zadost_at')
+  let data, error
+  try { ;({ data, error } = await withTimeout(sb.from('profiles').update({ smazani_zadost_at: ted }).eq('id', currentUser.id).select('id, smazani_zadost_at'), 12000)) }
+  catch (e) { error = e }
   if (error || !data || !data.length) { showToast('❌ Žádost se neuložila' + (error ? ': ' + error.message : '')); return }
   currentProfile.smazani_zadost_at = data[0].smazani_zadost_at
   showToast('🗑 Žádost o smazání účtu odeslána')
@@ -23762,7 +23799,10 @@ async function pozadatOSmazaniUctu() {
 }
 async function zrusitZadostOSmazaniUctu() {
   if (!currentUser) return
-  const { data, error } = await sb.from('profiles').update({ smazani_zadost_at: null }).eq('id', currentUser.id).select('id')
+  const withTimeout = (p, ms) => Promise.race([p, new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), ms))])
+  let data, error
+  try { ;({ data, error } = await withTimeout(sb.from('profiles').update({ smazani_zadost_at: null }).eq('id', currentUser.id).select('id'), 12000)) }
+  catch (e) { error = e }
   if (error || !data || !data.length) { showToast('❌ Nepodařilo se to zrušit' + (error ? ': ' + error.message : '')); return }
   currentProfile.smazani_zadost_at = null
   showToast('✅ Žádost zrušena')
@@ -24626,8 +24666,11 @@ function editMyPhone() {
 async function saveMyPhone() {
   const val = document.getElementById('mob-phone-input')?.value.trim()
   if (!val) { showToast('⚠️ Zadejte telefonní číslo'); return }
-  const { error } = await sb.from('profiles').update({ phone: val }).eq('id', currentUser.id)
-  if (error) { showToast('❌ Chyba: ' + error.message); return }
+  const withTimeout = (p, ms) => Promise.race([p, new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), ms))])
+  let data, error
+  try { ;({ data, error } = await withTimeout(sb.from('profiles').update({ phone: val }).eq('id', currentUser.id).select('id'), 12000)) }
+  catch (e) { error = e }
+  if (error || !data || !data.length) { showToast('❌ Neuložilo se' + (error ? ': ' + error.message : '')); return }
   if (currentProfile) currentProfile.phone = val
   const valEl = document.getElementById('mob-phone-val'); if (valEl) valEl.textContent = val
   const box = document.getElementById('mob-phone-edit'); if (box) box.style.display = 'none'
@@ -24640,8 +24683,11 @@ function editMyCar() {
   if (box) box.style.display = box.style.display === 'none' ? 'block' : 'none'
 }
 async function saveMyCar(has) {
-  const { error } = await sb.from('profiles').update({ has_car: has }).eq('id', currentUser.id)
-  if (error) { showToast('❌ Chyba: ' + error.message); return }
+  const withTimeout = (p, ms) => Promise.race([p, new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), ms))])
+  let data, error
+  try { ;({ data, error } = await withTimeout(sb.from('profiles').update({ has_car: has }).eq('id', currentUser.id).select('id'), 12000)) }
+  catch (e) { error = e }
+  if (error || !data || !data.length) { showToast('❌ Neuložilo se' + (error ? ': ' + error.message : '')); return }
   if (currentProfile) currentProfile.has_car = has
   const valEl = document.getElementById('mob-car-val'); if (valEl) valEl.textContent = has ? '🚗 Ano' : '— Ne'
   const yesBtn = document.getElementById('mob-car-yes-btn'); const noBtn = document.getElementById('mob-car-no-btn')
@@ -27843,12 +27889,17 @@ async function _exportWorkerKWTed(workerId, workerName, week, year, lang, forema
 
   // Když je podpis vedoucího, ulož výkaz, aby ho admin viděl v docházce za týden
   if (foreman && (foreman.name || foreman.signature)) {
+    // Bez časového limitu by na slabém signálu na stavbě zápis jen viselo —
+    // stejná pojistka jako u sourozence téhle funkce, saveForemanSignToDb.
+    const withTimeout = (p, ms) => Promise.race([
+      p, new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), ms))
+    ])
     let pdfUrl = null
     // 1) Zkus nahrát HTML výkaz do storage (kvůli zobrazení/stažení adminem)
     try {
       const blob = new Blob([printHTML], { type: 'text/html;charset=utf-8' })
       const path = `hour-sheets/${workerId}_KW${week}_${year}_${Date.now()}.html`
-      const { error: upErr } = await sb.storage.from('contracts').upload(path, blob, { contentType: 'text/html', upsert: true })
+      const { error: upErr } = await withTimeout(sb.storage.from('contracts').upload(path, blob, { contentType: 'text/html', upsert: true }), 15000)
       if (!upErr) {
         const { data: pub } = sb.storage.from('contracts').getPublicUrl(path)
         pdfUrl = pub?.publicUrl || null
@@ -27859,28 +27910,32 @@ async function _exportWorkerKWTed(workerId, workerName, week, year, lang, forema
     // 2) Vždy ulož záznam (i bez pdf_url) — ať admin aspoň vidí jméno vedoucího + že je podepsáno
     try {
       console.log('[hour-sheet] ukládám | jméno:', foreman.name, '| podpis délka:', foreman.signature?.length || 0)
-      const { data: insData, error: insErr } = await sb.from('weekly_hour_sheets').insert({
+      const { data: insData, error: insErr } = await withTimeout(sb.from('weekly_hour_sheets').insert({
         worker_id: workerId, kw: week, kw_year: year,
         foreman_name: foreman.name || null, pdf_url: pdfUrl,
         foreman_signature: foreman.signature || null
-      }).select('id, foreman_signature')
+      }).select('id, foreman_signature'), 15000)
       if (insErr) {
         console.error('[hour-sheet] insert selhal:', insErr.message)
         showToast('⚠️ Výkaz se nepodařilo uložit pro admina: ' + insErr.message)
+        zapisChybuAppky('vykaz-hodin', insErr.message, { workerId, week, year })
       } else {
         const savedId = insData && insData[0]?.id
         const savedSigLen = insData && insData[0]?.foreman_signature?.length
         console.log('[hour-sheet] uloženo id:', savedId, '| podpis v DB délka:', savedSigLen || 0)
         // Pojistka: když se podpis nezapsal, ale máme ho, doplň ho update-em
         if (savedId && foreman.signature && !savedSigLen) {
-          const { error: updErr } = await sb.from('weekly_hour_sheets')
-            .update({ foreman_signature: foreman.signature }).eq('id', savedId)
+          const { error: updErr } = await withTimeout(sb.from('weekly_hour_sheets')
+            .update({ foreman_signature: foreman.signature }).eq('id', savedId), 15000)
           console.log('[hour-sheet] dodatečný update podpisu | chyba:', updErr?.message || 'žádná')
         }
         showToast('✅ Výkaz uložen' + (foreman.name ? ' (vedoucí: ' + foreman.name + ')' : '')
           + (pdfUrl ? '' : ' — ale soubor výkazu se nenahrál, v kanceláři bude vidět jen podpis'))
       }
-    } catch(e) { console.error('[hour-sheet] insert výjimka:', e?.message) }
+    } catch(e) {
+      console.error('[hour-sheet] insert výjimka:', e?.message)
+      zapisChybuAppky('vykaz-hodin', e?.message, { workerId, week, year })
+    }
   }
 
   printInPage(printHTML, ['Stundennachweis', 'KW' + week, year, bezpecnyNazevSouboru(workerName)].filter(Boolean).join('_') + '.html')
@@ -34221,7 +34276,10 @@ async function uploadContract() {
     .toLowerCase()
   const filePath = `${workerId}/${Date.now()}_${safeName}`
   console.log('[uploadContract] filePath:', filePath)
-  const { data: storageData, error: storageErr } = await sb.storage.from('contracts').upload(filePath, contractFile, {upsert: false})
+  const withTimeout = (p, ms) => Promise.race([p, new Promise((_, rej) => setTimeout(() => rej(new Error('Vypršel čas — zkuste to prosím znovu')), ms))])
+  let storageData, storageErr
+  try { ;({ data: storageData, error: storageErr } = await withTimeout(sb.storage.from('contracts').upload(filePath, contractFile, {upsert: false}), 20000)) }
+  catch (e) { storageErr = e }
   if (storageErr) {
     let msg = storageErr.message
     console.error('[uploadContract] storage error:', storageErr)
@@ -34239,13 +34297,16 @@ async function uploadContract() {
   const fileUrl = urlData?.publicUrl
 
   // Ulož do DB - vrať data pro získání ID
-  const { data: contractData, error: dbErr } = await sb.from('contracts').insert({
-    worker_id: workerId,
-    title,
-    file_url: fileUrl,
-    status: 'admin_pending',
-    created_at: new Date().toISOString()
-  }).select().single()
+  let contractData, dbErr
+  try {
+    ;({ data: contractData, error: dbErr } = await withTimeout(sb.from('contracts').insert({
+      worker_id: workerId,
+      title,
+      file_url: fileUrl,
+      status: 'admin_pending',
+      created_at: new Date().toISOString()
+    }).select().single(), 15000))
+  } catch (e) { dbErr = e }
   if (dbErr) { showToast('❌ Chyba DB: ' + dbErr.message); progress.style.display='none'; return }
 
   const contractId = contractData?.id
@@ -34292,7 +34353,10 @@ async function uploadSignedContract() {
     .replace(/_+/g, '_')
     .toLowerCase()
   const filePath = `${workerId}/${Date.now()}_signed_${safeName}`
-  const { error: storageErr } = await sb.storage.from('contracts').upload(filePath, contractFile, { upsert: false })
+  const withTimeout = (p, ms) => Promise.race([p, new Promise((_, rej) => setTimeout(() => rej(new Error('Vypršel čas — zkuste to prosím znovu')), ms))])
+  let storageErr
+  try { ;({ error: storageErr } = await withTimeout(sb.storage.from('contracts').upload(filePath, contractFile, { upsert: false }), 20000)) }
+  catch (e) { storageErr = e }
   if (storageErr) {
     let msg = storageErr.message
     if (msg.includes('not found') || msg.includes('does not exist')) msg = 'Storage bucket "contracts" neexistuje'
@@ -34304,15 +34368,18 @@ async function uploadSignedContract() {
   const fileUrl = urlData?.publicUrl
 
   // Ulož jako už podepsanou — status signed_scan, podpis = nahraný soubor
-  const { error: dbErr } = await sb.from('contracts').insert({
-    worker_id: workerId,
-    title,
-    file_url: fileUrl,
-    signature_url: fileUrl,
-    signed_at: new Date().toISOString(),
-    status: 'signed_scan',
-    created_at: new Date().toISOString()
-  })
+  let dbErr
+  try {
+    ;({ error: dbErr } = await withTimeout(sb.from('contracts').insert({
+      worker_id: workerId,
+      title,
+      file_url: fileUrl,
+      signature_url: fileUrl,
+      signed_at: new Date().toISOString(),
+      status: 'signed_scan',
+      created_at: new Date().toISOString()
+    }), 15000))
+  } catch (e) { dbErr = e }
   if (dbErr) { showToast('❌ Chyba DB: ' + dbErr.message); progress.style.display = 'none'; return }
 
   progress.style.display = 'none'
@@ -34348,7 +34415,10 @@ async function uploadAdminSignedContract() {
     .replace(/_+/g, '_')
     .toLowerCase()
   const filePath = `${workerId}/${Date.now()}_adminsigned_${safeName}`
-  const { error: storageErr } = await sb.storage.from('contracts').upload(filePath, contractFile, { upsert: false })
+  const withTimeout = (p, ms) => Promise.race([p, new Promise((_, rej) => setTimeout(() => rej(new Error('Vypršel čas — zkuste to prosím znovu')), ms))])
+  let storageErr
+  try { ;({ error: storageErr } = await withTimeout(sb.storage.from('contracts').upload(filePath, contractFile, { upsert: false }), 20000)) }
+  catch (e) { storageErr = e }
   if (storageErr) {
     let msg = storageErr.message
     if (msg.includes('not found') || msg.includes('does not exist')) msg = 'Storage bucket "contracts" neexistuje'
@@ -34361,15 +34431,18 @@ async function uploadAdminSignedContract() {
 
   // Soubor už obsahuje náš podpis → rovnou status 'pending' (čeká na OSVČ),
   // stejně jako po dokončení elektronického podpisu adminem přes saveAdminSignedPDF().
-  const { data: contractData, error: dbErr } = await sb.from('contracts').insert({
-    worker_id: workerId,
-    title,
-    file_url: fileUrl,
-    admin_signature_url: fileUrl,
-    admin_signed_at: new Date().toISOString(),
-    status: 'pending',
-    created_at: new Date().toISOString()
-  }).select().single()
+  let contractData, dbErr
+  try {
+    ;({ data: contractData, error: dbErr } = await withTimeout(sb.from('contracts').insert({
+      worker_id: workerId,
+      title,
+      file_url: fileUrl,
+      admin_signature_url: fileUrl,
+      admin_signed_at: new Date().toISOString(),
+      status: 'pending',
+      created_at: new Date().toISOString()
+    }).select().single(), 15000))
+  } catch (e) { dbErr = e }
   if (dbErr) { showToast('❌ Chyba DB: ' + dbErr.message); progress.style.display = 'none'; return }
 
   // Pošli notifikaci pracovníkovi — stejná jako u běžného nahrání k podpisu
@@ -35913,32 +35986,41 @@ async function potvrdOznameni() {
   const btn = document.getElementById('announcement-ok')
   if (!annId || !currentUser?.id) return
   if (btn) { btn.disabled = true; btn.textContent = 'Ukládám…' }
-  let { data, error } = await sb.from('oznameni_precteno')
-    .insert({ oznameni_id: annId, worker_id: currentUser.id, potvrzeno: true }).select('oznameni_id')
-  // Řádek už je: potvrzené z druhého telefonu (v pořádku), nebo jen „zavřel"
-  // z doby, kdy šlo červené omylem zavřít křížkem — to se přepne na potvrzené.
-  if (error && (error.code === '23505' || /duplicate key/i.test(error.message || ''))) {
-    ;({ data, error } = await sb.from('oznameni_precteno')
-      .update({ potvrzeno: true, kdy: new Date().toISOString() })
-      .eq('oznameni_id', annId).eq('worker_id', currentUser.id).select('oznameni_id'))
-    if (error || !data || !data.length) {
-      // Přepnout nejde (chybí migrace supabase-migrace-oznameni-potvrzeni.sql).
-      // Když už potvrzené je, v pořádku; jinak si potvrzení zapamatuje aspoň
-      // tenhle telefon, ať pracovník nezůstane u lišty, která nejde zavřít.
-      const { data: r } = await sb.from('oznameni_precteno').select('potvrzeno')
-        .eq('oznameni_id', annId).eq('worker_id', currentUser.id)
-      if (!(r && r[0] && r[0].potvrzeno)) {
-        console.warn('[oznámení] potvrzení se do databáze nepřepsalo:', error?.message || '0 řádků')
-        lsSet(annPamet('potvrzeno', annId), '1')
+  // Bez časového limitu by na slabém signálu na stavbě zápis jen viselo a
+  // tlačítko by zůstalo navždy "Ukládám…".
+  const withTimeout = (p, ms) => Promise.race([
+    p, new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), ms))
+  ])
+  let data, error
+  try {
+    ;({ data, error } = await withTimeout(sb.from('oznameni_precteno')
+      .insert({ oznameni_id: annId, worker_id: currentUser.id, potvrzeno: true }).select('oznameni_id'), 12000))
+    // Řádek už je: potvrzené z druhého telefonu (v pořádku), nebo jen „zavřel"
+    // z doby, kdy šlo červené omylem zavřít křížkem — to se přepne na potvrzené.
+    if (error && (error.code === '23505' || /duplicate key/i.test(error.message || ''))) {
+      ;({ data, error } = await withTimeout(sb.from('oznameni_precteno')
+        .update({ potvrzeno: true, kdy: new Date().toISOString() })
+        .eq('oznameni_id', annId).eq('worker_id', currentUser.id).select('oznameni_id'), 12000))
+      if (error || !data || !data.length) {
+        // Přepnout nejde (chybí migrace supabase-migrace-oznameni-potvrzeni.sql).
+        // Když už potvrzené je, v pořádku; jinak si potvrzení zapamatuje aspoň
+        // tenhle telefon, ať pracovník nezůstane u lišty, která nejde zavřít.
+        const { data: r } = await withTimeout(sb.from('oznameni_precteno').select('potvrzeno')
+          .eq('oznameni_id', annId).eq('worker_id', currentUser.id), 12000)
+        if (!(r && r[0] && r[0].potvrzeno)) {
+          console.warn('[oznámení] potvrzení se do databáze nepřepsalo:', error?.message || '0 řádků')
+          lsSet(annPamet('potvrzeno', annId), '1')
+        }
+        data = [{ oznameni_id: annId }]; error = null
       }
-      data = [{ oznameni_id: annId }]; error = null
     }
-  }
+  } catch (e) { error = e }
   if (error || !data || !data.length) {
     if (btn) { btn.disabled = false; btn.textContent = 'Porozuměl jsem' }
     showToast(chybiMigraceOznameni(error)
       ? '❌ Potvrzení zatím nejde uložit — dejte vědět SubBau'
       : '❌ Potvrzení se neuložilo — zkuste to prosím znovu')
+    zapisChybuAppky('potvrzeni-oznameni', error?.message, { annId })
     return
   }
   // I telefon si potvrzení pamatuje — kdyby se pak nenačetlo, kdo co odklikl
@@ -36661,18 +36743,25 @@ async function markRead(id, el) {
     const dot = el.querySelector('span[style*="border-radius:50%"]')
     if (dot) dot.remove()
   }
-  const { error } = await sb.from('notifications').update({ is_read: true }).eq('id', id).eq('worker_id', currentUser.id)
+  const withTimeout = (p, ms) => Promise.race([p, new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), ms))])
+  let error
+  try { ;({ error } = await withTimeout(sb.from('notifications').update({ is_read: true }).eq('id', id).eq('worker_id', currentUser.id), 10000)) }
+  catch (e) { error = e }
   if (error) { console.warn('[markRead] selhalo:', error.message); showToast('⚠️ Nepodařilo se uložit (oprávnění?)') }
   loadMobNotifications()
 }
 
 async function markAllRead() {
   if (!currentUser) return
-  const { data, error } = await sb.from('notifications')
-    .update({ is_read: true })
-    .eq('worker_id', currentUser.id)
-    .eq('is_read', false)
-    .select('id')
+  const withTimeout = (p, ms) => Promise.race([p, new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), ms))])
+  let data, error
+  try {
+    ;({ data, error } = await withTimeout(sb.from('notifications')
+      .update({ is_read: true })
+      .eq('worker_id', currentUser.id)
+      .eq('is_read', false)
+      .select('id'), 10000))
+  } catch (e) { error = e }
   if (error) {
     console.warn('[markAllRead] selhalo:', error.message)
     showToast('⚠️ Nepodařilo se uložit — chybí oprávnění (spusťte SQL zpravy-oznaceni)')
@@ -40582,7 +40671,10 @@ async function ulozVzhledFaktury(hodnota, workerId) {
   const n = parseInt(hodnota, 10)
   // POZOR: dřív tu byla natvrdo desítka a vzhledy 11–20 to tiše zahodilo.
   if (!Number.isInteger(n) || n < 1 || n > POCET_VZHLEDU) return
-  const { error } = await sb.from('profiles').update({ invoice_design: n }).eq('id', kdo)
+  const withTimeout = (p, ms) => Promise.race([p, new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), ms))])
+  let error
+  try { ;({ error } = await withTimeout(sb.from('profiles').update({ invoice_design: n }).eq('id', kdo), 12000)) }
+  catch (e) { error = e }
   if (error) {
     // Databáze má u sloupce podmínku na rozsah. Dokud neproběhne migrace,
     // odmítne vzhledy nad 10 — a to je potřeba říct nahlas, ne spolknout.

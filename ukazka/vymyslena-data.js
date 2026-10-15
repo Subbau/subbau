@@ -129,7 +129,13 @@
       const pozde = (i + zpet) % 5 === 0;
       const ci = pozde ? '07:12:00' : '06:58:00';
       const co = ((i + zpet) % 6 === 0) ? '17:30:00' : '16:03:00';
-      const hodin = ((i + zpet) % 6 === 0) ? 10 : 8.5;
+      // Hodiny musí sedět s applyAttendanceRules ze appky (ukázková vrstva
+      // běží PŘED appkou a funkci zavolat nemůže) — jinak admin v Úpravě dne
+      // uvidí jiné číslo, než jaké appka sama přepočítá, a zápis se bude tvářit,
+      // že se "něco změnilo", i když nikdo nic neupravil (15. 10. 2026, zjištěno
+      // při testu vyfakturovano). Pozdní příchod (07:12) se zaokrouhlí na 7:30
+      // (jen do 10 min po celé se promíjí) — o tu půlhodinu míň se tedy pracuje.
+      const hodin = ((i + zpet) % 6 === 0) ? (pozde ? 9.5 : 10) : (pozde ? 8 : 8.5);
       // Dnešek u části lidí necháme rozdělaný, ať je vidět běžící směna
       const bezOdchodu = zpet === 0 && dow !== 0 && i % 3 === 0;
       D.attendance.push({
