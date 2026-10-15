@@ -2908,6 +2908,14 @@ setTimeout(function () {
         <button id="inv-create-btn" onclick="generateInvoiceMob()" style="width:100%;padding:15px;background:#9c3b22;color:#fff;border:none;border-radius:12px;font-size:15px;font-weight:800;cursor:pointer;font-family:'Archivo',-apple-system,sans-serif;display:flex;align-items:center;justify-content:center;gap:9px"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:18px;height:18px"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/></svg><span>Vytvořit fakturu</span></button>
         <div style="text-align:center;font-size:10px;color:var(--text3);margin-top:8px">🇨🇿 Čeština · 🇩🇪 Deutsch · 🇬🇧 English</div>
       </div>
+
+      <!-- Moje odeslané faktury — jen ty, co SubBau označil jako vyřízené nebo
+           zaplacené (majitel 15. 10. 2026: pracovník má vidět, že jeho faktura
+           u SubBau opravdu je, ale až POTÉ, co ji zpracujeme, ne hned po odeslání). -->
+      <div class="mob-card" id="moje-faktury-card" style="display:none">
+        <div class="mob-card-title"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:18px;height:18px;flex-shrink:0;vertical-align:-3px;margin-right:7px"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/><path d="M9 15l2 2 4-4"/></svg>Moje faktury</div>
+        <div id="moje-faktury-list"></div>
+      </div>
     </div>
   </div>
   <!-- Plovoucí tlačítko: rychlý chat se SubBau -->
@@ -4880,7 +4888,7 @@ async function submitAdminSignatureWithPlacement() {
 // Po nahrání nové verze se snadno pozná, jestli se opravdu nasadila: otevřete
 // appku, zmáčkněte F12 (na Macu ⌥⌘I) a v konzoli je vypsané tohle datum. Když
 // tam svítí starší, prohlížeč nebo GitHub drží starou verzi.
-const SUBBAU_VERZE = '2026-10-15 b — Podpis vedoucího a fotky stavby spolehlivěji, deník chyb appky'
+const SUBBAU_VERZE = '2026-10-15 c — Faktura e-mailem se zapíše vždy; Moje faktury'
 console.log('SubBau docházka — verze ' + SUBBAU_VERZE)
 // Verze i dole v menu správce. Když někdo novinku „nevidí", podle ní se hned
 // pozná, jestli nemá otevřenou starou kopii appky — bez hledání v konzoli.
@@ -17339,7 +17347,7 @@ function renderWorkerInvoices() {
         // mezery („28. 9. 2026"), proto se dělí u POSLEDNÍ mezery.
         const t = dt(r.sent_at), i = t.lastIndexOf(' ')
         return i > 0 ? t.slice(0, i) + '<div style="font-size:11px;color:var(--text3)">' + t.slice(i + 1) + '</div>' : t
-      })()}${r.sent_via === 'email' ? '<div style="font-size:11px;color:var(--text3)">e-mailem</div>' : ''}</td>
+      })()}${(SENT_VIA_POPISEK[r.sent_via] ? `<div style="font-size:11px;color:var(--text3)">${SENT_VIA_POPISEK[r.sent_via]}</div>` : '')}</td>
       <td>${statusPill(r.status)}${r.odlozeno_at ? `<div style="font-size:11px;font-weight:800;color:#1d4ed8;margin-top:3px;white-space:nowrap">⏸ odloženo ${_invDmy(String(r.odlozeno_at).slice(0, 10))}</div>` : ''}</td>
       <td>
         <div style="display:flex;gap:4px;flex-wrap:wrap">
@@ -23851,6 +23859,14 @@ function bezpecnaFotkaStavby(url) {
   return /^blob:/.test(u) ? u : ''
 }
 
+// Stejná pojistka jako u fotek ze stavby, jen pro PDF faktur (bucket "documents").
+function bezpecneDokumentyUrl(url) {
+  const u = String(url || '').trim()
+  if (!u || u.length > 1000 || /["'<>\s\\]/.test(u)) return ''
+  if (SUPABASE_URL) return u.startsWith(SUPABASE_URL + '/storage/v1/object/public/documents/') ? u : ''
+  return /^blob:/.test(u) ? u : ''
+}
+
 // Hodinovou sazbu určuje SubBau v sekci Provize (uloží se do profiles.hourly_rate_worker).
 // Když ji tam admin nastavil, pracovník ji nesmí přepsat — jinak by mu faktura
 // nesouhlasila s tím, co je domluvené, a rozpadl by se výpočet provize.
@@ -24035,6 +24051,43 @@ async function loadInvoiceForm() {
 
   await loadInvoiceWeeks()
   await onInvoiceWeekChange()
+  nactiMojeFaktury()
+}
+
+// Vlastní odeslané faktury pracovníka — jen vyřízené/zaplacené (status != 'new').
+// Dokud je faktura jen „new" (SubBau ji ještě neviděl/nezpracoval), v appce se
+// pracovníkovi neukáže — má vidět, že je u SubBau hotová, ne jen odeslaná.
+async function nactiMojeFaktury() {
+  const card = document.getElementById('moje-faktury-card')
+  const list = document.getElementById('moje-faktury-list')
+  if (!card || !list || !currentUser) return
+  let data = null
+  try {
+    const r = await sb.from('worker_invoices')
+      .select('id, invoice_number, kw, kw_year, period_from, period_to, total_amount, status, pdf_url, sent_at')
+      .eq('worker_id', currentUser.id).in('status', ['seen', 'paid'])
+      .order('sent_at', { ascending: false }).limit(30)
+    data = r.data
+  } catch (e) { console.warn('[moje faktury] načtení selhalo:', e?.message) }
+  if (!data || !data.length) { card.style.display = 'none'; return }
+  card.style.display = ''
+  const stavLabel = { seen: 'Vyřízená', paid: 'Zaplacená' }
+  const stavBarva = { seen: '#8a5a00', paid: '#1d9e75' }
+  list.innerHTML = data.map(r => {
+    const obdobi = r.kw ? ('KW ' + r.kw + '/' + r.kw_year) : (r.period_from ? (_invDmy(r.period_from) + ' – ' + _invDmy(r.period_to)) : '')
+    const url = bezpecneDokumentyUrl(r.pdf_url)
+    return `<div style="display:flex;align-items:center;gap:10px;padding:9px 0;border-bottom:1px solid var(--brd)">
+      <div style="min-width:0;flex:1">
+        <div style="font-size:13px;font-weight:800;color:var(--text)">č. ${escAttr(r.invoice_number || '—')}</div>
+        <div style="font-size:11.5px;color:var(--text3)">${escAttr(obdobi)}</div>
+      </div>
+      <div style="text-align:right">
+        <div style="font-size:13px;font-weight:800;color:var(--text)">${(Number(r.total_amount) || 0).toFixed(2)} €</div>
+        <div style="font-size:10.5px;font-weight:700;color:${stavBarva[r.status] || 'var(--text3)'}">${stavLabel[r.status] || r.status}</div>
+      </div>
+      ${url ? `<a href="${escAttr(url)}" target="_blank" rel="noopener" title="Stáhnout" style="flex-shrink:0;display:flex;align-items:center;justify-content:center;width:34px;height:34px;border-radius:8px;background:var(--bg);color:var(--text2)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:16px;height:16px"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="M7 10l5 5 5-5"/><path d="M12 15V3"/></svg></a>` : ''}
+    </div>`
+  }).join('')
 }
 
 // Uloží fakturační údaje z formuláře do profilu. Vrací true, když se to povedlo.
@@ -33456,6 +33509,14 @@ async function saveInvoicePdf() {
 // Obě posílají identické PDF a obě si zapíšou řádek do worker_invoices, aby
 // admin viděl fakturu na jednom místě, ať pracovník zvolí cokoliv.
 const INVOICE_EMAIL = 'faktury@subbau.cz'
+// Popisek u faktury v seznamu admina podle toho, jak se e-mail poslal.
+// „Nepotvrzené" u sdílení/ručního odeslání: appka ověří jen zápis do SubBau
+// (ten je jistý), ne že pracovníkův e-mail opravdu dorazil do schránky.
+const SENT_VIA_POPISEK = {
+  email: 'e-mailem',
+  'email-sdileni': 'e-mailem (sdílením — nepotvrzené)',
+  'email-rucne': 'e-mailem (ručně — nepotvrzené)'
+}
 let _invSending = false
 // Trvalé potvrzení o odeslání (přežije překreslení lišty pod náhledem)
 let _invSentNote = ''
@@ -33744,61 +33805,83 @@ async function emailInvoiceToSubbau() {
     // 1) Odeslat přes server (Brevo) — příloha dorazí spolehlivě
     if (label) label.textContent = 'Odesílám na ' + INVOICE_EMAIL + '…'
     const sent = await sendInvoiceByServer(out)
-    if (sent.ok) {
-      const row = invoiceRowFromLast('email')
-      try {
-        const up = await uploadInvoicePdf(out.blob, d.workerId, d.invoiceNum)
-        row.pdf_path = up.path; row.pdf_url = up.url
-      } catch (e) { console.warn('[faktura] PDF k e-mailu se nenahrálo:', e?.message) }
-      // Faktura, která odešla jen mailem a není ve složce, se u správce snadno ztratí —
-      // pracovník o tom musí vědět, ne vidět čisté ✅.
-      const error = await storeInvoiceRow(row)
-      if (error) {
-        console.warn('[faktura] e-mail odešel, zápis do složky ne:', error.message)
-        zapisChybuAppky('faktura-email-bez-zapisu', error.message, { invoiceNum: d.invoiceNum, workerId: d.workerId })
-        _invSentNote = '⚠️ Odesláno e-mailem na ' + INVOICE_EMAIL + ', ale do složky Faktury se nezapsala — dejte prosím vědět SubBau.'
-        updateInvoiceSendUi()
-        showInvoiceSentModal('Faktura odešla e-mailem na ' + INVOICE_EMAIL + ', ale do složky Faktury se nezapsala. Dejte prosím vědět SubBau.', true)
-      } else {
-        _invSentNote = '✅ Odesláno e-mailem na ' + INVOICE_EMAIL + '.'
-        updateInvoiceSendUi()
-        showInvoiceSentModal('Faktura č. ' + (d.invoiceNum || '') + ' odešla e-mailem na ' + INVOICE_EMAIL + '.')
+    let sentVia = 'email', zpravaNavic = ''
+
+    if (!sent.ok) {
+      console.warn('[faktura] server e-mail neposlal:', sent.reason)
+      zapisChybuAppky('faktura-email-server', sent.reason, { invoiceNum: d.invoiceNum, workerId: d.workerId })
+
+      // 2) Sdílení přes telefon — pracovník vybere svou poštu, PDF je přiložené
+      const file = new File([out.blob], out.filename, { type: 'application/pdf' })
+      let zrusenoSdilenim = false
+      if (navigator.canShare && navigator.canShare({ files: [file] })) {
+        try {
+          await navigator.share({
+            files: [file],
+            title: 'Faktura ' + (d.invoiceNum || ''),
+            text: 'Faktura ' + (d.invoiceNum || '') + ' — ' + (d.workerName || '') + '\nPošlete prosím na ' + INVOICE_EMAIL
+          })
+          sentVia = 'email-sdileni'
+          zpravaNavic = ' PDF jste poslali přes sdílení — zkontrolujte prosím, že e-mail opravdu odešel.'
+        } catch (e) {
+          if (e && e.name === 'AbortError') zrusenoSdilenim = true   // pracovník sdílení zavřel sám
+          else console.warn('[faktura] sdílení selhalo:', e?.message)
+        }
       }
+      if (zrusenoSdilenim) {
+        showToast('Odeslání zrušeno — zkuste to prosím znovu, až budete chtít fakturu opravdu poslat')
+        return
+      }
+      if (sentVia === 'email') {
+        // 3) Poslední záchrana: ulož PDF a otevři rozepsaný e-mail. Appka si
+        // neověří, že pracovník e-mail fakt odeslal — proto se faktura NÍŽE
+        // zapíše do složky u SubBau tak jako tak (15. 10. 2026: appka to dřív
+        // nedělala vůbec a faktura byla u SubBau neviditelná, i když ji
+        // pracovník "poslal" — tahle cesta zůstávala jediná, co nic nezapsala).
+        try { out.pdf.save(out.filename) } catch (e) { console.warn('[faktura] uložení PDF:', e?.message) }
+        const subj = encodeURIComponent('Faktura ' + (d.invoiceNum || '') + ' — ' + (d.workerName || ''))
+        const body = encodeURIComponent(
+          'Dobrý den,\n\nposílám fakturu č. ' + (d.invoiceNum || '') + ' za týden ' + (d.week || '') + '/' + (d.year || '') +
+          '.\nČástka: ' + (Number(d.totalAmount) || 0).toFixed(2) + ' EUR\n\n' +
+          'PDF faktury je uložené v telefonu — přiložte ho prosím k tomuto e-mailu.\n\n' +
+          (d.workerName || ''))
+        window.location.href = 'mailto:' + INVOICE_EMAIL + '?subject=' + subj + '&body=' + body
+        sentVia = 'email-rucne'
+        zpravaNavic = ' PDF se navíc uložilo do telefonu — přiložte ho prosím k otevřenému e-mailu a odešlete na ' + INVOICE_EMAIL + '.'
+      }
+    }
+
+    // Faktura se zapíše do složky u SubBau VŽDY, ať e-mail dopadl jakkoli —
+    // to je náš vlastní spolehlivý systém a nezávisí na tom, jestli se povede
+    // odeslat (nebo opravdu odešle) e-mail. Admin tak fakturu uvidí, i když
+    // zrovna nepřijde mail.
+    const row = invoiceRowFromLast(sentVia)
+    try {
+      const up = await uploadInvoicePdf(out.blob, d.workerId, d.invoiceNum)
+      row.pdf_path = up.path; row.pdf_url = up.url
+    } catch (e) { console.warn('[faktura] PDF k e-mailu se nenahrálo:', e?.message) }
+    const error = await storeInvoiceRow(row)
+    if (error) {
+      console.warn('[faktura] e-mail odešel, zápis do složky ne:', error.message)
+      zapisChybuAppky('faktura-email-bez-zapisu', error.message, { invoiceNum: d.invoiceNum, workerId: d.workerId })
+      _invSentNote = '⚠️ Odesláno e-mailem, ale do složky Faktury se nezapsala — dejte prosím vědět SubBau.'
+      updateInvoiceSendUi()
+      showInvoiceSentModal('Faktura odešla e-mailem, ale do složky Faktury se nezapsala. Dejte prosím vědět SubBau.', true)
       return
     }
-    console.warn('[faktura] server e-mail neposlal:', sent.reason)
-
-    // 2) Sdílení přes telefon — pracovník vybere svou poštu, PDF je přiložené
-    const file = new File([out.blob], out.filename, { type: 'application/pdf' })
-    if (navigator.canShare && navigator.canShare({ files: [file] })) {
-      try {
-        await navigator.share({
-          files: [file],
-          title: 'Faktura ' + (d.invoiceNum || ''),
-          text: 'Faktura ' + (d.invoiceNum || '') + ' — ' + (d.workerName || '') + '\nPošlete prosím na ' + INVOICE_EMAIL
-        })
-        showToast('📤 Vyberte poštu a odešlete na ' + INVOICE_EMAIL)
-        return
-      } catch (e) {
-        if (e && e.name === 'AbortError') return   // pracovník sdílení zavřel
-        console.warn('[faktura] sdílení selhalo:', e?.message)
-      }
+    if (sentVia === 'email') {
+      _invSentNote = '✅ Odesláno e-mailem na ' + INVOICE_EMAIL + '.'
+      updateInvoiceSendUi()
+      showInvoiceSentModal('Faktura č. ' + (d.invoiceNum || '') + ' odešla e-mailem na ' + INVOICE_EMAIL + '.')
+    } else {
+      _invSentNote = '✅ Faktura č. ' + (d.invoiceNum || '') + ' je u SubBau ve složce Faktury.' + zpravaNavic
+      updateInvoiceSendUi()
+      showInvoiceSentModal('Faktura č. ' + (d.invoiceNum || '') + ' je zapsaná u SubBau ve složce Faktury — tu vidí v každém případě.' + zpravaNavic, true)
     }
-
-    // 3) Poslední záchrana: ulož PDF a otevři rozepsaný e-mail. Appka si tu
-    // nijak neověří, že pracovník e-mail fakt odeslal — a nikam se přitom
-    // nezapíše faktura, takže u SubBau o ní nikdo neví. Aspoň se to zapíše
-    // do deníku chyb, ať je vidět, jak často se sem appka dostává.
-    zapisChybuAppky('faktura-email-posledni-zachrana', sent.reason || 'server e-mail neposlal', { invoiceNum: d.invoiceNum, workerId: d.workerId })
-    try { out.pdf.save(out.filename) } catch (e) { console.warn('[faktura] uložení PDF:', e?.message) }
-    const subj = encodeURIComponent('Faktura ' + (d.invoiceNum || '') + ' — ' + (d.workerName || ''))
-    const body = encodeURIComponent(
-      'Dobrý den,\n\nposílám fakturu č. ' + (d.invoiceNum || '') + ' za týden ' + (d.week || '') + '/' + (d.year || '') +
-      '.\nČástka: ' + (Number(d.totalAmount) || 0).toFixed(2) + ' EUR\n\n' +
-      'PDF faktury je uložené v telefonu — přiložte ho prosím k tomuto e-mailu.\n\n' +
-      (d.workerName || ''))
-    window.location.href = 'mailto:' + INVOICE_EMAIL + '?subject=' + subj + '&body=' + body
-    showToast('📎 PDF uloženo — přiložte ho k e-mailu')
+  } catch (e) {
+    console.error('[faktura] odeslání:', e)
+    showToast('❌ Odeslání selhalo: ' + (e?.message || e))
+    zapisChybuAppky('faktura-email', e?.message, { invoiceNum: d?.invoiceNum, workerId: d?.workerId })
   } finally {
     _invSendBusy(false, 'inv-email-label', orig || ('Poslat e-mailem na ' + INVOICE_EMAIL))
   }
