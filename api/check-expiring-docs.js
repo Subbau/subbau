@@ -307,6 +307,24 @@ module.exports = async function handler(req, res) {
     );
     const workerById = new Map((workers || []).map((w) => [w.id, w]));
 
+    // Doklad, co mezitím nahradil novější (pracovník ho sám nahrál znovu),
+    // se nesmí dál připomínat — starý řádek se při nahrání nového nikde
+    // neoznačí jako nahrazený, takže upomínka na něj jela dál vedle nového
+    // dokladu (audit 16. 10. 2026). „op" a „pas" počítáme jako stejný typ
+    // dokladu, stejně jako chybějící doklady výš.
+    const vsechnyDoklady = await sb(
+      `documents?select=worker_id,doc_type,status,uploaded_at&worker_id=in.(${ids.join(',')})` +
+        `&status=not.in.(rejected,unreadable)`,
+      serviceKey
+    ).catch(() => []);
+    const typovaSkupina = (t) => (t === 'op' || t === 'pas') ? 'op' : t;
+    const nejnovejsi = new Map();
+    for (const d of (vsechnyDoklady || [])) {
+      const klic = d.worker_id + '|' + typovaSkupina(d.doc_type);
+      const aktualni = nejnovejsi.get(klic);
+      if (!aktualni || String(d.uploaded_at || '') > String(aktualni)) nejnovejsi.set(klic, d.uploaded_at);
+    }
+
     const results = [];
     const adminSummary = [];
 
@@ -318,6 +336,10 @@ module.exports = async function handler(req, res) {
       // (Když migrace supabase-migrace-doklad-bez-expirace.sql ještě neproběhla,
       //  sloupec chybí, hodnota je undefined a chová se to jako dřív.)
       if (doc.no_expiry) continue;
+
+      // Novější doklad stejného typu už existuje — tenhle starý přeskočit.
+      const nejnovejsiUploadTypu = nejnovejsi.get(doc.worker_id + '|' + typovaSkupina(doc.doc_type));
+      if (nejnovejsiUploadTypu && String(nejnovejsiUploadTypu) > String(doc.uploaded_at || '')) continue;
 
       const daysLeft = daysBetween(today, new Date(doc.valid_until + 'T00:00:00'));
       // Propadlý doklad připomínáme, dokud ho nevymění; končící až od 30 dní.

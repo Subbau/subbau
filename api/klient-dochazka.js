@@ -770,12 +770,18 @@ module.exports = async (req, res) => {
     // určitý počet řádků (v Supabase výchozí 1000) — se vzestupným pořadím by
     // při delší historii v přepínači chyběly právě nejnovější týdny (rozbor
     // výkonu 1. 10. 2026). Na pořadí v seznamu nezáleží, řadí se níž.
-    const sPartou = (sloupce, odDne, doDne2, poradi = 'asc') => potom(db(`attendance?select=${sloupce}` +
+    // `&limit=5000` tu dřív nic neznamenalo — Supabase i tak vrátí nejvýš
+    // „max-rows" (výchozí 1000) a zbytek potichu zahodí (stejná past jako
+    // v appce u Kalendáře, audit 16. 10. 2026). `dbVsechno` dotahuje po
+    // stránkách, dokud řádky nedojdou; `,id.asc` v řazení je nutný tiebreaker
+    // — bez něj by se stránky u dnů se stejným work_date mohly překrývat
+    // nebo přeskočit řádek.
+    const sPartou = (sloupce, odDne, doDne2, poradi = 'asc') => potom(dbVsechno(`attendance?select=${sloupce}` +
       `&team_id=in.(${teamIds.map(encodeURIComponent).join(',')})` +
-      `&work_date=gte.${odDne}&work_date=lte.${doDne2}&order=work_date.${poradi}&limit=5000`, klic));
-    const bezParty = (sloupce, odDne, doDne2, poradi = 'asc') => potom(db(`attendance?select=${sloupce}&team_id=is.null` +
+      `&work_date=gte.${odDne}&work_date=lte.${doDne2}&order=work_date.${poradi},id.asc`, klic));
+    const bezParty = (sloupce, odDne, doDne2, poradi = 'asc') => potom(dbVsechno(`attendance?select=${sloupce}&team_id=is.null` +
       `&worker_id=in.(${lideVeSkupinach.map(encodeURIComponent).join(',')})` +
-      `&work_date=gte.${odDne}&work_date=lte.${doDne2}&order=work_date.${poradi}&limit=5000`, klic));
+      `&work_date=gte.${odDne}&work_date=lte.${doDne2}&order=work_date.${poradi},id.asc`, klic));
 
     // Třetí kolo: docházka s partou (a týdny s partou) souběžně s lidmi.
     // (U dokladů se docházka nečte — viz rezimDokladu níž.)

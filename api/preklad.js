@@ -19,6 +19,26 @@ const POVOLENE = [
   'https://translate.googleapis.com/translate_a/single?',
   'https://api.mymemory.translated.net/get?',
 ];
+
+// Brzda proti zneužití jako volný neomezený relay (audit 16. 10. 2026):
+// endpoint neměl žádné omezení počtu volání, na rozdíl od sesterských API
+// funkcí (admin-update-worker, send-invoice), co ho už dávno mají. Stejný
+// vzor, jen zkopírovaný sem.
+const HITS = new Map();
+function rateLimited(key, max, windowMs = 10 * 60 * 1000) {
+  const now = Date.now();
+  const fresh = (HITS.get(key) ?? []).filter((t) => now - t < windowMs);
+  if (fresh.length >= max) {
+    HITS.set(key, fresh);
+    return true;
+  }
+  fresh.push(now);
+  HITS.set(key, fresh);
+  if (HITS.size > 5000) HITS.clear();
+  return false;
+}
+const clientIp = (req) =>
+  String(req.headers['x-forwarded-for'] ?? '').split(',')[0].trim() || 'unknown';
 const NENI_PREKLAD = /MYMEMORY WARNING|QUERY LENGTH LIMIT|TRANSLATED\.NET|PLEASE SELECT|DISTINCT LANGUAGES|IS AN INVALID|INVALID (SOURCE|TARGET) LANGUAGE|NO QUERY SPECIFIED|LIMIT EXCEEDED/i;
 
 // Je odpověď služby platný překlad, který smí CDN držet?
@@ -32,6 +52,10 @@ function lzePamatovat(url, telo) {
 }
 
 module.exports = async function handler(req, res) {
+  if (rateLimited(`preklad:${clientIp(req)}`, 60)) {
+    res.status(429).json({ chyba: 'příliš mnoho požadavků' });
+    return;
+  }
   const url = String((req.query && req.query.u) || '');
   if (!POVOLENE.some((p) => url.startsWith(p)) || url.length > 8000) {
     res.status(400).json({ chyba: 'nepovolená adresa' });

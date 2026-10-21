@@ -146,6 +146,33 @@ module.exports = async function handler(req, res) {
     return;
   }
 
+  // 3b) Cíl nesmí být jiný admin (audit 16. 10. 2026: tahle funkce dřív
+  // kontrolovala jen to, že VOLAJÍCÍ je admin — na cílový účet se nedívala
+  // vůbec. Jeden admin tak mohl tiše přepsat přihlášení kteréhokoli jiného
+  // admina, včetně majitele. Admin smí měnit přihlášení sám sobě a obyčejným
+  // pracovníkům (OSVČ/parťák), na jiného admina ne — na to by musel jít jiný,
+  // přísněji hlídaný postup.
+  if (userId !== callerId) {
+    try {
+      const targetResp = await fetch(
+        `${SUPABASE_URL}/rest/v1/profiles?id=eq.${encodeURIComponent(userId)}&select=role`,
+        { headers: { apikey: serviceKey, Authorization: `Bearer ${serviceKey}` } }
+      );
+      const targetRows = targetResp.ok ? await targetResp.json() : [];
+      if (!targetRows.length) {
+        res.status(404).json({ ok: false, error: 'target_not_found' });
+        return;
+      }
+      if (targetRows[0].role === 'admin') {
+        res.status(403).json({ ok: false, error: 'cannot_modify_other_admin' });
+        return;
+      }
+    } catch {
+      res.status(502).json({ ok: false, error: 'target_check_failed' });
+      return;
+    }
+  }
+
   // 4) Vlastní změna přes Supabase Admin API (jediné místo, kde je service_role potřeba)
   const payload = {};
   if (newEmail) {

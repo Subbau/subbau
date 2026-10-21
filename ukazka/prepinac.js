@@ -41,7 +41,10 @@
       'border-radius:9px;border:1px solid #4a443e;background:#2c2722;color:#fff;cursor:pointer}' +
       '#demo-pruh button.aktivni{background:#E8A13A;color:#211D1A;border-color:#E8A13A}' +
       'body{padding-bottom:56px!important}' +
-      '@media print{#demo-pruh{display:none}body{padding-bottom:0!important}}';
+      // Spodní menu pracovníka je samo o sobě fixed na bottom:0 — padding na
+      // body ho nehne, takže by zůstalo schované pod ukázkovým pruhem.
+      '.mob-nav{bottom:56px!important}' +
+      '@media print{#demo-pruh{display:none}body{padding-bottom:0!important}.mob-nav{bottom:0!important}}';
     document.head.appendChild(styl);
 
     function oznac() {

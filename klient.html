@@ -439,9 +439,14 @@ function doplnPreklady(){
 
 function vykreslit(d, preklady){
   preklady = preklady || {};
-  var podle = {};
-  d.radky.forEach(function(r){ (podle[r.jmeno] = podle[r.jmeno] || []).push(r) });
-  var jmena = Object.keys(podle).sort(function(a,b){ return a.localeCompare(b,'cs') });
+  // Seskupuje se podle ID pracovníka, ne podle jména — dva lidé stejného jména
+  // (shoda vzniká snadno, appka má otevřenou registraci) by se jinak smísili
+  // v jednoho: hodiny obou dohromady, fotka/telefon/poznámka jen jednoho z nich
+  // (audit 16. 10. 2026). Appka posílá `worker` u každého řádku už dávno,
+  // jen se tu nepoužíval.
+  var podle = {}, jmenoPodleId = {};
+  d.radky.forEach(function(r){ var id = r.worker || r.jmeno; (podle[id] = podle[id] || []).push(r); if (!jmenoPodleId[id]) jmenoPodleId[id] = r.jmeno });
+  var jmena = Object.keys(podle).sort(function(a,b){ return jmenoPodleId[a].localeCompare(jmenoPodleId[b],'cs') });
 
   var celkem = 0, poradi = 0;
   var html = '<header>'
@@ -549,7 +554,7 @@ function vykreslit(d, preklady){
             + '</div>'
           : '<div class="foto foto-prazdna" onclick="vyberFoto(\'' + esc(wid) + '\')" title="Foto hinzufügen · přidat fotku">＋</div>')
       + '<div style="min-width:0;flex:1">'
-      +   '<div class="jmeno">' + esc(jm)
+      +   '<div class="jmeno">' + esc(jmenoPodleId[jm])
       +     (skoncil
             ? '<span class="konec-stitek">Zusammenarbeit beendet · spolupráce ukončena'
               + (datumKonce ? ' ' + datumPlne(datumKonce) : '') + '</span>'
@@ -1064,8 +1069,16 @@ function stahnoutCsv(){
       r.probiha || r.sazba == null ? '' : (Math.round(Number(r.sazba) * 100) / 100).toFixed(2).replace('.', ','),
       r.probiha || r.provize == null ? '' : (Math.round(Number(r.provize) * 100) / 100).toFixed(2).replace('.', ',') ];
   });
+  // Buňka začínající na = + - @ (nebo tabulátorem/CR) by Excel po otevření
+  // spustil jako vzorec — jméno i popis práce píše sám pracovník, takže si
+  // ho tak může nastavit kdokoli (audit 16. 10. 2026). Uvozující apostrof
+  // podle doporučení OWASP donutí tabulkový program brát to jako obyčejný text.
+  function bezpecnaBunka(b){
+    var s = String(b);
+    return /^[=+\-@\t\r]/.test(s) ? "'" + s : s;
+  }
   var csv = [hl].concat(radky).map(function(r){
-    return r.map(function(b){ return '"' + String(b).replace(/"/g,'""') + '"' }).join(';');
+    return r.map(function(b){ return '"' + bezpecnaBunka(b).replace(/"/g,'""') + '"' }).join(';');
   }).join('\r\n');
   // BOM, ať Excel pozná diakritiku
   var blob = new Blob(['﻿' + csv], { type: 'text/csv;charset=utf-8' });
