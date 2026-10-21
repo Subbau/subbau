@@ -1189,6 +1189,9 @@ module.exports = async (req, res) => {
       if (slibDovolene) {
         const abs = vybal(await slibDovolene);
         for (const a of (abs || [])) {
+          // Absence (neomluvená, zapisuje jen správce) je interní věc kanceláře —
+          // odběratel ji vidět nemá (majitel 21. 10. 2026), proto se přeskočí.
+          if (a.type === 'absence') continue;
           // Nemoc se pozná podle sloupce type; starší záznamy ji mají jen
           // v poznámce, proto i ta záloha — stejně jako to dělá appka.
           const nemoc = a.type === 'nemoc'

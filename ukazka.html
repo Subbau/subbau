@@ -2085,7 +2085,7 @@ setTimeout(function () {
             .kal-firma td{padding:0}
             .kal-firma td div{position:sticky;left:0;display:inline-block;padding:7px 10px;font-size:13px;font-weight:800}
             .kal-firma td div span{font-size:11px;font-weight:600;opacity:.75}
-            .kal-parta td{padding:0;background:#fff}
+            .kal-parta td{padding:0;background:#ececea}
             .kal-parta td div{position:sticky;left:0;display:inline-block;padding:4px 10px 3px 20px;font-size:11px;font-weight:700;color:var(--text2)}
             .kal tfoot th,.kal tfoot td{border-bottom:none;border-top:2px solid var(--brd)}
             .kal-pocet{padding:0;text-align:center;font-size:11px;font-weight:800;color:var(--green);cursor:pointer;height:26px}
@@ -2166,6 +2166,7 @@ setTimeout(function () {
               <div id="cal-abs-tlacitka" style="display:flex;gap:6px">
                 <button type="button" id="cal-abs-btn-nemoc" onclick="calAbsZacni('nemoc')" title="Zapsat nemoc klepnutím na den v kalendáři" style="padding:7px 12px;border:1.5px solid #6a4c93;border-radius:9px;background:#fff;color:#6a4c93;font-size:13px;font-weight:700;cursor:pointer;font-family:inherit">🤒 Nemoc</button>
                 <button type="button" id="cal-abs-btn-dovolena" onclick="calAbsZacni('dovolena')" title="Zapsat dovolenou klepnutím na den v kalendáři" style="padding:7px 12px;border:1.5px solid #2f7fc1;border-radius:9px;background:#fff;color:#2f7fc1;font-size:13px;font-weight:700;cursor:pointer;font-family:inherit">🏖 Dovolená</button>
+                <button type="button" id="cal-abs-btn-absence" onclick="calAbsZacni('absence')" title="Zapsat absenci klepnutím na den v kalendáři" style="padding:7px 12px;border:1.5px solid #b8460e;border-radius:9px;background:#fff;color:#b8460e;font-size:13px;font-weight:700;cursor:pointer;font-family:inherit">⚠️ Absence</button>
               </div>
               <div id="cal-celkem" class="kal-celkem"></div>
             </div>
@@ -5608,7 +5609,7 @@ async function submitAdminSignatureWithPlacement() {
 // Po nahrání nové verze se snadno pozná, jestli se opravdu nasadila: otevřete
 // appku, zmáčkněte F12 (na Macu ⌥⌘I) a v konzoli je vypsané tohle datum. Když
 // tam svítí starší, prohlížeč nebo GitHub drží starou verzi.
-const SUBBAU_VERZE = '2026-10-21 b — Nahrávání dokladu zkusí znovu na slabém signálu'
+const SUBBAU_VERZE = '2026-10-21 c — Absence v kalendáři, rušení záznamu, odbarvené podskupiny'
 console.log('StavKo docházka — verze ' + SUBBAU_VERZE)
 // Verze i dole v menu správce. Když někdo novinku „nevidí", podle ní se hned
 // pozná, jestli nemá otevřenou starou kopii appky — bez hledání v konzoli.
@@ -13796,7 +13797,7 @@ async function loadKWData() {
     // Dovolená / nemoc — místo 0h ukaž, proč nebyl v práci
     const vac = vacDays[(w.id||'') + '|' + dateStr]
     if (vac) {
-      const info = ABSENCE[vac.type === 'nemoc' ? 'nemoc' : 'dovolena']
+      const info = ABSENCE[absType(vac)]
       const noteTxt = vac.note ? (' — ' + vac.note) : ''
       return `<td class="kw-day" data-date="${dateStr}" style="text-align:center;background:${info.bg};color:${info.color};font-weight:700;vertical-align:middle" title="${info.label}${noteTxt.replace(/"/g,'&quot;')}"><div style="display:flex;flex-direction:column;align-items:center;gap:2px;line-height:1.1">${info.icon}<span style="font-size:10px;font-weight:800">${info.label}</span></div></td>`
     }
@@ -13989,7 +13990,7 @@ function calNazevObdobi(od, doo) {
   return cz(od) + ' – ' + cz(doo) + ' ' + doo.slice(0, 4)
 }
 
-// Status pracovníka pro daný den: 'worked' | 'bad' | 'vac' | 'sick' | 'plan' | 'rest' | 'off' | null
+// Status pracovníka pro daný den: 'worked' | 'bad' | 'vac' | 'sick' | 'absence' | 'plan' | 'rest' | 'off' | null
 function dayStatusFor(worker, dateStr, attSet, vacList) {
   const attMap = window._calAttMap || {}
   const rec = attMap[worker.id + '|' + dateStr]
@@ -13998,9 +13999,9 @@ function dayStatusFor(worker, dateStr, attSet, vacList) {
     if (rec && attHasProblem(rec)) return 'bad'   // žlutá — něco nesedí
     return 'worked'                                // tmavě zelená — reálně byl
   }
-  // 2) dovolená nebo nemoc
+  // 2) dovolená, nemoc nebo absence
   const abs = vacList.find(v => v.worker_id === worker.id && dateStr >= v.date_from && dateStr <= v.date_to)
-  if (abs) return absType(abs) === 'nemoc' ? 'sick' : 'vac'
+  if (abs) { const at = absType(abs); return at === 'nemoc' ? 'sick' : at === 'absence' ? 'absence' : 'vac' }
   // 3) neděle vždy volno; sobota volno pokud pracovník v sobotu nechodí → odpočinek
   const wdOf = (() => { const [Y,M,D] = dateStr.split('-').map(Number); return new Date(Y,M-1,D).getDay() })()
   if (wdOf === 0 || (wdOf === 6 && !worker.turnus_weekends)) {
@@ -14067,6 +14068,8 @@ function calH(h) {
 // Červený zdravotnický kříž (nemoc v kalendáři). Kreslený, ne znak „✚" —
 // ten má v každém písmu jinou tloušťku a na telefonu bývá jako emoji.
 const KRIZ_NEMOC = '<svg class="kal-kriz" viewBox="0 0 10 10" aria-hidden="true"><path d="M3.4 0h3.2v3.4H10v3.2H6.6V10H3.4V6.6H0V3.4h3.4z" fill="#d0021b"/></svg>'
+// Absence (neomluvená): trojúhelník s vykřičníkem (majitel 21. 10. 2026).
+const TROJUHELNIK_ABSENCE = '<svg class="kal-trojuhelnik" viewBox="0 0 10 10" aria-hidden="true"><path d="M5 0.6L9.6 9.2H0.4z" fill="none" stroke="#b8460e" stroke-width="1" stroke-linejoin="round"/><rect x="4.45" y="3.1" width="1.1" height="2.9" fill="#b8460e"/><rect x="4.45" y="6.9" width="1.1" height="1.1" fill="#b8460e"/></svg>'
 function kalStavy() {
   return {
     // Zelená o malinko světlejší a PLÁN ODLIŠENÝ PROUŽKY (majitel 2. 10. 2026:
@@ -14079,6 +14082,7 @@ function kalStavy() {
     // (majitel 2. 10. 2026). Značku do políčka i do legendy dává `znacka`.
     vac:    { nazev: ABSENCE.dovolena.label, barva: ABSENCE.dovolena.fill,    pismo: '#0e4a7b', znacka: '<span class="kal-znacka">DOV</span>' },
     sick:   { nazev: ABSENCE.nemoc.label,    barva: ABSENCE.nemoc.fill,       pismo: '#d0021b', znacka: KRIZ_NEMOC },
+    absence:{ nazev: ABSENCE.absence.label,  barva: ABSENCE.absence.fill,     pismo: '#8a3307', znacka: TROJUHELNIK_ABSENCE },
     rest:   { nazev: 'Odpočinek (víkend)',   barva: '#d8c9b8',                pismo: '#211D1A' },
     off:    { nazev: 'Volno (turnus)',       barva: '#bbb',                   pismo: '#fff' }
   }
@@ -14095,7 +14099,7 @@ function kalLegenda() {
   const vzorekZnacky = (s) => `<span style="display:inline-flex;align-items:center;justify-content:center;min-width:26px;height:16px;padding:0 3px;border-radius:3px;vertical-align:-3px;background:${s.barva};color:${s.pismo};font-size:9.5px;font-weight:800">${s.znacka}</span>`
   el.innerHTML = Object.values(kalStavy()).map(s => `<span>${s.znacka ? vzorekZnacky(s) : vzorek('background:' + s.barva)} ${escAttr(s.nazev)}</span>`).join('') +
     `<span>${vzorek('background:#fff;box-shadow:inset 2px 0 0 var(--amber),inset -2px 0 0 var(--amber)')} Dnes</span>` +
-    `<span>${vzorek('background:var(--green);background-image:linear-gradient(135deg,' + ABSENCE.dovolena.color + ' 0 6px,transparent 6px);box-shadow:inset 0 0 0 2px var(--red)')} Dovolená/nemoc i práce ve stejný den</span>`
+    `<span>${vzorek('background:var(--green);background-image:linear-gradient(135deg,' + ABSENCE.dovolena.color + ' 0 6px,transparent 6px);box-shadow:inset 0 0 0 2px var(--red)')} Nepřítomnost i práce ve stejný den</span>`
   el.__hotovo = true
 }
 
@@ -14633,15 +14637,15 @@ async function renderCalendar(tichy) {
       let popis = s ? s.nazev : 'Bez záznamu'
       if (prace && hod) popis += ' · ' + calH(hod.h) + ' h' + (hod.prichod ? ' (' + hod.prichod + '–' + (hod.odchod || (hod.bezi ? 'běží' : '?')) + ')' : '')
       if (st === 'bad') popis += ' · ' + calProcProblem(attMap[k])
-      if (st === 'vac' || st === 'sick') { const pozn = absNote(najdiVolno(w.id, d.ds)); if (pozn) popis += ' · ' + pozn }
-      if (volno) popis += ' · POZOR: zapsaná ' + (absType(volno) === 'nemoc' ? 'nemoc' : 'dovolená/volno') + ' i práce'
+      if (st === 'vac' || st === 'sick' || st === 'absence') { const pozn = absNote(najdiVolno(w.id, d.ds)); if (pozn) popis += ' · ' + pozn }
+      if (volno) popis += ' · POZOR: zapsaná ' + ABSENCE[absType(volno)].label.toLowerCase() + ' i práce'
       // Zápis klepnutím (Nemoc/Dovolená v liště): zvýrazni dny vybrané pro
       // tohohle pracovníka, dokud se výběr neuloží nebo nezruší.
       const vPicku = _calAbsPick && _calAbsPick.workerId === w.id && _calAbsPick.od && d.ds >= _calAbsPick.od && d.ds <= _calAbsPick.doo
       const tr = 'kal-b' + (!s && jeVikend(d) ? ' vikend' : '') + (!s && d.wd === 0 ? ' nedele' : '') + (d.ds === dnes ? ' dnes' : '') + (volno ? ' rozpor' : '') + (vPicku ? ' kal-b-vyber' : '')
       // Rozpor: v rohu políčka trojúhelník v barvě dovolené/nemoci + červený
       // rámeček. Samotný rámeček na zelené skoro nebylo vidět.
-      const roh = volno ? `;background-image:linear-gradient(135deg,${absType(volno) === 'nemoc' ? ABSENCE.nemoc.color : ABSENCE.dovolena.color} 0 9px,transparent 9px)` : ''
+      const roh = volno ? `;background-image:linear-gradient(135deg,${ABSENCE[absType(volno)].color} 0 9px,transparent 9px)` : ''
       const styl = vPicku
         ? ` style="background:${ABSENCE[_calAbsPick.typ].fill};outline:2px solid ${ABSENCE[_calAbsPick.typ].color};outline-offset:-2px"`
         : (s ? ` style="background:${s.barva};color:${s.pismo}${roh}"` : '')
@@ -14664,11 +14668,16 @@ async function renderCalendar(tichy) {
   if (celkemEl) celkemEl.textContent = 'Celkem ' + celkem.toFixed(1) + 'h'
   zapisKalendar(content, html)
 
-  // Tlačítka Nemoc/Dovolená jsou MIMO #cal-content (nepřekreslují se s mřížkou),
-  // takže jejich "zapnutý" vzhled se musí hlídat zvlášť při každém kreslení.
-  const btnN = document.getElementById('cal-abs-btn-nemoc'), btnD = document.getElementById('cal-abs-btn-dovolena')
-  if (btnN) { const on = _calAbsPick?.typ === 'nemoc'; btnN.style.background = on ? ABSENCE.nemoc.color : '#fff'; btnN.style.color = on ? '#fff' : ABSENCE.nemoc.color }
-  if (btnD) { const on = _calAbsPick?.typ === 'dovolena'; btnD.style.background = on ? ABSENCE.dovolena.color : '#fff'; btnD.style.color = on ? '#fff' : ABSENCE.dovolena.color }
+  // Tlačítka Nemoc/Dovolená/Absence jsou MIMO #cal-content (nepřekreslují se
+  // s mřížkou), takže jejich "zapnutý" vzhled se musí hlídat zvlášť při
+  // každém kreslení.
+  ;['nemoc', 'dovolena', 'absence'].forEach(k => {
+    const btn = document.getElementById('cal-abs-btn-' + k)
+    if (!btn) return
+    const on = _calAbsPick?.typ === k
+    btn.style.background = on ? ABSENCE[k].color : '#fff'
+    btn.style.color = on ? '#fff' : ABSENCE[k].color
+  })
 
   // Telefon: při otevření nového období (ne při obnově téhož) dojeď na dnešek,
   // ať člověk nemusí rolovat přes celý měsíc, než najde, co se děje dneska.
@@ -14715,7 +14724,18 @@ function calAbsZrusit() { if (_calAbsPick && _calAbsPick.uklada) return; _calAbs
 function calAbsKlik(workerId, den, jmeno) {
   const p = _calAbsPick
   if (!p || p.uklada) return
-  if (!p.workerId) { p.workerId = workerId; p.jmeno = jmeno; p.od = den; p.doo = den; renderCalendar(); return }
+  if (!p.workerId) {
+    p.workerId = workerId; p.jmeno = jmeno; p.od = den; p.doo = den
+    renderCalendar()
+    // Na ten den už něco zapsané být může — rovnou nabídni zrušit TO, místo
+    // aby správce musel zvlášť do karty pracovníka (majitel 21. 10. 2026).
+    sb.from('vacations').select('id, type, note, date_from, date_to')
+      .eq('worker_id', workerId).lte('date_from', den).gte('date_to', den)
+      .order('date_from', { ascending: true }).limit(1)
+      .then(({ data }) => { if (_calAbsPick === p) { p.existujici = (data && data[0]) || null; renderCalendar() } })
+      .catch(() => {})
+    return
+  }
   if (p.workerId !== workerId) {
     showToast('⚠️ Nejdřív dokončete nebo zrušte výběr pro ' + (p.jmeno || 'vybraného pracovníka'))
     return
@@ -14729,12 +14749,20 @@ function calAbsListaHtml() {
   if (!p) return ''
   const info = ABSENCE[p.typ]
   const czd = d => { const x = String(d || '').split('-'); return x.length === 3 ? x[2] + '.' + x[1] + '.' + x[0] : (d || '') }
-  const rozsah = p.od ? (p.od === p.doo ? czd(p.od) : czd(p.od) + ' – ' + czd(p.doo)) : ''
   const uklada = !!p.uklada
+  const existujici = p.existujici ? (() => {
+    const ei = ABSENCE[absType(p.existujici)]
+    return `<div style="font-size:12px;color:var(--text2);margin-top:5px;padding-top:5px;border-top:1px dashed var(--brd)">
+      Už tu je: <b style="color:${ei.color}">${escAttr(ei.label)}</b> ${czd(p.existujici.date_from)} – ${czd(p.existujici.date_to)}
+      <button type="button" onclick="calAbsZrusitExistujici()" ${uklada ? 'disabled' : ''} style="margin-left:6px;padding:3px 9px;border:1px solid var(--red);border-radius:6px;background:#fff;color:var(--red);font-size:11.5px;font-weight:700;cursor:pointer;font-family:inherit">Zrušit tenhle záznam</button>
+    </div>` })() : ''
   return `<div data-cal-abs-lista style="position:fixed;left:50%;transform:translateX(-50%);bottom:calc(12px + env(safe-area-inset-bottom));width:min(620px, calc(100vw - 24px));box-sizing:border-box;z-index:9000;padding:12px 14px;border:2px solid ${info.color};border-radius:12px;background:#fff;box-shadow:0 10px 30px rgba(0,0,0,.25);display:flex;flex-wrap:wrap;align-items:center;gap:8px 12px">
     <div style="flex:1;min-width:200px">
       <div style="font-size:14.5px;font-weight:800;color:${info.color}">${info.icon} ${escAttr(info.label)}${p.jmeno ? ' — ' + escAttr(p.jmeno) : ''}</div>
-      <div style="font-size:12.5px;color:var(--text2);margin-top:2px">${p.workerId ? escAttr(rozsah) : 'Klepněte na den v kalendáři u pracovníka'}</div>
+      <div style="font-size:12.5px;color:var(--text2);margin-top:2px">${p.workerId
+        ? ('Začátek: <b>' + escAttr(czd(p.od)) + '</b> · Konec: <b>' + escAttr(czd(p.doo)) + '</b>')
+        : 'Klepněte na den v kalendáři u pracovníka'}</div>
+      ${existujici}
     </div>
     <button type="button" onclick="calAbsZrusit()" ${uklada ? 'disabled' : ''} style="min-height:40px;padding:8px 14px;border:1.5px solid var(--brd);border-radius:9px;background:#fff;font-size:14px;font-weight:700;cursor:pointer;font-family:inherit">Zrušit</button>
     <button type="button" onclick="calAbsUloz()" ${p.workerId && !uklada ? '' : 'disabled'} class="btn-pri" style="min-height:40px;padding:8px 16px;font-size:14px">${uklada ? 'Ukládám…' : 'Uložit'}</button>
@@ -14767,6 +14795,30 @@ async function calAbsUloz() {
     renderCalendar()
   }
 }
+// Zrušení UŽ ZAPSANÉHO záznamu nalezeného na prvním klepnutí — bez nutnosti
+// jít do karty pracovníka (majitel 21. 10. 2026).
+async function calAbsZrusitExistujici() {
+  const p = _calAbsPick
+  if (!p || !p.existujici || p.uklada) return
+  const ei = ABSENCE[absType(p.existujici)]
+  if (!confirm('Zrušit zapsanou ' + ei.label.toLowerCase() + ' (' + (p.jmeno || '') + ')?')) return
+  p.uklada = true
+  renderCalendar()
+  try {
+    const { data, error } = await sb.from('vacations').delete().eq('id', p.existujici.id).select('id')
+    if (error || !data || !data.length) {
+      showToast('❌ Nepodařilo se zrušit' + (error ? ': ' + error.message : ' — nemáte na to oprávnění'))
+      p.uklada = false; renderCalendar(); return
+    }
+    showToast('🗑 ' + ei.label + ' zrušena')
+    _calAbsPick = null
+    renderCalendar()
+  } catch (e) {
+    showToast('❌ Nepodařilo se zrušit: ' + (e?.message || e))
+    p.uklada = false
+    renderCalendar()
+  }
+}
 
 // Globální data kalendáře + detail dne
 let calData = null
@@ -14793,7 +14845,7 @@ function showDayDetail(dateStr) {
     const abs = upravit ? vacList.find(v => v.worker_id === w.id && dateStr >= v.date_from && dateStr <= v.date_to) : null
     if (!abs) return `<div style="font-size:13px;padding:4px 0;border-bottom:1px solid var(--brd)">${escAttr(w.full_name)}</div>`
     const rozpor = upravit === 'rozpor'
-      ? `<span data-rozpor-nepritomnost="${escAttr(abs.id)}" style="display:block;font-size:11.5px;font-weight:600;color:var(--red);margin-top:2px">⚠️ Zapsaná ${absType(abs) === 'nemoc' ? 'nemoc' : 'dovolená/volno'} i práce · ${czDen(abs.date_from)} → ${czDen(abs.date_to)}</span>`
+      ? `<span data-rozpor-nepritomnost="${escAttr(abs.id)}" style="display:block;font-size:11.5px;font-weight:600;color:var(--red);margin-top:2px">⚠️ Zapsaná ${ABSENCE[absType(abs)].label.toLowerCase()} i práce · ${czDen(abs.date_from)} → ${czDen(abs.date_to)}</span>`
       : ''
     return `<div style="font-size:13px;padding:4px 0;border-bottom:1px solid var(--brd);display:flex;justify-content:space-between;align-items:center;gap:8px">
       <span style="min-width:0">${escAttr(w.full_name)}${rozpor}</span>
@@ -37971,7 +38023,7 @@ function toggleVacForm() {
 // se bere odsud, ať to všude vypadá stejně — v appce, v kalendáři i v přehledu.
 const ABSENCE = {
   dovolena: {
-    label: 'Dovolená/volno', short: 'Volno',
+    label: 'Dovolená/volno', short: 'Volno', emoji: '☀️',
     // SVĚTLE MODRÁ VŠUDE (majitel 2. 10. 2026: „změnit barvu dovolené z černé
     // na nějakou světlou modrou, všude kde bude dovolená"). Dřív var(--blue) —
     // jenže „modrá" v barvách appky je skoro černá (#211D1A). color = písmo,
@@ -37980,11 +38032,19 @@ const ABSENCE = {
     icon: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:15px;height:15px;flex-shrink:0"><circle cx="12" cy="12" r="5"/><path d="M12 1v2M12 21v2M4.2 4.2l1.4 1.4M18.4 18.4l1.4 1.4M1 12h2M21 12h2"/></svg>'
   },
   nemoc: {
-    label: 'Nemoc', short: 'Nemoc',
+    label: 'Nemoc', short: 'Nemoc', emoji: '🩺',
     // fill = políčko v kalendáři: světlé, ať je na něm vidět červený kříž
     // (majitel 2. 10. 2026). Jinde zůstává nemoc fialová.
     color: '#6a4c93', bg: '#ede7f4', fill: '#fdeeee', dot: '#6a4c93',
     icon: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:15px;height:15px;flex-shrink:0"><circle cx="12" cy="12" r="9"/><path d="M12 8v8M8 12h8"/></svg>'
+  },
+  // ABSENCE (neomluvená) — majitel 21. 10. 2026: červeno-žlutá, trojúhelník
+  // s vykřičníkem. Na rozdíl od dovolené/nemoci ji zapisuje VÝHRADNĚ správce
+  // (v mobilním formuláři pracovníka — vacSetType — se záměrně nenabízí).
+  absence: {
+    label: 'Absence', short: 'Absence', emoji: '⚠️',
+    color: '#b8460e', bg: '#fdecd2', fill: '#fdf3d9', dot: '#b8460e',
+    icon: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:15px;height:15px;flex-shrink:0"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><path d="M12 9v4"/><path d="M12 17h.01"/></svg>'
   }
 }
 // Bezpečné čtení druhu. Když v databázi sloupec `type` ještě není (neproběhla
@@ -37996,6 +38056,7 @@ const _ABS_NOTE_SICK = /^Nemoc(\s—\s|$)/
 function absType(v) {
   if (!v) return 'dovolena'
   if (v.type === 'nemoc') return 'nemoc'
+  if (v.type === 'absence') return 'absence'
   if (!v.type && _ABS_NOTE_SICK.test(String(v.note || '').trim())) return 'nemoc'
   return 'dovolena'
 }
@@ -38117,7 +38178,7 @@ async function loadMobVacations() {
 }
 
 async function deleteVacation(id, type) {
-  const info = ABSENCE[type === 'nemoc' ? 'nemoc' : 'dovolena']
+  const info = ABSENCE[type] || ABSENCE.dovolena
   if (!confirm('Smazat tento záznam (' + info.label.toLowerCase() + ')?')) return
   // Mazání, které databáze nepustí, vrátí úspěch bez chyby a 0 řádků —
   // dřív se pokaždé hlásilo „smazána" a záznam se po obnovení vrátil.
@@ -38172,14 +38233,20 @@ let _wdVacEdit = null
 let _wdVacUklada = false
 function wdVacSetType(t) {
   _wdVacType = t
-  const dov = document.getElementById('wd-vac-type-dovolena')
-  const nem = document.getElementById('wd-vac-type-nemoc')
-  if (dov) { dov.style.background = t === 'dovolena' ? 'var(--blue)' : '#fff'; dov.style.color = t === 'dovolena' ? '#fff' : '#211D1A' }
-  if (nem) { nem.style.background = t === 'nemoc' ? ABSENCE.nemoc.color : '#fff'; nem.style.color = t === 'nemoc' ? '#fff' : '#211D1A' }
+  // Dovolená má (jako jediná) i se zapnutím zvlášť tmavou barvu appky, ne
+  // svou vlastní — tak to bylo odjakživa, Nemoc i Absence berou svou barvu.
+  const barvaZapnuto = { dovolena: 'var(--blue)', nemoc: ABSENCE.nemoc.color, absence: ABSENCE.absence.color }
+  ;['dovolena', 'nemoc', 'absence'].forEach(k => {
+    const el = document.getElementById('wd-vac-type-' + k)
+    if (!el) return
+    const on = t === k
+    el.style.background = on ? barvaZapnuto[k] : '#fff'
+    el.style.color = on ? '#fff' : '#211D1A'
+  })
   const btn = document.getElementById('wd-vac-save-btn')
-  if (btn) btn.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:1em;height:1em;flex-shrink:0;vertical-align:-2px"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><path d="M17 21v-8H7v8M7 3v5h8"/></svg> Uložit ' + (_wdVacEdit ? 'změny' : (t === 'nemoc' ? 'nemoc' : 'dovolenou'))
+  if (btn) btn.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:1em;height:1em;flex-shrink:0;vertical-align:-2px"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><path d="M17 21v-8H7v8M7 3v5h8"/></svg> Uložit ' + (_wdVacEdit ? 'změny' : (t === 'dovolena' ? 'dovolenou' : ABSENCE[t].label.toLowerCase()))
   const note = document.getElementById('wd-vac-note')
-  if (note) note.placeholder = t === 'nemoc' ? 'např. chřipka, úraz…' : 'např. rodinná dovolená'
+  if (note) note.placeholder = t === 'nemoc' ? 'např. chřipka, úraz…' : t === 'absence' ? 'např. důvod absence' : 'např. rodinná dovolená'
 }
 
 async function loadWdVacations() {
@@ -38205,6 +38272,9 @@ async function loadWdVacations() {
         </button>
         <button type="button" id="wd-vac-type-nemoc" onclick="wdVacSetType('nemoc')" style="flex:1;padding:9px 8px;border:1.5px solid var(--brd);border-radius:8px;font-size:12.5px;font-weight:700;cursor:pointer;font-family:inherit;display:flex;align-items:center;justify-content:center;gap:6px;background:#fff;color:#211D1A">
           ${ABSENCE.nemoc.icon}Nemoc
+        </button>
+        <button type="button" id="wd-vac-type-absence" onclick="wdVacSetType('absence')" style="flex:1;padding:9px 8px;border:1.5px solid var(--brd);border-radius:8px;font-size:12.5px;font-weight:700;cursor:pointer;font-family:inherit;display:flex;align-items:center;justify-content:center;gap:6px;background:#fff;color:#211D1A">
+          ${ABSENCE.absence.icon}Absence
         </button>
       </div>
       <div class="g2" style="gap:10px">
@@ -38295,11 +38365,11 @@ async function wdAddVacation() {
   // Pracovník ať o tom ví — jinak by mu záznam přistál v appce bez vysvětlení
   try {
     const czd = d => { const p = String(d).slice(0,10).split('-'); return p[2]+'. '+p[1]+'. '+p[0] }
-    const jeNemoc = _wdVacType === 'nemoc'
+    const nazev = info.label.toLowerCase()
     await sb.from('notifications').insert({
       worker_id: currentWorkerId,
-      title: (jeNemoc ? '🩺 Zapsaná nemoc' : '☀️ Zapsaná dovolená'),
-      message: 'StavKo vám zapsal ' + (jeNemoc ? 'nemoc' : 'dovolenou') + ' ' + czd(from) + ' → ' + czd(to) + (note ? ' (' + note + ')' : '') + '.',
+      title: info.emoji + ' Zapsaná ' + nazev,
+      message: 'StavKo vám zapsal ' + nazev + ' ' + czd(from) + ' → ' + czd(to) + (note ? ' (' + note + ')' : '') + '.',
       type: 'obecna',
       is_read: false
     })
@@ -38314,7 +38384,7 @@ async function wdAddVacation() {
 // Admin smaže dovolenou nebo nemoc pracovníka
 async function wdDeleteVacation(id, type) {
   if (!id) return
-  const info = ABSENCE[type === 'nemoc' ? 'nemoc' : 'dovolena']
+  const info = ABSENCE[type] || ABSENCE.dovolena
   if (!confirm('Opravdu smazat tento záznam (' + info.label.toLowerCase() + ')?')) return
   const { data: smazano, error } = await sb.from('vacations').delete().eq('id', id).select('id')
   // Mazání bez práv v Postgresu nechybuje — jen nesmaže nic. Proto počet řádků.
@@ -38398,17 +38468,17 @@ function wdVacNastavUpravu() {
   const f = document.getElementById('wd-vac-form')
   if (!e || !f) return
   f.dataset.upravuje = String(e.id)
-  f.style.borderColor = ABSENCE.dovolena.color
+  f.style.borderColor = ABSENCE[e.type].color
   const nadpis = document.getElementById('wd-vac-form-title'); if (nadpis) nadpis.textContent = 'Upravit zapsanou nepřítomnost'
   const hint = document.getElementById('wd-vac-form-hint')
   if (hint) { hint.textContent = 'Mění se tento záznam — nový se nepřidá. Pracovník dostane zprávu o změně.'; hint.style.color = 'var(--text2)' }
   const od = document.getElementById('wd-vac-from'); if (od) od.value = e.date_from || ''
   const doo = document.getElementById('wd-vac-to'); if (doo) doo.value = e.date_to || ''
   const pozn = document.getElementById('wd-vac-note'); if (pozn) pozn.value = e.note || ''
-  wdVacSetType(e.type === 'nemoc' ? 'nemoc' : 'dovolena')   // nastaví i „Uložit změny"
+  wdVacSetType(e.type)   // nastaví i „Uložit změny"
   const zrus = document.getElementById('wd-vac-cancel-btn'); if (zrus) zrus.style.display = 'block'
   document.querySelectorAll('#wdt-dovolena [data-vac-radek]').forEach(r => {
-    r.style.background = r.dataset.vacRadek === String(e.id) ? ABSENCE.dovolena.bg : ''
+    r.style.background = r.dataset.vacRadek === String(e.id) ? ABSENCE[e.type].bg : ''
   })
   if (e.posun) { e.posun = false; setTimeout(() => f.scrollIntoView({ behavior: 'smooth', block: 'start' }), 60) }
 }
@@ -38422,7 +38492,7 @@ function wdZrusUpravuNepritomnosti() {
 async function wdUlozUpravuNepritomnosti(from, to, note) {
   const e = _wdVacEdit
   if (!e || _wdVacUklada) return
-  const type = _wdVacType === 'nemoc' ? 'nemoc' : 'dovolena'
+  const type = _wdVacType
   const info = ABSENCE[type]
   const btn = document.getElementById('wd-vac-save-btn')
   _wdVacUklada = true
@@ -38451,11 +38521,11 @@ async function wdUlozUpravuNepritomnosti(from, to, note) {
   // Pracovník ať o změně ví — jinak by se mu dovolená v appce posunula bez vysvětlení
   try {
     const czd = d => { const p = String(d).slice(0,10).split('-'); return p[2]+'. '+p[1]+'. '+p[0] }
-    const jeNemoc = type === 'nemoc'
+    const nazev = info.label.toLowerCase()
     await sb.from('notifications').insert({
       worker_id: e.worker_id,
-      title: (jeNemoc ? '🩺 Upravená nemoc' : '☀️ Upravená dovolená'),
-      message: 'StavKo vám upravil ' + (jeNemoc ? 'nemoc' : 'dovolenou') + ' — teď ' + czd(from) + ' → ' + czd(to) + (note ? ' (' + note + ')' : '') + '.',
+      title: info.emoji + ' Upravená ' + nazev,
+      message: 'StavKo vám upravil ' + nazev + ' — teď ' + czd(from) + ' → ' + czd(to) + (note ? ' (' + note + ')' : '') + '.',
       type: 'obecna',
       is_read: false
     })
