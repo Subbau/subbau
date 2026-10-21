@@ -4899,7 +4899,7 @@ async function submitAdminSignatureWithPlacement() {
 // Po nahrání nové verze se snadno pozná, jestli se opravdu nasadila: otevřete
 // appku, zmáčkněte F12 (na Macu ⌥⌘I) a v konzoli je vypsané tohle datum. Když
 // tam svítí starší, prohlížeč nebo GitHub drží starou verzi.
-const SUBBAU_VERZE = '2026-10-21 — Dovolená/nemoc klepnutím v kalendáři, oprava faktur'
+const SUBBAU_VERZE = '2026-10-21 b — Nahrávání dokladu zkusí znovu na slabém signálu'
 console.log('SubBau docházka — verze ' + SUBBAU_VERZE)
 // Verze i dole v menu správce. Když někdo novinku „nevidí", podle ní se hned
 // pozná, jestli nemá otevřenou starou kopii appky — bez hledání v konzoli.
@@ -23842,13 +23842,31 @@ async function uploadDocument() {
   const withTimeout = (p, ms) => Promise.race([
     p, new Promise((_, rej) => setTimeout(() => rej(new Error('Vypršel čas — zkuste to prosím znovu')), ms))
   ])
+  // Slabý signál na stavbě umí "Failed to fetch" i vypršení času vyhodit,
+  // i když se připojení za chvíli samo obnoví — hlavně u velkých dvoustranných
+  // dokladů (A1 apod.), které appka na rozdíl od fotek nijak nezmenšuje
+  // (audit 21. 10. 2026: appka to dřív zahodila na první zaškobrtnutí).
+  const zkusVicekrat = async (udelej, naPokus) => {
+    let posledniChyba
+    for (let i = 0; i < 3; i++) {
+      if (i > 0) { naPokus(i + 1); await new Promise(r => setTimeout(r, 1500)) }
+      try {
+        const { error } = await udelej()
+        if (!error) return { error: null }
+        posledniChyba = error
+        if (!/Failed to fetch|NetworkError|Load failed|network|Vypršel čas/i.test(String(error.message || ''))) return { error }
+      } catch (e) {
+        posledniChyba = e
+        if (!/Failed to fetch|NetworkError|Load failed|network|Vypršel čas/i.test(String(e?.message || e || ''))) return { error: e }
+      }
+    }
+    return { error: posledniChyba }
+  }
   const filePath = `${currentUser.id}/${docType}_${Date.now()}.${uploadExt}`
-  let storageErr
-  try {
-    ;({ error: storageErr } = await withTimeout(sb.storage
-      .from('documents')
-      .upload(filePath, uploadBlob, { upsert: true, contentType: uploadContentType }), 20000))
-  } catch (e) { storageErr = e }
+  const { error: storageErr } = await zkusVicekrat(
+    () => withTimeout(sb.storage.from('documents').upload(filePath, uploadBlob, { upsert: true, contentType: uploadContentType }), 20000),
+    n => { btn.textContent = '⏳ Slabý signál — zkouším znovu (' + n + '/3)…' }
+  )
 
   if (storageErr) {
     let sMsg = storageErr.message
@@ -23871,9 +23889,8 @@ async function uploadDocument() {
 
   // 4. DB záznam pro přední stranu / dokument
   const frontName = docType + (isMulti ? '_strana1' : '') + '_' + new Date().toISOString().slice(0,10) + '.pdf'
-  let dbErr
-  try {
-    ;({ error: dbErr } = await withTimeout(sb.from('documents').insert({
+  const { error: dbErr } = await zkusVicekrat(
+    () => withTimeout(sb.from('documents').insert({
       worker_id: currentUser.id,
       doc_type: docType,
       file_name: frontName,
@@ -23883,8 +23900,9 @@ async function uploadDocument() {
       status: 'pending',
       uploaded_by: currentUser.id,
       uploaded_at: new Date().toISOString()
-    }), 15000))
-  } catch (e) { dbErr = e }
+    }), 15000),
+    n => { btn.textContent = '⏳ Slabý signál — zkouším znovu (' + n + '/3)…' }
+  )
 
   if (dbErr) {
     // Soubor v úložišti, ke kterému není řádek v databázi, by nikdo nenašel — ukliď ho
@@ -23907,20 +23925,26 @@ async function uploadDocument() {
       const je2Obrazek = (selectedFile2.type || '').startsWith('image/') || /\.(jpe?g|png|heic|webp)$/i.test(selectedFile2.name || '')
       if (je2Obrazek) blob2 = await imagesToPdfBlob([selectedFile2])
       const filePath2 = `${currentUser.id}/${docType}_${Date.now()}_strana2.pdf`
-      const { error: stErr2 } = await withTimeout(sb.storage.from('documents').upload(filePath2, blob2, { upsert: true, contentType: 'application/pdf' }), 20000)
+      const { error: stErr2 } = await zkusVicekrat(
+        () => withTimeout(sb.storage.from('documents').upload(filePath2, blob2, { upsert: true, contentType: 'application/pdf' }), 20000),
+        n => { btn.textContent = '⏳ Slabý signál — zkouším znovu (' + n + '/3)…' }
+      )
       if (stErr2) throw stErr2
       const { data: u2 } = sb.storage.from('documents').getPublicUrl(filePath2)
-      const { error: dbErr2 } = await withTimeout(sb.from('documents').insert({
-        worker_id: currentUser.id,
-        doc_type: docType,
-        file_name: docType + '_strana2_' + new Date().toISOString().slice(0,10) + '.pdf',
-        file_path: filePath2,
-        file_url: u2?.publicUrl,
-        valid_until: validUntil || null,
-        status: 'pending',
-        uploaded_by: currentUser.id,
-        uploaded_at: new Date().toISOString()
-      }), 15000)
+      const { error: dbErr2 } = await zkusVicekrat(
+        () => withTimeout(sb.from('documents').insert({
+          worker_id: currentUser.id,
+          doc_type: docType,
+          file_name: docType + '_strana2_' + new Date().toISOString().slice(0,10) + '.pdf',
+          file_path: filePath2,
+          file_url: u2?.publicUrl,
+          valid_until: validUntil || null,
+          status: 'pending',
+          uploaded_by: currentUser.id,
+          uploaded_at: new Date().toISOString()
+        }), 15000),
+        n => { btn.textContent = '⏳ Slabý signál — zkouším znovu (' + n + '/3)…' }
+      )
       if (dbErr2) {
         // Soubor v úložišti bez řádku v databázi by nikdo nenašel — ukliď ho
         await sb.storage.from('documents').remove([filePath2]).catch(() => {})
