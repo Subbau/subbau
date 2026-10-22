@@ -2570,6 +2570,9 @@ setTimeout(function () {
             <!-- Seznam konverzací -->
             <div class="card" style="overflow:hidden;display:flex;flex-direction:column">
               <div class="card-h"><h4><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:18px;height:18px;flex-shrink:0;vertical-align:-3px;margin-right:7px"><path d="M21 11.5a8.38 8.38 0 0 1-9 8.5 8.5 8.5 0 0 1-3.8-.9L3 20l1.3-3.8A8.5 8.5 0 0 1 12 3a8.38 8.38 0 0 1 9 8.5z"/></svg>Konverzace</h4></div>
+              <div style="padding:8px 12px;border-bottom:1px solid var(--brd)">
+                <input type="text" id="admin-chat-hledani" oninput="filtrChatSeznamu()" placeholder="🔎 Hledat jméno…" style="width:100%;padding:8px 10px;border:1.5px solid var(--brd);border-radius:8px;font-size:13px;font-family:inherit;box-sizing:border-box">
+              </div>
               <div id="admin-chat-list" style="flex:1;overflow-y:auto">
                 <div style="text-align:center;padding:20px;color:var(--text3);font-size:13px">Načítám...</div>
               </div>
@@ -5625,7 +5628,7 @@ async function submitAdminSignatureWithPlacement() {
 // Po nahrání nové verze se snadno pozná, jestli se opravdu nasadila: otevřete
 // appku, zmáčkněte F12 (na Macu ⌥⌘I) a v konzoli je vypsané tohle datum. Když
 // tam svítí starší, prohlížeč nebo GitHub drží starou verzi.
-const SUBBAU_VERZE = '2026-10-21 e — Dnešní den v kalendáři je stejně široký jako ostatní'
+const SUBBAU_VERZE = '2026-10-22 — Velký doklad upozorní na Wi-Fi, hledání jména v Chatu'
 console.log('StavKo docházka — verze ' + SUBBAU_VERZE)
 // Verze i dole v menu správce. Když někdo novinku „nevidí", podle ní se hned
 // pozná, jestli nemá otevřenou starou kopii appky — bez hledání v konzoli.
@@ -16039,6 +16042,7 @@ function scrollChatBottom(id) {
 }
 
 // ── ADMIN CHAT ──
+let _adminChatListData = null
 async function loadAdminChatList() {
   const skrytiChat = await skrytiLideIds()   // schované firmy
   // Načti všechny workery s jejich poslední zprávou
@@ -16089,7 +16093,27 @@ async function loadAdminChatList() {
     return lb.localeCompare(la)
   })
 
+  // Uložit pro filtr hledáním (filtrChatSeznamu) — ať se při psaní nemusí
+  // appka znovu ptát databáze, jen přeskládá to, co už má.
+  _adminChatListData = { workers, unreadMap, lastMap }
+  vykresliChatSeznam()
+}
+
+// Hledání podle jména (majitel 22. 10. 2026) — bez ohledu na háčky/čárky
+// a velká/malá písmena. Vykresluje ze zapamatovaných dat, žádný dotaz.
+function filtrChatSeznamu() { vykresliChatSeznam() }
+function vykresliChatSeznam() {
+  if (!_adminChatListData) return
+  const { unreadMap, lastMap } = _adminChatListData
+  let { workers } = _adminChatListData
+  const hledano = _bezHacku(document.getElementById('admin-chat-hledani')?.value || '').trim()
+  if (hledano) workers = workers.filter(w => _bezHacku(w.full_name || '').includes(hledano))
   const div = document.getElementById('admin-chat-list')
+  if (!div) return
+  if (!workers.length) {
+    div.innerHTML = `<div style="text-align:center;padding:20px;color:var(--text3);font-size:13px">${hledano ? 'Nikdo takový se nenašel' : 'Žádní pracovníci'}</div>`
+    return
+  }
   div.innerHTML = workers.map(w => {
     const u = unreadMap[w.id] || 0
     const last = lastMap[w.id]
@@ -24505,6 +24529,12 @@ async function uploadDocument() {
   }
 
   if (!selectedFile) { showToast('⚠️ Vyfoťte dokument nebo vyberte soubor'); return }
+  // Velký soubor na slabém signálu na stavbě umí spadnout i přes tři pokusy
+  // (audit 22. 10. 2026 — appka ho zkusí znovu, ale když je signál trvale
+  // slabý, nepomůže to). Radši upozornit předem, než nechat nahrávání
+  // opakovaně selhávat.
+  const celkemMB = ((selectedFile.size || 0) + (selectedFile2?.size || 0)) / 1024 / 1024
+  if (celkemMB > 5 && !confirm('Tenhle doklad má ' + (Math.round(celkemMB * 10) / 10) + ' MB — na slabém signálu na stavbě se nemusí podařit nahrát. Pokud můžete, zkuste to prosím na Wi-Fi.\n\nPokračovat i tak?')) return
   const isMulti = MULTISIDE_TYPES.includes(docType)
   const btn = document.getElementById('upload-btn')
   const progress = document.getElementById('upload-progress')
@@ -24651,7 +24681,7 @@ async function uploadDocument() {
     showToast('❌ Nahrávání: ' + sMsg)
     if (status) { status.style.display='block'; status.style.background='var(--red-l)'; status.style.color='var(--red)'; status.textContent='❌ '+sMsg }
     btn.disabled = false; btn.textContent = '📤 Nahrát'; progress.style.display = 'none'
-    zapisChybuAppky('nahravani-dokumentu', storageErr?.message, { docType })
+    zapisChybuAppky('nahravani-dokumentu', storageErr?.message, { docType, velikostMB: Math.round((uploadBlob?.size || 0) / 1024 / 1024 * 10) / 10 })
     return
   }
 
@@ -24681,7 +24711,7 @@ async function uploadDocument() {
     try { await sb.storage.from('documents').remove([filePath]) } catch(e) {}
     showToast('❌ ' + docSaveErrorText(dbErr))
     btn.disabled = false; btn.textContent = '📤 Nahrát'; progress.style.display = 'none'
-    zapisChybuAppky('nahravani-dokumentu', dbErr?.message, { docType })
+    zapisChybuAppky('nahravani-dokumentu', dbErr?.message, { docType, velikostMB: Math.round((uploadBlob?.size || 0) / 1024 / 1024 * 10) / 10 })
     return
   }
 
@@ -24725,7 +24755,7 @@ async function uploadDocument() {
     } catch (e) {
       console.error('[uploadDocument] zadní strana selhala:', e)
       zadniStranaChyba = e?.message || 'neznámá chyba'
-      zapisChybuAppky('nahravani-dokumentu-zadni-strana', zadniStranaChyba, { docType })
+      zapisChybuAppky('nahravani-dokumentu-zadni-strana', zadniStranaChyba, { docType, velikostMB: Math.round((selectedFile2?.size || 0) / 1024 / 1024 * 10) / 10 })
     }
   }
 
