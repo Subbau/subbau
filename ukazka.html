@@ -5633,7 +5633,7 @@ async function submitAdminSignatureWithPlacement() {
 // Po nahrání nové verze se snadno pozná, jestli se opravdu nasadila: otevřete
 // appku, zmáčkněte F12 (na Macu ⌥⌘I) a v konzoli je vypsané tohle datum. Když
 // tam svítí starší, prohlížeč nebo GitHub drží starou verzi.
-const SUBBAU_VERZE = '2026-10-23 b — Nová verze nepřenačte appku uprostřed obnovy přihlášení'
+const SUBBAU_VERZE = '2026-10-23 c — Deník přihlášení pozná, ze které záložky záznam je'
 console.log('StavKo docházka — verze ' + SUBBAU_VERZE)
 // Verze i dole v menu správce. Když někdo novinku „nevidí", podle ní se hned
 // pozná, jestli nemá otevřenou starou kopii appky — bez hledání v konzoli.
@@ -5665,15 +5665,31 @@ const SUPABASE_ANON_KEY = ''   // ukázka: žádný klíč
 const DENIK_KLIC = 'denik-prihlaseni'
 // Klíč, pod kterým knihovna drží přihlášení (ukázka má adresu prázdnou).
 const KLIC_RELACE = (() => { try { return 'sb-' + new URL(SUPABASE_URL).hostname.split('.')[0] + '-auth-token' } catch (e) { return 'sb-bez-serveru-auth-token' } })()
+// Značka téhle záložky — v deníku pak jde poznat, jestli obnovu přihlášení
+// dělala jiná záložka (23. 10. 2026: server odmítal klíč jako „už použitý"
+// a nebylo vidět, kdo ho použil).
+const ZALOZKA = Math.random().toString(36).slice(2, 5)
 function zapisDenik(co, detail) {
   try {
     const d = JSON.parse(localStorage.getItem(DENIK_KLIC) || '[]')
-    const z = { t: new Date().toISOString(), co: String(co).slice(0, 80) }
+    const z = { t: new Date().toISOString(), co: String(co).slice(0, 80), z: ZALOZKA }
     if (detail != null && detail !== '') z.d = String(detail).slice(0, 160)
     d.push(z)
     localStorage.setItem(DENIK_KLIC, JSON.stringify(d.slice(-40)))
   } catch (e) {}
 }
+try {
+  const kanal = new BroadcastChannel('subbau-zalozky')
+  kanal.onmessage = e => {
+    const m = e.data || {}
+    // Zapisuje jen nově otevřená záložka: deník je jeden pro všechny a WebKit
+    // sdílí localStorage mezi záložkami se zpožděním — zápis staré záložky by
+    // přepsaly zápisy té nové při startu. Odpověď proto až po chvíli.
+    if (m.typ === 'kdo') setTimeout(() => kanal.postMessage({ typ: 'ja', z: ZALOZKA }), 1500)
+    else if (m.typ === 'ja') zapisDenik('appka je otevřená i v jiné záložce', m.z)
+  }
+  kanal.postMessage({ typ: 'kdo', z: ZALOZKA })
+} catch (e) {}
 // Všechny dotazy jdou dál beze změny; jen u přihlašovacího serveru (/auth/v1/)
 // se zapíše, co odpověděl na obnovu přihlášení a na odhlášení, a každá chyba.
 function _sbFetch(vstup, nastaveni) {
