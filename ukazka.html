@@ -5633,7 +5633,7 @@ async function submitAdminSignatureWithPlacement() {
 // Po nahrání nové verze se snadno pozná, jestli se opravdu nasadila: otevřete
 // appku, zmáčkněte F12 (na Macu ⌥⌘I) a v konzoli je vypsané tohle datum. Když
 // tam svítí starší, prohlížeč nebo GitHub drží starou verzi.
-const SUBBAU_VERZE = '2026-10-22 c — Deník na přihlašovací stránce teď ukáže i tiché odhlášení beze stopy'
+const SUBBAU_VERZE = '2026-10-23 a — Nevyžádané odhlášení se po přihlášení samo pošle do deníku chyb'
 console.log('StavKo docházka — verze ' + SUBBAU_VERZE)
 // Verze i dole v menu správce. Když někdo novinku „nevidí", podle ní se hned
 // pozná, jestli nemá otevřenou starou kopii appky — bez hledání v konzoli.
@@ -6415,6 +6415,7 @@ async function _initAppInner(user) {
   loadAnnouncement()
   initAppDone = true  // profil načten, dál už nic neblokuje → zruš nouzový timeout
   clearAuthTimeout()
+  odesliDenikOdhlaseni()
   console.log('[initApp] role ze Supabase:', JSON.stringify(profile.role))
   const role = (profile.role || '').trim().toLowerCase()
 
@@ -6527,6 +6528,30 @@ async function doPasswordRecovery() {
       showLogin('nové heslo')
     }, 2000)
   }
+}
+
+// Odhlášení, o které člověk nežádal, se po dalším přihlášení samo pošle do
+// chyby_appky i s deníkem — fotka přihlašovací obrazovky se nedala sehnat
+// (23. 10. 2026: admina to zase odhlásilo a panel prý nic neukázal).
+const DENIK_ODESLANO = 'denik-odeslano-do'
+function odesliDenikOdhlaseni() {
+  try {
+    let d = []
+    try { d = JSON.parse(lsGet(DENIK_KLIC) || '[]') } catch (e) {}
+    const od = Date.parse(lsGet(DENIK_ODESLANO) || '') || 0
+    const odhlaseni = d.filter(z => z.co === 'přihlašovací obrazovka' && z.d !== 'tlačítko Odhlásit' && Date.parse(z.t) > od)
+    lsSet(DENIK_ODESLANO, new Date().toISOString())
+    if (!odhlaseni.length) return
+    let zPlochy = false
+    try { zPlochy = !!(window.matchMedia('(display-mode: standalone)').matches || navigator.standalone) } catch (e) {}
+    zapisChybuAppky('odhlaseni', odhlaseni.map(z => z.t.slice(5, 16).replace('T', ' ') + ' ' + (z.d || '?')).join(' | '), {
+      verze: SUBBAU_VERZE.split(' — ')[0],
+      prohlizec: navigator.userAgent,
+      zPlochy,
+      zaznamuVDeniku: d.length,
+      denik: d.slice(-25)
+    })
+  } catch (e) {}
 }
 
 function showLogin(duvod) {
@@ -6655,6 +6680,7 @@ function ukazDenikNaPrihlaseni() {
   const cas = t => { const x = new Date(t); return x.toLocaleDateString('cs-CZ', { day: 'numeric', month: 'numeric' }) + ' ' + x.toLocaleTimeString('cs-CZ', { hour: '2-digit', minute: '2-digit' }) }
   el.innerHTML = '<summary style="cursor:pointer">Proč mě to odhlásilo?</summary>' +
     d.map(z => '<div>' + escAttr(cas(z.t) + ' · ' + z.co + (z.d ? ' · ' + z.d : '')) + '</div>').join('')
+  el.open = true
   el.style.display = 'block'
 }
 
