@@ -5633,7 +5633,7 @@ async function submitAdminSignatureWithPlacement() {
 // Po nahrání nové verze se snadno pozná, jestli se opravdu nasadila: otevřete
 // appku, zmáčkněte F12 (na Macu ⌥⌘I) a v konzoli je vypsané tohle datum. Když
 // tam svítí starší, prohlížeč nebo GitHub drží starou verzi.
-const SUBBAU_VERZE = '2026-10-23 a — Nevyžádané odhlášení se po přihlášení samo pošle do deníku chyb'
+const SUBBAU_VERZE = '2026-10-23 b — Nová verze nepřenačte appku uprostřed obnovy přihlášení'
 console.log('StavKo docházka — verze ' + SUBBAU_VERZE)
 // Verze i dole v menu správce. Když někdo novinku „nevidí", podle ní se hned
 // pozná, jestli nemá otevřenou starou kopii appky — bez hledání v konzoli.
@@ -5684,6 +5684,13 @@ function _sbFetch(vstup, nastaveni) {
   let cesta = url.split('/auth/v1/')[1] || ''
   const druh = /grant_type=([a-z_]+)/.exec(cesta)
   cesta = cesta.split('?')[0] + (druh ? ' ' + druh[1] : '')
+  // Přenačtení po nové verzi nesmí utnout obnovu přihlášení — odpověď s novým
+  // klíčem by se ztratila (deník Jiráska 23. 10.: „přenačítám" a o 0,4 s později
+  // obnova „Load failed"). Viz bezpecneNaPrenacteni().
+  if (/^token/.test(cesta)) {
+    window._obnovaPrihlaseni = (window._obnovaPrihlaseni || 0) + 1
+    p.finally(() => { window._obnovaPrihlaseni--; window._obnovaKonec = Date.now() }).catch(() => {})
+  }
   return p.then(r => {
     try {
       if (!r.ok) {
@@ -5849,16 +5856,24 @@ if ('serviceWorker' in navigator) {
     // je to příště vidět, místo aby se to muselo znovu hádat.
     const bezpecneNaPrenacteni = () => {
       if (window.zapisProbiha || window.checkinInProgress) return false
+      if (obnovaPrihlaseniBezi()) return false
       const a = document.activeElement
       if (a && (a.tagName === 'TEXTAREA' || (a.tagName === 'INPUT' && !/^(button|submit|checkbox|radio)$/.test(a.type || '')))) return false
       return true
     }
     const zacatek = Date.now()
     const zkusPrenacist = () => {
-      if (!bezpecneNaPrenacteni() && Date.now() - zacatek < 60000) { setTimeout(zkusPrenacist, 2000); return }
+      const ceka = Date.now() - zacatek
+      // Na obnovu přihlášení se čeká déle (3 min) než na rozepsané pole (60 s):
+      // utnutá obnova odhlásí, utnuté psaní jen zdrží.
+      if (obnovaPrihlaseniBezi() ? ceka < 180000 : (!bezpecneNaPrenacteni() && ceka < 60000)) { setTimeout(zkusPrenacist, 2000); return }
       try { zapisDenik('aktualizace appky', 'přenačítám na novou verzi') } catch (e) {}
       try { showToast('🔄 Appka se aktualizovala — chviličku…') } catch (e) {}
-      setTimeout(() => location.reload(), 400)
+      setTimeout(() => {
+        // Obnova mohla začít v těch 400 ms (typicky hned po probuzení appky).
+        if (obnovaPrihlaseniBezi() && Date.now() - zacatek < 180000) { setTimeout(zkusPrenacist, 1000); return }
+        location.reload()
+      }, 400)
     }
     zkusPrenacist()
   })
@@ -6523,6 +6538,7 @@ async function doPasswordRecovery() {
       // scope:'local' — jinak reset hesla na jednom telefonu odhlásí i počítač,
       // co ten den nikdo nezavřel (stejný bug jako dřív u tlačítka Odhlásit
       // a startovní kontroly, jen na tomhle místě přehlédnutý — audit 22. 10. 2026).
+      window._vlastniOdhlaseni = Date.now()
       try { await sb.auth.signOut({ scope: 'local' }) } catch(e) {}
       document.getElementById('recovery-app').style.display = 'none'
       showLogin('nové heslo')
@@ -6534,12 +6550,25 @@ async function doPasswordRecovery() {
 // chyby_appky i s deníkem — fotka přihlašovací obrazovky se nedala sehnat
 // (23. 10. 2026: admina to zase odhlásilo a panel prý nic neukázal).
 const DENIK_ODESLANO = 'denik-odeslano-do'
+// Běží (nebo se za chvíli spustí) obnova přihlášení? Knihovna obnovuje, když
+// do konce platnosti zbývá méně než 90 s — s rezervou se proto bere 2 min.
+function obnovaPrihlaseniBezi() {
+  if (window._obnovaPrihlaseni > 0) return true
+  if (Date.now() - (window._obnovaKonec || 0) < 3000) return true
+  try {
+    const r = JSON.parse(lsGet(KLIC_RELACE) || 'null')
+    if (r && r.expires_at && r.expires_at * 1000 - Date.now() < 120000) return true
+  } catch (e) {}
+  return false
+}
 function odesliDenikOdhlaseni() {
   try {
     let d = []
     try { d = JSON.parse(lsGet(DENIK_KLIC) || '[]') } catch (e) {}
     const od = Date.parse(lsGet(DENIK_ODESLANO) || '') || 0
-    const odhlaseni = d.filter(z => z.co === 'přihlašovací obrazovka' && z.d !== 'tlačítko Odhlásit' && Date.parse(z.t) > od)
+    // „nepřihlášen" (prostě otevřel appku bez relace) a „nové heslo" jsou běžné
+    // přihlašování, ne odhlášení — 23. 10. jimi pracovníci zaplnili deník chyb.
+    const odhlaseni = d.filter(z => z.co === 'přihlašovací obrazovka' && !/^(tlačítko Odhlásit|nepřihlášen|nové heslo)$/.test(z.d || '') && Date.parse(z.t) > od)
     lsSet(DENIK_ODESLANO, new Date().toISOString())
     if (!odhlaseni.length) return
     let zPlochy = false
@@ -6549,7 +6578,7 @@ function odesliDenikOdhlaseni() {
       prohlizec: navigator.userAgent,
       zPlochy,
       zaznamuVDeniku: d.length,
-      denik: d.slice(-25)
+      denik: d
     })
   } catch (e) {}
 }
