@@ -4937,7 +4937,7 @@ async function submitAdminSignatureWithPlacement() {
 // Po nahrání nové verze se snadno pozná, jestli se opravdu nasadila: otevřete
 // appku, zmáčkněte F12 (na Macu ⌥⌘I) a v konzoli je vypsané tohle datum. Když
 // tam svítí starší, prohlížeč nebo GitHub drží starou verzi.
-const SUBBAU_VERZE = '2026-10-23 e — Plán MMI + schovaná záložka neobnovuje přihlášení (odhlašování adminů)'
+const SUBBAU_VERZE = '2026-10-24 a — Hlídač pomalosti u správce + záložky se přenačtou při každé verzi'
 console.log('SubBau docházka — verze ' + SUBBAU_VERZE)
 // Verze i dole v menu správce. Když někdo novinku „nevidí", podle ní se hned
 // pozná, jestli nemá otevřenou starou kopii appky — bez hledání v konzoli.
@@ -5013,7 +5013,10 @@ function _sbFetch(vstup, nastaveni) {
     }
     return Promise.reject(new TypeError('Failed to fetch'))
   }
+  const t0 = Date.now()
   const p = fetch(vstup, nastaveni)
+  if (typeof _pomZapisDotaz === 'function') p.then(r => _pomZapisDotaz((nastaveni?.method || 'GET') + ' ' + url.replace(/^https:\/\/[^/]+/, ''), Date.now() - t0, r.status),
+         e => _pomZapisDotaz((nastaveni?.method || 'GET') + ' ' + url.replace(/^https:\/\/[^/]+/, ''), Date.now() - t0, 'chyba')).catch(() => {})
   if (url.indexOf('/auth/v1/') < 0) return p
   let cesta = url.split('/auth/v1/')[1] || ''
   const druh = /grant_type=([a-z_]+)/.exec(cesta)
@@ -5184,14 +5187,19 @@ if ('serviceWorker' in navigator) {
   let _swReloaded = false
   navigator.serviceWorker.addEventListener('controllerchange', () => {
     if (_swReloaded) return
-    _swReloaded = true
+    // Pojistka proti zacyklení: v jedné kartě nejvýš jedno přenačtení za 2 minuty.
+    // Dřív to bylo „nejvýš jednou vůbec" — karta otevřená od rána pak přes den
+    // zůstala na staré verzi bez oprav (23. 10. 2026: Švamberk měl celý den
+    // záložku bez opravy odhlašování a ta mu přihlášení shodila).
     try {
-      if (sessionStorage.getItem('sw-prenacteno') === '1') {
-        console.warn('[sw] nová verze převzala řízení podruhé — přenačtení přeskočeno, ať se to nezacyklí')
+      const minule = Number(sessionStorage.getItem('sw-prenacteno')) || 0
+      if (Date.now() - minule < 120000) {
+        console.warn('[sw] nová verze převzala řízení podruhé za 2 min — přenačtení přeskočeno, ať se to nezacyklí')
         return
       }
-      sessionStorage.setItem('sw-prenacteno', '1')
+      sessionStorage.setItem('sw-prenacteno', String(Date.now()))
     } catch (e) { /* Safari v soukromém režimu ukládání zakazuje */ }
+    _swReloaded = true   // až teď: přeskočené přenačtení nesmí zablokovat další verzi
     // NEPŘENAČÍTAT UPROSTŘED PRÁCE (13. 10. 2026: majitel — „furt se to
     // odhlašuje"). Appku nasazujeme i několikrát denně a dřív se přenačtení
     // spustilo OKAMŽITĚ, i když zrovna něco odesílala nebo někdo psal do pole —
@@ -6061,6 +6069,7 @@ function ukazDenikNaPrihlaseni() {
 }
 
 function showAdmin(profile) {
+  setTimeout(() => { try { spustHlidacPomalosti() } catch (e) { console.warn('[pomalost]', e) } }, 0)
   if (window.skryjBoot) window.skryjBoot()   // úvodní obrazovka pryč — víme, co ukázat
   document.getElementById('login').style.display = 'none'
   document.getElementById('app').style.display = 'block'
@@ -7743,6 +7752,74 @@ async function zapisBezpecnostniUdalost(typ) {
 // události (na to je historie úprav) — jen pro technické selhání appky.
 // Nikdy nesmí sama shodit to, co po ní následuje — kdyby se nepovedl ani
 // tenhle zápis, appka v tom nesmí uváznout.
+// ===== HLÍDAČ POMALOSTI (jen správce) =====
+// 24. 10. 2026 majitel: „je to tak zpomalený, že nejsem schopen nic udělat"
+// (úprava hodin). Na ukázce je appka rychlá a server odpovídá za 0,25 s —
+// brzdí to až se skutečnými daty, která zkouška nevidí. Hlídač měří přímo
+// u správce: které funkce appky trvají, které dotazy jsou pomalé a kdy se
+// stránka zasekne (neodpovídá na klepnutí). Každé 3 minuty, když bylo něco
+// pomalé, pošle souhrn do chyby_appky (kde = 'pomalost').
+const _pom = { fce: {}, dotazy: [], zaseky: [], od: Date.now(), odeslano: 0, poslano: 0 }
+function _pomZapisDotaz(cesta, ms, stav) {
+  if (ms < 1500) return
+  _pom.dotazy.push({ c: cesta.slice(0, 120), ms: Math.round(ms), s: stav, v: _activeAdminView?.() || '' })
+  if (_pom.dotazy.length > 60) _pom.dotazy.shift()
+}
+function spustHlidacPomalosti() {
+  if (window._pomBezi) return
+  window._pomBezi = true
+  // 1) obalit hlavní funkce appky měřením (synchronní část i celé doběhnutí)
+  const VZOR = /^(load|render|refresh|obnov|nacti|vykresli|open|save|uloz|zobraz|compute|sv$|_debouncedRefresh$|_onAdminDbChange$)/
+  for (const k of Object.keys(window)) {
+    if (!VZOR.test(k) || k === 'open') continue
+    const f = window[k]
+    if (typeof f !== 'function' || f.__pom) continue
+    try { if (/^class\b/.test(Function.prototype.toString.call(f))) continue } catch (e) { continue }
+    const obal = function (...a) {
+      const t0 = Date.now()
+      let v
+      try { v = f.apply(this, a) } finally {
+        const sync = Date.now() - t0
+        const z = _pom.fce[k] || (_pom.fce[k] = { n: 0, sync: 0, syncMax: 0, cel: 0, celMax: 0 })
+        z.n++; z.sync += sync; if (sync > z.syncMax) z.syncMax = sync
+        if (v && typeof v.then === 'function') {
+          v.then(() => { const c = Date.now() - t0; z.cel += c; if (c > z.celMax) z.celMax = c }, () => {})
+        }
+      }
+      return v
+    }
+    obal.__pom = true
+    try { window[k] = obal } catch (e) {}
+  }
+  // 2) zaseknutí stránky: tik každých 250 ms; zpoždění nad 300 ms = stránka neodpovídala
+  let posl = Date.now()
+  setInterval(() => {
+    const ted = Date.now(), zpozd = ted - posl - 250
+    posl = ted
+    if (document.visibilityState !== 'visible' || zpozd < 300) return
+    _pom.zaseky.push({ ms: Math.round(zpozd), v: _activeAdminView?.() || '', t: new Date().toISOString().slice(11, 19) })
+    if (_pom.zaseky.length > 60) _pom.zaseky.shift()
+  }, 250)
+  // 3) souhrn každé 3 minuty, jen když bylo něco pomalé; nejvýš 30× v kartě
+  setInterval(odesliSouhrnPomalosti, 180000)
+}
+function odesliSouhrnPomalosti() {
+    if (_pom.poslano >= 30) return
+    const fce = Object.entries(_pom.fce)
+      .map(([k, z]) => ({ f: k, n: z.n, syncMax: Math.round(z.syncMax), syncSum: Math.round(z.sync), celMax: Math.round(z.celMax), celSum: Math.round(z.cel) }))
+      .filter(x => x.syncMax >= 200 || x.celMax >= 2000)
+      .sort((a, b) => (b.syncSum + b.celSum / 10) - (a.syncSum + a.celSum / 10)).slice(0, 15)
+    if (!fce.length && !_pom.dotazy.length && !_pom.zaseky.length) { _pom.fce = {}; return }
+    const zaseku = _pom.zaseky.reduce((s, z) => s + z.ms, 0)
+    zapisChybuAppky('pomalost', 'za ' + Math.round((Date.now() - _pom.od) / 60000) + ' min: zaseknuto ' + Math.round(zaseku / 1000) + ' s (' + _pom.zaseky.length + '×), pomalých dotazů ' + _pom.dotazy.length + ', sekce ' + (_activeAdminView?.() || '?'), {
+      verze: SUBBAU_VERZE.split(' — ')[0], prohlizec: navigator.userAgent,
+      prvku: document.getElementsByTagName('*').length,
+      fce, dotazy: _pom.dotazy.slice(-25), zaseky: _pom.zaseky.slice(-25)
+    })
+    _pom.poslano++
+    _pom.fce = {}; _pom.dotazy = []; _pom.zaseky = []; _pom.od = Date.now()
+}
+
 async function zapisChybuAppky(kde, zprava, detail) {
   try {
     await sb.from('chyby_appky').insert({
