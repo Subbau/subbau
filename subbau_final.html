@@ -4937,7 +4937,7 @@ async function submitAdminSignatureWithPlacement() {
 // Po nahrání nové verze se snadno pozná, jestli se opravdu nasadila: otevřete
 // appku, zmáčkněte F12 (na Macu ⌥⌘I) a v konzoli je vypsané tohle datum. Když
 // tam svítí starší, prohlížeč nebo GitHub drží starou verzi.
-const SUBBAU_VERZE = '2026-10-29 a — Plán MMI: přehled podle staveb a přesouvání (připraveno na propojení se Stavbyplánem)'
+const SUBBAU_VERZE = '2026-10-29 b — Plán MMI: kulaté fotky u jmen'
 console.log('SubBau docházka — verze ' + SUBBAU_VERZE)
 // Verze i dole v menu správce. Když někdo novinku „nevidí", podle ní se hned
 // pozná, jestli nemá otevřenou starou kopii appky — bez hledání v konzoli.
@@ -25632,13 +25632,13 @@ async function mmiNasiLide(j) {
   const prof = {}
   const ids = [...new Set(nasi.map(c => c.subbau_id))]
   for (let i = 0; i < ids.length; i += 150) {
-    const { data } = await sb.from('profiles').select('id, full_name').in('id', ids.slice(i, i + 150))
+    const { data } = await sb.from('profiles').select('id, full_name, avatar_url').in('id', ids.slice(i, i + 150))
     ;(data || []).forEach(p => { prof[p.id] = p })
   }
   const lide = new Map()
   for (const c of nasi) {
     const p = prof[c.subbau_id]
-    lide.set(c.id, { jmeno: p?.full_name || ((c.jmeno || '') + ' ' + (c.prijmeni || '')).trim() || '?', vDochazce: !!p, workerId: c.subbau_id })
+    lide.set(c.id, { jmeno: p?.full_name || ((c.jmeno || '') + ' ' + (c.prijmeni || '')).trim() || '?', vDochazce: !!p, workerId: c.subbau_id, fotka: p?.avatar_url || null })
   }
   return lide
 }
@@ -25797,6 +25797,14 @@ function mmiHtml() {
   return hlava + (_mmiUi.pohled === 'lide' ? mmiHtmlLide() : _mmiUi.pohled === 'presuny' ? mmiHtmlPresuny(presuny) : mmiHtmlStavby())
 }
 
+// Malá kulatá fotka u jména (majitel 29. 10. 2026: „někteří se řídí fotkami").
+// Stejná fotka jako jinde v appce (zmenšenina, opakování, iniciály); v tlačítku
+// se nezvětšuje — klepnutí na člověka má otevřít přesun.
+function mmiFotka(c, px, zvetsit) {
+  let h = fotkaHtml(c.fotka, c.jmeno, px, false).replace('border-radius:6px', 'border-radius:50%')
+  if (!zvetsit) h = h.replace(/ onclick="event\.stopPropagation\(\);showAvatarPreview\([^"]*\)"/, '').replace(' title="Kliknutím zvětšíte"', '').replace('cursor:zoom-in;', '')
+  return h
+}
 const mmiVarovani = (c) => c.vDochazce ? '' : ' <span title="Tohoto člověka MMI vede jako našeho, ale v docházce ho nenacházím" style="color:var(--amber)">⚠</span>'
 
 function mmiHtmlStavby() {
@@ -25815,8 +25823,8 @@ function mmiHtmlStavby() {
   const poradi = Object.keys(naMiste).sort((a, b) => naMiste[b].length - naMiste[a].length || mmiNazev(a).localeCompare(mmiNazev(b), 'cs'))
   const clovek = (c, barva) => {
     const m = M.plan[c.cid]?.[den] || null, pr = mmiPredtim(c.cid, den)
-    return `<button data-mmi-clovek-den onclick="mmiOtevriPresun(${M.lide.indexOf(c)},'${den}')" style="min-height:44px;padding:5px 11px;border-radius:9px;border:1px solid rgba(0,0,0,.12);background:${barva};color:inherit;cursor:pointer;font-family:inherit;text-align:left;display:flex;flex-direction:column;justify-content:center">
-      <span style="font-weight:650;font-size:13px">${escAttr(c.jmeno)}${mmiVarovani(c)}</span>${pr && pr !== m ? `<span style="font-size:11px;color:#4A433C">předtím ${escAttr(mmiNazev(pr))}</span>` : ''}</button>`
+    return `<button data-mmi-clovek-den onclick="mmiOtevriPresun(${M.lide.indexOf(c)},'${den}')" style="min-height:44px;padding:4px 11px 4px 5px;border-radius:22px;border:1px solid rgba(0,0,0,.12);background:${barva};color:inherit;cursor:pointer;font-family:inherit;text-align:left;display:flex;align-items:center;gap:8px">
+      ${mmiFotka(c, 32)}<span style="display:flex;flex-direction:column;justify-content:center;min-width:0"><span style="font-weight:650;font-size:13px">${escAttr(c.jmeno)}${mmiVarovani(c)}</span>${pr && pr !== m ? `<span style="font-size:11px;color:#4A433C">předtím ${escAttr(mmiNazev(pr))}</span>` : ''}</span></button>`
   }
   const karta = (nazev, adresa, barva, lide) => `<div data-mmi-stavba style="background:#fff;border:1px solid var(--brd);border-radius:12px;padding:12px 14px;display:flex;flex-direction:column;gap:8px">
       <div style="display:flex;align-items:center;gap:8px"><span aria-hidden="true" style="width:12px;height:12px;border-radius:50%;background:${barva};border:1px solid rgba(0,0,0,.25);flex-shrink:0"></span><b style="flex:1;min-width:0;font-size:14.5px">${escAttr(nazev)}</b><span style="font-size:12px;color:var(--text3);white-space:nowrap">${mmiLidi(lide.length)}</span></div>
@@ -25845,7 +25853,7 @@ function mmiHtmlLide() {
     return `<td ${m ? `data-mmi-den="${d}"` : ''} style="padding:0;border:1px solid var(--brd)"><button onclick="mmiOtevriPresun(${M.lide.indexOf(c)},'${d}')" title="${popis}" aria-label="${popis}" style="display:block;width:100%;min-height:36px;padding:4px 6px;border:${m && pr && pr !== m ? '2px solid #211D1A' : '0'};background:${m ? M.barva[m] : mmiVikend(d) ? '#f4f3f1' : '#fff'};color:${m ? 'inherit' : 'var(--text3)'};font-size:11.5px;font-family:inherit;white-space:nowrap;max-width:110px;overflow:hidden;text-overflow:ellipsis;cursor:pointer;text-align:${m ? 'left' : 'center'}">${m ? escAttr(mmiNazev(m)) : '—'}</button></td>`
   }
   const radky = klice.map(k => `<tr><td colspan="${M.dny.length + 1}" style="padding:10px 8px 4px;border:1px solid var(--brd);background:#faf9f7;font-size:12.5px"><span aria-hidden="true" style="display:inline-block;width:10px;height:10px;border-radius:50%;background:${k ? M.barva[k] : '#f4f3f1'};border:1px solid rgba(0,0,0,.25);margin-right:6px"></span><b>${escAttr(k ? mmiNazev(k) : 'Bez stavby')}</b> <span style="color:var(--text3)">· ${mmiLidi(skup.get(k).length)}</span></td></tr>`
-    + skup.get(k).map(c => `<tr data-mmi-clovek="${escAttr(c.workerId)}"><td style="position:sticky;left:0;z-index:1;background:#fff;padding:5px 8px;border:1px solid var(--brd);white-space:nowrap;font-weight:600">${escAttr(c.jmeno)}${mmiVarovani(c)}</td>${M.dny.map(d => bunka(c, d)).join('')}</tr>`).join('')).join('')
+    + skup.get(k).map(c => `<tr data-mmi-clovek="${escAttr(c.workerId)}"><td style="position:sticky;left:0;z-index:1;background:#fff;padding:4px 8px;border:1px solid var(--brd);white-space:nowrap;font-weight:600"><span style="display:inline-flex;align-items:center;gap:7px">${mmiFotka(c, 26, true)}<span>${escAttr(c.jmeno)}${mmiVarovani(c)}</span></span></td>${M.dny.map(d => bunka(c, d)).join('')}</tr>`).join('')).join('')
   const pouzita = Object.keys(M.barva).filter(id => M.lide.some(c => M.dny.some(d => M.plan[c.cid]?.[d] === id)))
   const legenda = pouzita.length ? `<div style="display:flex;flex-wrap:wrap;gap:8px 16px;margin-top:12px;font-size:12.5px">${pouzita.map(id => `<span style="display:inline-flex;align-items:center;gap:6px"><span style="width:14px;height:14px;border-radius:3px;background:${M.barva[id]};border:1px solid var(--brd)"></span><b>${escAttr(mmiNazev(id))}</b>${M.mista[id]?.adresa ? `<span style="color:var(--text3)">${escAttr(M.mista[id].adresa)}</span>` : ''}</span>`).join('')}<span style="color:var(--text3)">Tmavý rámeček = první den na nové stavbě. Klepnutím na políčko člověka přesunete.</span></div>` : ''
   return `<div style="overflow-x:auto;border:1px solid var(--brd);border-radius:10px">
@@ -25947,9 +25955,9 @@ function mmiVykresliPresun() {
   const sipka = (o, popis, zak) => `<button onclick="mmiPresunDen(${o})" aria-label="${popis}" ${zak ? 'disabled' : ''} style="width:44px;height:44px;border:1px solid var(--brd);border-radius:9px;background:#fff;cursor:${zak ? 'default' : 'pointer'};opacity:${zak ? .4 : 1};font-size:18px;font-family:inherit;color:inherit">${o < 0 ? '‹' : '›'}</button>`
   box.innerHTML = `<div style="background:#fff;border-radius:14px;width:100%;max-width:480px;max-height:calc(100vh - 32px);overflow-y:auto;padding:18px;box-sizing:border-box;display:flex;flex-direction:column;gap:12px">
     <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px">
-      <div><div style="font-size:11.5px;color:var(--text3);font-weight:700;letter-spacing:.04em">PŘESUN</div>
+      <div style="display:flex;align-items:center;gap:12px;min-width:0">${mmiFotka(c, 52)}<div style="min-width:0"><div style="font-size:11.5px;color:var(--text3);font-weight:700;letter-spacing:.04em">PŘESUN</div>
         <div style="font-size:19px;font-weight:800">${escAttr(c.jmeno)}</div>
-        <div style="font-size:12.5px;color:var(--text3)">Teď ${mmiDen(P.den)}: ${escAttr(ted ? mmiNazev(ted) : 'bez stavby')}</div></div>
+        <div style="font-size:12.5px;color:var(--text3)">Teď ${mmiDen(P.den)}: ${escAttr(ted ? mmiNazev(ted) : 'bez stavby')}</div></div></div>
       <button onclick="mmiZavriPresun()" aria-label="Zavřít" style="width:44px;height:44px;flex-shrink:0;border:1px solid var(--brd);border-radius:9px;background:#fff;cursor:pointer;font-size:20px;font-family:inherit;color:inherit">×</button>
     </div>
     <div style="display:flex;align-items:center;gap:8px"><b style="width:62px">Od dne</b>${sipka(-1, 'Předchozí den', k <= 0)}<b data-mmi-od style="min-width:96px;text-align:center">${mmiDen(P.den)}</b>${sipka(1, 'Další den', k >= M.dny.length - 1)}</div>
