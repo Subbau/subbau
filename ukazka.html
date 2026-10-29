@@ -5646,7 +5646,7 @@ async function submitAdminSignatureWithPlacement() {
 // Po nahrání nové verze se snadno pozná, jestli se opravdu nasadila: otevřete
 // appku, zmáčkněte F12 (na Macu ⌥⌘I) a v konzoli je vypsané tohle datum. Když
 // tam svítí starší, prohlížeč nebo GitHub drží starou verzi.
-const SUBBAU_VERZE = '2026-10-27 a — Úprava hodin na pomalém internetu: okno hned, uložení 3 kola místo 8'
+const SUBBAU_VERZE = '2026-10-29 a — Plán MMI: přehled podle staveb a přesouvání (připraveno na propojení se Stavbyplánem)'
 console.log('StavKo docházka — verze ' + SUBBAU_VERZE)
 // Verze i dole v menu správce. Když někdo novinku „nevidí", podle ní se hned
 // pozná, jestli nemá otevřenou starou kopii appky — bez hledání v konzoli.
@@ -26285,7 +26285,7 @@ function textZpravy(m) {
 
 // ===== PLÁN MMI =====
 // MMI (Mario Marcantelli) plánuje naše lidi po stavbách ve Stavbyplánu a vyrobí
-// tam „Odkaz pro StavKo" (Edge funkce subbau-plan). Tady se jen čte: kdo, který
+// tam „Odkaz pro StavKo" (Edge funkce subbau-plan). Čte se z něj: kdo, který
 // den, na které stavbě — 14 dní dopředu — a koho za posledních 14 dní přesunuli.
 // Odkaz nese tajný klíč, proto leží v plan_mmi a vidí ho jen správci.
 // Majitel 23. 10. 2026: samostatná sekce nad Kalendářem, přesuny jen upozornit
@@ -26378,7 +26378,23 @@ function mmiZmenitOdkaz() {
   if (el) el.innerHTML = mmiFormularHtml('Nový odkaz nahradí ten dosavadní pro všechny správce.')
 }
 
+// PŘEHLED A PŘESOUVÁNÍ (majitel 29. 10. 2026: „předělat, aby byl přehledný
+// a abych ty lidi mohl taky přesouvat a ve Stavbyplánu se přesunuli"). Tři
+// pohledy: Podle staveb (vybraný den → stavby a kdo na nich je), Lidé × 14 dní
+// a Přesuny. Klepnutí na člověka otevře okno přesunu.
+// PROPOJENÍ SE STAVBYPLÁNEM: přesun jde POSTem na týž odkaz
+//   { token, akce: 'presun', clovek_id, misto_id (null = bez stavby), od,
+//     do (null = dokud ho nepřesunou), kdo, klic }
+// a platí, jen když Stavbyplán odpoví { ok: true, akce: 'presun' } — dnešní
+// funkce na POST bez akce vrací plán, a to se za úspěch brát nesmí. Tlačítko
+// Přesunout se zapne, až Stavbyplán v plánu pošle presouvani: true; místa,
+// kam smí StavKo přesouvat, posílá v cile (jinak jen místa z plánu).
 let _mmiBeh = 0
+let _mmiUi = { pohled: 'stavby', den: null }
+let _mmiM = null
+let _mmiPresun = null      // otevřené okno přesunu: { i, den, cil, rozsah, bezi, chyba }
+const MMI_DEN_VZOR = /^\d{4}-\d{2}-\d{2}$/
+
 async function loadPlanMmi(znovu) {
   const el0 = document.getElementById('mmi-obsah')
   if (!el0) return
@@ -26404,52 +26420,293 @@ async function loadPlanMmi(znovu) {
     return
   }
   const lide = await mmiNasiLide(j)
+  if (beh !== _mmiBeh) return
+  let model
+  try { model = mmiModel(j, lide) } catch (e) { el.innerHTML = '<div style="color:var(--red)">' + escAttr(e.message) + '</div>'; return }
+  _mmiM = model
+  // Okno přesunu ukazuje na řádek starého plánu — po novém načtení ho zavřít.
+  if (_mmiPresun && !_mmiPresun.bezi) { _mmiPresun = null; document.getElementById('mmi-presun')?.remove() }
+  const dnes = localDateStr(new Date())
+  if (!model.dny.includes(_mmiUi.den)) _mmiUi.den = model.dny.includes(dnes) ? dnes : model.dny[0]
+  el.innerHTML = mmiHtml()
+}
+
+function mmiModel(j, lideMap) {
+  if (!MMI_DEN_VZOR.test(String(j.od)) || !MMI_DEN_VZOR.test(String(j.do))) throw new Error('Stavbyplán poslal plán bez platných dnů.')
   const mista = {}
-  ;(j.mista || []).forEach(m => { mista[m.id] = m })
-  const barva = {}
-  let bi = 0
+  ;(j.mista || []).forEach(m => { if (m?.id) mista[m.id] = m })
+  const cileZeStavbyplanu = Array.isArray(j.cile) ? j.cile.filter(m => m?.id) : []
+  cileZeStavbyplanu.forEach(m => { if (!mista[m.id]) mista[m.id] = m })
   const plan = {}
   for (const r of (j.plan || [])) {
-    if (!lide.has(r.clovek_id)) continue
+    if (!lideMap.has(r.clovek_id)) continue
     ;(plan[r.clovek_id] = plan[r.clovek_id] || {})[r.den] = r.misto_id
-    if (r.misto_id && !barva[r.misto_id]) barva[r.misto_id] = MMI_BARVY[bi++ % MMI_BARVY.length]
   }
   const dny = []
   for (let d = j.od, i = 0; d <= j.do && i < 31; d = mmiPosunDen(d, 1), i++) dny.push(d)
-  const dnes = localDateStr(new Date())
-  const vikend = (d) => { const w = new Date(d + 'T12:00:00Z').getUTCDay(); return w === 0 || w === 6 }
-  const radky = [...lide.entries()].sort((a, b) => a[1].jmeno.localeCompare(b[1].jmeno, 'cs'))
-  const nazev = (id) => mista[id]?.nazev || (id ? '?' : '—')
-  const bunka = (cid, d) => {
-    const m = plan[cid]?.[d]
-    const zaklad = 'padding:5px 6px;border:1px solid var(--brd);font-size:11.5px;white-space:nowrap;max-width:96px;overflow:hidden;text-overflow:ellipsis'
-    if (!m) return `<td style="${zaklad};color:var(--text3);text-align:center;${vikend(d) ? 'background:#f4f3f1' : ''}">—</td>`
-    const ms = mista[m] || {}
-    return `<td data-mmi-den="${d}" title="${escAttr((ms.nazev || '?') + (ms.adresa ? '\n' + ms.adresa : ''))}" style="${zaklad};background:${barva[m]}">${escAttr(ms.nazev || '?')}</td>`
+  const lide = [...lideMap.entries()].map(([cid, c]) => ({ cid, ...c })).sort((a, b) => a.jmeno.localeCompare(b.jmeno, 'cs'))
+  const barva = {}
+  let bi = 0
+  for (const d of dny) for (const c of lide) {
+    const m = plan[c.cid]?.[d]
+    if (m && !barva[m]) barva[m] = MMI_BARVY[bi++ % MMI_BARVY.length]
   }
-  const tabulka = !radky.length
-    ? '<div style="color:var(--text3);padding:8px 0">V odkazu teď nejsou žádní naši lidé. MMI v odkazu vybírá, koho ukazuje — musí v něm být aspoň „lidé ze StavKo".</div>'
-    : `<div style="overflow-x:auto;border:1px solid var(--brd);border-radius:10px">
-      <table data-mmi-tabulka style="border-collapse:collapse;min-width:100%;font-size:12px">
-        <thead><tr><th style="position:sticky;left:0;background:#fff;text-align:left;padding:6px 8px;border:1px solid var(--brd);min-width:150px">Pracovník</th>
-        ${dny.map(d => `<th style="padding:6px;border:1px solid var(--brd);white-space:nowrap;font-weight:${d === dnes ? 800 : 600};${d === dnes ? 'background:var(--amber-l,#faf0dc)' : vikend(d) ? 'background:#f4f3f1' : 'background:#fff'}">${mmiDen(d)}</th>`).join('')}</tr></thead>
-        <tbody>${radky.map(([cid, c]) => `<tr data-mmi-clovek="${escAttr(c.workerId)}"><td style="position:sticky;left:0;background:#fff;padding:5px 8px;border:1px solid var(--brd);white-space:nowrap;font-weight:600">${escAttr(c.jmeno)}${c.vDochazce ? '' : ' <span title="Tohoto člověka MMI vede jako našeho, ale v docházce ho nenacházím" style="color:var(--amber)">⚠</span>'}</td>${dny.map(d => bunka(cid, d)).join('')}</tr>`).join('')}</tbody>
-      </table></div>`
-  const pouzita = Object.keys(barva)
-  const legenda = pouzita.length ? `<div style="display:flex;flex-wrap:wrap;gap:8px 16px;margin-top:12px;font-size:12.5px">${pouzita.map(id => `<span style="display:inline-flex;align-items:center;gap:6px"><span style="width:14px;height:14px;border-radius:3px;background:${barva[id]};border:1px solid var(--brd)"></span><b>${escAttr(nazev(id))}</b>${mista[id]?.adresa ? `<span style="color:var(--text3)">${escAttr(mista[id].adresa)}</span>` : ''}</span>`).join('')}</div>` : ''
-  const presuny = (j.presuny || []).filter(p => lide.has(p.clovek_id)).sort((a, b) => String(b.kdy).localeCompare(String(a.kdy)))
-  const seznamPresunu = presuny.length
-    ? presuny.map(p => `<div data-mmi-presun style="padding:7px 0;border-bottom:1px solid var(--brd);font-size:13px"><span style="color:var(--text3)">${mmiKdy(p.kdy)}</span> · <b>${escAttr(lide.get(p.clovek_id).jmeno)}</b> · od ${mmiDen(p.den)}: ${escAttr(nazev(p.z))} → <b>${escAttr(nazev(p.na))}</b></div>`).join('')
-    : '<div style="color:var(--text3);font-size:13px;padding:6px 0">Za posledních 14 dní MMI nikoho z našich nepřesunulo.</div>'
-  el.innerHTML = `
+  const cile = (cileZeStavbyplanu.length ? cileZeStavbyplanu : Object.values(mista))
+    .slice().sort((a, b) => String(a.nazev || '').localeCompare(String(b.nazev || ''), 'cs'))
+  for (const m of cile) if (!barva[m.id]) barva[m.id] = MMI_BARVY[bi++ % MMI_BARVY.length]
+  return { j, mista, plan, dny, lide, barva, cile, lzePresouvat: j.presouvani === true }
+}
+
+const mmiNazev = (id) => id ? (_mmiM?.mista[id]?.nazev || '?') : 'bez stavby'
+const mmiVikend = (d) => { const w = new Date(d + 'T12:00:00Z').getUTCDay(); return w === 0 || w === 6 }
+const mmiLidi = (n) => n === 1 ? '1 člověk' : n >= 2 && n <= 4 ? n + ' lidé' : n + ' lidí'
+function mmiPredtim(cid, den) {
+  const dny = _mmiM.dny
+  for (let k = dny.indexOf(den) - 1; k >= 0; k--) { const m = _mmiM.plan[cid]?.[dny[k]]; if (m) return m }
+  return null
+}
+function mmiPresunyNasich() {
+  const nasi = new Set(_mmiM.lide.map(c => c.cid))
+  return (_mmiM.j.presuny || []).filter(p => nasi.has(p.clovek_id)).sort((a, b) => String(b.kdy).localeCompare(String(a.kdy)))
+}
+function mmiPrekresli() {
+  const el = document.getElementById('mmi-obsah')
+  if (el && _mmiM) el.innerHTML = mmiHtml()
+}
+function mmiPohled(k) {
+  if (!['stavby', 'lide', 'presuny'].includes(k)) return
+  _mmiUi.pohled = k
+  mmiPrekresli()
+}
+function mmiVyberDen(d) {
+  if (!_mmiM?.dny.includes(d)) return
+  _mmiUi.den = d
+  mmiPrekresli()
+}
+
+function mmiHtml() {
+  const M = _mmiM, j = M.j
+  const tab = (k, t) => { const on = _mmiUi.pohled === k; return `<button onclick="mmiPohled('${k}')" aria-pressed="${on}" style="min-height:40px;padding:0 14px;border-radius:9px;border:1px solid ${on ? '#211D1A' : 'var(--brd)'};background:${on ? '#211D1A' : '#fff'};color:${on ? '#E8A13A' : 'inherit'};font-weight:700;font-size:13px;cursor:pointer;font-family:inherit">${t}</button>` }
+  const presuny = mmiPresunyNasich()
+  const hlava = `
     <div style="display:flex;flex-wrap:wrap;gap:8px 14px;align-items:center;margin-bottom:12px;font-size:12.5px;color:var(--text3)">
       <span>${mmiDen(j.od)} – ${mmiDen(j.do)} · načteno ${mmiKdy(_mmi.kdy)}</span>
       <button onclick="loadPlanMmi(true)" style="padding:5px 10px;border:1px solid var(--brd);background:#fff;border-radius:6px;cursor:pointer;font-size:12px;font-family:inherit">Obnovit</button>
       <button onclick="mmiZmenitOdkaz()" style="padding:5px 10px;border:1px solid var(--brd);background:#fff;border-radius:6px;cursor:pointer;font-size:12px;font-family:inherit">Změnit odkaz</button>
     </div>
-    ${tabulka}${legenda}
-    <h4 style="margin:22px 0 6px">Přesuny za posledních 14 dní</h4>
-    ${seznamPresunu}`
+    <div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:14px">${tab('stavby', 'Podle staveb')}${tab('lide', 'Lidé × 14 dní')}${tab('presuny', 'Přesuny (' + presuny.length + ')')}</div>`
+  if (!M.lide.length) return hlava + '<div style="color:var(--text3);padding:8px 0">V odkazu teď nejsou žádní naši lidé. MMI v odkazu vybírá, koho ukazuje — musí v něm být aspoň „lidé ze StavKo".</div>'
+  return hlava + (_mmiUi.pohled === 'lide' ? mmiHtmlLide() : _mmiUi.pohled === 'presuny' ? mmiHtmlPresuny(presuny) : mmiHtmlStavby())
+}
+
+const mmiVarovani = (c) => c.vDochazce ? '' : ' <span title="Tohoto člověka MMI vede jako našeho, ale v docházce ho nenacházím" style="color:var(--amber)">⚠</span>'
+
+function mmiHtmlStavby() {
+  const M = _mmiM, den = _mmiUi.den, dnes = localDateStr(new Date())
+  const chipy = M.dny.map(d => {
+    const on = d === den
+    const n = M.lide.filter(c => M.plan[c.cid]?.[d]).length
+    const [dn, ...datum] = mmiDen(d).split(' ')
+    return `<button onclick="mmiVyberDen('${d}')" aria-pressed="${on}" style="flex:0 0 auto;width:74px;min-height:62px;padding:6px 2px;border-radius:9px;border:1px solid ${on ? '#211D1A' : 'var(--brd)'};background:${on ? '#211D1A' : mmiVikend(d) ? '#f4f3f1' : '#fff'};color:${on ? '#fff' : 'inherit'};cursor:pointer;font-family:inherit;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:1px">
+      <span style="font-size:11.5px;font-weight:700">${dn}${d === dnes ? ' · dnes' : ''}</span>
+      <span style="font-size:14px;font-weight:800">${datum.join(' ')}</span>
+      <span style="font-size:10.5px;color:${on ? '#E8A13A' : 'var(--text3)'}">${n ? n + ' v práci' : 'volno'}</span></button>`
+  }).join('')
+  const naMiste = {}, volni = []
+  for (const c of M.lide) { const m = M.plan[c.cid]?.[den]; if (m) (naMiste[m] = naMiste[m] || []).push(c); else volni.push(c) }
+  const poradi = Object.keys(naMiste).sort((a, b) => naMiste[b].length - naMiste[a].length || mmiNazev(a).localeCompare(mmiNazev(b), 'cs'))
+  const clovek = (c, barva) => {
+    const m = M.plan[c.cid]?.[den] || null, pr = mmiPredtim(c.cid, den)
+    return `<button data-mmi-clovek-den onclick="mmiOtevriPresun(${M.lide.indexOf(c)},'${den}')" style="min-height:44px;padding:5px 11px;border-radius:9px;border:1px solid rgba(0,0,0,.12);background:${barva};color:inherit;cursor:pointer;font-family:inherit;text-align:left;display:flex;flex-direction:column;justify-content:center">
+      <span style="font-weight:650;font-size:13px">${escAttr(c.jmeno)}${mmiVarovani(c)}</span>${pr && pr !== m ? `<span style="font-size:11px;color:#4A433C">předtím ${escAttr(mmiNazev(pr))}</span>` : ''}</button>`
+  }
+  const karta = (nazev, adresa, barva, lide) => `<div data-mmi-stavba style="background:#fff;border:1px solid var(--brd);border-radius:12px;padding:12px 14px;display:flex;flex-direction:column;gap:8px">
+      <div style="display:flex;align-items:center;gap:8px"><span aria-hidden="true" style="width:12px;height:12px;border-radius:50%;background:${barva};border:1px solid rgba(0,0,0,.25);flex-shrink:0"></span><b style="flex:1;min-width:0;font-size:14.5px">${escAttr(nazev)}</b><span style="font-size:12px;color:var(--text3);white-space:nowrap">${mmiLidi(lide.length)}</span></div>
+      ${adresa ? `<div style="font-size:12px;color:var(--text3);margin-top:-4px">${escAttr(adresa)}</div>` : ''}
+      <div style="display:flex;flex-wrap:wrap;gap:6px">${lide.map(c => clovek(c, barva)).join('')}</div></div>`
+  const karty = poradi.map(m => karta(mmiNazev(m), M.mista[m]?.adresa || '', M.barva[m] || '#eee', naMiste[m])).join('')
+    + (volni.length ? karta('Bez stavby / volno', '', '#f4f3f1', volni) : '')
+  const vPraci = M.lide.length - volni.length
+  const souhrn = mmiDen(den) + ': ' + (vPraci
+    ? mmiLidi(vPraci) + ' na ' + (poradi.length === 1 ? '1 stavbě' : poradi.length + ' stavbách') + (volni.length ? ', ' + volni.length + ' bez stavby' : '')
+    : 'nikdo nemá stavbu')
+  return `<div style="overflow-x:auto;padding-bottom:4px;margin-bottom:12px"><div style="display:flex;gap:6px;min-width:max-content">${chipy}</div></div>
+    <div style="display:flex;flex-wrap:wrap;justify-content:space-between;gap:4px 16px;align-items:baseline;margin-bottom:10px"><b data-mmi-souhrn style="font-size:15px">${souhrn}</b><span style="color:var(--text3);font-size:12.5px">Klepněte na člověka a vyberte, kam ho přesunout.</span></div>
+    <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(250px,1fr));gap:10px">${karty}</div>`
+}
+
+function mmiHtmlLide() {
+  const M = _mmiM, dnes = localDateStr(new Date())
+  const prvni = (c) => { for (const d of M.dny) { const m = M.plan[c.cid]?.[d]; if (m) return m } return '' }
+  const skup = new Map()
+  for (const c of M.lide) { const k = prvni(c); if (!skup.has(k)) skup.set(k, []); skup.get(k).push(c) }
+  const klice = [...skup.keys()].sort((a, b) => (a === '') - (b === '') || mmiNazev(a).localeCompare(mmiNazev(b), 'cs'))
+  const bunka = (c, d) => {
+    const m = M.plan[c.cid]?.[d], pr = mmiPredtim(c.cid, d)
+    const popis = escAttr(c.jmeno + ' · ' + mmiDen(d) + ' · ' + mmiNazev(m) + (m && M.mista[m]?.adresa ? ' · ' + M.mista[m].adresa : ''))
+    return `<td ${m ? `data-mmi-den="${d}"` : ''} style="padding:0;border:1px solid var(--brd)"><button onclick="mmiOtevriPresun(${M.lide.indexOf(c)},'${d}')" title="${popis}" aria-label="${popis}" style="display:block;width:100%;min-height:36px;padding:4px 6px;border:${m && pr && pr !== m ? '2px solid #211D1A' : '0'};background:${m ? M.barva[m] : mmiVikend(d) ? '#f4f3f1' : '#fff'};color:${m ? 'inherit' : 'var(--text3)'};font-size:11.5px;font-family:inherit;white-space:nowrap;max-width:110px;overflow:hidden;text-overflow:ellipsis;cursor:pointer;text-align:${m ? 'left' : 'center'}">${m ? escAttr(mmiNazev(m)) : '—'}</button></td>`
+  }
+  const radky = klice.map(k => `<tr><td colspan="${M.dny.length + 1}" style="padding:10px 8px 4px;border:1px solid var(--brd);background:#faf9f7;font-size:12.5px"><span aria-hidden="true" style="display:inline-block;width:10px;height:10px;border-radius:50%;background:${k ? M.barva[k] : '#f4f3f1'};border:1px solid rgba(0,0,0,.25);margin-right:6px"></span><b>${escAttr(k ? mmiNazev(k) : 'Bez stavby')}</b> <span style="color:var(--text3)">· ${mmiLidi(skup.get(k).length)}</span></td></tr>`
+    + skup.get(k).map(c => `<tr data-mmi-clovek="${escAttr(c.workerId)}"><td style="position:sticky;left:0;z-index:1;background:#fff;padding:5px 8px;border:1px solid var(--brd);white-space:nowrap;font-weight:600">${escAttr(c.jmeno)}${mmiVarovani(c)}</td>${M.dny.map(d => bunka(c, d)).join('')}</tr>`).join('')).join('')
+  const pouzita = Object.keys(M.barva).filter(id => M.lide.some(c => M.dny.some(d => M.plan[c.cid]?.[d] === id)))
+  const legenda = pouzita.length ? `<div style="display:flex;flex-wrap:wrap;gap:8px 16px;margin-top:12px;font-size:12.5px">${pouzita.map(id => `<span style="display:inline-flex;align-items:center;gap:6px"><span style="width:14px;height:14px;border-radius:3px;background:${M.barva[id]};border:1px solid var(--brd)"></span><b>${escAttr(mmiNazev(id))}</b>${M.mista[id]?.adresa ? `<span style="color:var(--text3)">${escAttr(M.mista[id].adresa)}</span>` : ''}</span>`).join('')}<span style="color:var(--text3)">Tmavý rámeček = první den na nové stavbě. Klepnutím na políčko člověka přesunete.</span></div>` : ''
+  return `<div style="overflow-x:auto;border:1px solid var(--brd);border-radius:10px">
+      <table data-mmi-tabulka style="border-collapse:collapse;min-width:100%;font-size:12px">
+        <thead><tr><th style="position:sticky;left:0;z-index:2;background:#fff;text-align:left;padding:6px 8px;border:1px solid var(--brd);min-width:150px">Pracovník</th>
+        ${M.dny.map(d => `<th style="padding:6px;border:1px solid var(--brd);white-space:nowrap;font-weight:${d === dnes ? 800 : 600};${d === dnes ? 'background:var(--amber-l,#faf0dc)' : mmiVikend(d) ? 'background:#f4f3f1' : 'background:#fff'}">${mmiDen(d)}</th>`).join('')}</tr></thead>
+        <tbody>${radky}</tbody>
+      </table></div>${legenda}`
+}
+
+function mmiHtmlPresuny(presuny) {
+  const jmena = new Map(_mmiM.lide.map(c => [c.cid, c.jmeno]))
+  const radek = (p) => {
+    const subbau = p.zdroj === 'subbau'
+    const kdo = (subbau ? 'StavKo' : 'MMI') + (p.kdo ? ' · ' + String(p.kdo).slice(0, 80) : '')
+    return `<div data-mmi-presun style="display:flex;flex-wrap:wrap;align-items:center;gap:4px 10px;padding:9px 0;border-bottom:1px solid var(--brd);font-size:13px">
+      <span style="color:var(--text3);min-width:84px">${mmiKdy(p.kdy)}</span>
+      <span style="font-size:11.5px;font-weight:700;padding:2px 8px;border-radius:999px;background:${subbau ? '#FBEBD0' : '#E1EAF7'};color:${subbau ? '#7A4A0B' : '#1D4F91'}">${escAttr(kdo)}</span>
+      <span><b>${escAttr(jmena.get(p.clovek_id))}</b> · od ${MMI_DEN_VZOR.test(String(p.den)) ? mmiDen(p.den) : '?'}: ${escAttr(mmiNazev(p.z))} → <b>${escAttr(mmiNazev(p.na))}</b></span></div>`
+  }
+  return (presuny.length ? presuny.map(radek).join('') : '<div style="color:var(--text3);font-size:13px;padding:6px 0">Za posledních 14 dní nikoho z našich nepřesunuli.</div>')
+    + '<div style="color:var(--text3);font-size:12.5px;margin-top:10px">Přesuny od MMI vyskočí i na nástěnce. Přesun ze StavKo se zapíše do Stavbyplánu a MMI u něj uvidí, že ho udělal StavKo.</div>'
+}
+
+// ── Okno přesunu ────────────────────────────────────────────────────────
+function mmiOtevriPresun(i, den) {
+  if (!_mmiM?.lide[i] || !_mmiM.dny.includes(den) || _mmiPresun?.bezi) return
+  _mmiPresun = { i, den, cil: undefined, rozsah: 'den', bezi: false, chyba: '' }
+  mmiVykresliPresun()
+}
+function mmiZavriPresun() {
+  if (_mmiPresun?.bezi) return
+  _mmiPresun = null
+  document.getElementById('mmi-presun')?.remove()
+}
+function mmiCil(k) {
+  if (!_mmiPresun || _mmiPresun.bezi) return
+  _mmiPresun.cil = k < 0 ? '' : _mmiM.cile[k]?.id
+  _mmiPresun.chyba = ''
+  mmiVykresliPresun()
+}
+function mmiRozsah(r) {
+  if (!_mmiPresun || _mmiPresun.bezi || !['den', 'tyden', 'trvale'].includes(r)) return
+  _mmiPresun.rozsah = r
+  mmiVykresliPresun()
+}
+function mmiPresunDen(o) {
+  if (!_mmiPresun || _mmiPresun.bezi) return
+  const k = _mmiM.dny.indexOf(_mmiPresun.den) + o
+  if (k < 0 || k >= _mmiM.dny.length) return
+  _mmiPresun.den = _mmiM.dny[k]
+  mmiVykresliPresun()
+}
+// Konec týdne: všední den → pátek, víkend → neděle.
+function mmiKonecTydne(den) {
+  const w = new Date(den + 'T12:00:00Z').getUTCDay()
+  return mmiPosunDen(den, w === 0 ? 0 : w === 6 ? 1 : 5 - w)
+}
+function mmiDoDne(P) { return P.rozsah === 'den' ? P.den : P.rozsah === 'tyden' ? mmiKonecTydne(P.den) : null }
+
+function mmiVykresliPresun() {
+  const P = _mmiPresun, M = _mmiM
+  if (!P || !M) return
+  let box = document.getElementById('mmi-presun')
+  if (!box) {
+    box = document.createElement('div')
+    box.id = 'mmi-presun'
+    box.setAttribute('role', 'dialog')
+    box.setAttribute('aria-modal', 'true')
+    box.style.cssText = 'position:fixed;inset:0;z-index:9000;background:rgba(33,29,26,.45);display:flex;align-items:center;justify-content:center;padding:16px;box-sizing:border-box'
+    box.addEventListener('click', e => { if (e.target === box) mmiZavriPresun() })
+    document.body.appendChild(box)
+  }
+  const odscrolovano = box.firstElementChild?.scrollTop || 0
+  const c = M.lide[P.i]
+  const ted = M.plan[c.cid]?.[P.den] || null
+  const k = M.dny.indexOf(P.den)
+  const vzhled = (on) => `border:1px solid ${on ? '#211D1A' : 'var(--brd)'};background:${on ? '#211D1A' : '#fff'};color:${on ? '#fff' : 'inherit'}`
+  const vedlejsi = (on) => on ? '#E8A13A' : 'var(--text3)'
+  const cil = (k2, nazev, adresa, barva, jeTed) => {
+    const on = P.cil !== undefined && (k2 < 0 ? P.cil === '' : P.cil === M.cile[k2].id)
+    return `<button data-mmi-cil onclick="mmiCil(${k2})" aria-pressed="${on}" style="min-height:44px;display:flex;align-items:center;gap:10px;padding:4px 12px;border-radius:9px;${vzhled(on)};font-family:inherit;font-size:13.5px;cursor:pointer;text-align:left">
+      <span aria-hidden="true" style="width:12px;height:12px;border-radius:50%;background:${barva};border:1px solid rgba(0,0,0,.25);flex-shrink:0"></span>
+      <span style="flex:1;min-width:0"><b>${escAttr(nazev)}</b>${adresa ? `<span style="display:block;font-size:11.5px;color:${vedlejsi(on)}">${escAttr(adresa)}</span>` : ''}</span>
+      ${jeTed ? `<span style="font-size:11.5px;color:${vedlejsi(on)}">teď tady</span>` : ''}</button>`
+  }
+  const cile = M.cile.map((m, k2) => cil(k2, m.nazev || '?', m.adresa || '', M.barva[m.id] || '#eee', ted === m.id)).join('')
+    + cil(-1, 'Bez stavby (zrušit plán)', '', '#f4f3f1', !ted)
+  const volba = (r, nadpis, pod) => { const on = P.rozsah === r; return `<button data-mmi-rozsah="${r}" onclick="mmiRozsah('${r}')" aria-pressed="${on}" style="min-height:56px;padding:6px 4px;border-radius:9px;${vzhled(on)};font-family:inherit;cursor:pointer;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px"><span style="font-weight:700;font-size:13px">${nadpis}</span><span style="font-size:11px;color:${vedlejsi(on)}">${pod}</span></button>` }
+  const doDne = mmiDoDne(P)
+  let veta = 'Vyberte, kam ho přesunout.'
+  if (P.cil !== undefined) {
+    const kam = P.cil ? 'na stavbě ' + escAttr(mmiNazev(P.cil)) : 'bez stavby (plán se zruší)'
+    veta = '<b>' + escAttr(c.jmeno) + '</b> bude ' + (P.rozsah === 'den' ? 'jen ' + mmiDen(P.den) + ' ' + kam
+      : P.rozsah === 'tyden' ? 'od ' + mmiDen(P.den) + ' do ' + mmiDen(doDne) + ' ' + kam
+      : 'od ' + mmiDen(P.den) + ' ' + kam + ', dokud ho někdo znovu nepřesune') + '.'
+  }
+  const lze = M.lzePresouvat && P.cil !== undefined && !P.bezi
+  const sipka = (o, popis, zak) => `<button onclick="mmiPresunDen(${o})" aria-label="${popis}" ${zak ? 'disabled' : ''} style="width:44px;height:44px;border:1px solid var(--brd);border-radius:9px;background:#fff;cursor:${zak ? 'default' : 'pointer'};opacity:${zak ? .4 : 1};font-size:18px;font-family:inherit;color:inherit">${o < 0 ? '‹' : '›'}</button>`
+  box.innerHTML = `<div style="background:#fff;border-radius:14px;width:100%;max-width:480px;max-height:calc(100vh - 32px);overflow-y:auto;padding:18px;box-sizing:border-box;display:flex;flex-direction:column;gap:12px">
+    <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px">
+      <div><div style="font-size:11.5px;color:var(--text3);font-weight:700;letter-spacing:.04em">PŘESUN</div>
+        <div style="font-size:19px;font-weight:800">${escAttr(c.jmeno)}</div>
+        <div style="font-size:12.5px;color:var(--text3)">Teď ${mmiDen(P.den)}: ${escAttr(ted ? mmiNazev(ted) : 'bez stavby')}</div></div>
+      <button onclick="mmiZavriPresun()" aria-label="Zavřít" style="width:44px;height:44px;flex-shrink:0;border:1px solid var(--brd);border-radius:9px;background:#fff;cursor:pointer;font-size:20px;font-family:inherit;color:inherit">×</button>
+    </div>
+    <div style="display:flex;align-items:center;gap:8px"><b style="width:62px">Od dne</b>${sipka(-1, 'Předchozí den', k <= 0)}<b data-mmi-od style="min-width:96px;text-align:center">${mmiDen(P.den)}</b>${sipka(1, 'Další den', k >= M.dny.length - 1)}</div>
+    <div style="display:flex;flex-direction:column;gap:6px"><b>Kam</b>${cile}</div>
+    <div style="display:flex;flex-direction:column;gap:6px"><b>Na jak dlouho</b>
+      <div style="display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:6px">${volba('den', 'Jen tento den', mmiDen(P.den))}${volba('tyden', 'Do konce týdne', 'do ' + mmiDen(mmiKonecTydne(P.den)))}${volba('trvale', 'Dokud ho nepřesunou', 'jako ve Stavbyplánu')}</div></div>
+    <div data-mmi-veta style="background:#f6f4f1;border-radius:9px;padding:10px 12px;font-size:13.5px">${veta}</div>
+    ${P.chyba ? `<div data-mmi-chyba style="color:var(--red);font-size:13px">${escAttr(P.chyba)}</div>` : ''}
+    ${M.lzePresouvat ? '' : '<div data-mmi-nepropojeno style="background:var(--amber-l,#faf0dc);border-radius:9px;padding:10px 12px;font-size:13px">Přesouvání se zapne po propojení se Stavbyplánem. Zatím si okno můžete jen prohlédnout, nic se neodešle.</div>'}
+    <div style="display:flex;gap:8px;justify-content:flex-end">
+      <button onclick="mmiZavriPresun()" ${P.bezi ? 'disabled' : ''} style="min-height:44px;padding:0 16px;border:1px solid var(--brd);border-radius:9px;background:#fff;font-weight:700;cursor:pointer;font-family:inherit;color:inherit">Zrušit</button>
+      <button id="mmi-presunout" onclick="mmiPotvrdPresun()" ${lze ? '' : 'disabled'} style="min-height:44px;padding:0 18px;border:none;border-radius:9px;background:${lze ? '#211D1A' : '#e4ded5'};color:${lze ? '#E8A13A' : '#6B645C'};font-weight:800;cursor:${lze ? 'pointer' : 'default'};font-family:inherit">${P.bezi ? 'Přesouvám…' : 'Přesunout'}</button>
+    </div>
+    <div style="font-size:12px;color:var(--text3)">Zapíše se hned do Stavbyplánu. MMI u přesunu uvidí, že ho udělal StavKo.</div>
+  </div>`
+  if (box.firstElementChild) box.firstElementChild.scrollTop = odscrolovano
+}
+
+async function mmiPotvrdPresun() {
+  const P = _mmiPresun, M = _mmiM
+  if (!P || P.bezi || P.cil === undefined || !M?.lzePresouvat) return
+  const c = M.lide[P.i]
+  const odkaz = String(M.j.__odkaz || '')
+  const token = (odkaz.match(/[?&]t=([0-9a-f]{64})(?:&|$)/i) || [])[1]
+  if (!token) { P.chyba = 'V uloženém odkazu chybí klíč — vložte odkaz znovu.'; return mmiVykresliPresun() }
+  P.bezi = true; P.chyba = ''
+  mmiVykresliPresun()
+  const zadani = {
+    token: token.toLowerCase(), akce: 'presun', clovek_id: c.cid, misto_id: P.cil || null,
+    od: P.den, do: mmiDoDne(P), kdo: String(currentProfile?.full_name || '').slice(0, 80),
+    klic: (crypto.randomUUID && crypto.randomUUID()) || String(Date.now()) + Math.random().toString(16).slice(2)
+  }
+  const ovl = new AbortController()
+  const stop = setTimeout(() => ovl.abort(), 20000)
+  let j = null, chyba = ''
+  try {
+    const r = await fetch(odkaz.split('?')[0], { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(zadani), cache: 'no-store', signal: ovl.signal })
+    j = await r.json().catch(() => null)
+  } catch (e) {
+    chyba = e?.name === 'AbortError' ? 'Stavbyplán neodpověděl do 20 s. Přesun možná proběhl — klepněte na Obnovit a podívejte se.' : 'Stavbyplán se teď nepodařilo zavolat. Zkuste to znovu.'
+  } finally { clearTimeout(stop) }
+  if (!chyba && !(j && j.ok === true && j.akce === 'presun')) {
+    const kod = String(j?.kod || '').slice(0, 40)
+    chyba = kod === 'neplatny' ? 'Odkaz už neplatí — MMI ho ve Stavbyplánu zrušilo nebo vyrobilo nový.'
+      : kod === 'nepovoleno' ? 'Stavbyplán přesouvání ze StavKo nepovolil.'
+      : j?.ok === true ? 'Stavbyplán přesun nepotvrdil — zatím neumí přijímat přesuny ze StavKo.'
+      : 'Stavbyplán přesun odmítl' + (kod ? ' (' + kod + ')' : '') + '.'
+  }
+  if (_mmiPresun !== P) return
+  P.bezi = false
+  if (chyba) { P.chyba = chyba; mmiVykresliPresun(); return }
+  _mmiPresun = null
+  document.getElementById('mmi-presun')?.remove()
+  showToast('✅ Zapsáno ve Stavbyplánu: ' + c.jmeno + ' → ' + mmiNazev(zadani.misto_id))
+  loadPlanMmi(true)
 }
 
 // Nástěnka: přesuny, které ještě nikdo ze správců neodklikl. „Viděl jsem"
@@ -26468,7 +26725,8 @@ async function nactiPresunyMmiNaNastenku() {
   const mista = {}
   ;(j.mista || []).forEach(m => { mista[m.id] = m })
   const nazev = (id) => mista[id]?.nazev || '—'
-  const nove = (j.presuny || []).filter(p => lide.has(p.clovek_id) && !videno.has(mmiKlicPresunu(p)))
+  // Přesuny, které udělal sám StavKo (zdroj 'subbau'), na nástěnku nepatří.
+  const nove = (j.presuny || []).filter(p => lide.has(p.clovek_id) && p.zdroj !== 'subbau' && !videno.has(mmiKlicPresunu(p)))
     .sort((a, b) => String(b.kdy).localeCompare(String(a.kdy)))
   if (!nove.length) return skryt()
   box.style.display = 'block'
