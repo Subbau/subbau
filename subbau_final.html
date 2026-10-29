@@ -4937,7 +4937,7 @@ async function submitAdminSignatureWithPlacement() {
 // Po nahrání nové verze se snadno pozná, jestli se opravdu nasadila: otevřete
 // appku, zmáčkněte F12 (na Macu ⌥⌘I) a v konzoli je vypsané tohle datum. Když
 // tam svítí starší, prohlížeč nebo GitHub drží starou verzi.
-const SUBBAU_VERZE = '2026-10-24 a — Hlídač pomalosti u správce + záložky se přenačtou při každé verzi'
+const SUBBAU_VERZE = '2026-10-27 a — Úprava hodin na pomalém internetu: okno hned, uložení 3 kola místo 8'
 console.log('SubBau docházka — verze ' + SUBBAU_VERZE)
 // Verze i dole v menu správce. Když někdo novinku „nevidí", podle ní se hned
 // pozná, jestli nemá otevřenou starou kopii appky — bez hledání v konzoli.
@@ -6372,18 +6372,26 @@ function obnovOtevrenouSekci() {
 // jestli realtime kanál stihne doběhnout. Voláno přímo z edit/delete/manuál funkcí,
 // ne jen přes realtime, ať je to spolehlivé i při pomalejším připojení.
 async function refreshAttendanceEverywhere(workerId) {
-  try { if (typeof loadDashboard === 'function') await loadDashboard() } catch(e) { console.warn('[refresh] dashboard', e?.message) }
-  try { if (typeof loadKWData === 'function') loadKWData() } catch(e) { console.warn('[refresh] kwdata', e?.message) }
-  try { if (typeof loadTodayTimeline === 'function') loadTodayTimeline() } catch(e) { console.warn('[refresh] today', e?.message) }
-  try { if (typeof loadWorkers === 'function') loadWorkers() } catch(e) { console.warn('[refresh] workers', e?.message) }
-  try {
-    if (workerId && typeof currentWorkerId !== 'undefined' && currentWorkerId === workerId && typeof loadWdAttendance === 'function') {
-      loadWdAttendance()
-    }
-  } catch(e) { console.warn('[refresh] wd-att', e?.message) }
-  // Sekce, kterou má správce zrovna otevřenou (kalendář, Provize, výkazy…).
+  // POMALÉ PŘIPOJENÍ (27. 10. 2026, 1,5–2,4 s na dotaz): dřív se tu nejdřív
+  // ČEKALO na celou nástěnku — desítky dotazů i volání Stavbyplánu kvůli
+  // přesunům MMI — i když nebyla vidět, a teprve pak se obnovila docházka.
+  // Teď vše naráz; nástěnku obnoví obnovOtevrenouSekci, jen když je otevřená
+  // (při přepnutí na ni se načte sama).
+  const bezi = []
+  const pust = (co, fn) => {
+    try { const v = fn(); if (v && typeof v.then === 'function') bezi.push(v.catch(e => console.warn('[refresh] ' + co, e?.message))) }
+    catch (e) { console.warn('[refresh] ' + co, e?.message) }
+  }
+  if (typeof loadKWData === 'function') pust('kwdata', () => loadKWData())
+  if (typeof loadTodayTimeline === 'function') pust('today', () => loadTodayTimeline())
+  if (typeof loadWorkers === 'function') pust('workers', () => loadWorkers())
+  if (workerId && typeof currentWorkerId !== 'undefined' && currentWorkerId === workerId && typeof loadWdAttendance === 'function') {
+    pust('wd-att', () => loadWdAttendance())
+  }
+  // Sekce, kterou má správce zrovna otevřenou (kalendář, Provize, nástěnka…).
   // Realtime na to nespoléháme — na pomalém připojení dorazí pozdě, nebo vůbec.
-  try { obnovOtevrenouSekci() } catch(e) { console.warn('[refresh] sekce', e?.message) }
+  pust('sekce', () => obnovOtevrenouSekci())
+  await Promise.all(bezi)
 }
 // ============ ADMIN ZVUKOVÉ UPOZORNĚNÍ ============
 // Dvojité pípnutí přes Web Audio (žádný externí soubor). Přehraje se jen u admina
@@ -29276,7 +29284,10 @@ async function znovuNactiUpravuDne(id, ted) {
 }
 
 function editAttRecord(id, date, ci, co, bs, be) {
-  // Klasické otevření z detailu pracovníka — bez týdenní lišty
+  // Klasické otevření z detailu pracovníka — bez týdenní lišty. Případné
+  // rozběhnuté načítání týdne sem už nepatří (_weekEditBeh) a jeho kryt pryč.
+  _weekEditBeh++
+  nacitaniTydne(false)
   const wb = document.getElementById('edit-att-weekbar')
   if (wb) wb.style.display = 'none'
   const dw = document.getElementById('edit-att-date-wrap')
@@ -29331,33 +29342,28 @@ function editAttRecord(id, date, ci, co, bs, be) {
 const _DAY_NAMES = {1:'Po',2:'Út',3:'St',4:'Čt',5:'Pá',6:'So',7:'Ne'}
 let _weekEditRecords = {}   // dateStr -> POLE záznamů dne (den může mít víc směn)
 let _weekEditVybrany = {}   // dateStr -> index záznamu, který se právě upravuje
-async function openWeekEdit(workerId, week, year, workerName, focusDate) {
-  if (!workerId) return
-  document.getElementById('edit-att-worker').value = workerId
-  document.getElementById('edit-att-kw').value = week
-  document.getElementById('edit-att-kwyear').value = year
-  document.getElementById('edit-att-workername').textContent = workerName || ''
+// POMALÉ PŘIPOJENÍ (27. 10. 2026): hlídač u správců naměřil 1,5–2,4 s na každý
+// dotaz. Okno se dřív ukázalo až po stažení týdne — po klepnutí se dvě vteřiny
+// nedělo nic a správce klepal znovu. Teď se ukáže hned s „Načítám týden…"
+// (přes pole, ať se nedá nic vyplnit ani uložit) a týden se doplní, až dorazí.
+let _weekEditBeh = 0
+function nacitaniTydne(ano) {
+  const modal = document.getElementById('edit-att-modal')
+  const obsah = modal && modal.firstElementChild
+  if (!obsah) return
+  let kryt = document.getElementById('edit-att-nacitam')
+  if (!ano) { if (kryt) kryt.remove(); return }
+  if (kryt) return
+  obsah.style.position = 'relative'
+  kryt = document.createElement('div')
+  kryt.id = 'edit-att-nacitam'
+  kryt.style.cssText = 'position:absolute;inset:0;background:rgba(255,255,255,0.88);border-radius:18px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:12px;z-index:5;font-size:15px;font-weight:700;color:var(--text2)'
+  kryt.innerHTML = '<div>⏳ Načítám týden…</div><button type="button" onclick="closeEditAttModal()" style="padding:7px 14px;border:1px solid var(--brd);background:#fff;border-radius:8px;cursor:pointer;font-family:inherit;font-size:13px;font-weight:600">Zavřít</button>'
+  obsah.appendChild(kryt)
+}
 
-  // Ukaž týdenní lištu, schovej ruční pole data
-  document.getElementById('edit-att-weekbar').style.display = 'block'
-  document.getElementById('edit-att-date-wrap').style.display = 'none'
-  // Tlačítko mohlo zůstat zamčené z předchozího otevření přes detail pracovníka
-  const ulozBtnW = document.querySelector('#edit-att-modal button[onclick="saveEditAttRecord()"]')
-  if (ulozBtnW) { ulozBtnW.disabled = false; ulozBtnW.textContent = ulozBtnW.dataset.puvodni || 'Uložit změny' }
-
-  // Načti všechny záznamy pracovníka za daný týden
-  const { data, error: weekErr } = await sb.from('attendance')
-    .select('*').eq('worker_id', workerId).eq('kw', week).eq('kw_year', year)
-    .order('check_in', { ascending: true, nullsFirst: false })
-  if (weekErr) showToast('⚠️ Docházku týdne se nepodařilo načíst')
-  _weekEditRecords = {}
-  _weekEditVybrany = {}
-  ;(data||[]).forEach(r => {
-    if (!_weekEditRecords[r.work_date]) _weekEditRecords[r.work_date] = []
-    _weekEditRecords[r.work_date].push(r)
-  })
-
-  // Postav den-picker (Po–Ne) s hodinami; zvýrazni dny se záznamem
+// Postaví výběr dne (Po–Ne) s hodinami z _weekEditRecords; vrátí první den se záznamem.
+function vykresliDnyTydne(week, year) {
   const weekStart = getWeekStartDate(week, year)
   const todayStr = localDateStr()
   const picker = document.getElementById('edit-att-daypicker')
@@ -29384,11 +29390,64 @@ async function openWeekEdit(workerId, week, year, workerName, focusDate) {
     </button>`
   }
   picker.innerHTML = html
+  return firstWithData
+}
 
+async function openWeekEdit(workerId, week, year, workerName, focusDate) {
+  if (!workerId) return
+  const beh = ++_weekEditBeh
+  document.getElementById('edit-att-worker').value = workerId
+  document.getElementById('edit-att-kw').value = week
+  document.getElementById('edit-att-kwyear').value = year
+  document.getElementById('edit-att-workername').textContent = workerName || ''
+
+  // Ukaž týdenní lištu, schovej ruční pole data
+  document.getElementById('edit-att-weekbar').style.display = 'block'
+  document.getElementById('edit-att-date-wrap').style.display = 'none'
+  // Tlačítko mohlo zůstat zamčené z předchozího otevření přes detail pracovníka
+  const ulozBtnW = document.querySelector('#edit-att-modal button[onclick="saveEditAttRecord()"]')
+  if (ulozBtnW) { ulozBtnW.disabled = false; ulozBtnW.textContent = ulozBtnW.dataset.puvodni || 'Uložit změny' }
+
+  // Okno hned, týden se doplní (viz nacitaniTydne)
+  document.getElementById('edit-att-daypicker').innerHTML = ''
+  nacitaniTydne(true)
   document.getElementById('edit-att-modal').style.display = 'flex'
+
+  // Načti všechny záznamy pracovníka za daný týden
+  const { data, error: weekErr } = await sb.from('attendance')
+    .select('*').eq('worker_id', workerId).eq('kw', week).eq('kw_year', year)
+    .order('check_in', { ascending: true, nullsFirst: false })
+  // Mezitím správce okno zavřel nebo otevřel jiný týden/člověka — tohle už nepatří nikam.
+  if (beh !== _weekEditBeh) return
+  if (document.getElementById('edit-att-modal').style.display === 'none') { nacitaniTydne(false); return }
+  nacitaniTydne(false)
+  if (weekErr) showToast('⚠️ Docházku týdne se nepodařilo načíst')
+  _weekEditRecords = {}
+  _weekEditVybrany = {}
+  ;(data||[]).forEach(r => {
+    if (!_weekEditRecords[r.work_date]) _weekEditRecords[r.work_date] = []
+    _weekEditRecords[r.work_date].push(r)
+  })
+
+  // Postav den-picker (Po–Ne) s hodinami; zvýrazni dny se záznamem
+  const firstWithData = vykresliDnyTydne(week, year)
   // Předvyber den: focusDate → první den se záznamem → dnešek
-  const pick = focusDate || firstWithData || todayStr
+  const pick = focusDate || firstWithData || localDateStr()
   pickEditDay(pick)
+}
+
+// Uložený nebo smazaný den rovnou do otevřeného okna — bez nového stahování
+// celého týdne (na pomalém připojení to byla další 2 s čekání po každém uložení).
+function promitniDenDoTydne(ds, ulozeny, smazaneId) {
+  let seznam = (_weekEditRecords[ds] || []).filter(r => String(r.id) !== String(ulozeny ? ulozeny.id : smazaneId))
+  if (ulozeny) seznam.push(ulozeny)
+  seznam.sort((a, b) => (a.check_in == null) - (b.check_in == null) || String(a.check_in || '').localeCompare(String(b.check_in || '')))
+  if (seznam.length) _weekEditRecords[ds] = seznam; else delete _weekEditRecords[ds]
+  const week = parseInt(document.getElementById('edit-att-kw').value)
+  const year = parseInt(document.getElementById('edit-att-kwyear').value)
+  vykresliDnyTydne(week, year)
+  const idx = ulozeny ? seznam.findIndex(r => String(r.id) === String(ulozeny.id)) : 0
+  pickEditDay(ds, Math.max(0, idx))
 }
 
 // Vybere den v týdenním editu a naplní pole z načteného záznamu (nebo prázdné pro nový).
@@ -29512,6 +29571,8 @@ function showManualSiteField() {
 }
 
 function closeEditAttModal() {
+  _weekEditBeh++          // pozdě dorazivší týden už okno znovu neotevře
+  nacitaniTydne(false)
   document.getElementById('edit-att-modal').style.display = 'none'
 }
 
@@ -29651,14 +29712,26 @@ async function hlidejVyfakturovanyTyden(workerId, kde, otazka) {
       videno.add(t.w + '|' + kw + '|' + rok)
       // select('*'): před migrací firma-zamestnanci sloupec zamestnavatel_id chybí
       // a výběr po jménu by spadl — pak se hlídá aspoň faktura toho člověka.
-      const { data: kdo, error: chybaKdo } = await sb.from('profiles').select('*').eq('id', t.w).maybeSingle()
-      if (chybaKdo) console.warn('[vyfakturovaný týden] profil nejde přečíst:', chybaKdo.message)
-      const sefId = (kdo && kdo.zamestnavatel_id && kdo.zamestnavatel_id !== t.w) ? kdo.zamestnavatel_id : null
-      const [fakt, sef] = await Promise.all([
-        sb.from('worker_invoices').select('worker_id, invoice_number, total_hours, total_amount, status, kw, kw_year')
-          .in('worker_id', sefId ? [t.w, sefId] : [t.w]).eq('kw', kw).eq('kw_year', rok),
-        sefId ? sb.from('profiles').select('full_name, company_name').eq('id', sefId).maybeSingle() : { data: null }
+      // Profil a faktury člověka NARÁZ (27. 10. 2026: na pomalém připojení stálo
+      // každé kolo k serveru 1,5–2 s). Faktury zaměstnavatele se dočtou jen tehdy,
+      // když ho člověk má — to je druhé kolo jen u zaměstnanců firem.
+      const SLOUPCE_FAKTURY = 'worker_id, invoice_number, total_hours, total_amount, status, kw, kw_year'
+      const [kdoRes, faktJeho] = await Promise.all([
+        sb.from('profiles').select('*').eq('id', t.w).maybeSingle(),
+        sb.from('worker_invoices').select(SLOUPCE_FAKTURY).eq('worker_id', t.w).eq('kw', kw).eq('kw_year', rok)
       ])
+      const kdo = kdoRes.data
+      if (kdoRes.error) console.warn('[vyfakturovaný týden] profil nejde přečíst:', kdoRes.error.message)
+      const sefId = (kdo && kdo.zamestnavatel_id && kdo.zamestnavatel_id !== t.w) ? kdo.zamestnavatel_id : null
+      let fakt = faktJeho, sef = { data: null }
+      if (sefId && !faktJeho.error) {
+        const [faktSefa, sefRes] = await Promise.all([
+          sb.from('worker_invoices').select(SLOUPCE_FAKTURY).eq('worker_id', sefId).eq('kw', kw).eq('kw_year', rok),
+          sb.from('profiles').select('full_name, company_name').eq('id', sefId).maybeSingle()
+        ])
+        sef = sefRes
+        fakt = faktSefa.error ? faktSefa : { data: [...(faktJeho.data || []), ...(faktSefa.data || [])], error: null }
+      }
       if (fakt.error) { console.warn('[vyfakturovaný týden] faktury nejdou přečíst — ukládám bez kontroly:', fakt.error.message); continue }
       const jeho = (fakt.data || []).filter(f => f.worker_id === t.w)
       const firmy = sefId ? (fakt.data || []).filter(f => f.worker_id === sefId) : []
@@ -29871,14 +29944,12 @@ async function saveEditAttRecord() {
   showToast('✅ Záznam uložen — obnovuji...')
   if (id) _editAttOtisk = otiskDneProUpravu(updData[0])
 
-  // Pokud jsme v režimu týdenního editu, zůstaň v modalu a obnov den-picker
+  // Pokud jsme v režimu týdenního editu, zůstaň v modalu: uložený den se ukáže
+  // hned (bez nového stahování týdne) a přehledy se obnoví na pozadí.
   if (workerId) {
-    const week = parseInt(document.getElementById('edit-att-kw').value)
-    const year = parseInt(document.getElementById('edit-att-kwyear').value)
-    const name = document.getElementById('edit-att-workername').textContent
-    await openWeekEdit(workerId, week, year, name, dateStr)
-    await refreshAttendanceEverywhere(workerId)
-    showToast('✅ Uloženo a obnoveno')
+    promitniDenDoTydne(updData[0].work_date || dateStr, updData[0])
+    showToast('✅ Uloženo')
+    refreshAttendanceEverywhere(workerId).catch(e => console.warn('[refresh]', e?.message))
     return
   }
 
@@ -29908,14 +29979,10 @@ async function deleteAttRecord() {
   if (!smazano || !smazano.length) { showToast('❌ Záznam se nesmazal — databáze to nepovolila'); return }
   showToast('🗑 Záznam smazán')
 
-  // Týdenní režim — zůstaň v modalu, obnov den-picker
+  // Týdenní režim — zůstaň v modalu: smazaný den zmizí hned, přehledy na pozadí
   if (workerId) {
-    const week = parseInt(document.getElementById('edit-att-kw').value)
-    const year = parseInt(document.getElementById('edit-att-kwyear').value)
-    const name = document.getElementById('edit-att-workername').textContent
-    const dateStr = document.getElementById('edit-att-date').value
-    await openWeekEdit(workerId, week, year, name, dateStr)
-    await refreshAttendanceEverywhere(workerId)
+    promitniDenDoTydne(document.getElementById('edit-att-date').value, null, id)
+    refreshAttendanceEverywhere(workerId).catch(e => console.warn('[refresh]', e?.message))
     return
   }
 
