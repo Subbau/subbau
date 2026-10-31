@@ -85,7 +85,7 @@
 
   // Provize (marže) — jen ukázková čísla
   D.worker_commissions = lideId.map((w, i) => ({
-    worker_id: w, provize: 3 + (i % 3), payment_terms: '7/14', bez_provize: false,
+    worker_id: w, provize: 3 + (i % 3), payment_terms: null, bez_provize: false,
     updated_at: new Date().toISOString(),
   }));
 

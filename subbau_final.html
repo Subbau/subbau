@@ -8212,37 +8212,69 @@ const jeBudouci = den => /^\d{4}-\d{2}-\d{2}$/.test(String(den || '')) && String
 // Uloží novou hodnotu a podle odpovědi k ní doplní historii.
 // Vrací true, když se uložilo. S datem v budoucnu je to naplánovaná změna —
 // volající pak NESMÍ přepsat dnešní hodnotu v profilu.
-async function ulozSazbuSHistorii(workerId, druh, puvodni, nova, odKdy) {
+async function ulozSazbuSHistorii(workerId, druh, puvodni, nova, odKdy, opts) {
   const dnes = localDateStr()
+  // Chybějící tabulka (neproběhlá migrace) = není co mazat ani hlídat. Jméno
+  // tabulky v hlášce nestačí — obsahuje ho i odmítnutí právy — a „schema cache"
+  // hlásí i dočasně nedostupný server (PGRST002), proto jen tyhle kódy.
+  const chybiTabulka = e => /^(PGRST205|42P01)$/.test(String(e?.code || '')) || /does not exist|could not find the table/i.test(String(e?.message || ''))
   if (odKdy === 'zpetne') {
     // Zpětný přepočet = historie u tohohle údaje nemá smysl, ať nezůstane viset.
-    // Když se smazat nepodaří, NESMÍ se hlásit „přepočítáno zpětně" — stará
-    // historie by dál platila a nová sazba jen od posledního záznamu.
-    // Naplánovaná změna (datum v budoucnu) zůstává — je to vědomé rozhodnutí
-    // do budoucna a dny před ní pak dostanou novou hodnotu jako základ.
-    let chybaMazani = null, zbylePlany = []
-    try {
-      ;({ error: chybaMazani } = await sb.from('worker_rate_history').delete().eq('worker_id', workerId).eq('druh', druh).lte('valid_from', dnes))
-      if (!chybaMazani) {
-        const { data: plany, error: chybaPlanu } = await sb.from('worker_rate_history').select('id').eq('worker_id', workerId).eq('druh', druh).gt('valid_from', dnes).limit(1)
-        if (chybaPlanu) chybaMazani = chybaPlanu
-        else zbylePlany = plany || []
-      }
-    }
-    catch (e) { chybaMazani = e }
-    // Chybějící tabulka (neproběhlá migrace) = není co mazat. Jméno tabulky v hlášce
-    // ale nestačí — obsahuje ho i odmítnutí právy.
-    if (chybaMazani && !/does not exist|schema cache|could not find the table|PGRST205|42P01/i.test((chybaMazani.message || '') + ' ' + (chybaMazani.code || ''))) {
-      showToast('❌ Starou historii sazby se nepodařilo smazat — nic se nezměnilo: ' + (chybaMazani.message || chybaMazani))
+    // Naplánovaná změna (datum v budoucnu) ale zůstává — je to vědomé rozhodnutí
+    // do budoucna; dny před ní pak dostanou novou hodnotu jako základ.
+    // POŘADÍ (kontrola 31. 10. 2026): dřív se nejdřív mazalo a až pak hledal
+    // plán a psal základ — výpadek uprostřed nechal historii smazanou, a appka
+    // přitom hlásila „nic se nezměnilo". Teď se nejdřív jen čte.
+    const { data: plany, error: chybaPlanu } = await sb.from('worker_rate_history')
+      .select('id').eq('worker_id', workerId).eq('druh', druh).gt('valid_from', dnes).limit(1)
+    if (chybaPlanu) {
+      if (chybiTabulka(chybaPlanu)) return true
+      showToast('❌ Historii sazby se nepodařilo načíst — nic se nezměnilo: ' + (chybaPlanu.message || chybaPlanu))
       return false
     }
-    if (zbylePlany.length && sazbaJeZadana(nova)) {
-      const { error: chybaZakladu } = await sb.from('worker_rate_history').upsert({
-        worker_id: workerId, druh, hodnota: Number(nova), valid_from: DAVNO, created_by: currentUser?.id || null
-      }, { onConflict: 'worker_id,druh,valid_from' })
-      if (chybaZakladu) { showToast('❌ Historii sazby se nepodařilo uložit: ' + (chybaZakladu.message || chybaZakladu)); return false }
+    if (!(plany || []).length) {
+      // Bez plánu: jedno smazání jako dřív — buď proběhne celé, nebo vůbec.
+      const { error: chybaMazani } = await sb.from('worker_rate_history').delete().eq('worker_id', workerId).eq('druh', druh).lte('valid_from', dnes)
+      if (chybaMazani && !chybiTabulka(chybaMazani)) {
+        showToast('❌ Starou historii sazby se nepodařilo smazat — nic se nezměnilo: ' + (chybaMazani.message || chybaMazani))
+        return false
+      }
+      return true
+    }
+    // S plánem: nejdřív základ s novou hodnotou (prázdná = 0, ať plán po svém
+    // dni nezačne platit i zpětně), teprve pak smazat ostatní minulé hranice.
+    const { error: chybaZakladu } = await sb.from('worker_rate_history').upsert({
+      worker_id: workerId, druh, hodnota: sazbaJeZadana(nova) ? Number(nova) : 0, valid_from: DAVNO, created_by: currentUser?.id || null
+    }, { onConflict: 'worker_id,druh,valid_from' })
+    if (chybaZakladu) {
+      showToast('❌ Historii sazby se nepodařilo uložit — nic se nezměnilo: ' + (chybaZakladu.message || chybaZakladu))
+      return false
+    }
+    const { error: chybaMazani } = await sb.from('worker_rate_history').delete()
+      .eq('worker_id', workerId).eq('druh', druh).lte('valid_from', dnes).neq('valid_from', DAVNO)
+    if (chybaMazani) {
+      showToast('⚠️ Zpětný přepočet se uložil jen napůl (výpadek spojení) — uložte prosím sazbu ještě jednou')
+      return false
     }
     return true
+  }
+  // Datum v budoucnu = plán. Plán je u člověka jen jeden, takže nový nahradí
+  // ten dosavadní — ale ne potichu: běžná oprava sazby s předvyplněným „zítra"
+  // by jinak smazala dohodnuté zvýšení (kontrola 31. 10. 2026). Okno plánu
+  // (opts.nahradit) se neptá — tam je dosavadní plán vidět hned vedle.
+  if (odKdy > dnes && !(opts && opts.nahradit)) {
+    const { data: jine, error: chybaJine } = await sb.from('worker_rate_history').select('valid_from, hodnota')
+      .eq('worker_id', workerId).eq('druh', druh).gt('valid_from', dnes).neq('valid_from', odKdy).order('valid_from').limit(1)
+    if (chybaJine && !chybiTabulka(chybaJine)) {
+      showToast('❌ Naplánovanou změnu se nepodařilo ověřit — nic se nezměnilo: ' + (chybaJine.message || chybaJine))
+      return false
+    }
+    const jiny = (jine || [])[0]
+    if (jiny && !confirm('U pracovníka je naplánovaná změna od ' + datumCz(String(jiny.valid_from).slice(0, 10)) + ' na ' + Number(jiny.hodnota) + ' €/h.\n\n'
+      + 'Nová změna od ' + datumCz(odKdy) + ' ji nahradí. Pokračovat?\n\n(Když chcete naplánovanou změnu nechat, zvolte jako datum dnešek.)')) {
+      showToast('Nic se nezměnilo — naplánovaná změna zůstává')
+      return false
+    }
   }
   // Aby se dřívější dny počítaly po staru, musí být původní sazba v historii
   // zapsaná jako platná „odjakživa". Bez toho by se na starší dny nenašel žádný
@@ -8267,6 +8299,14 @@ async function ulozSazbuSHistorii(workerId, druh, puvodni, nova, odKdy) {
       })
       if (chybaZaklad) throw chybaZaklad
     }
+    // Plán je jen jeden: ostatní budoucí řádky pryč DŘÍV, než se zapíše nový.
+    // Obráceně by se dvě souběžná uložení (dvě záložky) mohla smazat navzájem
+    // a nezůstal by žádný plán (Codex 31. 10. 2026); takhle aspoň jeden zůstane.
+    if (odKdy > dnes) {
+      const { error: chybaPlanu } = await sb.from('worker_rate_history')
+        .delete().eq('worker_id', workerId).eq('druh', druh).gt('valid_from', dnes).neq('valid_from', odKdy)
+      if (chybaPlanu) throw chybaPlanu
+    }
     const { error } = await sb.from('worker_rate_history').upsert({
       worker_id: workerId, druh, hodnota: (nova == null ? 0 : nova),
       valid_from: odKdy, created_by: currentUser?.id || null
@@ -8275,16 +8315,10 @@ async function ulozSazbuSHistorii(workerId, druh, puvodni, nova, odKdy) {
     // Hranice ležící PO zvoleném datu už neplatí — od téhle chvíle je novou
     // hodnotou to, co admin právě zadal (a co je i v profilu). Bez smazání by
     // se od data té pozdější hranice vrátila zase stará sazba a nová by platila
-    // jen v úzkém okénku mezi oběma daty. Naplánovaná změna (po dnešku) zůstává;
-    // když se ale plánuje znovu, nahradí tu dosavadní — plán je jen jeden.
+    // jen v úzkém okénku mezi oběma daty. Naplánovaná změna (po dnešku) zůstává.
     const { error: chybaUklid } = await sb.from('worker_rate_history')
       .delete().eq('worker_id', workerId).eq('druh', druh).gt('valid_from', odKdy).lte('valid_from', dnes)
     if (chybaUklid) throw chybaUklid
-    if (odKdy > dnes) {
-      const { error: chybaPlanu } = await sb.from('worker_rate_history')
-        .delete().eq('worker_id', workerId).eq('druh', druh).gt('valid_from', dnes).neq('valid_from', odKdy)
-      if (chybaPlanu) throw chybaPlanu
-    }
   } catch (e) {
     const m = e?.message || ''
     showToast(/worker_rate_history|does not exist|schema cache/i.test(m)
@@ -8304,11 +8338,19 @@ let _sazbySrovnanoDne = ''
 async function srovnejNaplanovaneSazby() {
   const dnes = localDateStr()
   if (_sazbySrovnanoDne === dnes || !smiVidetProvize()) return
-  const { data: h, error } = await sb.from('worker_rate_history')
-    .select('worker_id, druh, hodnota, valid_from, created_at').lte('valid_from', dnes).order('valid_from', { ascending: true })
-  if (error) return
+  // Po stránkách: databáze vrátí nejvýš 1000 řádků na dotaz a bez nejnovějších
+  // změn by se do profilu vrátila stará sazba (Codex 31. 10. 2026).
+  const h = []
+  for (let od = 0; od < 200000; od += 1000) {
+    const { data: kus, error } = await sb.from('worker_rate_history')
+      .select('worker_id, druh, hodnota, valid_from, created_at').lte('valid_from', dnes)
+      .order('valid_from', { ascending: true }).order('id').range(od, od + 999)
+    if (error) return
+    h.push(...(kus || []))
+    if (!kus || kus.length < 1000) break
+  }
   const platne = {}
-  ;(h || []).forEach(r => { platne[r.druh + '|' + r.worker_id] = r })
+  h.forEach(r => { platne[r.druh + '|' + r.worker_id] = r })
   const nastaly = Object.values(platne).filter(r => r.created_at
     && localDateStr(new Date(r.created_at)) < String(r.valid_from).slice(0, 10))
   if (!nastaly.length) { _sazbySrovnanoDne = dnes; return }
@@ -8335,9 +8377,9 @@ async function srovnejNaplanovaneSazby() {
 
 // Okno „Naplánovat změnu" v Provizích.
 let _planSazby = null
-function otevriPlanSazby(workerId, jmeno, druh) {
+function otevriPlanSazby(workerId, jmeno, druh, jenProvize) {
   document.getElementById('plan-sazby-modal')?.remove()
-  _planSazby = { workerId, druh: druh || 'sazba' }
+  _planSazby = { workerId, druh: jenProvize ? 'provize' : (druh || 'sazba') }
   const zitra = zitraStr()
   const ov = document.createElement('div')
   ov.id = 'plan-sazby-modal'
@@ -8348,7 +8390,7 @@ function otevriPlanSazby(workerId, jmeno, druh) {
     <button onclick="zavriPlanSazby()" title="Zavřít a nic neměnit" aria-label="Zavřít" style="position:absolute;top:14px;right:14px;width:34px;height:34px;border:none;border-radius:10px;background:#f4efe7;color:#6b6157;font-size:17px;cursor:pointer">✕</button>
     <div style="font-size:17px;font-weight:800;color:#211D1A;margin-bottom:4px;padding-right:40px">Naplánovat změnu</div>
     <div style="font-size:12.5px;color:#9a9082;margin-bottom:14px;font-weight:600">${escAttr(jmeno || '')}</div>
-    <div style="display:flex;gap:8px;margin-bottom:14px">${volba('sazba', 'Hodinovka')}${volba('provize', 'Provize')}</div>
+    <div style="display:flex;gap:8px;margin-bottom:14px">${jenProvize ? volba('provize', 'Vlastní provize zaměstnance') : volba('sazba', 'Hodinovka') + volba('provize', 'Provize')}</div>
     <label for="plan-sazby-od" style="display:block;font-size:12px;font-weight:700;color:#6b6157;margin-bottom:6px">Od kdy</label>
     <input type="date" id="plan-sazby-od" min="${zitra}" value="${zitra}" style="width:100%;padding:11px;border:1.5px solid var(--brd,#e0d9cf);border-radius:9px;font-size:16px;font-family:inherit;box-sizing:border-box;margin-bottom:12px">
     <label for="plan-sazby-castka" style="display:block;font-size:12px;font-weight:700;color:#6b6157;margin-bottom:6px">Na kolik (€/h)</label>
@@ -8384,7 +8426,14 @@ async function ulozPlanSazby() {
     return chyba('Dnešní hodnotu se nepodařilo načíst — nic se nezměnilo. Zkuste to prosím znovu.')
   }
   const puvodni = ted ? (druh === 'sazba' ? ted.hourly_rate_worker : ted.provize) : null
-  if (!await ulozSazbuSHistorii(P.workerId, druh, puvodni, castka, od)) {
+  // Bez dnešní hodnoty by plán neměl o co opřít dny před sebou: až by den
+  // nastal a hodnota se propsala do profilu, platila by zpětně i na ně
+  // (Codex 31. 10. 2026). Poprvé se sazba zadává rovnou do políčka.
+  if (!sazbaJeZadana(puvodni)) {
+    if (btn) { btn.disabled = false; btn.textContent = 'Naplánovat' }
+    return chyba((druh === 'sazba' ? 'Hodinovka' : 'Provize') + ' zatím není vyplněná — zadejte ji rovnou do políčka v tabulce (poprvé platí od začátku). Plán jde jen u vyplněné hodnoty.')
+  }
+  if (!await ulozSazbuSHistorii(P.workerId, druh, puvodni, castka, od, { nahradit: true })) {
     if (btn) { btn.disabled = false; btn.textContent = 'Naplánovat' }
     return
   }
@@ -8871,7 +8920,9 @@ async function saveProvizeTerms(select, workerId, firemni) {
   const { error } = await sb.from('worker_commissions')
     .upsert({ worker_id: workerId, payment_terms: terms, updated_at: new Date().toISOString() }, { onConflict: 'worker_id' })
   if (error) {
-    showToast(/payment_terms/i.test(error.message) ? '❌ Chybí sloupec payment_terms — spusťte migraci supabase-migrace-provize-splatnost.sql' : '❌ Chyba: ' + error.message)
+    showToast(/null value|not-null|23502/i.test((error.message || '') + ' ' + (error.code || ''))
+      ? '❌ Databáze zatím „podle firmy" neumí — spusťte prosím SQL „Splatnost podle firmy" z 31. 10. 2026'
+      : /payment_terms/i.test(error.message) ? '❌ Chybí sloupec payment_terms — spusťte migraci supabase-migrace-provize-splatnost.sql' : '❌ Chyba: ' + error.message)
     return
   }
   // Dny splatnosti přepiš i do profilu — z něj je bere faktura.
@@ -8920,11 +8971,18 @@ async function saveFirmaTerms(select, firmIdx) {
     // Audit 30. 9. 2026: čtení výjimek ani zápis do profilů nečetly chybu —
     // firemní splatnost pak dostali i lidé s vlastní, nebo se nepropsala nikomu,
     // a appka stejně hlásila „platí pro N lidí".
+    // Všem SOUČASNÝM lidem firmy (podle skupin), ne jen těm, kdo jsou vidět
+    // v zobrazeném týdnu — kdo ten týden nepracoval, zůstal na 14 dnech, a kdo
+    // mezitím přešel jinam, dostal splatnost staré firmy (kontrola 31. 10. 2026).
+    const { data: clenove, error: chybaClenu } = await sb.from('profiles').select('id')
+      .in('team_id', f.tymy).in('role', ['osvec', 'partak'])
+    if (chybaClenu) throw chybaClenu
+    const lideFirmy = (clenove || []).map(c => c.id)
     const { data: vyjimky, error: chybaVyjimek } = await sb.from('worker_commissions')
-      .select('worker_id, payment_terms').in('worker_id', f.ids || [])
+      .select('worker_id, payment_terms').in('worker_id', lideFirmy)
     if (chybaVyjimek) throw chybaVyjimek
     const maVlastni = new Set((vyjimky || []).filter(v => v.payment_terms).map(v => v.worker_id))
-    const bezVlastni = (f.ids || []).filter(id => !maVlastni.has(id))
+    const bezVlastni = lideFirmy.filter(id => !maVlastni.has(id))
     const days = parseInt((terms || '7/14').split('/')[1], 10)
     if (bezVlastni.length && !isNaN(days)) {
       const { data: propsano, error: chybaProfilu } = await sb.from('profiles').update({ invoice_due_days: days }).in('id', bezVlastni).select('id')
@@ -9238,12 +9296,8 @@ async function renderProvizeContent() {
   // nerozejde sama se sebou.
   const firmaTermsMap = {}
   const firmaTermsChybi = !(teams || []).some(t => 'payment_terms' in t)
-  // Splatnost celé firmy (podle company_id) — skupina, která ji sama nemá,
-  // jede podle ostatních skupin své firmy (viz splatnostFirmy).
-  const firmaTermsFirmy = {}
   ;(teams || []).forEach(t => {
     if (t.payment_terms) firmaTermsMap[String(t.id)] = t.payment_terms
-    if (t.payment_terms && t.company_id && !firmaTermsFirmy[t.company_id]) firmaTermsFirmy[t.company_id] = t.payment_terms
   })
 
   // Když ještě neproběhla migrace supabase-migrace-provize-splatnost.sql, sloupec payment_terms
@@ -9309,6 +9363,14 @@ async function renderProvizeContent() {
   ;(teams || []).forEach(t => { teamById[t.id] = t })
   const companyNameById = {}
   ;(companies || []).forEach(c => { companyNameById[c.id] = c.name })
+  // Splatnost celé firmy podle jejího jména (jako karta firmy) — skupina, která
+  // ji sama nemá, jede podle ostatních skupin téže firmy (viz splatnostFirmy).
+  const firmaTermsPodleJmena = {}
+  ;(teams || []).forEach(t => {
+    if (!t.payment_terms) return
+    const k = provizeFirmOf({ team_id: t.id }, teamById, companyNameById)
+    if (!firmaTermsPodleJmena[k]) firmaTermsPodleJmena[k] = t.payment_terms
+  })
 
   // Firma se určuje podle toho, kde pracovník v zobrazeném období opravdu dělal —
   // ne podle toho, kam patří dnes. Bere se skupina zapsaná u docházky. U starých
@@ -9620,7 +9682,7 @@ async function renderProvizeContent() {
     // člověk výjimku, nebo jede podle firmy.
     const vlastniTerms = termsMap[w.id] || ''
     const firemniTerms = firmaTermsMap[String(w.team_id)]
-      || firmaTermsFirmy[teamById[w.team_id]?.company_id] || ''
+      || (w.team_id ? firmaTermsPodleJmena[provizeFirmOf(w, teamById, companyNameById)] : '') || ''
     const terms = vlastniTerms || firemniTerms || '7/14'
     const dueInfo = provizeDueInfo(terms)
     return {
@@ -9827,9 +9889,15 @@ async function renderProvizeContent() {
             return out + '</div>'
           })() : ''
         }</td>
-        <td data-plan-bunka="${r.id}" style="font-size:12px;white-space:nowrap">${r.zamestnavatelId ? '<span title="Zaměstnanec firmy — sazbu nemá" style="color:var(--text3)">—</span>' : (
-          ['sazba', 'provize'].filter(d => r.plan[d]).map(d => `<div data-plan="${d}" style="display:flex;align-items:center;gap:5px;margin-bottom:3px"><span style="color:var(--text2)">${d === 'sazba' ? 'Sazba' : 'Provize'} od ${datumCz(r.plan[d].od)}:</span> <b style="color:#1d4ed8">${eur(r.plan[d].hodnota)}</b><button onclick="zrusPlanSazby('${jsStr(r.id)}','${d}')" title="Zrušit naplánovanou změnu" aria-label="Zrušit" style="padding:0 6px;border:1px solid var(--brd);border-radius:6px;background:#fff;color:var(--red);cursor:pointer;font-size:11px;font-family:inherit;line-height:18px">✕</button></div>`).join('')
-          + `<button onclick="otevriPlanSazby('${jsStr(r.id)}','${jsStr(r.name)}')" title="Naplánovat zvýšení nebo snížení od data" style="padding:3px 8px;font-size:11px;font-weight:700;border:1px solid var(--brd);border-radius:6px;background:#fff;color:var(--text2);cursor:pointer;font-family:inherit">${r.plan.sazba || r.plan.provize ? '+ změnit' : '+ naplánovat'}</button>`)}</td>
+        <td data-plan-bunka="${r.id}" style="font-size:12px;white-space:nowrap">${(() => {
+          // Zaměstnanec firmy hodinovku nemá — plánovat jde jen jeho VLASTNÍ
+          // provizi. Už naplánované řádky jsou ale vidět vždy i s ✕, ať nic
+          // neplatí potají (kontrola 31. 10. 2026).
+          const muze = !r.zamestnavatelId || r.vlastniProvize
+          const radky = ['sazba', 'provize'].filter(d => r.plan[d]).map(d => `<div data-plan="${d}" style="display:flex;align-items:center;gap:5px;margin-bottom:3px"><span style="color:var(--text2)">${d === 'sazba' ? 'Sazba' : 'Provize'} od ${datumCz(r.plan[d].od)}:</span> <b style="color:#1d4ed8">${eur(r.plan[d].hodnota)}</b><button onclick="zrusPlanSazby('${jsStr(r.id)}','${d}')" title="Zrušit naplánovanou změnu" aria-label="Zrušit" style="padding:0 6px;border:1px solid var(--brd);border-radius:6px;background:#fff;color:var(--red);cursor:pointer;font-size:11px;font-family:inherit;line-height:18px">✕</button></div>`).join('')
+          const tlacitko = muze ? `<button onclick="otevriPlanSazby('${jsStr(r.id)}','${jsStr(r.name)}'${r.zamestnavatelId ? ",'provize',true" : ''})" title="Naplánovat zvýšení nebo snížení od data" style="padding:3px 8px;font-size:11px;font-weight:700;border:1px solid var(--brd);border-radius:6px;background:#fff;color:var(--text2);cursor:pointer;font-family:inherit">${r.plan.sazba || r.plan.provize ? '+ změnit' : '+ naplánovat'}</button>` : ''
+          return (radky + tlacitko) || '<span title="Zaměstnanec firmy — sazbu nemá" style="color:var(--text3)">—</span>'
+        })()}</td>
         <td style="text-align:right">${r.zamestnavatelId ? `<button onclick="vyberSefa('${r.id}')" title="Zaměstnanec firmy — sazbu nemá. Klepnutím změníte, pod kým pracuje, nebo ho vrátíte mezi OSVČ." style="padding:6px 10px;font-size:12.5px;font-weight:700;border:1.5px solid #c7d6e4;border-radius:7px;background:#eef3f8;color:#2c4257;cursor:pointer;font-family:inherit;white-space:nowrap">👔 zaměstnanec</button><div style="font-size:10.5px;color:var(--text3);margin-top:3px">sazbu nemá</div>` : `<input id="pv-rate-${r.id}" type="number" step="0.01" min="0" value="${r.sazbaPole == null ? '' : r.sazbaPole}" placeholder="chybí" title="${r.sazbaPole == null ? 'Chybí hodinová sazba — dokud ji nezadáte, počítá se pracovníkovi nula' : (r.sazbaPole === 0 ? 'Sazba je nula — pracovník za hodiny nedostane nic' : '')}" onfocus="vyberCislo(this)" onchange="saveProvizeRate(this,'${r.id}')" style="width:80px;padding:6px 8px;border:${r.sazbaPole != null ? '1.5px solid var(--brd)' : '2px solid var(--red)'};background:${r.sazbaPole != null ? '' : 'var(--red-l)'};border-radius:7px;font-size:14px;text-align:right;font-family:inherit"> €/h`}</td>
         <td style="text-align:right">${r.zamestnavatelId ? (r.vlastniProvize
           ? `<input id="pv-prov-${r.id}" type="number" step="0.01" min="0" value="${r.provPole == null ? '' : r.provPole}" placeholder="šéfova" title="Vlastní provize zaměstnance — jeho hodiny se počítají touto sazbou, peníze jdou šéfovi.${r.provPole == null ? ' Dokud je prázdná, počítá se šéfova.' : ''}" onfocus="vyberCislo(this)" onchange="saveProvizeCommission(this,'${r.id}')" style="width:80px;padding:6px 8px;border:1.5px solid var(--amber);border-radius:7px;font-size:14px;text-align:right;font-family:inherit;background:#faf6ee"> €/h<div><button onclick="nastavVlastniProvizi('${r.id}', false)" title="Zase počítat jeho hodiny šéfovou provizí" style="margin-top:4px;padding:2px 7px;font-size:10.5px;font-weight:700;border:1px solid var(--brd);border-radius:6px;background:#fff;color:var(--text2);cursor:pointer;font-family:inherit;white-space:nowrap">↺ podle šéfa</button></div>`
@@ -20944,7 +21012,7 @@ async function createTeam(name, location, companyId) {
   if (companyId) payload.company_id = companyId
   // Nová skupina firmy převezme její splatnost (viz splatnostFirmy).
   let terms = null
-  try { terms = await splatnostFirmy(companyId) } catch (e) { console.warn('[splatnost] firmy se nenačetla:', e?.message || e) }
+  try { terms = await splatnostFirmy({ companyId, nazevSkupiny: name }) } catch (e) { console.warn('[splatnost] firmy se nenačetla:', e?.message || e) }
   if (terms) payload.payment_terms = terms
   let { data: inserted, error } = await sb.from('teams')
     .insert(payload)
@@ -20989,6 +21057,9 @@ async function deleteTeam(teamId, teamName) {
 // Admin naváže/změní firmu u týmu. Změna firmy přepíše odběratele u všech členů týmu.
 async function setTeamCompany(teamId, companyId) {
   const cid = companyId || null
+  // Odkud skupina přichází — splatnost staré firmy s ní nesmí přejít k nové.
+  let predCid = null
+  try { predCid = ((await sb.from('teams').select('company_id').eq('id', teamId).maybeSingle()).data || {}).company_id || null } catch (e) {}
   const { error } = await sb.from('teams').update({ company_id: cid }).eq('id', teamId)
   if (error) { showToast('Chyba: ' + error.message); return }
   // Aktualizuj cache
@@ -20997,11 +21068,17 @@ async function setTeamCompany(teamId, companyId) {
     // Skupina převezme splatnost firmy, kam teď patří (když ji firma má).
     let splatnostSkupinyOk = true
     try {
-      const terms = await splatnostFirmy(cid, teamId)
+      const terms = await splatnostFirmy({ companyId: cid, kromeTymu: teamId })
       if (terms) {
         const { error: chybaTerms } = await sb.from('teams').update({ payment_terms: terms }).eq('id', teamId)
         if (chybaTerms) throw chybaTerms
         if (tt) tt.payment_terms = terms
+      } else if (predCid && String(predCid) !== String(cid)) {
+        // Nová firma splatnost nemá a skupina přišla od jiné — její stará
+        // splatnost by se jinak rozlezla na celou novou firmu (kontrola 31. 10.).
+        const { error: chybaTerms } = await sb.from('teams').update({ payment_terms: null }).eq('id', teamId)
+        if (chybaTerms) throw chybaTerms
+        if (tt) tt.payment_terms = null
       }
     } catch (e) { splatnostSkupinyOk = false; console.warn('[splatnost] skupina ji od firmy nepřevzala:', e?.message || e) }
     // Přepiš odběratele i splatnost u všech členů týmu podle nové firmy
@@ -26454,9 +26531,11 @@ async function nactiNuloveSazbyNaNastenku() {
 }
 async function vimONuloveSazbe(klice) {
   try {
+    // Co mezitím odklikla jiná záložka, se přeskočí — prostý insert by kvůli
+    // jedné duplicitě neuložil ani ostatní (Codex 31. 10. 2026).
     const { error } = await sb.from('doc_alert_dismissals')
-      .insert(klice.map(k => ({ dismiss_key: k, dismissed_by: currentUser?.id || null })))
-    if (error && error.code !== '23505') { showToast('⚠️ Nepodařilo se uložit: ' + error.message); return }
+      .upsert(klice.map(k => ({ dismiss_key: k, dismissed_by: currentUser?.id || null })), { onConflict: 'dismiss_key', ignoreDuplicates: true })
+    if (error) { showToast('⚠️ Nepodařilo se uložit: ' + error.message); return }
   } catch (e) { showToast('⚠️ Nepodařilo se uložit: ' + (e?.message || e)); return }
   nactiNuloveSazbyNaNastenku()
 }
@@ -35741,20 +35820,31 @@ async function splatnostFirmyPracovnika(workerId) {
 // skupin (staveb) a splatnost se drží u každé zvlášť. Skupina založená až po
 // nastavení splatnosti ji neměla — a kdo do ní přibyl, dostal 7/14 i u firmy
 // se 7/7. Proto se bere ze všech skupin firmy, jako v řádku firmy v Provizích.
-async function splatnostFirmy(companyId, kromeTymu) {
-  if (!companyId) return null
-  const { data, error } = await sb.from('teams').select('id, payment_terms')
-    .eq('company_id', companyId).not('payment_terms', 'is', null)
-  if (error) throw error
-  return (data || []).filter(t => String(t.id) !== String(kromeTymu || ''))
-    .map(t => t.payment_terms).find(Boolean) || null
+// Firma se pozná STEJNĚ jako v Provizích (provizeFirmOf): jméno firmy
+// z číselníku, u skupiny bez firmy její název bez části za pomlčkou. Jen podle
+// company_id by to nesedělo u skupin bez firmy ani u firmy se dvěma záznamy
+// stejného jména (kontrola 31. 10. 2026).
+async function splatnostFirmy({ companyId = null, nazevSkupiny = '', kromeTymu = null } = {}) {
+  const [rT, rC] = await Promise.all([
+    sb.from('teams').select('id, name, company_id, payment_terms').order('id'),
+    sb.from('companies').select('id, name')
+  ])
+  if (rT.error) throw rT.error
+  if (rC.error) throw rC.error
+  const teamById = {}, jmena = {}
+  ;(rT.data || []).forEach(t => { teamById[t.id] = t })
+  ;(rC.data || []).forEach(c => { jmena[c.id] = c.name })
+  const klic = (companyId && jmena[companyId]) ? jmena[companyId] : cleanTeamName(nazevSkupiny)
+  if (!klic) return null
+  return (rT.data || []).filter(t => t.payment_terms && String(t.id) !== String(kromeTymu || '')
+    && provizeFirmOf({ team_id: t.id }, teamById, jmena) === klic).map(t => t.payment_terms)[0] || null
 }
 async function splatnostFirmyTymu(teamId) {
   if (!teamId) return null
-  const { data: t, error } = await sb.from('teams').select('payment_terms, company_id').eq('id', teamId).maybeSingle()
+  const { data: t, error } = await sb.from('teams').select('name, payment_terms, company_id').eq('id', teamId).maybeSingle()
   if (error) throw error
   if (!t) return null
-  return t.payment_terms || await splatnostFirmy(t.company_id)
+  return t.payment_terms || await splatnostFirmy({ companyId: t.company_id, nazevSkupiny: t.name, kromeTymu: teamId })
 }
 
 // Faktura bere dny splatnosti z profilu (pracovník do Provizí nevidí). Dřív se
@@ -42599,9 +42689,11 @@ async function saveWorkerProfile() {
   // Historie až TEĎ, po úspěšném uložení profilu. Kdyby se zapsala dřív a profil
   // pak neuložil, počítaly by se peníze podle nové sazby, přestože by ti appka
   // řekla „Chyba" a v kartě by svítilo staré číslo.
+  // Hlášení o sazbě se ukáže jako POSLEDNÍ — „✅ Profil uložen" ho dřív hned
+  // přepsalo a nepovedený plán zmizel beze stopy (kontrola 31. 10. 2026).
+  let sazbaVysledek = null   // 'plan' | 'plan-chyba' | 'chyba'
   if (odKdySazba && jeBudouci(odKdySazba)) {
-    if (await ulozSazbuSHistorii(currentWorkerId, 'sazba', puvSazba, rate, odKdySazba))
-      showToast('📅 Hodinovka naplánovaná — od ' + datumCz(odKdySazba) + ' ' + rate + ' €/h')
+    sazbaVysledek = await ulozSazbuSHistorii(currentWorkerId, 'sazba', puvSazba, rate, odKdySazba) ? 'plan' : 'plan-chyba'
   } else if (odKdySazba && !await ulozSazbuSHistorii(currentWorkerId, 'sazba', puvSazba, rate, odKdySazba)) {
     // Historie neprošla — vrátíme profilu původní sazbu, ať spolu nezůstanou
     // rozejité. Zbytek profilu je uložený a zůstává.
@@ -42609,14 +42701,17 @@ async function saveWorkerProfile() {
     sazbaKUlozeni = puvSazba
     const poleSazba = document.getElementById('wd-rate')
     if (poleSazba) poleSazba.value = puvSazba == null ? '' : puvSazba
-    showToast('⚠️ Sazba se nezměnila — zbytek profilu je uložený')
+    sazbaVysledek = 'chyba'
   }
   smazNuluVimOTom('sazba', currentWorkerId, sazbaKUlozeni)
-  if (dphNeulozeno) showToast('⚠️ Profil uložen, ale údaje k DPH ne — v databázi chybí sloupce is_vat_payer / ic / dic')
-  if (narodnostNeulozena) showToast(narodnostNeulozena === 'migrace'
+  if (sazbaVysledek === 'plan-chyba') showToast('⚠️ Profil uložen, ale plán hodinovky ' + rate + ' €/h od ' + datumCz(odKdySazba) + ' se NEULOŽIL — zkuste ho prosím znovu')
+  else if (sazbaVysledek === 'chyba') showToast('⚠️ Sazba se nezměnila — zbytek profilu je uložený')
+  else if (dphNeulozeno) showToast('⚠️ Profil uložen, ale údaje k DPH ne — v databázi chybí sloupce is_vat_payer / ic / dic')
+  else if (narodnostNeulozena) showToast(narodnostNeulozena === 'migrace'
     ? '⚠️ Profil uložen, ale národnost ne — spusťte migraci supabase-migrace-narodnost.sql'
     : '⚠️ Profil uložen, ale národnost se neuložila — zkuste to prosím znovu')
-  else showToast('✅ Profil uložen')
+  else showToast('✅ Profil uložen' + (sazbaVysledek === 'plan'
+    ? ' — hodinovka ' + rate + ' €/h platí od ' + datumCz(odKdySazba) + ', do té doby ' + (puvSazba ?? '—') + ' €/h' : ''))
   if (currentWorkerProfile) currentWorkerProfile.german_level = germanLevel
   const hlVl = document.getElementById('wd-avatar-vlajka'); if (hlVl) hlVl.innerHTML = vlajkaHtml(currentWorkerId, currentWorkerProfile?.narodnost || null, false)
   const hlDe = document.getElementById('wd-name-nemcina'); if (hlDe) hlDe.innerHTML = nemcinaHtml(currentWorkerId, germanLevel || null)
