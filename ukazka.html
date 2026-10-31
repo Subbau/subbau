@@ -9001,19 +9001,22 @@ async function ulozSazbuSHistorii(workerId, druh, puvodni, nova, odKdy, opts) {
       })
       if (chybaZaklad) throw chybaZaklad
     }
-    // Plán je jen jeden: ostatní budoucí řádky pryč DŘÍV, než se zapíše nový.
-    // Obráceně by se dvě souběžná uložení (dvě záložky) mohla smazat navzájem
-    // a nezůstal by žádný plán (Codex 31. 10. 2026); takhle aspoň jeden zůstane.
-    if (odKdy > dnes) {
-      const { error: chybaPlanu } = await sb.from('worker_rate_history')
-        .delete().eq('worker_id', workerId).eq('druh', druh).gt('valid_from', dnes).neq('valid_from', odKdy)
-      if (chybaPlanu) throw chybaPlanu
-    }
+    // Plán je jen jeden. Nejdřív se ZAPÍŠE nový (s časem zápisu) a teprve pak
+    // se smažou budoucí řádky zapsané PŘED ním. Když zápis selže, starý plán
+    // zůstane; když selže mazání, zůstanou dva a nic se neztratí; a dvě
+    // souběžná uložení se nesmažou navzájem — vyhraje to pozdější (Codex 31. 10.).
+    const zapsano = new Date().toISOString()
     const { error } = await sb.from('worker_rate_history').upsert({
       worker_id: workerId, druh, hodnota: (nova == null ? 0 : nova),
-      valid_from: odKdy, created_by: currentUser?.id || null
+      valid_from: odKdy, created_by: currentUser?.id || null,
+      ...(odKdy > dnes ? { created_at: zapsano } : {})
     }, { onConflict: 'worker_id,druh,valid_from' })
     if (error) throw error
+    if (odKdy > dnes) {
+      const { error: chybaPlanu } = await sb.from('worker_rate_history').delete()
+        .eq('worker_id', workerId).eq('druh', druh).gt('valid_from', dnes).neq('valid_from', odKdy).lt('created_at', zapsano)
+      if (chybaPlanu) throw new Error('nový plán je uložený, ale dosavadní se nepodařilo zrušit — zrušte ho prosím křížkem v Provizích (' + (chybaPlanu.message || chybaPlanu) + ')')
+    }
     // Hranice ležící PO zvoleném datu už neplatí — od téhle chvíle je novou
     // hodnotou to, co admin právě zadal (a co je i v profilu). Bez smazání by
     // se od data té pozdější hranice vrátila zase stará sazba a nová by platila

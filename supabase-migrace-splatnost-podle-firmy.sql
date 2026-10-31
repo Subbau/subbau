@@ -15,16 +15,21 @@ alter table public.worker_commissions alter column payment_terms drop not null;
 alter table public.worker_commissions alter column payment_terms drop default;
 
 -- 2) Samo zapsané 7/14 pryč. Zůstává, co někdo v Provizích výslovně vybral:
---    7/7, 7/10, 14/14 a 7/14 jen tam, kde ho historie úprav zná jako ruční změnu.
+--    7/7, 7/10, 14/14 a 7/14 jen tam, kde ho historie úprav zná jako ruční
+--    volbu — změnu na 7/14, nebo nový řádek bez provize (ten vzniká jen
+--    výběrem splatnosti; uložení provize zakládá řádek s provizí).
+--    Historie úprav běží od 10. 10. 2026; co se zvolilo dřív, poznat nejde —
+--    proto se nejdřív pouští NÁHLED a majitel zkontroluje jména.
 update public.worker_commissions wc
    set payment_terms = null
  where wc.payment_terms = '7/14'
    and not exists (
      select 1 from public.historie_uprav h
       where h.tabulka = 'worker_commissions'
-        and h.akce = 'UPDATE'
         and h.komu = wc.worker_id
-        and h.zmeny -> 'payment_terms' ->> 1 = '7/14');
+        and ((h.akce = 'UPDATE' and h.zmeny -> 'payment_terms' ->> 1 = '7/14')
+          or (h.akce = 'INSERT' and h.zmeny ->> 'payment_terms' = '7/14'
+              and h.zmeny -> 'provize' is not distinct from 'null'::jsonb)));
 
 -- 3) Dny splatnosti na fakturách podle firmy. Firma se pozná jako v Provizích:
 --    jméno firmy, u skupiny bez firmy její název bez části za pomlčkou.
