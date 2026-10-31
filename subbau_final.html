@@ -4993,7 +4993,7 @@ async function submitAdminSignatureWithPlacement() {
 // Po nahrání nové verze se snadno pozná, jestli se opravdu nasadila: otevřete
 // appku, zmáčkněte F12 (na Macu ⌥⌘I) a v konzoli je vypsané tohle datum. Když
 // tam svítí starší, prohlížeč nebo GitHub drží starou verzi.
-const SUBBAU_VERZE = '2026-10-31 b — Plán mzdy, nuly v dashboardu, splatnost podle firmy, potvrzení faktury, den v docházce, karta na mobilu'
+const SUBBAU_VERZE = '2026-10-31 c — Šedé řádky ve Fakturách, číslo první faktury, Moje faktury bez stavů'
 console.log('SubBau docházka — verze ' + SUBBAU_VERZE)
 // Verze i dole v menu správce. Když někdo novinku „nevidí", podle ní se hned
 // pozná, jestli nemá otevřenou starou kopii appky — bez hledání v konzoli.
@@ -17968,6 +17968,7 @@ async function loadWorkerInvoices() {
   const skrytiFakt = await skrytiLideIds()
   _invCache = (data || []).filter(r => !jeSkrytaFirmaPracovnika(r.worker) && !skrytiFakt.has(r.worker_id))
   await nactiTymyFaktur(_invCache)   // firma v týdnu faktury podle docházky
+  await nactiSedeRadkyFaktur().catch(e => console.warn('[faktury] šedé řádky:', e?.message || e))
   fillInvoiceYearFilter()
   // Tabulka faktur má stovky řádků (480 faktur = ~31 000 prvků, ~190 ms zaseknutí).
   // Kreslí se jen do OTEVŘENÉ složky — při startu a obnově na pozadí se dřív kreslila
@@ -18029,6 +18030,92 @@ async function nactiTymyFaktur(radky) {
     chybi.forEach(r => _tymFakturyNacteno.add(r.worker_id + '|' + r.kw + '|' + r.kw_year))
   } catch (e) { /* zůstane dnešní zařazení */ }
 }
+// ŠEDÉ ŘÁDKY — KDO V TÝDNU PRACOVAL A FAKTURU JEŠTĚ NEPOSLAL. Majitel 31. 10.
+// 2026: „každý, kdo v tom týdnu pracoval, tam bude mít zašedlý řádek se jménem
+// — úplně stejně rozložený; až pošle fakturu, objeví se místo něj ten správný.
+// A u zašedlého řádku fajfka, že ji poslal naším způsobem, ať hlídáme, že máme
+// opravdu všechny. Nahoře u každé firmy kolik lidí pracovalo, kolik je faktur
+// a kdo chybí." Faktury se nikde nemažou ani neskrývají.
+// Hlídá se od týdne první faktury ve složce (dřív se v appce nefakturovalo).
+// Za zaměstnance firmy fakturuje šéf, proto se jejich hodiny počítají jemu.
+// Fajfka „poslal jinak" je sdílená pro všechny správce (doc_alert_dismissals).
+let _invSede = []                 // pseudořádky { _sedy: true, worker_id, kw, kw_year, total_hours, worker }
+let _invJinak = new Map()         // 'pracovník|kw|rok' → { kdy } — „poslal jinak"
+let _invSedeDochazka = { kdy: 0, od: '', radky: [], profily: [] }
+const FAKT_JINAK_KLIC = 'fakt-jinak|'
+async function nactiSedeRadkyFaktur() {
+  const tydny = _invCache.filter(r => r.kw && r.kw_year).map(r => Number(r.kw_year) * 100 + Number(r.kw))
+  if (!tydny.length) { _invSede = []; return }
+  const prvni = Math.min(...tydny)
+  const od = localDateStr(getWeekStartDate(prvni % 100, Math.floor(prvni / 100)))
+  // Docházku a lidi stačí stáhnout jednou za 90 s — složka se obnovuje každou
+  // minutu a při každé nové faktuře, šedé řádky se ale počítají pokaždé znovu.
+  if (_invSedeDochazka.od !== od || Date.now() - _invSedeDochazka.kdy > 90000) {
+    const radky = []
+    for (let o = 0; o < 200000; o += 1000) {
+      const { data, error } = await sb.from('attendance')
+        .select('worker_id, kw, kw_year, team_id, work_date, total_hours')
+        .gte('work_date', od).not('check_in', 'is', null)
+        .order('work_date').order('id').range(o, o + 999)
+      if (error) { console.warn('[faktury] docházka pro šedé řádky:', error.message); return }
+      radky.push(...(data || []))
+      if (!data || data.length < 1000) break
+    }
+    const { data: profily, error: chybaLidi } = await sb.from('profiles')
+      .select('id, full_name, role, zamestnavatel_id, avatar_url, invoice_color, team_id, subteam_id, crm_code')
+      .in('role', ['osvec', 'partak'])
+    if (chybaLidi) { console.warn('[faktury] lidé pro šedé řádky:', chybaLidi.message); return }
+    _invSedeDochazka = { kdy: Date.now(), od, radky, profily: profily || [] }
+  }
+  try {
+    const { data: jin, error } = await sb.from('doc_alert_dismissals').select('dismiss_key, dismissed_at').like('dismiss_key', FAKT_JINAK_KLIC + '%')
+    if (!error) {
+      _invJinak = new Map()
+      ;(jin || []).forEach(x => _invJinak.set(String(x.dismiss_key).slice(FAKT_JINAK_KLIC.length), { kdy: x.dismissed_at }))
+    }
+  } catch (e) { /* bez fajfek se jen neukáže „poslal jinak" */ }
+  const prof = new Map(_invSedeDochazka.profily.map(p => [p.id, p]))
+  const skryti = await skrytiLideIds()
+  const maFakturu = new Set(_invCache.filter(r => r.kw && r.kw_year).map(r => r.worker_id + '|' + r.kw + '|' + r.kw_year))
+  const tydnyLidi = new Map()
+  for (const a of _invSedeDochazka.radky) {
+    const p = prof.get(a.worker_id)
+    if (!p || !a.kw || !a.kw_year) continue
+    const kdo = (p.zamestnavatel_id && prof.get(p.zamestnavatel_id)) ? p.zamestnavatel_id : a.worker_id
+    const k = kdo + '|' + a.kw + '|' + a.kw_year
+    const z = tydnyLidi.get(k) || { w: kdo, kw: a.kw, rok: a.kw_year, hodiny: 0, tym: null, den: '' }
+    z.hodiny += Number(a.total_hours) || 0
+    if (a.team_id != null && String(a.work_date) >= z.den) { z.tym = a.team_id; z.den = String(a.work_date) }
+    tydnyLidi.set(k, z)
+  }
+  const sede = []
+  for (const [k, z] of tydnyLidi) {
+    if (maFakturu.has(k)) continue
+    const p = prof.get(z.w)
+    if (!p || jeSkrytaFirmaPracovnika(p) || skryti.has(z.w)) continue
+    // Firma = skupina z docházky toho týdne, stejně jako u faktur (firmaFaktury).
+    if (z.tym != null) { _tymFakturyTydne.set(k, z.tym); _tymFakturyNacteno.add(k) }
+    sede.push({ _sedy: true, id: 'sedy|' + k, worker_id: z.w, kw: z.kw, kw_year: z.rok,
+      total_hours: Math.round(z.hodiny * 100) / 100,
+      worker: { full_name: p.full_name, avatar_url: p.avatar_url, invoice_color: p.invoice_color,
+                team_id: p.team_id, subteam_id: p.subteam_id, crm_code: p.crm_code } })
+  }
+  _invSede = sede
+}
+
+// Fajfka „poslal jinak" u šedého řádku — sdílená pro všechny správce.
+async function fakturaPoslalJinak(workerId, kw, rok, zapnout) {
+  const kl = workerId + '|' + kw + '|' + rok
+  const klic = FAKT_JINAK_KLIC + kl
+  const { error } = zapnout
+    ? await sb.from('doc_alert_dismissals').upsert({ dismiss_key: klic, dismissed_by: currentUser?.id || null }, { onConflict: 'dismiss_key', ignoreDuplicates: true })
+    : await sb.from('doc_alert_dismissals').delete().eq('dismiss_key', klic)
+  if (error) { showToast('❌ Nepodařilo se uložit: ' + error.message); renderWorkerInvoices(); return }
+  if (zapnout) _invJinak.set(kl, { kdy: new Date().toISOString() })
+  else _invJinak.delete(kl)
+  renderWorkerInvoices()
+}
+
 function firmaFaktury(r) {
   const zTydne = r && r.worker_id && r.kw ? _tymFakturyTydne.get(r.worker_id + '|' + r.kw + '|' + r.kw_year) : null
   const tid = zTydne ?? (r && (r.worker?.team_id ?? r.team_id))
@@ -18113,6 +18200,14 @@ function renderWorkerInvoices() {
       return hay.includes(q)
     })
   }
+  // Šedé řádky (pracoval, faktura nepřišla) jen v přehledu po týdnech a bez
+  // filtru stavu — ve stavech „vyřízená/zaplacená" nemají co dělat.
+  const poTydnech = _invSortKey === 'week' || _invSortKey === 'sent'
+  const sedeVRoce = year ? _invSede.filter(r => String(r.kw_year) === year) : _invSede
+  if (poTydnech && !status && sedeVRoce.length) {
+    rows = rows.concat(q ? sedeVRoce.filter(r => [r.worker?.full_name, 'kw ' + r.kw + '/' + r.kw_year, r.kw + '/' + r.kw_year]
+      .join(' ').toLowerCase().includes(q)) : sedeVRoce)
+  }
 
   const dir = _invSortDir === 'asc' ? 1 : -1
   // KDYŽ SE DĚLÍ PO TÝDNECH, ŘADÍ SE TÝDEN → FIRMA → JMÉNO.
@@ -18141,9 +18236,10 @@ function renderWorkerInvoices() {
     if (el) el.textContent = _invSortKey === k ? (_invSortDir === 'asc' ? '▲' : '▼') : ''
   })
 
-  renderInvoiceStats(rows)
-  // Pro tisk soupisu: přesně to, co je vypsané (hledání a filtry platí).
-  window._invZobrazene = rows
+  renderInvoiceStats(rows.filter(r => !r._sedy))
+  // Pro tisk soupisu: přesně to, co je vypsané (hledání a filtry platí) —
+  // jen skutečné faktury, šedé řádky do soupisu nepatří.
+  window._invZobrazene = rows.filter(r => !r._sedy)
 
   if (!rows.length) {
     tbody.innerHTML = '<tr><td colspan="10" style="text-align:center;color:var(--text3);padding:20px">'
@@ -18177,11 +18273,55 @@ function renderWorkerInvoices() {
   // podle toho se u firmy nabídne „Zaplaceno všem".
   const _nezaplaceno = new Map(), _odlozeneCekaji = new Map()
   if (delitTydny) rows.forEach(r => {
-    if ((r.status || 'new') === 'paid' || !r.kw) return
+    if (r._sedy || (r.status || 'new') === 'paid' || !r.kw) return
     const k = r.kw + '/' + r.kw_year + '|' + firmaFaktury(r)
     const m = r.odlozeno_at ? _odlozeneCekaji : _nezaplaceno
     m.set(k, (m.get(k) || 0) + 1)
   })
+
+  // Souhrn u firmy v týdnu: kolik lidí pracovalo, kolik je faktur, kdo chybí.
+  // Počítá se ze VŠEHO (jen rok platí), ať hledání neukáže zkreslená čísla.
+  const _souhrnFirmy = new Map()
+  if (delitTydny) {
+    const vse = (year ? _invCache.filter(r => String(r.kw_year || '') === year) : _invCache).concat(sedeVRoce)
+    vse.forEach(r => {
+      if (!r.kw) return
+      const k = r.kw + '/' + r.kw_year + '|' + firmaFaktury(r)
+      const s = _souhrnFirmy.get(k) || { lidi: new Set(), faktur: 0, jinak: 0, chybi: [] }
+      s.lidi.add(r.worker_id)
+      if (!r._sedy) s.faktur++
+      else if (_invJinak.has(r.worker_id + '|' + r.kw + '|' + r.kw_year)) s.jinak++
+      else s.chybi.push(r.worker?.full_name || '—')
+      _souhrnFirmy.set(k, s)
+    })
+  }
+  const souhrnFirmyHtml = (kw, rok, firma) => {
+    const s = _souhrnFirmy.get(kw + '/' + rok + '|' + firma)
+    if (!s) return ''
+    return `<span data-souhrn-firmy style="font-weight:600;color:var(--text3)">· pracovalo ${s.lidi.size} · faktur ${s.faktur}${s.jinak ? ' + ' + s.jinak + ' poslaných jinak' : ''}${s.chybi.length
+      ? ` · <b style="color:var(--red)">chybí ${s.chybi.length}: ${escAttr(s.chybi.slice().sort((a, b) => a.localeCompare(b, 'cs')).join(', '))}</b>`
+      : ' · <b style="color:var(--green)">✓ všechny</b>'}</span>`
+  }
+  // Šedý řádek — stejné sloupce jako faktura, jen místo dokladu „faktura nepřišla".
+  const radekSedy = r => {
+    const kl = r.worker_id + '|' + r.kw + '|' + r.kw_year
+    const jinak = _invJinak.get(kl)
+    const po = getWeekStartDate(Number(r.kw), Number(r.kw_year))
+    const ne = new Date(po); ne.setDate(po.getDate() + 6)
+    return `
+    <tr data-sedy="${escAttr(kl)}" style="background:#efede9;color:var(--text3)" title="${jinak ? 'Faktura poslaná jinak' : 'Pracoval, faktura zatím nepřišla'}">
+      <td style="border-left:5px solid transparent"><span style="display:inline-flex;align-items:center;gap:8px;min-width:0;opacity:.55">${fotkaHtml(r.worker?.avatar_url, r.worker?.full_name, 28)}<b>${escAttr(r.worker?.full_name || '—')}</b></span></td>
+      <td style="font-size:12px;font-style:italic;white-space:nowrap">${jinak ? 'poslal jinak' : 'faktura nepřišla'}</td>
+      <td></td>
+      <td style="white-space:nowrap">KW ${escAttr(r.kw)}/${escAttr(r.kw_year)}<div style="font-size:11px;color:var(--text3)">${_invDmy(localDateStr(po))} –<br>${_invDmy(localDateStr(ne))}</div></td>
+      <td style="font-size:12px">—</td>
+      <td style="text-align:right;white-space:nowrap">${(Number(r.total_hours) || 0).toFixed(2)} h</td>
+      <td style="text-align:right">—</td>
+      <td style="white-space:nowrap;font-size:12px">${jinak && jinak.kdy ? _invDmy(String(jinak.kdy).slice(0, 10)) : '—'}</td>
+      <td>${jinak ? '<span class="pill pg">✓ poslal jinak</span>' : '<span class="pill" style="background:#e2ded8;color:#6b6157">čeká na fakturu</span>'}</td>
+      <td><label title="Fakturu poslal jinak (e-mailem, papírově…) — zaškrtnutím ji počítáme jako dodanou" style="display:inline-flex;align-items:center;gap:6px;font-size:12px;font-weight:600;color:var(--text2);cursor:pointer;white-space:nowrap"><input type="checkbox" ${jinak ? 'checked' : ''} onchange="fakturaPoslalJinak('${jsStr(r.worker_id)}','${jsStr(r.kw)}','${jsStr(r.kw_year)}', this.checked)" style="width:17px;height:17px;cursor:pointer;accent-color:var(--green)">poslal jinak</label></td>
+    </tr>`
+  }
 
   const _invHtml = rows.map(r => {
     // Barva je vlastnost pracovníka, ne dokladu — proto se bere živě z profilu.
@@ -18201,14 +18341,15 @@ function renderWorkerInvoices() {
       const firmaTeto = firmaFaktury(r)
       if (firmaTeto !== _poslFirma) {
         const zbyva = r.kw ? (_nezaplaceno.get(r.kw + '/' + r.kw_year + '|' + firmaTeto) || 0) : 0
-        oddelovac += `<tr><td colspan="10" style="padding:6px 12px 4px 24px;background:var(--bg,#f4efe7);font-size:12px;font-weight:700;color:var(--text3)"><div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap"><span>${escAttr(firmaTeto)}</span>${zbyva
+        oddelovac += `<tr><td colspan="10" style="padding:6px 12px 4px 24px;background:var(--bg,#f4efe7);font-size:12px;font-weight:700;color:var(--text3)"><div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap"><span>${escAttr(firmaTeto)}</span>${r.kw ? souhrnFirmyHtml(r.kw, r.kw_year, firmaTeto) : ''}${zbyva
           ? `<button onclick="event.stopPropagation();zaplacenoFirme('${jsStr(r.kw)}','${jsStr(r.kw_year)}','${jsStr(firmaTeto)}', this)" title="Označí jako zaplacené všechny nezaplacené faktury téhle firmy v tomhle týdnu (odložené ne). Propíše se to i do Provizí." style="font-size:11px;padding:3px 9px;border:1px solid var(--amber);border-radius:6px;cursor:pointer;background:var(--amber-l);color:var(--amber);font-family:inherit;font-weight:800">✅ Zaplaceno všem (${zbyva})</button>`
-          : (!r.kw ? '' : (_odlozeneCekaji.get(r.kw + '/' + r.kw_year + '|' + firmaTeto)
+          : ((!r.kw || !(_souhrnFirmy.get(r.kw + '/' + r.kw_year + '|' + firmaTeto)?.faktur)) ? '' : (_odlozeneCekaji.get(r.kw + '/' + r.kw_year + '|' + firmaTeto)
             ? '<span style="font-size:11px;font-weight:700;color:#1d4ed8">⏸ nezaplacené jsou jen odložené</span>'
             : '<span style="font-size:11px;font-weight:700;color:var(--green)">✓ vše zaplaceno</span>'))}</div></td></tr>`
         _poslFirma = firmaTeto
       }
     }
+    if (r._sedy) return oddelovac + radekSedy(r)
     return oddelovac + `
     <tr${r.odlozeno_at ? ' data-odlozeno="1" style="background:#dbeafe" title="Odložená faktura"' : ''}>
       <!-- Fotka je tu 28 px, ne 40 jako v denním přehledu. Tahle tabulka má
@@ -25116,16 +25257,17 @@ async function nactiMojeFaktury() {
   if (!card || !list || !currentUser) return
   let data = null
   try {
+    // VŠECHNY odeslané faktury, bez našich stavů. Majitel 31. 10. 2026:
+    // „štítky schovat" — vyřízená/zaplacená jsou naše poznámky; pracovník tu
+    // vidí seznam toho, co odeslal (a hned po odeslání i tu novou).
     const r = await sb.from('worker_invoices')
-      .select('id, invoice_number, kw, kw_year, period_from, period_to, total_amount, status, pdf_url, sent_at')
-      .eq('worker_id', currentUser.id).in('status', ['seen', 'paid'])
+      .select('id, invoice_number, kw, kw_year, period_from, period_to, total_amount, pdf_url, sent_at')
+      .eq('worker_id', currentUser.id)
       .order('sent_at', { ascending: false }).limit(30)
     data = r.data
   } catch (e) { console.warn('[moje faktury] načtení selhalo:', e?.message) }
   if (!data || !data.length) { card.style.display = 'none'; return }
   card.style.display = ''
-  const stavLabel = { seen: 'Vyřízená', paid: 'Zaplacená' }
-  const stavBarva = { seen: '#8a5a00', paid: '#1d9e75' }
   list.innerHTML = data.map(r => {
     const obdobi = r.kw ? ('KW ' + r.kw + '/' + r.kw_year) : (r.period_from ? (_invDmy(r.period_from) + ' – ' + _invDmy(r.period_to)) : '')
     const url = bezpecneDokumentyUrl(r.pdf_url)
@@ -25136,7 +25278,7 @@ async function nactiMojeFaktury() {
       </div>
       <div style="text-align:right">
         <div style="font-size:13px;font-weight:800;color:var(--text)">${(Number(r.total_amount) || 0).toFixed(2)} €</div>
-        <div style="font-size:10.5px;font-weight:700;color:${stavBarva[r.status] || 'var(--text3)'}">${stavLabel[r.status] || r.status}</div>
+        ${r.sent_at ? `<div style="font-size:10.5px;color:var(--text3)">odesláno ${_invDmy(String(r.sent_at).slice(0, 10))}</div>` : ''}
       </div>
       ${url ? `<a href="${escAttr(url)}" target="_blank" rel="noopener" title="Stáhnout" style="flex-shrink:0;display:flex;align-items:center;justify-content:center;width:34px;height:34px;border-radius:8px;background:var(--bg);color:var(--text2)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:16px;height:16px"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="M7 10l5 5 5-5"/><path d="M12 15V3"/></svg></a>` : ''}
     </div>`
@@ -25470,9 +25612,17 @@ function slozCisloFaktury(vzor, poradi) {
 }
 
 // Další volné číslo pro pracovníka: vezme tvar z jeho poslední faktury a
-// pokračuje v něm. Kdo ještě žádnou nemá, začne na rok + 01.
+// pokračuje v něm. Kdo ještě žádnou nemá, začne na rok + pořadí 11–89.
+// Majitel 31. 10. 2026: „aby to nezačínalo pokaždé, když u nás poprvé
+// fakturuje, 01" — tvar zůstává bez pomlčky (např. 202637). Pořadí se odvodí
+// z ID pracovníka, takže při každém otevření formuláře vyjde stejné.
+function prvniPoradiFaktury(workerId) {
+  let h = 0
+  for (const ch of String(workerId || '')) h = (h * 31 + ch.charCodeAt(0)) >>> 0
+  return 11 + (h % 79)
+}
 async function dalsiCisloFaktury(workerId, rok) {
-  const zaloha = String(rok) + '01'
+  const zaloha = String(rok) + String(prvniPoradiFaktury(workerId))
   try {
     const { data } = await sb.from('worker_invoices')
       .select('invoice_number, created_at').eq('worker_id', workerId)
