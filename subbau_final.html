@@ -18042,6 +18042,7 @@ async function nactiTymyFaktur(radky) {
 let _invSede = []                 // pseudořádky { _sedy: true, worker_id, kw, kw_year, total_hours, worker }
 let _invJinak = new Map()         // 'pracovník|kw|rok' → { kdy } — „poslal jinak"
 let _invSedeDochazka = { kdy: 0, od: '', radky: [], profily: [] }
+let _invPracovali = new Map()     // 'kw/rok|firma' → Set lidí, kteří tam ten týden opravdu pracovali
 const FAKT_JINAK_KLIC = 'fakt-jinak|'
 async function nactiSedeRadkyFaktur() {
   const tydny = _invCache.filter(r => r.kw && r.kw_year).map(r => Number(r.kw_year) * 100 + Number(r.kw))
@@ -18088,6 +18089,25 @@ async function nactiSedeRadkyFaktur() {
     if (a.team_id != null && String(a.work_date) >= z.den) { z.tym = a.team_id; z.den = String(a.work_date) }
     tydnyLidi.set(k, z)
   }
+  // „Pracovalo" v souhrnu firmy = skuteční lidé s docházkou (i zaměstnanci,
+  // za které fakturuje šéf) — ne počet fakturujících (Codex 31. 10.). Firma
+  // podle poslední skupiny toho člověka v týdnu, stejně jako u faktur.
+  const nazvyTymu = new Map((_teamsCache || []).map(t => [String(t.id), t.name]))
+  const posledniTym = new Map()
+  for (const a of _invSedeDochazka.radky) {
+    const p = prof.get(a.worker_id)
+    if (!p || !a.kw || !a.kw_year || a.team_id == null || jeSkrytaFirmaPracovnika(p) || skryti.has(a.worker_id)) continue
+    const k = a.worker_id + '|' + a.kw + '|' + a.kw_year
+    const z = posledniTym.get(k)
+    if (!z || String(a.work_date) >= z.den) posledniTym.set(k, { w: a.worker_id, kw: a.kw, rok: a.kw_year, tym: a.team_id, den: String(a.work_date) })
+  }
+  const pracovali = new Map()
+  for (const z of posledniTym.values()) {
+    const kl = z.kw + '/' + z.rok + '|' + (nazvyTymu.get(String(z.tym)) || 'Bez firmy')
+    if (!pracovali.has(kl)) pracovali.set(kl, new Set())
+    pracovali.get(kl).add(z.w)
+  }
+  _invPracovali = pracovali
   const sede = []
   for (const [k, z] of tydnyLidi) {
     if (maFakturu.has(k)) continue
@@ -18200,11 +18220,11 @@ function renderWorkerInvoices() {
       return hay.includes(q)
     })
   }
-  // Šedé řádky (pracoval, faktura nepřišla) jen v přehledu po týdnech a bez
-  // filtru stavu — ve stavech „vyřízená/zaplacená" nemají co dělat.
-  const poTydnech = _invSortKey === 'week' || _invSortKey === 'sent'
+  // Šedé řádky (pracoval, faktura nepřišla) při každém řazení — řazení nemá
+  // měnit, co je vidět (Codex 31. 10.). Jen ve filtru stavu ne: ve stavech
+  // „vyřízená/zaplacená" nemají co dělat.
   const sedeVRoce = year ? _invSede.filter(r => String(r.kw_year) === year) : _invSede
-  if (poTydnech && !status && sedeVRoce.length) {
+  if (!status && sedeVRoce.length) {
     rows = rows.concat(q ? sedeVRoce.filter(r => [r.worker?.full_name, 'kw ' + r.kw + '/' + r.kw_year, r.kw + '/' + r.kw_year]
       .join(' ').toLowerCase().includes(q)) : sedeVRoce)
   }
@@ -18298,7 +18318,8 @@ function renderWorkerInvoices() {
   const souhrnFirmyHtml = (kw, rok, firma) => {
     const s = _souhrnFirmy.get(kw + '/' + rok + '|' + firma)
     if (!s) return ''
-    return `<span data-souhrn-firmy style="font-weight:600;color:var(--text3)">· pracovalo ${s.lidi.size} · faktur ${s.faktur}${s.jinak ? ' + ' + s.jinak + ' poslaných jinak' : ''}${s.chybi.length
+    const pracovalo = _invPracovali.get(kw + '/' + rok + '|' + firma)?.size || s.lidi.size
+    return `<span data-souhrn-firmy style="font-weight:600;color:var(--text3)">· pracovalo ${pracovalo} · faktur ${s.faktur}${s.jinak ? ' + ' + s.jinak + ' poslaných jinak' : ''}${s.chybi.length
       ? ` · <b style="color:var(--red)">chybí ${s.chybi.length}: ${escAttr(s.chybi.slice().sort((a, b) => a.localeCompare(b, 'cs')).join(', '))}</b>`
       : ' · <b style="color:var(--green)">✓ všechny</b>'}</span>`
   }
@@ -25263,7 +25284,7 @@ async function nactiMojeFaktury() {
     const r = await sb.from('worker_invoices')
       .select('id, invoice_number, kw, kw_year, period_from, period_to, total_amount, pdf_url, sent_at')
       .eq('worker_id', currentUser.id)
-      .order('sent_at', { ascending: false }).limit(30)
+      .order('sent_at', { ascending: false }).limit(1000)
     data = r.data
   } catch (e) { console.warn('[moje faktury] načtení selhalo:', e?.message) }
   if (!data || !data.length) { card.style.display = 'none'; return }
