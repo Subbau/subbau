@@ -5646,7 +5646,7 @@ async function submitAdminSignatureWithPlacement() {
 // Po nahrání nové verze se snadno pozná, jestli se opravdu nasadila: otevřete
 // appku, zmáčkněte F12 (na Macu ⌥⌘I) a v konzoli je vypsané tohle datum. Když
 // tam svítí starší, prohlížeč nebo GitHub drží starou verzi.
-const SUBBAU_VERZE = '2026-10-29 b — Plán MMI: kulaté fotky u jmen'
+const SUBBAU_VERZE = '2026-10-31 a — Faktura vzor 8 s IBAN, přihlášení po probuzení'
 console.log('StavKo docházka — verze ' + SUBBAU_VERZE)
 // Verze i dole v menu správce. Když někdo novinku „nevidí", podle ní se hned
 // pozná, jestli nemá otevřenou starou kopii appky — bez hledání v konzoli.
@@ -5703,11 +5703,47 @@ try {
   }
   kanal.postMessage({ typ: 'kdo', z: ZALOZKA })
 } catch (e) {}
+// PŘIHLÁŠENÝ SE NIKDY NEPTÁ JAKO NEPŘIHLÁŠENÝ (31. 10. 2026). Po probuzení
+// telefonu nebo Macu je přihlášení prošlé a první obnova spadne, protože síť
+// ještě nenaběhla. Knihovna pak 60 s obnovu znovu nezkusí a dotazy mezitím
+// posílá s veřejným klíčem: příchod spadl na „zápis nepovolen. Ozvěte se
+// StavKo", úprava hodin u admina na RLS a čtení vracelo prázdno. Takový dotaz
+// se proto zastaví, přihlášení se obnoví hned a dotaz odejde s ním. Když obnova
+// nevyjde, je to výpadek sítě a appka řekne „slabý signál, zkuste znovu".
+// Zkouška ~/sb-zkousky/anon-po-probuzeni.
+function _jsemPrihlaseny() { try { return !!currentUser } catch (e) { return false } }
+function _jdeSVerejnymKlicem(nastaveni) {
+  try { return new Headers(nastaveni && nastaveni.headers).get('Authorization') === 'Bearer ' + SUPABASE_ANON_KEY } catch (e) { return false }
+}
+async function _dotazSObnovenymPrihlasenim(vstup, nastaveni) {
+  const selhani = sb.auth && sb.auth.lastRefreshFailure
+  // Obnova spadla před chvílí (knihovna ji zkoušela i s opakováním) — zkoušet
+  // ji hned znovu by člověka nechalo čekat dalších 25 s na totéž.
+  const prave = selhani && selhani.expiresAt - Date.now() > 55000
+  let klic = null
+  if (!prave && document.visibilityState !== 'hidden') {
+    if (selhani) sb.auth.lastRefreshFailure = null
+    try { klic = (await sb.auth.getSession()).data?.session?.access_token || null } catch (e) {}
+  }
+  if (!klic || klic === SUPABASE_ANON_KEY) {
+    if (Date.now() - (window._bezPrihlaseniZapsano || 0) > 600000) {
+      window._bezPrihlaseniZapsano = Date.now()
+      zapisDenik('dotaz bez přihlášení zastaven', prave ? 'obnova právě spadla' : 'obnova nevyšla')
+    }
+    throw new TypeError('Failed to fetch')
+  }
+  const hlavicky = new Headers(nastaveni && nastaveni.headers)
+  hlavicky.set('Authorization', 'Bearer ' + klic)
+  return _sbFetch(vstup, { ...nastaveni, headers: hlavicky })
+}
 // Všechny dotazy jdou dál beze změny; jen u přihlašovacího serveru (/auth/v1/)
 // se zapíše, co odpověděl na obnovu přihlášení a na odhlášení, a každá chyba.
 function _sbFetch(vstup, nastaveni) {
   let url = ''
   try { url = String((vstup && vstup.url) || vstup) } catch (e) {}
+  if (/\/(rest|storage|functions)\/v1\//.test(url) && _jsemPrihlaseny() && _jdeSVerejnymKlicem(nastaveni)) {
+    return _dotazSObnovenymPrihlasenim(vstup, nastaveni)
+  }
   // SCHOVANÁ ZÁLOŽKA OBNOVU PŘIHLÁŠENÍ NEZAČNE (23. 10. 2026). Safari záložky
   // v pozadí uspává — i uprostřed obnovy: server starý klíč zneplatní, nový se
   // do záložky nikdy nedostane, a kdo pak starý klíč použije (druhá záložka,
@@ -32778,12 +32814,15 @@ ${V.popisPod ? `<div style="font-size:10.5px;color:#6B635D;line-height:1.5;margi
 <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:26px;padding-top:16px">
 <div style="width:47%">
 <div style="font-size:9px;font-weight:700;letter-spacing:3px;text-transform:uppercase;color:${V.barva};margin-bottom:8px">${V.L.payment || ''}</div>
-<table style="width:100%;border-collapse:collapse;font-family:'Menlo','Consolas',monospace">
-<tr><td style="font-size:9.5px;letter-spacing:1.5px;text-transform:uppercase;color:#6B635D;padding:4px 10px 4px 0;border-bottom:1px solid ${V.linka};white-space:nowrap">${V.L.iban || 'IBAN'}</td><td style="font-size:11.5px;font-weight:700;text-align:right;padding:4px 0;border-bottom:1px solid ${V.linka}">${V.iban}</td></tr>
-<tr><td style="font-size:9.5px;letter-spacing:1.5px;text-transform:uppercase;color:#6B635D;padding:4px 10px 4px 0;border-bottom:1px solid ${V.linka};white-space:nowrap">${V.L.swift || 'SWIFT / BIC'}</td><td style="font-size:11.5px;font-weight:700;text-align:right;padding:4px 0;border-bottom:1px solid ${V.linka}">${V.swift}</td></tr>
-<tr><td style="font-size:9.5px;letter-spacing:1.5px;text-transform:uppercase;color:#6B635D;padding:4px 10px 4px 0;border-bottom:1px solid ${V.linka};white-space:nowrap">${V.L.vs || 'VS'}</td><td style="font-size:11.5px;font-weight:700;text-align:right;padding:4px 0;border-bottom:1px solid ${V.linka}">${V.vs}</td></tr>
-<tr><td style="font-size:9.5px;letter-spacing:1.5px;text-transform:uppercase;color:#6B635D;padding:4px 10px 4px 0">${V.L.ks || 'KS'}</td><td style="font-size:11.5px;font-weight:700;text-align:right;padding:4px 0">${V.ks}</td></tr>
-</table>
+<div style="font-family:'Menlo','Consolas',monospace">
+<!-- Popisek NAD údajem, ne vedle něj: trojjazyčný „Variabilní symbol · Verwendungszweck ·
+     Variable symbol“ v jednom řádku roztáhl sloupec přes půl listu a IBAN se zmáčkl
+     pod rámeček K úhradě, který ho přikryl. -->
+<div style="padding:4px 0 5px;border-bottom:1px solid ${V.linka}"><div style="font-size:9.5px;letter-spacing:1.5px;text-transform:uppercase;color:#6B635D;line-height:1.35">${V.L.iban || 'IBAN'}</div><div style="font-size:11.5px;font-weight:700;margin-top:2px;white-space:nowrap">${V.iban}</div></div>
+<div style="padding:4px 0 5px;border-bottom:1px solid ${V.linka}"><div style="font-size:9.5px;letter-spacing:1.5px;text-transform:uppercase;color:#6B635D;line-height:1.35">${V.L.swift || 'SWIFT / BIC'}</div><div style="font-size:11.5px;font-weight:700;margin-top:2px">${V.swift}</div></div>
+<div style="padding:4px 0 5px;border-bottom:1px solid ${V.linka}"><div style="font-size:9.5px;letter-spacing:1.5px;text-transform:uppercase;color:#6B635D;line-height:1.35">${V.L.vs || 'VS'}</div><div style="font-size:11.5px;font-weight:700;margin-top:2px">${V.vs}</div></div>
+<div style="padding:4px 0 5px"><div style="font-size:9.5px;letter-spacing:1.5px;text-transform:uppercase;color:#6B635D;line-height:1.35">${V.L.ks || 'KS'}</div><div style="font-size:11.5px;font-weight:700;margin-top:2px">${V.ks}</div></div>
+</div>
 </div>
 <div style="width:326px">
 <table style="width:100%;border-collapse:collapse">
