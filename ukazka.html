@@ -5725,7 +5725,7 @@ async function submitAdminSignatureWithPlacement() {
 // Po nahrání nové verze se snadno pozná, jestli se opravdu nasadila: otevřete
 // appku, zmáčkněte F12 (na Macu ⌥⌘I) a v konzoli je vypsané tohle datum. Když
 // tam svítí starší, prohlížeč nebo GitHub drží starou verzi.
-const SUBBAU_VERZE = '2026-11-01 b — Provize: jiná splatnost orámovaná; Faktury po kliknutí neskáčou nahoru'
+const SUBBAU_VERZE = '2026-11-01 c — Po návratu do záložky bez hesla; neodeslaná faktura se pošle sama'
 console.log('StavKo docházka — verze ' + SUBBAU_VERZE)
 // Verze i dole v menu správce. Když někdo novinku „nevidí", podle ní se hned
 // pozná, jestli nemá otevřenou starou kopii appky — bez hledání v konzoli.
@@ -6033,6 +6033,8 @@ if ('serviceWorker' in navigator) {
     // nad otevřeným potvrzením obojí smazala. Čeká se jako na obnovu přihlášení.
     const fakturaVPraci = () => {
       try { if (_invSending) return true } catch (e) {}
+      // I odesílání podržené faktury z fronty — utnuté uprostřed by ztratilo odpověď.
+      try { if (_fakturyOdesilam) return true } catch (e) {}
       const otevrene = id => { const el = document.getElementById(id); return !!(el && el.style.display && el.style.display !== 'none') }
       return otevrene('invoice-overlay') || otevrene('inv-sent-modal')
     }
@@ -6844,7 +6846,11 @@ function nabidniZnovuNacteni() {
 }
 window.addEventListener('online', () => {
   const login = document.getElementById('login')
-  if (login && login.style.display !== 'none' && lsGet(KLIC_RELACE)) zkusZnovuNacist(true)
+  // Ve schované záložce ne: obnovu tam _sbFetch odmítne, knihovna ji pak ~25 s
+  // opakuje a návrat do záložky by v tu chvíli skončil na přihlášení (probuzení
+  // Macu = „online" ve schované záložce; kontrola 1. 11. 2026). Po návratu se
+  // načte cestou poNavratuDoZalozky.
+  if (document.visibilityState !== 'hidden' && login && login.style.display !== 'none' && lsGet(KLIC_RELACE)) zkusZnovuNacist(true)
 })
 // SCHOVANÁ ZÁLOŽKA NECHCE HESLO (1. 11. 2026, majitel poslal fotku přihlašovací
 // stránky s „Proč mě to odhlásilo?" a na návrh opravy řekl „ano"). Appka se
@@ -6867,7 +6873,9 @@ async function nactiPoNavratuDoZalozky() {
   // zmizela (obnova vrátila 400) → formulář, pokud ho už neukázal SIGNED_OUT.
   const login = document.getElementById('login')
   if (currentUser || initAppRunning || authHandling || !login) return
-  if (login.style.display !== 'flex' || lsGet(KLIC_RELACE)) showLogin('nepřihlášen')
+  // Vlastní důvod, ne „nepřihlášen": v „Proč mě to odhlásilo?" i v deníku
+  // odeslaném do chyby_appky musí být vidět, že se appka po návratu nenačetla.
+  if (login.style.display !== 'flex' || lsGet(KLIC_RELACE)) showLogin('po návratu do záložky se nenačetlo')
 }
 function poNavratuDoZalozky(e) {
   if (document.visibilityState === 'hidden') return
@@ -6892,9 +6900,19 @@ async function zkusZnovuNacist(samo) {
   const btn = box && box.querySelector('button')
   if (btn) { btn.disabled = true; btn.textContent = 'Načítám…' }
   try {
+    // Knihovna si 60 s pamatuje neúspěšnou obnovu a na server se do té doby
+    // nezeptá — „Zkusit znovu", návrat sítě („online") ani návrat do záložky
+    // (Safari pošle focus dřív než visibilitychange) by nic neudělaly a
+    // bliklo by přihlášení (kontrola 1. 11. 2026). Sem se chodí jen
+    // z viditelné záložky; ve schované obnovu dál neposílá _sbFetch.
+    if (document.visibilityState !== 'hidden' && sb.auth && 'lastRefreshFailure' in sb.auth) sb.auth.lastRefreshFailure = null
     const { data } = await sb.auth.getSession()
     const u = data && data.session && data.session.user
-    if (!u) { if (box) box.style.display = 'none'; return }
+    // Obnova nevyšla, ale relace v prohlížeči zůstala (nejde síť) — rámeček
+    // „Pořád jste přihlášeni" nechat a zkoušet dál. Dřív se schoval a zbyla
+    // prázdná přihlašovací stránka: pole na heslo jsou při uložené relaci
+    // schovaná (kontrola 1. 11. 2026). Relace zmizela → ukázat pole.
+    if (!u) { if (!lsGet(KLIC_RELACE)) nabidniZnovuNacteni(); return }
     zapisDenik('zkouším znovu', typeof samo === 'string' ? samo : samo ? 'samo' : 'tlačítkem')
     appInitialized = true
     authHandling = true
@@ -8766,6 +8784,8 @@ async function posliCekajiciChyby() {
       const { _q, ...radek } = z
       let chyba = null
       try { chyba = (await sb.from('chyby_appky').insert(radek))?.error || null } catch (e) { chyba = e || new Error('výjimka') }
+      // Účet se změnil během zápisu — odmítnutí nic neříká o záznamu, nechat ho.
+      if (!_jsemPrihlaseny() || currentUser.id !== ja) break
       // Pořád bez spojení nebo přihlášení — zkusí se příště.
       if (chyba && jePrechodnaChyba(chyba)) break
       // Zapsáno, nebo to databáze odmítla natrvalo (to by nevyšlo nikdy) — pryč z fronty.
@@ -36461,7 +36481,9 @@ function invoiceErrorText(error) {
 // Zkouška ~/sb-zkousky/fronta-faktur.
 const FRONTA_FAKTUR = 'faktury-k-odeslani'
 // Větší PDF se v telefonu nedrží — faktura pak odejde bez něj, jako dřív.
-const FRONTA_PDF_MAX = 1.5 * 1024 * 1024
+// 0,7 MB: v localStorage zabere base64 v UTF-16 skoro 4× tolik a do téhož
+// místa (≈ 5 MB) ukládá knihovna přihlášení — nesmí jí dojít (kontrola 1. 11.).
+const FRONTA_PDF_MAX = 0.7 * 1024 * 1024
 
 // Přechodná = výpadek sítě, server chvíli mimo, prošlé přihlášení. To se
 // spraví samo. Cokoli jiného (i neznámá chyba) je trvalé: tam by čekání
@@ -36544,6 +36566,28 @@ function posliCekajiciFaktury() {
         // ručně odeslaná už ve frontě není.
         if (!_jsemPrihlaseny() || currentUser.id !== f.worker_id || _invSending) break
         if (!fakturyKOdeslani().some(x => x.id === f.id)) continue
+        // Na jednom telefonu se střídají dva lidé: změní-li se účet uprostřed
+        // odesílání, odpověď (třeba RLS) nic neříká o faktuře — nechat ji ve
+        // frontě pro vlastníka, nezahodit (kontrola 1. 11. 2026).
+        const jinyUcet = () => !_jsemPrihlaseny() || currentUser.id !== f.worker_id
+        // Došla už minule a ztratila se jen odpověď? Pozná se podle času odeslání
+        // (sent_at dává telefon a kancelář ho nemění, ani když opraví číslo).
+        // Znovu by se poslala naslepo a přepsala opravy z kanceláře.
+        if (f.radek.sent_at) {
+          let uz = null
+          try {
+            const r0 = await sb.from('worker_invoices').select('id').eq('worker_id', f.worker_id).eq('sent_at', f.radek.sent_at).limit(1)
+            if (r0.error) throw r0.error
+            uz = r0.data
+          } catch (e) { break }        // čtení nevyšlo — pořád bez spojení, zkusí se příště
+          if (jinyUcet()) break
+          if (uz && uz.length) {
+            zapisFrontuFaktur(fakturyKOdeslani().filter(x => x.id !== f.id))
+            zmena = true
+            showToast('✅ Faktura č. ' + f.cislo + ' u StavKo je')
+            continue
+          }
+        }
         const row = { ...f.radek }
         if (f.pdf && !row.pdf_url) {
           try {
@@ -36557,8 +36601,10 @@ function posliCekajiciFaktury() {
             console.warn('[faktura] podržené PDF se nenahrálo:', e?.message || e)
           }
         }
+        if (jinyUcet()) break
         let error = null
         try { error = await storeInvoiceRow(row) } catch (e) { error = e || new Error('výjimka') }
+        if (jinyUcet()) break
         if (error && jePrechodnaChyba(error)) break       // pořád bez spojení nebo přihlášení
         // Zapsaná, nebo trvale odmítnutá — tahle verze jde z fronty pryč.
         zapisFrontuFaktur(fakturyKOdeslani().filter(x => x.id !== f.id))
