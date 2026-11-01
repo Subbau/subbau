@@ -24,18 +24,32 @@ const POVOLENE = [
 // endpoint neměl žádné omezení počtu volání, na rozdíl od sesterských API
 // funkcí (admin-update-worker, send-invoice), co ho už dávno mají. Stejný
 // vzor, jen zkopírovaný sem.
+//
+// LIMIT 1500 DOTAZŮ ZA 10 MIN Z JEDNÉ ADRESY (1. 11. 2026). Původních 60
+// nestačilo ani na jeden výkaz — majitel: „u některých dní … to není ve
+// 3 jazycích, někdy je to jen česky, někdy německy". Appka na jeden NOVÝ
+// popis volá běžně 2–3× (rozpoznání jazyka + každý další jazyk), nejhůř 9×
+// (popis bez háčků od cizince: Google „auto", ověření z češtiny a z jeho
+// jazyka, pak dva další jazyky — každé se zálohou MyMemory). Výkaz party za
+// týden (15 lidí × 7 dní, každý popis jiný = 105 popisů) je běžně ~300,
+// nejhůř 945 dotazů. Celá kancelář chodí z jedné adresy, takže 1500 = jeden
+// nejhorší výkaz a rezerva na další. Opakované popisy vrací CDN z paměti
+// a do limitu se nepočítají. Proti relay brzdí dál (v průměru 2,5 dotazu/s).
+const LIMIT_DOTAZU = 1500;
 const HITS = new Map();
+// 0 = pustit; jinak za kolik sekund se uvolní místo (nejstarší dotaz vypadne
+// z okna) — posílá se jako Retry-After.
 function rateLimited(key, max, windowMs = 10 * 60 * 1000) {
   const now = Date.now();
   const fresh = (HITS.get(key) ?? []).filter((t) => now - t < windowMs);
   if (fresh.length >= max) {
     HITS.set(key, fresh);
-    return true;
+    return Math.max(1, Math.ceil((fresh[0] + windowMs - now) / 1000));
   }
   fresh.push(now);
   HITS.set(key, fresh);
   if (HITS.size > 5000) HITS.clear();
-  return false;
+  return 0;
 }
 const clientIp = (req) =>
   String(req.headers['x-forwarded-for'] ?? '').split(',')[0].trim() || 'unknown';
@@ -52,7 +66,12 @@ function lzePamatovat(url, telo) {
 }
 
 module.exports = async function handler(req, res) {
-  if (rateLimited(`preklad:${clientIp(req)}`, 60)) {
+  const zaSekund = rateLimited(`preklad:${clientIp(req)}`, LIMIT_DOTAZU);
+  if (zaSekund) {
+    // Retry-After posílá JEN tenhle limit (odpovědi služeb jdou dál bez
+    // hlaviček): appka podle něj pozná náš limit a nezkouší služby napřímo
+    // — z kanceláře neodpovídají (1. 11. 2026).
+    res.setHeader('Retry-After', String(zaSekund));
     res.status(429).json({ chyba: 'příliš mnoho požadavků' });
     return;
   }
