@@ -6618,6 +6618,8 @@ async function _initAppInner(user) {
   initAppDone = true  // profil načten, dál už nic neblokuje → zruš nouzový timeout
   clearAuthTimeout()
   odesliDenikOdhlaseni()
+  // Po přihlášení odejde, co se dřív neodeslalo — faktury a zápisy chyb (1. 11. 2026).
+  posliCekajici()
   console.log('[initApp] role ze Supabase:', JSON.stringify(profile.role))
   const role = (profile.role || '').trim().toLowerCase()
 
@@ -8699,15 +8701,77 @@ function odesliSouhrnPomalosti() {
     _pom.fce = {}; _pom.dotazy = []; _pom.zaseky = []; _pom.od = Date.now()
 }
 
+// CHYBA SE NEZTRATÍ ANI BEZ SIGNÁLU (1. 11. 2026). Zápis chyby jde stejnou
+// cestou jako to, co selhalo — když telefon nemá spojení nebo mu vypršelo
+// přihlášení, spadne taky. Appka to navíc nepoznala (supabase-js chybu
+// nevyhazuje, vrací ji), takže po Jaroslavově faktuře nezůstala žádná stopa.
+// Majitel: „chybu zapsat, až to půjde". Nepovedený zápis se proto podrží
+// v telefonu (nejvýš 20) a odejde sám spolu s fakturami — viz posliCekajici().
+const FRONTA_CHYB = 'chyby-k-odeslani'
 async function zapisChybuAppky(kde, zprava, detail) {
+  const zaznam = {
+    kdo: currentUser?.id || null,
+    kdo_jmeno: currentProfile?.full_name || null,
+    kde, zprava: String(zprava || '').slice(0, 500),
+    detail: detail || null
+  }
+  let chyba = null
+  try { chyba = (await sb.from('chyby_appky').insert(zaznam))?.error || null }
+  catch (e) { chyba = e || new Error('výjimka') }
+  if (!chyba) return
+  console.warn('[chyby_appky] zápis se nepovedl:', chyba?.message)
+  podrzChybuVTelefonu(zaznam)
+}
+
+function cekajiciChyby() {
+  try { const f = JSON.parse(lsGet(FRONTA_CHYB) || '[]'); return Array.isArray(f) ? f.filter(z => z && z._q) : [] } catch (e) { return [] }
+}
+function zapisCekajiciChyby(fronta) {
+  if (!fronta.length) { lsRemove(FRONTA_CHYB); return true }
+  return lsSet(FRONTA_CHYB, JSON.stringify(fronta))
+}
+function podrzChybuVTelefonu(zaznam) {
+  // Bez účtu ji databáze nepřijme ani později — zapsat smí každý jen sám za sebe.
+  if (!zaznam || !zaznam.kdo) return
+  // Kdy chyba opravdu vznikla (zapíše se až později). Velké podrobnosti
+  // (deník, pomalost) se zkrátí, ať v telefonu nezaberou místo fakturám.
+  const vznikla = new Date().toISOString()
+  let detail = Object.assign({}, zaznam.detail, { vznikla, odeslanoPozdeji: true })
   try {
-    await sb.from('chyby_appky').insert({
-      kdo: currentUser?.id || null,
-      kdo_jmeno: currentProfile?.full_name || null,
-      kde, zprava: String(zprava || '').slice(0, 500),
-      detail: detail || null
-    })
-  } catch (e) { console.warn('[chyby_appky] zápis se nepovedl:', e?.message) }
+    const s = JSON.stringify(zaznam.detail || null)
+    if (s.length > 8000) detail = { zkraceno: s.slice(0, 8000), vznikla, odeslanoPozdeji: true }
+  } catch (e) { detail = { vznikla, odeslanoPozdeji: true } }
+  const fronta = cekajiciChyby()
+  fronta.push({ ...zaznam, detail, _q: Date.now().toString(36) + Math.random().toString(36).slice(2, 7) })
+  // Nejvýš 20. Jako první jdou pryč souhrny pomalosti — chodí každé 3 minuty
+  // a vytlačily by chybu, kvůli které tohle celé je.
+  while (fronta.length > 20) {
+    const i = fronta.findIndex(z => z.kde === 'pomalost')
+    fronta.splice(i >= 0 ? i : 0, 1)
+  }
+  if (!zapisCekajiciChyby(fronta)) {
+    zapisCekajiciChyby(fronta.map(z => ({ ...z, detail: { vznikla: z.detail?.vznikla, odeslanoPozdeji: true, bezPodrobnosti: true } })))
+  }
+}
+let _chybyOdesilam = false
+async function posliCekajiciChyby() {
+  if (_chybyOdesilam || !_jsemPrihlaseny()) return
+  const ja = currentUser.id
+  const moje = cekajiciChyby().filter(z => z.kdo === ja)
+  if (!moje.length) return
+  _chybyOdesilam = true
+  try {
+    for (const z of moje) {
+      if (!_jsemPrihlaseny() || currentUser.id !== ja) break   // mezitím se přihlásil někdo jiný
+      const { _q, ...radek } = z
+      let chyba = null
+      try { chyba = (await sb.from('chyby_appky').insert(radek))?.error || null } catch (e) { chyba = e || new Error('výjimka') }
+      // Pořád bez spojení nebo přihlášení — zkusí se příště.
+      if (chyba && jePrechodnaChyba(chyba)) break
+      // Zapsáno, nebo to databáze odmítla natrvalo (to by nevyšlo nikdy) — pryč z fronty.
+      zapisCekajiciChyby(cekajiciChyby().filter(x => x._q !== _q))
+    }
+  } finally { _chybyOdesilam = false }
 }
 
 async function odemkniExportPdf() {
@@ -26048,6 +26112,7 @@ async function nactiMojeFaktury() {
   const card = document.getElementById('moje-faktury-card')
   const list = document.getElementById('moje-faktury-list')
   if (!card || !list || !currentUser) return
+  const ja = currentUser.id
   let data = null
   try {
     // VŠECHNY odeslané faktury, bez našich stavů. Majitel 31. 10. 2026:
@@ -26059,7 +26124,13 @@ async function nactiMojeFaktury() {
       .order('sent_at', { ascending: false }).limit(1000)
     data = r.data
   } catch (e) { console.warn('[moje faktury] načtení selhalo:', e?.message) }
-  if (!data || !data.length) { card.style.display = 'none'; return }
+  // Faktury podržené v telefonu (slabé spojení nebo přihlášení) — appka je
+  // pošle sama, pracovník je tu vidí jako „čeká na odeslání" (1. 11. 2026).
+  // Jen vlastní: na jednom telefonu se můžou střídat dva lidé.
+  const cekaji = fakturyKOdeslani().filter(f => f.worker_id === ja).map(f => ({ ...f.radek, cekaNaOdeslani: true }))
+  const cislaCekaji = new Set(cekaji.map(r => String(r.invoice_number)))
+  data = cekaji.concat((data || []).filter(r => !cislaCekaji.has(String(r.invoice_number))))
+  if (!data.length) { card.style.display = 'none'; return }
   card.style.display = ''
   list.innerHTML = data.map(r => {
     const obdobi = r.kw ? ('KW ' + r.kw + '/' + r.kw_year) : (r.period_from ? (_invDmy(r.period_from) + ' – ' + _invDmy(r.period_to)) : '')
@@ -26071,7 +26142,8 @@ async function nactiMojeFaktury() {
       </div>
       <div style="text-align:right">
         <div style="font-size:13px;font-weight:800;color:var(--text)">${(Number(r.total_amount) || 0).toFixed(2)} €</div>
-        ${r.sent_at ? `<div style="font-size:10.5px;color:var(--text3)">odesláno ${_invDmy(String(r.sent_at).slice(0, 10))}</div>` : ''}
+        ${r.cekaNaOdeslani ? '<div style="font-size:10.5px;font-weight:700;color:#9a6b15">čeká na odeslání</div>'
+          : (r.sent_at ? `<div style="font-size:10.5px;color:var(--text3)">odesláno ${_invDmy(String(r.sent_at).slice(0, 10))}</div>` : '')}
       </div>
       ${url ? `<a href="${escAttr(url)}" target="_blank" rel="noopener" title="Stáhnout" style="flex-shrink:0;display:flex;align-items:center;justify-content:center;width:34px;height:34px;border-radius:8px;background:var(--bg);color:var(--text2)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:16px;height:16px"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="M7 10l5 5 5-5"/><path d="M12 15V3"/></svg></a>` : ''}
     </div>`
@@ -32384,6 +32456,19 @@ async function generateInvoiceMobImpl(lang = 'en', override = null) {
   const zadaneCislo = String(override?.invoiceNum ?? document.getElementById('inv-num-full')?.value ?? '').trim()
   const invoiceNum = zadaneCislo || `${year}${week.toString().padStart(2,'0')}`
 
+  // Faktura, která čeká v telefonu na odeslání (1. 11. 2026), o sobě databáze
+  // ještě neví — předvyplněné číslo i kontrola níž by ji přehlédly a nová
+  // faktura by ji mohla přepsat. Appka ji proto nejdřív zkusí poslat; dokud
+  // čeká, další faktura se nevystaví.
+  if (!override && fakturyKOdeslani().some(f => f.worker_id === workerId)) {
+    try { await posliCekajiciFaktury() } catch (e) {}
+    const ceka = fakturyKOdeslani().find(f => f.worker_id === workerId)
+    if (ceka) {
+      showToast('⏳ Faktura č. ' + ceka.cislo + ' ještě čeká na odeslání — další vystavíte, až odejde (chce to spojení)')
+      return
+    }
+  }
+
   // Číslo si píše pracovník sám; admin ho může později opravit v okně úpravy.
   // O to důležitější je nepoužít jedno číslo dvakrát. Faktura za tentýž týden
   // je v pořádku (přepisuje tu původní), ale stejné číslo na jiném týdnu je chyba.
@@ -36360,6 +36445,156 @@ function invoiceErrorText(error) {
   return '❌ Fakturu se nepodařilo uložit: ' + m
 }
 
+// ===== FAKTURA, KTERÁ SE NEODESLALA, SE POŠLE SAMA (1. 11. 2026) =====
+// Majitel 1. 11. 2026: „fakturu poslal, ale nedoručila se, napodruhé už
+// přišla — prověř to". Jaroslav Janečka posílal fakturu ve chvíli, kdy telefon
+// neměl spojení nebo mu vypršelo přihlášení. Uviděl chybu a v databázi
+// nezůstalo nic — ani faktura, ani zapsaná chyba. Na návrh „podržet ji
+// v telefonu a poslat samo, chybu zapsat, až to půjde" majitel řekl „ano".
+// Přechodná chyba (síť, přihlášení) proto fakturu nezahodí: zůstane v telefonu
+// (i s PDF, když je malé) a appka ji pošle sama — po návratu signálu, po
+// návratu do appky, po přihlášení a každou minutu, dokud je appka na očích.
+// Trvalé chyby (RLS, duplicitní číslo, chybějící tabulka nebo sloupec) se
+// hlásí jako dřív. Posílá se JEN pod účtem, kterému faktura patří: na jednom
+// telefonu se můžou střídat dva lidé (Janečkovi). Každé další odeslání jde
+// přes storeInvoiceRow, takže tentýž řádek přepíše a nikdy nezdvojí.
+// Zkouška ~/sb-zkousky/fronta-faktur.
+const FRONTA_FAKTUR = 'faktury-k-odeslani'
+// Větší PDF se v telefonu nedrží — faktura pak odejde bez něj, jako dřív.
+const FRONTA_PDF_MAX = 1.5 * 1024 * 1024
+
+// Přechodná = výpadek sítě, server chvíli mimo, prošlé přihlášení. To se
+// spraví samo. Cokoli jiného (i neznámá chyba) je trvalé: tam by čekání
+// nepomohlo a pracovník musí hned vědět, že faktura neodešla.
+function jePrechodnaChyba(chyba) {
+  if (!chyba) return false
+  const kod = String(chyba.code || '')
+  const m = String(chyba.message || chyba)
+  if (/^(42501|23505|23502|23514|42P01|42703|PGRST204|PGRST205)$/.test(kod)) return false
+  if (/row-level security|policy|permission|violates|duplicate key|already exists|could not find|does not exist/i.test(m)) return false
+  if (/^(PGRST00[0-3]|PGRST30[0-3]|57014)$/.test(kod)) return true
+  return /failed to fetch|load failed|networkerror|network connection|internet connection|offline|fetcherror|aborterror|aborted|cancel|timed? ?out|timeout|jwt|exp claim|not authenticated|upstream|gateway|unavailable/i.test(m)
+}
+
+function fakturyKOdeslani() {
+  try {
+    const f = JSON.parse(lsGet(FRONTA_FAKTUR) || '[]')
+    return Array.isArray(f) ? f.filter(x => x && x.id && x.worker_id && x.cislo && x.radek) : []
+  } catch (e) { return [] }
+}
+function zapisFrontuFaktur(fronta) {
+  if (!fronta.length) { lsRemove(FRONTA_FAKTUR); return true }
+  return lsSet(FRONTA_FAKTUR, JSON.stringify(fronta))
+}
+// Faktura odešla — podržená (starší) verze téhož čísla už nesmí nic přepsat.
+function odeberZFrontyFaktur(workerId, cislo) {
+  const f = fakturyKOdeslani()
+  const zbytek = f.filter(x => !(x.worker_id === workerId && x.cislo === String(cislo)))
+  if (zbytek.length !== f.length) zapisFrontuFaktur(zbytek)
+}
+
+// Podrží fakturu v telefonu, když zápis spadl na přechodné chybě. Vrátí true,
+// jen když se to opravdu uložilo — jen pak smí appka říct „pošle se sama".
+async function podrzFakturuVTelefonu(chyba, row, out) {
+  if (!jePrechodnaChyba(chyba)) return false
+  // Jen vlastní faktura pod vlastním účtem. Fakturu, kterou vystavil správce
+  // za pracovníka, by appka neměla pod kým poslat — hlásí se jako dřív.
+  if (!row || !row.worker_id || !row.invoice_number || !_jsemPrihlaseny() || currentUser.id !== row.worker_id) return false
+  let pdf = null
+  if (!row.pdf_url && out && out.blob && out.blob.size && out.blob.size < FRONTA_PDF_MAX) {
+    try { pdf = await blobToBase64(out.blob) } catch (e) { pdf = null }
+  }
+  const cislo = String(row.invoice_number)
+  const ostatni = fakturyKOdeslani().filter(x => !(x.worker_id === row.worker_id && x.cislo === cislo))
+  const zaznam = { id: Date.now().toString(36) + Math.random().toString(36).slice(2, 7), worker_id: row.worker_id, cislo, kdy: new Date().toISOString(), radek: row, pdf }
+  if (zapisFrontuFaktur(ostatni.concat(zaznam))) return true
+  // Na PDF v telefonu není místo — podrží se bez něj a odejde bez PDF jako dřív.
+  if (pdf && zapisFrontuFaktur(ostatni.concat({ ...zaznam, pdf: null }))) return true
+  // Neuloží se vůbec (soukromý režim, plný telefon): hlásí se chyba jako dřív
+  // a starší podržená verze téhož čísla jde pryč, ať nepřepíše tu novou.
+  zapisFrontuFaktur(ostatni)
+  return false
+}
+
+function ukazFakturuCekajici(cislo) {
+  _invSentNote = '⏳ Čeká na odeslání — appka ji pošle sama, jakmile to půjde.'
+  showInvoiceSentModal('Faktura č. ' + (cislo || '') + ' se zatím neodeslala (slabé spojení nebo přihlášení). Appka ji pošle sama, jakmile to půjde — nemusíte nic dělat.', true, 'Faktura čeká na odeslání')
+  nactiMojeFaktury().catch(() => {})
+}
+
+function pdfZBase64(b64) {
+  const bin = atob(b64)
+  const bajty = new Uint8Array(bin.length)
+  for (let i = 0; i < bin.length; i++) bajty[i] = bin.charCodeAt(i)
+  return new Blob([bajty], { type: 'application/pdf' })
+}
+
+// Běžící odesílání podržených faktur (Promise) — ruční odeslání na něj počká.
+let _fakturyOdesilam = null
+function posliCekajiciFaktury() {
+  if (_fakturyOdesilam) return _fakturyOdesilam
+  if (_invSending || !_jsemPrihlaseny()) return Promise.resolve()
+  const ja = currentUser.id
+  if (!fakturyKOdeslani().some(f => f.worker_id === ja)) return Promise.resolve()
+  _fakturyOdesilam = (async () => {
+    let zmena = false
+    try {
+      for (const f of fakturyKOdeslani().filter(x => x.worker_id === ja)) {
+        // Mezitím se přihlásil někdo jiný nebo pracovník zrovna posílá ručně;
+        // ručně odeslaná už ve frontě není.
+        if (!_jsemPrihlaseny() || currentUser.id !== f.worker_id || _invSending) break
+        if (!fakturyKOdeslani().some(x => x.id === f.id)) continue
+        const row = { ...f.radek }
+        if (f.pdf && !row.pdf_url) {
+          try {
+            const up = await uploadInvoicePdf(pdfZBase64(f.pdf), f.worker_id, f.cislo)
+            row.pdf_path = up.path; row.pdf_url = up.url
+            // PDF už je nahrané — příště se nenahrává znovu.
+            zapisFrontuFaktur(fakturyKOdeslani().map(x => x.id === f.id ? { ...x, radek: row, pdf: null } : x))
+          } catch (e) {
+            // Jako při odeslání: faktura se zapíše i bez PDF. Když neprojde ani
+            // ona, zůstane ve frontě celá i s PDF a zkusí se příště.
+            console.warn('[faktura] podržené PDF se nenahrálo:', e?.message || e)
+          }
+        }
+        let error = null
+        try { error = await storeInvoiceRow(row) } catch (e) { error = e || new Error('výjimka') }
+        if (error && jePrechodnaChyba(error)) break       // pořád bez spojení nebo přihlášení
+        // Zapsaná, nebo trvale odmítnutá — tahle verze jde z fronty pryč.
+        zapisFrontuFaktur(fakturyKOdeslani().filter(x => x.id !== f.id))
+        zmena = true
+        if (error) {
+          console.error('[faktura] podržená faktura odmítnuta:', error)
+          zapisChybuAppky('faktura-fronta', error.message, { invoiceNum: f.cislo, workerId: f.worker_id, podrzenaOd: f.kdy })
+          showToast(invoiceErrorText(error) + ' (faktura č. ' + f.cislo + ')')
+          continue
+        }
+        showToast('✅ Faktura č. ' + f.cislo + ' odeslána' + (row.pdf_url ? '' : ' (bez PDF)'))
+        const d = window._lastInvoice
+        if (d && d.workerId === f.worker_id && String(d.invoiceNum || '') === f.cislo) {
+          _invSentNote = '✅ Odesláno ' + new Date().toLocaleString('cs-CZ') + ' — StavKo ji má ve složce Faktury.'
+          updateInvoiceSendUi()
+        }
+      }
+    } finally {
+      if (zmena) nactiMojeFaktury().catch(() => {})
+    }
+  })().finally(() => { _fakturyOdesilam = null })
+  return _fakturyOdesilam
+}
+
+// Kdy to zkusit znovu: po návratu signálu, po návratu do appky, po přihlášení
+// (initApp) a každou minutu — jen když je appka na očích. Ve schované záložce
+// se přihlášení neobnovuje (viz _sbFetch), tam by to stejně spadlo.
+function posliCekajici() {
+  if (!_jsemPrihlaseny() || document.visibilityState === 'hidden' || navigator.onLine === false) return
+  posliCekajiciChyby().catch(e => console.warn('[fronta chyb]', e?.message || e))
+  posliCekajiciFaktury().catch(e => console.warn('[fronta faktur]', e?.message || e))
+}
+window.addEventListener('online', () => setTimeout(posliCekajici, 1500))
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') setTimeout(posliCekajici, 1500) })
+setInterval(posliCekajici, 60000)
+
 function _invSendBusy(busy, label, text) {
   _invSending = busy
   const btn = document.getElementById('inv-send-btn')
@@ -36426,10 +36661,15 @@ async function sendInvoiceToSubbau() {
   // Na pomalém signálu trvá odesílání i desítky vteřin — popisek říká, co
   // se zrovna děje, ať to nevypadá zaseknuté.
   _invSendBusy(true, 'inv-send-label', 'Připravuji fakturu…')
+  // PDF si drží i pro případ, že se faktura podrží v telefonu (1. 11. 2026)
+  let out = null
   try {
+    // Appka zrovna sama posílá podržené faktury — počkat (nejdýl 15 s), ať
+    // starší podržená verze nepřepíše tuhle novější.
+    if (_fakturyOdesilam) await Promise.race([_fakturyOdesilam.catch(() => {}), new Promise(r => setTimeout(r, 15000))])
     // PDF: když se nepovede, fakturu i tak zapíšeme — ať se práce neztratí
     try {
-      const out = await buildInvoicePdf()
+      out = await buildInvoicePdf()
       if (label) label.textContent = 'Nahrávám fakturu…'
       const up = await uploadInvoicePdf(out.blob, d.workerId, d.invoiceNum)
       row.pdf_path = up.path
@@ -36442,10 +36682,19 @@ async function sendInvoiceToSubbau() {
     const error = await storeInvoiceRow(row)
     if (error) {
       console.error('[faktura] zápis selhal:', error)
+      // Bez signálu nebo s prošlým přihlášením se faktura podrží v telefonu
+      // a pošle se sama — místo chyby jasná zpráva (1. 11. 2026).
+      if (await podrzFakturuVTelefonu(error, row, out)) {
+        zapisChybuAppky('faktura-odeslat-subbau', error.message, { invoiceNum: d.invoiceNum, workerId: d.workerId, podrzena: true })
+        ukazFakturuCekajici(d.invoiceNum)
+        return
+      }
       showToast(invoiceErrorText(error))
       zapisChybuAppky('faktura-odeslat-subbau', error.message, { invoiceNum: d.invoiceNum, workerId: d.workerId })
       return
     }
+    // Odešla — podržená starší verze téhož čísla už nesmí nic přepsat.
+    odeberZFrontyFaktur(row.worker_id, row.invoice_number)
     // Trvalé potvrzení pod tlačítky (kdyby si pracovník náhled otevřel znovu)
     _invSentNote = '✅ Odesláno ' + new Date().toLocaleString('cs-CZ') + ' — StavKo ji má ve složce Faktury.'
     // Náhled zavři a ukaž jediné jasné potvrzení
@@ -36455,7 +36704,12 @@ async function sendInvoiceToSubbau() {
       !row.pdf_url)
   } catch (e) {
     console.error('[faktura] odeslání:', e)
-    showToast('❌ Odeslání selhalo: ' + (e?.message || e))
+    // Tahle větev se dřív nikam nezapisovala (1. 11. 2026).
+    zapisChybuAppky('faktura-odeslat-subbau', e?.message || String(e), { invoiceNum: d.invoiceNum, workerId: d.workerId, vyjimka: true })
+    let podrzena = false
+    try { podrzena = await podrzFakturuVTelefonu(e, row, out) } catch (e2) { podrzena = false }
+    if (podrzena) ukazFakturuCekajici(d.invoiceNum)
+    else showToast('❌ Odeslání selhalo: ' + (e?.message || e))
   } finally {
     _invSendBusy(false, 'inv-send-label', orig || 'Odeslat společnosti StavKo')
     updateInvoiceSendUi()
@@ -36540,15 +36794,30 @@ async function emailInvoiceToSubbau() {
       const up = await uploadInvoicePdf(out.blob, d.workerId, d.invoiceNum)
       row.pdf_path = up.path; row.pdf_url = up.url
     } catch (e) { console.warn('[faktura] PDF k e-mailu se nenahrálo:', e?.message) }
+    // Appka zrovna sama posílá podržené faktury — počkat, ať starší verze nepřepíše tuhle.
+    if (_fakturyOdesilam) await Promise.race([_fakturyOdesilam.catch(() => {}), new Promise(r => setTimeout(r, 15000))])
     const error = await storeInvoiceRow(row)
     if (error) {
       console.warn('[faktura] e-mail odešel, zápis do složky ne:', error.message)
-      zapisChybuAppky('faktura-email-bez-zapisu', error.message, { invoiceNum: d.invoiceNum, workerId: d.workerId })
+      // Bez signálu nebo s prošlým přihlášením se zápis do složky podrží
+      // v telefonu a appka ho udělá sama (1. 11. 2026).
+      let podrzena = false
+      try { podrzena = await podrzFakturuVTelefonu(error, row, out) } catch (e) { podrzena = false }
+      zapisChybuAppky('faktura-email-bez-zapisu', error.message, { invoiceNum: d.invoiceNum, workerId: d.workerId, podrzena })
+      if (podrzena) {
+        _invSentNote = '⏳ Odesláno e-mailem, do složky Faktury ji appka zapíše sama, jakmile to půjde.'
+        updateInvoiceSendUi()
+        showInvoiceSentModal('Faktura č. ' + (d.invoiceNum || '') + ' odešla e-mailem, do složky Faktury se ale zatím nezapsala (slabé spojení nebo přihlášení). Appka ji tam zapíše sama, jakmile to půjde — nemusíte nic dělat.', true)
+        nactiMojeFaktury().catch(() => {})
+        return
+      }
       _invSentNote = '⚠️ Odesláno e-mailem, ale do složky Faktury se nezapsala — dejte prosím vědět StavKo.'
       updateInvoiceSendUi()
       showInvoiceSentModal('Faktura odešla e-mailem, ale do složky Faktury se nezapsala. Dejte prosím vědět StavKo.', true)
       return
     }
+    // Zapsaná — podržená starší verze téhož čísla už nesmí nic přepsat.
+    odeberZFrontyFaktur(row.worker_id, row.invoice_number)
     if (sentVia === 'email') {
       _invSentNote = '✅ Odesláno e-mailem na ' + INVOICE_EMAIL + '.'
       updateInvoiceSendUi()
@@ -43114,7 +43383,8 @@ function closeInvoiceOverlay() {
 
 // Po odeslání se náhled zavře a zůstane jediné okno s potvrzením — pracovník
 // tak jasně vidí, že je hotovo, a nemusí náhled zavírat sám.
-function showInvoiceSentModal(text, varovani) {
+// vlastniNadpis (nepovinný): faktura podržená v telefonu není „odeslaná" (1. 11. 2026).
+function showInvoiceSentModal(text, varovani, vlastniNadpis) {
   closeInvoiceOverlay()
   const m = document.getElementById('inv-sent-modal')
   if (!m) { showToast(text); return }
@@ -43122,7 +43392,7 @@ function showInvoiceSentModal(text, varovani) {
   if (t) t.textContent = text || ''
   const nadpis = document.getElementById('inv-sent-title')
   const ikona = document.getElementById('inv-sent-icon')
-  if (nadpis) nadpis.textContent = varovani ? 'Faktura odeslána — s výhradou' : 'Faktura odeslána'
+  if (nadpis) nadpis.textContent = vlastniNadpis || (varovani ? 'Faktura odeslána — s výhradou' : 'Faktura odeslána')
   if (ikona) {
     ikona.style.background = varovani ? '#fdf3e3' : '#e1f5ee'
     ikona.style.color = varovani ? '#9a6b15' : '#1d9e75'
