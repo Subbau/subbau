@@ -606,22 +606,38 @@ module.exports = async (req, res) => {
         res.status(400).json({ ok: false, chyba: 'spatny_pracovnik' }); return;
       }
 
-      // Smí se psát jen k lidem, kteří v těch skupinách jsou.
-      let patriSem = false;
+      // Smí se psát jen k lidem, kteří v těch skupinách jsou — nebo v nich
+      // pracovali (docházka se skupinou odkazu). Odkaz je ukazuje i po přesunu
+      // jinam a právě po konci spolupráce potřebuje odběratel zaškrtnout
+      // „ukončená spolupráce" (majitel 1. 11. 2026: „nemůžu dát v odkazu
+      // Košaře, že jsme s ním ukončili spolupráci" — zápis spadl na cizi_pracovnik).
+      let patriSem = false, pracovalTu = false;
       if (teamIds.length) {
+        const skupiny = teamIds.map(encodeURIComponent).join(',');
         try {
           const p = await db(
             `profiles?select=id&id=eq.${encodeURIComponent(workerId)}` +
-            `&team_id=in.(${teamIds.map(encodeURIComponent).join(',')})&limit=1`, klic);
+            `&team_id=in.(${skupiny})&limit=1`, klic);
           patriSem = !!(p && p.length);
         } catch (e) { console.error('[klient] kontrola pracovníka:', e); }
+        if (!patriSem) {
+          try {
+            const a = await db(
+              `attendance?select=id&worker_id=eq.${encodeURIComponent(workerId)}` +
+              `&team_id=in.(${skupiny})&limit=1`, klic);
+            pracovalTu = !!(a && a.length);
+          } catch (e) { console.error('[klient] kontrola docházky pracovníka:', e); }
+        }
       }
-      if (!patriSem) { res.status(403).json({ ok: false, chyba: 'cizi_pracovnik' }); return; }
+      if (!patriSem && !pracovalTu) { res.status(403).json({ ok: false, chyba: 'cizi_pracovnik' }); return; }
 
       // ADRESA UBYTOVÁNÍ — jde přímo do profilu pracovníka, ne k odkazu.
       // Tutéž adresu vidí SubBau v Pracovnících a pracovník u sebe v appce,
       // a co tam zapíše SubBau, uvidí odběratel tady. Kódy od ubytování sem
       // nechodí a tahle funkce je ani nečte.
+      // Bývalému (v skupinách odkazu už není) profil měnit nesmí — ten už může
+      // bydlet jinde a pracovat pro jiného odběratele.
+      if ('ubytovani' in telo && !patriSem) { res.status(403).json({ ok: false, chyba: 'cizi_pracovnik' }); return; }
       if ('ubytovani' in telo) {
         const text = String(telo.ubytovani == null ? '' : telo.ubytovani)
           .replace(/[\u0000-\u001f\u007f]+/g, ' ').replace(/\s+/g, ' ').trim();
