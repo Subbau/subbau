@@ -8786,8 +8786,9 @@ async function posliCekajiciChyby() {
       try { chyba = (await sb.from('chyby_appky').insert(radek))?.error || null } catch (e) { chyba = e || new Error('výjimka') }
       // Účet se změnil během zápisu — odmítnutí nic neříká o záznamu, nechat ho.
       if (!_jsemPrihlaseny() || currentUser.id !== ja) break
-      // Pořád bez spojení nebo přihlášení — zkusí se příště.
-      if (chyba && jePrechodnaChyba(chyba)) break
+      // Pořád bez spojení nebo přihlášení, nebo neznámá chyba — zkusí se příště
+      // (fronta má nejvýš 20 záznamů, nezahltí se).
+      if (chyba && !jeTrvalaChyba(chyba)) break
       // Zapsáno, nebo to databáze odmítla natrvalo (to by nevyšlo nikdy) — pryč z fronty.
       zapisCekajiciChyby(cekajiciChyby().filter(x => x._q !== _q))
     }
@@ -36485,17 +36486,28 @@ const FRONTA_FAKTUR = 'faktury-k-odeslani'
 // místa (≈ 5 MB) ukládá knihovna přihlášení — nesmí jí dojít (kontrola 1. 11.).
 const FRONTA_PDF_MAX = 0.7 * 1024 * 1024
 
-// Přechodná = výpadek sítě, server chvíli mimo, prošlé přihlášení. To se
-// spraví samo. Cokoli jiného (i neznámá chyba) je trvalé: tam by čekání
-// nepomohlo a pracovník musí hned vědět, že faktura neodešla.
-function jePrechodnaChyba(chyba) {
+// Trvalá = databáze fakturu odmítla a další pokus dopadne stejně (práva,
+// duplicitní číslo, chybějící tabulka nebo sloupec, porušené pravidlo).
+function jeTrvalaChyba(chyba) {
   if (!chyba) return false
   const kod = String(chyba.code || '')
   const m = String(chyba.message || chyba)
-  if (/^(42501|23505|23502|23514|42P01|42703|PGRST204|PGRST205)$/.test(kod)) return false
-  if (/row-level security|policy|permission|violates|duplicate key|already exists|could not find|does not exist/i.test(m)) return false
-  if (/^(PGRST00[0-3]|PGRST30[0-3]|57014)$/.test(kod)) return true
-  return /failed to fetch|load failed|networkerror|network connection|internet connection|offline|fetcherror|aborterror|aborted|cancel|timed? ?out|timeout|jwt|exp claim|not authenticated|upstream|gateway|unavailable/i.test(m)
+  return /^(42501|23505|23502|23514|42P01|42703|PGRST204|PGRST205)$/.test(kod)
+    || /row-level security|policy|permission|violates|duplicate key|already exists|could not find|does not exist/i.test(m)
+}
+// Přechodná = výpadek sítě, server chvíli mimo, prošlé přihlášení. To se
+// spraví samo. Cokoli jiného (i neznámá chyba) se při ručním odeslání hlásí
+// jako dřív — pracovník musí hned vědět, že faktura neodešla. Podrženou
+// fakturu fronta zahodí jen při trvalé chybě (viz posliCekajiciFaktury).
+// Codex 1. 11. 2026: přechodné jsou i souběh v databázi (40001, 40P01),
+// výpadek spojení s ní (08…), přetížení (53…), její restart (57P01–03)
+// a odpověď 5xx („Internal Server Error").
+function jePrechodnaChyba(chyba) {
+  if (!chyba || jeTrvalaChyba(chyba)) return false
+  const kod = String(chyba.code || '')
+  const m = String(chyba.message || chyba)
+  if (/^(PGRST00[0-3]|PGRST30[0-3]|57014|40001|40P01|08\w{3}|53\w{3}|57P0[1-3])$/.test(kod)) return true
+  return /failed to fetch|load failed|networkerror|network connection|internet connection|offline|fetcherror|aborterror|aborted|cancel|timed? ?out|timeout|jwt|exp claim|not authenticated|upstream|gateway|unavailable|internal server error|server error|could not serialize|deadlock|too many connections|connection (refused|reset|closed|terminated)/i.test(m)
 }
 
 function fakturyKOdeslani() {
@@ -36553,6 +36565,15 @@ function pdfZBase64(b64) {
 
 // Běžící odesílání podržených faktur (Promise) — ruční odeslání na něj počká.
 let _fakturyOdesilam = null
+// Ruční odeslání počká na frontu. Je-li v ní TATÁŽ faktura, až do konce —
+// její pomalý zápis by jinak mohl doběhnout až po ručním a přepsat novější
+// verzi starší (Codex 1. 11. 2026). Kvůli ostatním nejdýl 15 s (zálohy).
+async function pockejNaFrontuFaktur(workerId, cislo) {
+  const bezi = _fakturyOdesilam
+  if (!bezi) return
+  const tataz = fakturyKOdeslani().some(x => x.worker_id === workerId && x.cislo === String(cislo))
+  await (tataz ? bezi.catch(() => {}) : Promise.race([bezi.catch(() => {}), new Promise(r => setTimeout(r, 15000))]))
+}
 function posliCekajiciFaktury() {
   if (_fakturyOdesilam) return _fakturyOdesilam
   if (_invSending || !_jsemPrihlaseny()) return Promise.resolve()
@@ -36605,7 +36626,17 @@ function posliCekajiciFaktury() {
         let error = null
         try { error = await storeInvoiceRow(row) } catch (e) { error = e || new Error('výjimka') }
         if (jinyUcet()) break
-        if (error && jePrechodnaChyba(error)) break       // pořád bez spojení nebo přihlášení
+        // Z fronty jde pryč jen zapsaná faktura, nebo ta, kterou databáze odmítla
+        // natrvalo. Přechodná i NEZNÁMÁ chyba (třeba 500 bez textu) → zkusí se
+        // příště: pracovník už dostal slib, že se pošle sama (Codex 1. 11. 2026).
+        if (error && !jeTrvalaChyba(error)) {
+          // Neznámou chybu zapsat jednou na fakturu, ne každou minutu.
+          if (!jePrechodnaChyba(error) && !f.neznamaChyba) {
+            zapisChybuAppky('faktura-fronta-neznama', error.message, { invoiceNum: f.cislo, workerId: f.worker_id, podrzenaOd: f.kdy })
+            zapisFrontuFaktur(fakturyKOdeslani().map(x => x.id === f.id ? { ...x, neznamaChyba: String(error.message || error).slice(0, 200) } : x))
+          }
+          break
+        }
         // Zapsaná, nebo trvale odmítnutá — tahle verze jde z fronty pryč.
         zapisFrontuFaktur(fakturyKOdeslani().filter(x => x.id !== f.id))
         zmena = true
@@ -36710,9 +36741,9 @@ async function sendInvoiceToSubbau() {
   // PDF si drží i pro případ, že se faktura podrží v telefonu (1. 11. 2026)
   let out = null
   try {
-    // Appka zrovna sama posílá podržené faktury — počkat (nejdýl 15 s), ať
-    // starší podržená verze nepřepíše tuhle novější.
-    if (_fakturyOdesilam) await Promise.race([_fakturyOdesilam.catch(() => {}), new Promise(r => setTimeout(r, 15000))])
+    // Appka zrovna sama posílá podržené faktury — počkat, ať starší podržená
+    // verze nepřepíše tuhle novější.
+    await pockejNaFrontuFaktur(row.worker_id, row.invoice_number)
     // PDF: když se nepovede, fakturu i tak zapíšeme — ať se práce neztratí
     try {
       out = await buildInvoicePdf()
@@ -36841,7 +36872,7 @@ async function emailInvoiceToSubbau() {
       row.pdf_path = up.path; row.pdf_url = up.url
     } catch (e) { console.warn('[faktura] PDF k e-mailu se nenahrálo:', e?.message) }
     // Appka zrovna sama posílá podržené faktury — počkat, ať starší verze nepřepíše tuhle.
-    if (_fakturyOdesilam) await Promise.race([_fakturyOdesilam.catch(() => {}), new Promise(r => setTimeout(r, 15000))])
+    await pockejNaFrontuFaktur(row.worker_id, row.invoice_number)
     const error = await storeInvoiceRow(row)
     if (error) {
       console.warn('[faktura] e-mail odešel, zápis do složky ne:', error.message)
