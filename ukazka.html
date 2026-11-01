@@ -42167,7 +42167,12 @@ async function _prekladGoogle(text, cil, sl, novy, stav) {
 async function _prekladMyMemory(text, cil, sl, stav) {
   if (!sl || sl === cil) return null
   const d = await _prekladJson('https://api.mymemory.translated.net/get?q=' + encodeURIComponent(text) + '&langpair=' + sl + '|' + cil, false, stav)
-  if (!d || Number(d.responseStatus) !== 200 || d.quotaFinished === true) return null
+  // Vyčerpaná kvóta nebo chyba služby přijde i se stavem 200 — je to selhání,
+  // ne „nic k přeložení": výkaz pak musí říct, že popis chybí (Codex 1. 11. 2026).
+  const kvotaNeboChyba = d && (Number(d.responseStatus) !== 200 || d.quotaFinished === true
+    || /MYMEMORY WARNING|LIMIT EXCEEDED/i.test(String(d.responseData?.translatedText || '')))
+  if (kvotaNeboChyba && stav) stav.selhalo = true
+  if (!d || kvotaNeboChyba) return null
   const t = String(d.responseData?.translatedText || '').trim()
   if (!t || _MYMEMORY_NENI_PREKLAD.test(t) || !_prelozeno(t, text)) return null
   return t
