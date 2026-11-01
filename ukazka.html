@@ -5725,7 +5725,7 @@ async function submitAdminSignatureWithPlacement() {
 // Po nahrání nové verze se snadno pozná, jestli se opravdu nasadila: otevřete
 // appku, zmáčkněte F12 (na Macu ⌥⌘I) a v konzoli je vypsané tohle datum. Když
 // tam svítí starší, prohlížeč nebo GitHub drží starou verzi.
-const SUBBAU_VERZE = '2026-11-01 c — Po návratu do záložky bez hesla; neodeslaná faktura se pošle sama'
+const SUBBAU_VERZE = '2026-11-01 d — Stažená faktura se jmenuje německy (Rechnung_…)'
 console.log('StavKo docházka — verze ' + SUBBAU_VERZE)
 // Verze i dole v menu správce. Když někdo novinku „nevidí", podle ní se hned
 // pozná, jestli nemá otevřenou starou kopii appky — bez hledání v konzoli.
@@ -19551,7 +19551,8 @@ async function downloadInvoicePdf(id) {
     setTimeout(() => URL.revokeObjectURL(blobUrl), 30000)
   } catch (e) {
     console.warn('[faktury] stažení selhalo, otevírám v prohlížeči:', e?.message)
-    openPdfUrl(url)
+    // I záložní cesta s německým názvem — jinak by se uložil faktura_<č>_<čas>.pdf.
+    openPdfUrl(odkazStahnoutNemecky(url, name))
   }
 }
 
@@ -19610,6 +19611,18 @@ async function printInvoicePdf(rawUrl, id) {
 function nazevFakturyZeSlozky(r) {
   const cis = String(r?.invoice_number || '').replace(/[^a-zA-Z0-9_-]/g, '')
   return ['Rechnung', cis, bezpecnyNazevSouboru(r?.worker?.full_name || r?.supplier_name)].filter(Boolean).join('_')
+}
+
+// Odkaz na PDF ve veřejném úložišti, který se uloží pod německým názvem.
+// Soubor se tam jmenuje faktura_<č>_<čas>.pdf (česky) a pod tím by ho prohlížeč
+// z přímého odkazu uložil (majitel 1. 11. 2026: „to zase píše ne Rechnung…
+// ale v češtině, nebo prostě jenom číslo — musí to být v němčině"). Supabase
+// umí ?download=<název> a pošle prohlížeči ten náš. Jiný odkaz (ukázka, blob:)
+// zůstane, jak je.
+function odkazStahnoutNemecky(url, nazev) {
+  const u = String(url || '')
+  if (!nazev || !/^https?:\/\/[^?#]+\/storage\/v1\/object\/public\//i.test(u)) return u
+  return u + (u.includes('?') ? '&' : '?') + 'download=' + encodeURIComponent(nazev)
 }
 
 // Stáhne PDF a vykreslí každou jeho stránku do obrázku (pdf.js, 2× zvětšení
@@ -26155,7 +26168,9 @@ async function nactiMojeFaktury() {
   card.style.display = ''
   list.innerHTML = data.map(r => {
     const obdobi = r.kw ? ('KW ' + r.kw + '/' + r.kw_year) : (r.period_from ? (_invDmy(r.period_from) + ' – ' + _invDmy(r.period_to)) : '')
-    const url = bezpecneDokumentyUrl(r.pdf_url)
+    // Stáhne se jako Rechnung_<číslo>_<jméno>.pdf, ne pod názvem z úložiště (1. 11. 2026).
+    const url = odkazStahnoutNemecky(bezpecneDokumentyUrl(r.pdf_url),
+      nazevFakturyZeSlozky({ invoice_number: r.invoice_number, worker: { full_name: currentProfile?.full_name } }) + '.pdf')
     return `<div style="display:flex;align-items:center;gap:10px;padding:9px 0;border-bottom:1px solid var(--brd)">
       <div style="min-width:0;flex:1">
         <div style="font-size:13px;font-weight:800;color:var(--text)">č. ${escAttr(r.invoice_number || '—')}</div>
