@@ -1465,9 +1465,23 @@ setTimeout(function () {
   var t = document.getElementById('boot-text'), p = document.getElementById('boot-sub')
   if (t && t.offsetParent !== null) { t.textContent = 'Pomalé připojení…'; if (p) p.textContent = 'Appka se pořád načítá. Vydržte prosím a nezavírejte okno.' }
 }, 9000)
-setTimeout(function () {
+setTimeout(function brzda() {
   var b = document.getElementById('boot')
   if (!b || b.style.display === 'none') return
+  // SCHOVANÁ ZÁLOŽKA (1. 11. 2026, majitel poslal fotku přihlašovací stránky
+  // s „Proč mě to odhlásilo?" a na opravu řekl „ano"). Appka načtená v pozadí
+  // s prošlým přihlášením čeká na návrat do záložky (viz cekejNaNavratDoZalozky)
+  // — brzda by tu ukázala přihlášení zbytečně. Ve schované záložce se nikdo
+  // nedívá: brzda počká, až bude vidět, a dá appce dalších 12 s.
+  if (document.visibilityState === 'hidden') {
+    var navrat = function () {
+      if (document.visibilityState === 'hidden') return
+      document.removeEventListener('visibilitychange', navrat)
+      setTimeout(brzda, 12000)
+    }
+    document.addEventListener('visibilitychange', navrat)
+    return
+  }
   // POZOR: #app, #osvec-app i #login jsou skryté stylem v CSS, ne přímo na prvku.
   // el.style.display je u nich PRÁZDNÝ ŘETĚZEC, ne 'none'. Porovnávat ho s 'none'
   // proto nedává smysl — vycházelo z toho „appka už jede“, i když nejela: brzda
@@ -6484,7 +6498,11 @@ sb.auth.onAuthStateChange(async (event, session) => {
   }
 
   if (event === 'SIGNED_IN' || event === 'INITIAL_SESSION') {
-    if (!session?.user) { showLogin('nepřihlášen'); return }
+    if (!session?.user) {
+      // Schovaná záložka s uloženým přihlášením počká na návrat (1. 11. 2026).
+      if (cekejNaNavratDoZalozky()) return
+      showLogin('nepřihlášen'); return
+    }
     if (registrationInProgress) { console.log('[auth] skip - registration in progress'); return }
     // Pokud je recovery mode - počkej na PASSWORD_RECOVERY event, nespouštěj app
     if (isRecoveryMode) {
@@ -6826,6 +6844,45 @@ window.addEventListener('online', () => {
   const login = document.getElementById('login')
   if (login && login.style.display !== 'none' && lsGet(KLIC_RELACE)) zkusZnovuNacist(true)
 })
+// SCHOVANÁ ZÁLOŽKA NECHCE HESLO (1. 11. 2026, majitel poslal fotku přihlašovací
+// stránky s „Proč mě to odhlásilo?" a na návrh opravy řekl „ano"). Appka se
+// načetla ve schované záložce (přenačtení na novou verzi, nebo Safari) s prošlým
+// přihlášením. Obnovu tam _sbFetch schválně neposílá (23. 10., „Already Used"),
+// takže knihovna ohlásila start „bez relace" a appka ukázala přihlášení — i když
+// klíč k obnově ležel v prohlížeči nepoužitý. Teď appka počká na návrat do
+// záložky a načte se sama; přihlášení ukáže, až když se ani pak nenačte.
+let _cekaNaZalozku = false
+function cekejNaNavratDoZalozky() {
+  if (document.visibilityState !== 'hidden' || !lsGet(KLIC_RELACE)) return false
+  if (!_cekaNaZalozku) zapisDenik('čekám na návrat do záložky', 'obnova přihlášení až po návratu')
+  _cekaNaZalozku = true
+  return true
+}
+async function nactiPoNavratuDoZalozky() {
+  await zkusZnovuNacist('po návratu do záložky')
+  // Nenačetlo se — teprve teď přihlašovací obrazovka, jako dřív. Relace v
+  // prohlížeči zůstala (nejde síť) → „Pořád jste přihlášeni" a zkoušet dál;
+  // zmizela (obnova vrátila 400) → formulář, pokud ho už neukázal SIGNED_OUT.
+  const login = document.getElementById('login')
+  if (currentUser || initAppRunning || authHandling || !login) return
+  if (login.style.display !== 'flex' || lsGet(KLIC_RELACE)) showLogin('nepřihlášen')
+}
+function poNavratuDoZalozky(e) {
+  if (document.visibilityState === 'hidden') return
+  if (_cekaNaZalozku) {
+    _cekaNaZalozku = false
+    // Appku mezitím nespustilo nic jiného (třeba přihlášení v jiné záložce).
+    if (!currentUser) { nactiPoNavratuDoZalozky(); return }
+  }
+  // „Pořád jste přihlášeni" už svítí — po návratu do záložky zkusit hned,
+  // ne až tikem za 30 s až 2 min.
+  const login = document.getElementById('login')
+  if (e && e.type === 'visibilitychange' && login && login.style.display === 'flex' && lsGet(KLIC_RELACE)) zkusZnovuNacist('po návratu do záložky')
+}
+document.addEventListener('visibilitychange', poNavratuDoZalozky)
+// Safari po návratu někdy pošle jen pageshow (stránka z mezipaměti) nebo focus.
+window.addEventListener('pageshow', poNavratuDoZalozky)
+window.addEventListener('focus', poNavratuDoZalozky)
 async function zkusZnovuNacist(samo) {
   if (_znovuBezi || initAppRunning || authHandling) return
   _znovuBezi = true
@@ -6836,7 +6893,7 @@ async function zkusZnovuNacist(samo) {
     const { data } = await sb.auth.getSession()
     const u = data && data.session && data.session.user
     if (!u) { if (box) box.style.display = 'none'; return }
-    zapisDenik('zkouším znovu', samo ? 'samo' : 'tlačítkem')
+    zapisDenik('zkouším znovu', typeof samo === 'string' ? samo : samo ? 'samo' : 'tlačítkem')
     appInitialized = true
     authHandling = true
     startAuthTimeout()
