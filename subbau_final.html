@@ -6074,6 +6074,9 @@ function odesliDenikOdhlaseni() {
 
 function showLogin(duvod) {
   zapisDenik('přihlašovací obrazovka', duvod || '?')
+  // I bez tlačítka Odhlásit (appka přišla o přihlášení): rozběhnuté měření polohy
+  // a pozdní poloha patří tomu, kdo byl přihlášený (2. 11. 2026).
+  ukonciPovinnouPolohu()
   if (window.skryjBoot) window.skryjBoot()   // úvodní obrazovka pryč — víme, co ukázat
   document.getElementById('login').style.display = 'flex'
   document.getElementById('app').style.display = 'none'
@@ -7338,6 +7341,9 @@ function closeAdminDrawer() {
 
 async function doLogout() {
   console.log('[doLogout] called')
+  // Měření polohy, pozdní poloha a návod k poloze patří odhlašovanému — hned pryč,
+  // ještě než se currentUser vynuluje (2. 11. 2026, viz ukonciPovinnouPolohu).
+  ukonciPovinnouPolohu()
   // Okno s chybějícími doklady patří přihlášenému — po odhlášení pryč.
   { const d = document.getElementById('docs-alert-overlay'); if (d) d.style.display = 'none' }
   window._dokladyPoSouhlasu = false
@@ -8024,10 +8030,13 @@ function odesliSouhrnPomalosti() {
 // Majitel: „chybu zapsat, až to půjde". Nepovedený zápis se proto podrží
 // v telefonu (nejvýš 20) a odejde sám spolu s fakturami — viz posliCekajici().
 const FRONTA_CHYB = 'chyby-k-odeslani'
-async function zapisChybuAppky(kde, zprava, detail) {
+// kdo = { id, jmeno } (nepovinné, 2. 11. 2026): za koho chybu zapsat, když to
+// nemá být právě přihlášený — nezapsaný příchod bez polohy, během kterého se
+// pracovník odhlásil, patří jemu, ne dalšímu přihlášenému. Bez něj jako dřív.
+async function zapisChybuAppky(kde, zprava, detail, kdo) {
   const zaznam = {
-    kdo: currentUser?.id || null,
-    kdo_jmeno: currentProfile?.full_name || null,
+    kdo: (kdo && kdo.id) || currentUser?.id || null,
+    kdo_jmeno: kdo && kdo.id ? (kdo.jmeno || null) : (currentProfile?.full_name || null),
     kde, zprava: String(zprava || '').slice(0, 500),
     detail: detail || null
   }
@@ -22540,7 +22549,9 @@ async function mobCheckin(type) {
     showToast('🚫 Zaznamenávání docházky je dočasně pozastaveno. Kontaktujte SubBau.')
     return
   }
-  if (checkinInProgress) { showToast('⏳ Počkejte...'); return }
+  // Běžící povinné měření polohy (firma „jen s polohou") počítá jako rozdělaný zápis,
+  // i když zámek mezitím uvolnila pojistka 20 s (kontrola 2. 11. 2026).
+  if (checkinInProgress || mereniPolohyBezi()) { showToast('⏳ Počkejte...'); return }
   // Panel s ruční adresou ukážeme až po zápisu (viz níž), ať nic nezdržuje.
   // DOCHÁZKA SE MUSÍ ZAPSAT VŽDYCKY. Dřív tady stálo `return`, když appka
   // neznala adresu stavby — pauza ani odchod se tím vůbec nezapsaly a lidem
@@ -22614,20 +22625,39 @@ async function mobCheckin(type) {
   // (`now` výš), ne z konce měření.
   let povinnaPoloha = null
   if (type === 'in' || type === 'out') {
+    // Kdo ťukl (kontrola 2. 11. 2026): když se během měření polohy odhlásí, appka
+    // už patří dalšímu — tomu se z tohohle pokusu nic neukáže ani nezapíše.
+    const kdoTukl = { id: currentUser.id, jmeno: currentProfile?.full_name || null }
+    const odhlasilSe = () => !currentUser || currentUser.id !== kdoTukl.id
     if (await mojeFirmaChcePolohu()) {
       clearTimeout(_stuckGuard)
+      // Odhlášení během zjišťování pravidla — měřit už není pro koho.
+      if (odhlasilSe()) { checkinInProgress = false; window.zapisProbiha = false; return }
+      // Jiné povinné měření ještě běží (sem se dostane jen souběhem, když zámek
+      // uvolnil doběhlý dřívější zápis) — dvě měření naráz by si přepisovala panel,
+      // Zrušit i záznam do deníku. Zámky patří běžícímu, ten je na konci uvolní.
+      if (mereniPolohyBezi()) { showToast('⏳ Počkejte...'); return }
       // Dřív tu byla 3s hláška „📍 Zjišťuji polohu…" a po ní až 12 s na obrazovce
       // nic. 2. 11. 2026 (Petr Fuks) ji nahradil panel, který drží celou dobu
       // měření (sekundy, „ťukněte na Povolit", Zrušit) — viz ukazMereniPolohy.
       // Hláška by jen zopakovala jeho text a překrývala se s ním.
       povinnaPoloha = await ziskejPolohuPovinne()
+      // Během měření se odhlásil (měření ukončilo odhlášení, ukonciPovinnouPolohu):
+      // žádný zápis docházky, hláška ani návod. Nepovedený pokus jde do deníku pod
+      // tím, kdo ťukal (s příznakem odhlaseno), ne pod dalšího přihlášeného.
+      if (odhlasilSe()) {
+        checkinInProgress = false
+        window.zapisProbiha = false
+        if (!povinnaPoloha) zapisNezapsanePolohy(type, now, kdoTukl)
+        return
+      }
       if (!povinnaPoloha) {
         checkinInProgress = false
         window.zapisProbiha = false
         // 2. 11. 2026, Petr Fuks: šest dní nezapsal docházku a v appce po tom
         // nezůstalo nic. Teď každé nepovedené měření nechá stopu v deníku chyb.
         // Bez await — deník nesmí návod zdržet ani nic shodit.
-        zapisNezapsanePolohy(type, now)
+        zapisNezapsanePolohy(type, now, kdoTukl)
         if (window._chybaPolohy === 'zruseno') {
           // Zrušil to sám (panel měření) — návod by mu jen překážel.
           showToast('📍 Zápis zrušen — nic se nezapsalo.')
@@ -27449,9 +27479,15 @@ function fetchAdresy(url, volby, ms) {
 // Konec směny to vezme hned — je-li to nejvýš 2 min staré. Otevřený návod mezitím
 // ukáže zelený řádek „Poloha se právě našla".
 const POZDNI_POLOHA_MS = 120000
-let _pozdniPoloha = null        // { lat, lng, acc, kdy }
+let _pozdniPoloha = null        // { lat, lng, acc, kdy, kdo } — kdo = id pracovníka, který měřil
 let _pozdniSledovani = null     // { zastav } — sledování na pozadí, vždy nejvýš jedno
 let _pozdniRadekCasovac = null
+// Běžící povinné měření ({ zrusit }), dokud nevrátí výsledek — vždy nejvýš jedno.
+// Kontrola 2. 11. 2026: když zámek checkinInProgress uvolnila pojistka 20 s nebo
+// odhlášení, šlo spustit druhé měření naráz a obě si přepisovala panel, Zrušit,
+// window._polohaDiag i záznam do deníku (konec prvního schoval panel druhého).
+let _povinneMereni = null
+function mereniPolohyBezi() { return !!_povinneMereni }
 function zastavPozdniSledovani() {
   const s = _pozdniSledovani
   _pozdniSledovani = null
@@ -27460,9 +27496,10 @@ function zastavPozdniSledovani() {
 function pozdniPolohaPlati() {
   return !!(_pozdniPoloha && Date.now() - _pozdniPoloha.kdy <= POZDNI_POLOHA_MS)
 }
-// Začíná nové povinné měření: vezmi pozdní polohu (je-li čerstvá) a sledování ukonči.
-function vezmiPozdniPolohu() {
-  const p = pozdniPolohaPlati() ? _pozdniPoloha : null
+// Začíná nové povinné měření: vezmi pozdní polohu (je-li čerstvá a naměřená pro
+// téhož pracovníka) a sledování ukonči.
+function vezmiPozdniPolohu(kdo) {
+  const p = pozdniPolohaPlati() && _pozdniPoloha.kdo === kdo ? _pozdniPoloha : null
   _pozdniPoloha = null
   zastavPozdniSledovani()
   return p
@@ -27472,12 +27509,25 @@ function zahodPozdniPolohu() {
   _pozdniPoloha = null
   zastavPozdniSledovani()
 }
-function zapamatujPozdniPolohu(p) {
+// ODHLÁŠENÍ / PŘIHLAŠOVACÍ OBRAZOVKA (kontrola 2. 11. 2026). Rozběhnuté povinné
+// měření skončí hned (panel pryč, GPS vypnutá), pozdní poloha i sledování na pozadí
+// se zahodí a návod se zavře — patří tomu, kdo ťukal. Dřív po odhlášení běžela
+// GPS dál (až 2 min, s panelem i na přihlašovací obrazovce) a kdo se na tomtéž
+// telefonu přihlásil do 2 min, dostal příchod zapsaný hned s polohou předchozího.
+// Volá doLogout a showLogin; nic nevyhodí.
+function ukonciPovinnouPolohu() {
+  try { const m = _povinneMereni; if (m) m.zrusit() } catch (e) {}
+  try { zahodPozdniPolohu() } catch (e) {}
+  try { const d = document.getElementById('navod-polohy'); if (d) d.style.display = 'none' } catch (e) {}
+}
+function zapamatujPozdniPolohu(p, kdo) {
   try {
+    // Mezitím se odhlásil (nebo je přihlášený někdo jiný) — poloha mu nepatří.
+    if (!currentUser || currentUser.id !== kdo) { zastavPozdniSledovani(); return }
     const acc = (p && p.coords && p.coords.accuracy) || 9999
     // Drží se ta přesnější (stejně přesná novější ji nahradí).
-    if (pozdniPolohaPlati() && _pozdniPoloha.acc < acc) return
-    _pozdniPoloha = { lat: p.coords.latitude, lng: p.coords.longitude, acc, kdy: Date.now() }
+    if (pozdniPolohaPlati() && _pozdniPoloha.kdo === kdo && _pozdniPoloha.acc < acc) return
+    _pozdniPoloha = { lat: p.coords.latitude, lng: p.coords.longitude, acc, kdy: Date.now(), kdo }
     ukazPozdniPolohuVNavodu()
     // Dost přesná (jako u měření ≤ 50 m) — GPS už vypnout, šetří baterku.
     if (acc <= 50) zastavPozdniSledovani()
@@ -27505,7 +27555,7 @@ function zjistiPovoleni(ms) {
 // a povinné měření teď smí trvat 45 s (s dotazem na povolení i víc). Panel ukazuje
 // celou dobu, kolik sekund už appka hledá, co má člověk udělat, a „Zrušit".
 // Nahoře, ať nezakryje tlačítko, na které člověk právě ťukl; když je stránka
-// posunutá a tlačítko je až nahoře, jde panel dolů nad spodní lištu.
+// posunutá a tlačítko je až nahoře, jde panel dolů nad spodní lištu (umistiMereniPolohy).
 // z-index 150: nad spodní lištou (100), pod všemi okny (od 200) — návod i dotazy
 // appky ho zakryjí. Počítadlo sekund je pro čtečky skryté, ať je nečte každou sekundu.
 function ukazMereniPolohy(zrusit) {
@@ -27515,17 +27565,40 @@ function ukazMereniPolohy(zrusit) {
     el.id = 'poloha-mereni'
     el.style.cssText = 'position:fixed;left:12px;right:12px;max-width:440px;margin:0 auto;box-sizing:border-box;z-index:150;display:none;align-items:center;gap:10px;padding:10px 10px 10px 14px;background:#fff;color:#211D1A;border:2px solid #1d9e75;border-radius:14px;box-shadow:0 6px 24px rgba(0,0,0,.25);font-family:inherit'
     el.innerHTML = '<div role="status" style="flex:1;min-width:0">'
-      + '<div style="font-size:15px;font-weight:800;line-height:1.3">📍 Hledám polohu… <span id="poloha-mereni-s" aria-hidden="true"></span></div>'
+      + '<div style="font-size:15px;font-weight:800;line-height:1.3"><span id="poloha-mereni-text">📍 Hledám polohu…</span> <span id="poloha-mereni-s" aria-hidden="true"></span></div>'
       + '<div id="poloha-mereni-rada" style="display:none;font-size:13px;line-height:1.35;color:#5b524a;margin-top:2px"></div>'
       + '</div>'
       + '<button type="button" id="poloha-mereni-zrusit" style="flex-shrink:0;min-height:44px;padding:0 14px;border:1px solid #d6d0c8;border-radius:10px;background:#fff;color:#555;font-size:14px;font-weight:700;font-family:inherit;cursor:pointer">Zrušit</button>'
     document.body.appendChild(el)
   }
   el.querySelector('#poloha-mereni-zrusit').onclick = zrusit
-  el.style.top = 'calc(8px + env(safe-area-inset-top, 0px))'
-  el.style.bottom = 'auto'
+  // Od začátku: řádek rady z minulého měření pryč, Zrušit zase vidět.
+  const rada = el.querySelector('#poloha-mereni-rada')
+  if (rada) { rada.textContent = ''; rada.style.display = 'none' }
   el.style.display = 'flex'
+  obnovMereniPolohy(0, '', false)
+  return el
+}
+// Kam s panelem (kontrola 2. 11. 2026). Nahoře, ale POD lištou oznámení
+// (#announcement-banner, z-index 9999 — červené svítí, dokud ho pracovník
+// nepotvrdí) a lištou „bez připojení" (#offline-banner, z-index 99999). Dřív
+// stál vždy na 8 px a lišta ho celý zakryla: pracovník 45–60 s neviděl nic a na
+// Zrušit nešlo ťuknout. Zvednout ho nad lišty nejde, byl by i nad okny appky.
+// Když by nahoře zakryl tlačítko docházky (stránka posunutá), jde dolů nad spodní
+// lištu. Volá se při každé obnově panelu (každou sekundu i při změně řádku rady —
+// ten panel zvětší) — lišta se může objevit i uprostřed měření.
+function umistiMereniPolohy(el) {
+  if (!el || el.style.display === 'none') return
   try {
+    let pod = 0
+    for (const id of ['announcement-banner', 'offline-banner']) {
+      const l = document.getElementById(id)
+      if (!l || getComputedStyle(l).display === 'none') continue
+      const q = l.getBoundingClientRect()
+      if (q.height > 0 && q.bottom > pod) pod = q.bottom
+    }
+    el.style.bottom = 'auto'
+    el.style.top = pod > 0 ? Math.ceil(pod + 8) + 'px' : 'calc(8px + env(safe-area-inset-top, 0px))'
     const r = el.getBoundingClientRect()
     const zakryl = [...document.querySelectorAll('#att-main-btn, #att-secondary')].some(b => {
       const q = b.getBoundingClientRect()
@@ -27533,16 +27606,26 @@ function ukazMereniPolohy(zrusit) {
     })
     if (zakryl) { el.style.top = 'auto'; el.style.bottom = 'calc(76px + env(safe-area-inset-bottom, 0px))' }
   } catch (e) {}
-  return el
 }
-function obnovMereniPolohy(sekund, rada) {
-  const s = document.getElementById('poloha-mereni-s')
-  const r = document.getElementById('poloha-mereni-rada')
-  if (s) s.textContent = sekund + ' s'
+// nalezena = poloha už je a dohledává se adresa (nejvýš 2× 4 s): panel to řekne
+// a Zrušit schová — dřív dál hlásil „Hledám polohu…" a Zrušit v tu chvíli
+// nalezenou polohu zahodil (kontrola 2. 11. 2026).
+function obnovMereniPolohy(sekund, rada, nalezena) {
+  const el = document.getElementById('poloha-mereni')
+  if (!el) return
+  const text = el.querySelector('#poloha-mereni-text')
+  const s = el.querySelector('#poloha-mereni-s')
+  const r = el.querySelector('#poloha-mereni-rada')
+  const z = el.querySelector('#poloha-mereni-zrusit')
+  const t = nalezena ? '📍 Poloha nalezena — dohledávám adresu…' : '📍 Hledám polohu…'
+  if (text && text.textContent !== t) text.textContent = t
+  if (s) s.textContent = nalezena ? '' : sekund + ' s'
+  if (z) z.style.display = nalezena ? 'none' : ''
   if (r) {
     if (r.textContent !== rada) r.textContent = rada
     r.style.display = rada ? 'block' : 'none'
   }
+  umistiMereniPolohy(el)
 }
 function skryjMereniPolohy() {
   const el = document.getElementById('poloha-mereni')
@@ -27586,9 +27669,12 @@ function captureLocationNow(volby) {
       chybaText: null, limit: '60s', skryto: 0, msMereni: 0, pozdni: false
     }) : null
     if (!navigator.geolocation) { window._chybaPolohy = 'nepodporuje'; resolve(''); return }
+    // Kdo měří: pozdní poloha i sledování na pozadí patří jen jemu — po odhlášení
+    // je další přihlášený nedostane (kontrola 2. 11. 2026).
+    const kdo = povinna && currentUser ? currentUser.id : null
     // Poloha, která po minulém povinném pokusu přišla pozdě (nejvýš 2 min stará).
     // Bere se hned na začátku a sledování na pozadí tím končí.
-    const pozdni = povinna ? vezmiPozdniPolohu() : null
+    const pozdni = povinna ? vezmiPozdniPolohu(kdo) : null
 
     const NA_PRVNI_UDAJ_MS = povinna ? 45000 : 15000   // poloha povolená: čekání na první údaj
     const NA_ODPOVED_MS = 60000      // telefon se ptá: odpověď člověka + první údaj
@@ -27604,6 +27690,10 @@ function captureLocationNow(volby) {
     // Jen povinné měření: poslední chyba 2/3 před prvním údajem, poslední zjištěný
     // stav oprávnění, tik panelu, sledování na pozadí a „výsledek je rozhodnutý".
     let posledniKod = null, stavPovoleni = null, tik = null, naPozadi = false, rozhodnuto = false
+    // Tohle povinné měření v _povinneMereni, dokud nevrátí výsledek. Odhlášení ho
+    // ukončí vynuceně (ukonciPovinnouPolohu → zrusit(true)).
+    const mereni = povinna ? { zrusit: () => zrusit(true) } : null
+    const odregistruj = () => { if (mereni && _povinneMereni === mereni) _povinneMereni = null }
 
     const stopWatch = () => {
       if (watchId !== null) { try { navigator.geolocation.clearWatch(watchId) } catch(e){} watchId = null }
@@ -27616,11 +27706,18 @@ function captureLocationNow(volby) {
       const s = Math.floor((Date.now() - start) / 1000)
       obnovMereniPolohy(s, done ? ''
         : stavPovoleni === 'prompt' ? 'Telefon se ptá na polohu — ťukněte na Povolit.'
-        : s >= 8 ? 'Venku nebo u okna to jde rychleji.' : '')
+        // Safari do iOS 15 nemá Permissions API ('unknown') — appka neví, jestli se
+        // telefon ptá. Rada z dřívější hlášky „Zjišťuji polohu…" tam platí podmíněně,
+        // do 8. s (pak řádek o okně), dokud nepřijde poloha (kontrola 2. 11. 2026).
+        : stavPovoleni === 'unknown' && s < 8 && bestLat === null ? 'Když se telefon zeptá, ťukněte na Povolit.'
+        : s >= 8 ? 'Venku nebo u okna to jde rychleji.' : '',
+        done && bestLat !== null)
     }
     const uklid = () => {
       clearInterval(tik); skryjMereniPolohy()
       document.removeEventListener('visibilitychange', pocitejSkryti)
+      window.removeEventListener('offline', obnovPanel)
+      window.removeEventListener('online', obnovPanel)
     }
     // Poloha povolená → na první údaj 45 s (jen jednou: od ťuknutí, nebo od povolení).
     const poPovoleni = (stav) => {
@@ -27642,12 +27739,17 @@ function captureLocationNow(volby) {
       }).catch(() => {})
     }
     // Poloha je (adresa) — platí první rozhodnutí; pozdější „Zrušit" už nic nezmění.
+    // Výsledek čte volající hned po resolve přes window._chybaPolohy / _polohaDiag —
+    // proto se těsně před resolve nastaví znovu (mezitím je mohlo přepsat jiné měření)
+    // a měření se odhlásí z _povinneMereni až s ním.
     const vrat = !povinna ? resolve : (adresa) => {
       if (rozhodnuto) return
       rozhodnuto = true
       uklid()
       // Stav oprávnění na konci jen do záznamu — zápis na něj nečeká.
       zjistiPovoleni(800).then(stav => { diag.povoleniKonec = stav || stavPovoleni })
+      window._polohaDiag = diag
+      odregistruj()
       resolve(adresa)
     }
     // Bez polohy: kód pro návod; sledovatDal = nechat sledování běžet na pozadí
@@ -27660,10 +27762,15 @@ function captureLocationNow(volby) {
       if (sledovatDal && watchId !== null) predejNaPozadi(); else stopWatch()
       // Návod se řídí stavem oprávnění NA KONCI (Chrome hlásí 'denied' u zablokované
       // stránky, 'prompt' i u vypnuté polohy) — počkat na něj, nejvýš 0,8 s.
-      zjistiPovoleni(800).then(stav => { diag.povoleniKonec = stav || stavPovoleni || 'unknown'; resolve('') })
+      zjistiPovoleni(800).then(stav => {
+        diag.povoleniKonec = stav || stavPovoleni || 'unknown'
+        window._chybaPolohy = kod; window._polohaDiag = diag
+        odregistruj()
+        resolve('')
+      })
     }
     // Sledování běží dál na pozadí nejvýš POZDNI_POLOHA_MS; co přijde, zapamatuje
-    // zapamatujPozdniPolohu. Vždy jen jedno sledování na pozadí.
+    // zapamatujPozdniPolohu (jen pro toho, kdo měřil). Vždy jen jedno sledování na pozadí.
     const predejNaPozadi = () => {
       zastavPozdniSledovani()
       naPozadi = true
@@ -27674,8 +27781,12 @@ function captureLocationNow(volby) {
       _pozdniSledovani = sledovani
     }
     // „Zrušit" na panelu: konec hned, nic se nezapíše a na pozadí se nesleduje.
-    const zrusit = () => {
+    // Když už poloha je a jen se dohledává adresa, panel Zrušit nenabízí a ťuknutí
+    // nic nezmění (dřív tím pracovník nalezenou polohu zahodil). vynutit = odhlášení
+    // (ukonciPovinnouPolohu): končí se vždy.
+    const zrusit = (vynutit) => {
       if (rozhodnuto) return
+      if (!vynutit && done && bestLat !== null) return
       if (!done) { done = true; clearTimeout(casovac); diag.msMereni = Date.now() - start }
       nevyslo('zruseno', false)
     }
@@ -27689,6 +27800,8 @@ function captureLocationNow(volby) {
         diag.msMereni = Date.now() - start
         // Bez polohy: poslední chyba 2/3, jinak 3 (nestihla se) — a sledovat dál na pozadí.
         if (bestLat === null) { nevyslo(posledniKod != null ? posledniKod : 3, true); return }
+        // Poloha je: panel hned „Poloha nalezena — dohledávám adresu…", bez Zrušit.
+        obnovPanel()
       }
       stopWatch()
       if (bestLat === null) { if (window._chybaPolohy == null) window._chybaPolohy = 3; resolve(''); return }
@@ -27727,8 +27840,16 @@ function captureLocationNow(volby) {
     }
 
     if (povinna) {
+      // Vždy jen jedno povinné měření. mobCheckin další ťuknutí během měření odbude
+      // „⏳ Počkejte..."; kdyby se sem přesto dostalo druhé, staré (osiřelé) skončí.
+      if (_povinneMereni) { try { _povinneMereni.zrusit() } catch (e) {} }
+      _povinneMereni = mereni
       document.addEventListener('visibilitychange', pocitejSkryti)
-      ukazMereniPolohy(zrusit)
+      // Lišta „bez připojení" se ukáže / zmizí hned (posluchač appky běží dřív než
+      // tenhle) — panel se pod ni přesune hned, ne až při dalším tiknutí.
+      window.addEventListener('offline', obnovPanel)
+      window.addEventListener('online', obnovPanel)
+      ukazMereniPolohy(() => zrusit(false))
       obnovPanel()
       tik = setInterval(tikni, 1000)
       if (pozdni) {
@@ -27750,7 +27871,7 @@ function captureLocationNow(volby) {
     // HNED po ťuknutí (bez čekání na zjištění oprávnění), ať se telefon zeptá.
     watchId = navigator.geolocation.watchPosition(p => {
       // Po konci měření jen povinné: sledování na pozadí si polohu zapamatuje.
-      if (done) { if (naPozadi) zapamatujPozdniPolohu(p); return }
+      if (done) { if (naPozadi) zapamatujPozdniPolohu(p, kdo); return }
       const acc = p.coords.accuracy || 9999
       if (povinna) {
         diag.udaju++
@@ -28098,10 +28219,23 @@ async function mojeFirmaChcePolohu(obnovit) {
 //    ji nepovolil Android; 'denied' u zablokované stránky. Proto i „nestihla se"
 //    při 'prompt' dostane kroky k povolení (stav na konci: _polohaDiag).
 //  - Návod mluvil o tlačítku „Příchod", na obrazovce je „Začít směnu".
+//
+// Jak se tlačítko, na které návod posílá, na obrazovce opravdu jmenuje: „Konec
+// směny", „Začít směnu" — a po ukončené směně téhož dne „Začít další směnu"
+// (updateMobStav). Kontrola 2. 11. 2026: u druhé směny posílal návod i připomínka
+// po obnovení na „Začít směnu", které na obrazovce nebylo.
+function jmenoTlacitkaDochazky(type) {
+  if (type === 'out') return 'Konec směny'
+  try {
+    const t = (document.getElementById('att-main-btn')?.textContent || '').trim()
+    if (t === 'Začít směnu' || t === 'Začít další směnu') return t
+  } catch (e) {}
+  return 'Začít směnu'
+}
 function ukazNavodPolohy(type, kod) {
   const co = type === 'out' ? 'Odchod' : 'Příchod'
   // Jak se tlačítko na obrazovce opravdu jmenuje.
-  const tlacitko = type === 'out' ? 'Konec směny' : 'Začít směnu'
+  const tlacitko = jmenoTlacitkaDochazky(type)
   const ios = typeof isIOS === 'function' && isIOS()
   const android = /android/i.test(navigator.userAgent || '')
   const zPlochy = typeof isAppInstalled === 'function' && isAppInstalled()
@@ -28187,8 +28321,10 @@ function ukazNavodPolohy(type, kod) {
   const typZapisu = type === 'out' ? 'out' : 'in'
   // Po zákazu (mimo Android) se stránka obnoví (jinak se Safari znovu nezeptá)
   // a po načtení appka připomene, ať ťukne znovu — sama nic nezapisuje.
+  // Jméno tlačítka si připomínka po obnovení vezme odsud (appka se po načtení
+  // teprve rozkoukává a tlačítko ještě nemusí mít text).
   dlg.querySelector('#navod-polohy-znovu').onclick = poZakazu
-    ? () => { try { sessionStorage.setItem('sb_poloha_znovu', typZapisu) } catch (e) {} location.reload() }
+    ? () => { try { sessionStorage.setItem('sb_poloha_znovu', typZapisu); sessionStorage.setItem('sb_poloha_znovu_tlacitko', tlacitko) } catch (e) {} location.reload() }
     : () => { dlg.style.display = 'none'; mobCheckin(typZapisu) }
   dlg.style.display = 'flex'
   // Poloha mohla přijít mezi koncem měření a otevřením návodu.
@@ -28203,9 +28339,14 @@ function pripomenPolohuPoObnoveni() {
   try {
     const znovu = sessionStorage.getItem('sb_poloha_znovu')
     if (!znovu) return
+    const ulozene = sessionStorage.getItem('sb_poloha_znovu_tlacitko')
     sessionStorage.removeItem('sb_poloha_znovu')
-    // Jménem tlačítka, které na obrazovce opravdu je (2. 11. 2026).
-    setTimeout(() => showToast('📍 Ťukněte znovu na ' + (znovu === 'out' ? 'Konec směny' : 'Začít směnu')
+    sessionStorage.removeItem('sb_poloha_znovu_tlacitko')
+    // Jménem tlačítka, které na obrazovce opravdu je (2. 11. 2026) — to, které
+    // viděl před obnovením (i „Začít další směnu"); jiný text se nepřevezme.
+    const jmeno = () => znovu === 'out' ? 'Konec směny'
+      : (ulozene === 'Začít směnu' || ulozene === 'Začít další směnu') ? ulozene : jmenoTlacitkaDochazky('in')
+    setTimeout(() => showToast('📍 Ťukněte znovu na ' + jmeno()
       + ' — když se telefon zeptá na polohu, dejte „Povolit“.'), 1500)
   } catch (e) {}
 }
@@ -28221,7 +28362,14 @@ async function ziskejPolohuPovinne() {
     const adresa = await captureLocationNow({ povinna: true })
     if (!adresa || gpsLat == null || gpsLng == null) return null
     return { lat: gpsLat, lng: gpsLng, adresa }
-  } catch (e) { skryjMereniPolohy(); return null }
+  } catch (e) {
+    // Měření spadlo — nesmí po něm zůstat panel, tikání ani „běžící měření"
+    // (každé další ťuknutí by jinak dostalo jen „Počkejte").
+    try { const m = _povinneMereni; if (m) m.zrusit() } catch (x) {}
+    _povinneMereni = null
+    skryjMereniPolohy()
+    return null
+  }
 }
 
 // STOPA PO NEZAPSANÉM PŘÍCHODU / ODCHODU (2. 11. 2026). Petr Fuks (firma „jen
@@ -28232,11 +28380,14 @@ async function ziskejPolohuPovinne() {
 // nebo prohlížeč, telefon. ŽÁDNÉ souřadnice.
 // Volá se bez await: nic nevyhodí a nic nezdrží (model telefonu se čeká nejvýš
 // 0,8 s; bez sítě zápis podrží v telefonu zapisChybuAppky).
-async function zapisNezapsanePolohy(type, kdyTuknul) {
+// kdo = { id, jmeno } toho, kdo ťukl — záznam patří jemu, i když se mezitím
+// odhlásil (pak detail.odhlaseno = true; kontrola 2. 11. 2026).
+async function zapisNezapsanePolohy(type, kdyTuknul, kdo) {
   try {
     // Hned, před prvním await — další pokus by _polohaDiag přepsal.
     const d = Object.assign({}, window._polohaDiag || {})
     const kod = window._chybaPolohy
+    const odhlaseno = !!(kdo && kdo.id && (!currentUser || currentUser.id !== kdo.id))
     const mm = (q) => { try { return window.matchMedia(q).matches } catch (e) { return false } }
     const rezim = mm('(display-mode: fullscreen)') ? 'fullscreen'
       : (mm('(display-mode: standalone)') || window.navigator.standalone === true) ? 'standalone'
@@ -28256,7 +28407,8 @@ async function zapisNezapsanePolohy(type, kdyTuknul) {
       model: null, platformVersion: null,
       online: navigator.onLine,
       sit: (navigator.connection && navigator.connection.effectiveType) || null,
-      pravidlo: { zdroj: window._gpsPravidloZdroj ?? null, vekMs: window._gpsPravidloVekMs ?? null }
+      pravidlo: { zdroj: window._gpsPravidloZdroj ?? null, vekMs: window._gpsPravidloVekMs ?? null },
+      odhlaseno
     }
     const zprava = (kod === 'zruseno' ? 'zrušeno' : 'kód ' + kod)
       + ' · povolení ' + (detail.povoleniStart || '?') + ' → ' + (detail.povoleniKonec || '?')
@@ -28271,7 +28423,7 @@ async function zapisNezapsanePolohy(type, kdyTuknul) {
         if (h) { detail.model = h.model || null; detail.platformVersion = h.platformVersion || null }
       } catch (e) {}
     }
-    await zapisChybuAppky(type === 'out' ? 'odchod-bez-polohy' : 'prichod-bez-polohy', zprava, detail)
+    await zapisChybuAppky(type === 'out' ? 'odchod-bez-polohy' : 'prichod-bez-polohy', zprava, detail, kdo)
   } catch (e) { console.warn('[poloha] zápis do deníku se nepovedl:', e && e.message) }
 }
 
