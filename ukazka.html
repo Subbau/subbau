@@ -1872,7 +1872,9 @@ setTimeout(function brzda() {
       window.__denikRaneZapis(nacita ? 'start-pomaly' : 'start-brzda', nacita ? 'appka do 12 s nic neukázala — stránka se ještě stahuje' : 'appka do 12 s nic neukázala',
         { t: nacita ? 'varovani' : 'chyba', skriptDobehl: !!window.__hlavniSkriptDobehl, jadro: !!window.__denikJadro, knihovna: !!window.supabase })
     }
-  } catch (e) {}
+    // Pojistka deníku nesmí zastavit brzdu; chybu nespolknout potichu (kritika
+    // 20c, spojení 2. 11. 2026) — značku [deník chyb] konzole deníku vynechá.
+  } catch (e) { console.warn('[deník chyb]', e) }
   window.skryjBoot()
   // Když appka do dvanácti vteřin nestihla nic ukázat, ukážeme aspoň přihlášení.
   // Prázdná obrazovka je to nejhorší, co může uživatel dostat.
@@ -6541,8 +6543,14 @@ function _dnCiste(x, klic, hloubka, videne) {
     }
     const ven = {}
     let n = 0
+    // Horní úroveň podrobností až 60 klíčů, vnořené 40 (spojení 2. 11. 2026):
+    // řádek polohy (_dnDochazka + _dnPolohaDetail + podrobnosti měření) má až
+    // 41 klíčů a ten poslední — ucet (kdo ťukal, když se mezitím odhlásil),
+    // případně pravidloVekMs — by při 40 potichu zmizel (sonda na ukázce:
+    // odchod, hrubý údaj, odhlášení). Velikost dál hlídá 16 000 znaků.
+    const strop = hloubka === 0 ? 60 : 40
     for (const k of Object.keys(x)) {
-      if (n >= 40) break
+      if (n >= strop) break
       if (DN_CITLIVY.test(k)) continue
       const h = _dnCiste(x[k], k, hloubka + 1, videne)
       if (h !== undefined) { ven[k] = h; n++ }
@@ -8266,7 +8274,9 @@ if (isRecoveryMode) {
     const kod = tvar(h.get('error_code') || q.get('error_code')), chyba = tvar(h.get('error') || q.get('error'))
     if (!kod && !chyba) return
     denikChybZapis('odkaz-z-emailu', 'Odkaz z e-mailu nefunguje (' + (kod || chyba) + ')', { error_code: kod, chyba, typ: tvar(h.get('type') || q.get('type')) })
-  } catch (e) {}
+    // Nespolknout potichu (kritika 20c, spojení 2. 11. 2026) — značku [deník chyb]
+    // konzole deníku vynechá, takže se to nezacyklí.
+  } catch (e) { console.warn('[deník chyb]', e) }
 })()
 
 // Detekuj veřejný podpisový odkaz pro firmu (?sign=TOKEN) — má přednost před přihlášením
@@ -25512,8 +25522,10 @@ async function mobCheckin(type) {
       // Hláška by jen zopakovala jeho text a překrývala se s ním.
       povinnaPoloha = await ziskejPolohuPovinne()
       // Během měření se odhlásil (měření ukončilo odhlášení, ukonciPovinnouPolohu):
-      // žádný zápis docházky, hláška ani návod. Nepovedený pokus jde do deníku pod
-      // tím, kdo ťukal (s příznakem odhlaseno), ne pod dalšího přihlášeného.
+      // žádný zápis docházky, hláška ani návod. Nepovedený pokus jde do deníku
+      // s tím, kdo ťukal (detail.ucet, odhlaseno) — jádro deníku zapisuje jen za
+      // přihlášeného, takže řádek počká v telefonu a odejde s nejbližším
+      // přihlášením (pred, ucetSedi; spojení s deníkem chyb 2. 11. 2026).
       if (odhlasilSe()) {
         checkinInProgress = false
         window.zapisProbiha = false
