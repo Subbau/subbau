@@ -13,6 +13,11 @@ NUTNE=(
   favicon.ico favicon-32.png icon-192.png icon-512.png apple-touch-icon.png
   api/klient-dochazka.js api/send-invoice.js
   api/admin-update-worker.js api/check-expiring-docs.js
+  # Deník chyb (2. 11. 2026): zápis bez přihlášení a serverový zápis — bez nich
+  # by se chyby lidí, kterým se appka nespustí, a chyby serveru nikam nedostaly.
+  # _denik.js si načítají všechny funkce výš: bez něj spadnou všechny.
+  api/chyba.js api/_denik.js
+  api/preklad.js       # překlad popisů práce (appka i odkaz pro odběratele)
   supabase.js
 )
 

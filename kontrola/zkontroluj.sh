@@ -39,6 +39,58 @@ VEL=$(wc -c < "$KDE/appka.js")
 
 node --check "$KDE/appka.js" || { echo "❌ SYNTAXE JE ŠPATNĚ"; exit 1; }
 
+# RANÝ ODCHYT DENÍKU CHYB MUSÍ BÝT VE STARÉM JAVASCRIPTU (ES5) — 2. 11. 2026.
+# Majitel: „v tom deníku to musí hlídat úplně všechno". Raný odchyt je úplně
+# první skript stránky, ještě před knihovnou a appkou — právě proto zachytí
+# i chybu, kvůli které se appka vůbec nespustí. Na starém telefonu, který
+# hlavní skript (moderní JavaScript) nepřečte, musí tenhle běžet dál; kdyby
+# v něm byla šipka, const nebo `…`, spadl by taky a deník by o tom telefonu
+# nevěděl nic. Výš se kontroluje jen NEJDELŠÍ skript (hlavní), tenhle ne.
+# Totéž platí pro raný odchyt odkazu pro odběratele (klient.html vedle appky).
+# Kontrola musí umět selhat: na zkušebních vzorcích MUSÍ šipku odmítnout
+# a starý zápis pustit — jinak skončí jako „NEPROBĚHLA".
+[ -r "$KDE/node_modules/acorn/package.json" ] || { echo "❌ Chybí acorn ($KDE/node_modules/acorn) — kontrola ES5 NEPROBĚHLA. Spusťte: cd $KDE && npm i eslint globals"; exit 2; }
+ES5_DIR="$(mktemp -d "${TMPDIR:-/tmp}/zkontroluj-es5.XXXXXX")" || { echo "❌ Nejde založit dočasnou složku — kontrola ES5 NEPROBĚHLA"; exit 2; }
+trap 'rm -rf "$ES5_DIR"' EXIT
+es5() {   # $1 = soubor se skriptem; projde jen ES5, jinak vypíše proč a vrátí 1
+  node -e '
+    const acorn = require(process.argv[1])
+    const src = require("fs").readFileSync(process.argv[2], "utf8")
+    try { acorn.parse(src, { ecmaVersion: 5, sourceType: "script" }) }
+    catch (e) { console.log("   " + e.message); process.exit(1) }' "$KDE/node_modules/acorn" "$1"
+}
+printf 'var nic = 0\nconst x = () => 1\n' > "$ES5_DIR/vzorek-novy.js"
+printf 'var x = function () { return 1 }\nvar o = { a: 1, }\n' > "$ES5_DIR/vzorek-stary.js"
+if es5 "$ES5_DIR/vzorek-novy.js" >/dev/null 2>&1 || ! es5 "$ES5_DIR/vzorek-stary.js" >/dev/null 2>&1; then
+  echo "❌ KONTROLA ES5 NEPROBĚHLA: acorn nerozlišil nový a starý JavaScript na zkušebních vzorcích."
+  exit 2
+fi
+# $1 = soubor, $2 = značka, $3 = popis; skript se značkou musí být právě jeden.
+zkontroluj_rany() {
+  local pocet
+  pocet="$(python3 - "$1" "$2" "$ES5_DIR/rany.js" <<'PY'
+import re, io, sys
+s = io.open(sys.argv[1], encoding='utf-8', errors='replace').read().replace(chr(13), '')
+b = [x for x in re.findall(r'<script(?![^>]*\bsrc=)[^>]*>(.*?)</script>', s, re.S) if sys.argv[2] in x]
+if len(b) == 1:
+    io.open(sys.argv[3], 'w', encoding='utf-8').write(b[0])
+print(len(b))
+PY
+)"
+  [ "$pocet" = "1" ] || { echo "❌ $3: skript se značkou „$2\" je v souboru ${pocet:-?}× — má tam být právě jednou ($1)"; exit 1; }
+  node --check "$ES5_DIR/rany.js" || { echo "❌ $3: SYNTAXE JE ŠPATNĚ"; exit 1; }
+  local proc
+  proc="$(es5 "$ES5_DIR/rany.js")" || { echo "❌ $3 není ES5 (starý telefon by ho nepřečetl):"; echo "$proc"; exit 1; }
+  echo "   $3: ES5 v pořádku"
+}
+zkontroluj_rany "$SOUBOR" 'DENÍK CHYB — RANÝ ODCHYT' 'Raný odchyt deníku chyb'
+KLIENT_HTML="$(dirname "$SOUBOR")/klient.html"
+if [ -f "$KLIENT_HTML" ]; then
+  zkontroluj_rany "$KLIENT_HTML" 'DENÍK CHYB — RANÝ ODCHYT ODKAZU' 'Raný odchyt v odkazu pro odběratele (klient.html)'
+else
+  echo "   (vedle appky není klient.html — jeho raný odchyt se tu nekontroluje)"
+fi
+
 cd "$KDE" || exit 2
 
 # ZKUŠEBNÍ VZOREK — soubor, který chybu MÁ. Když ji ESLint nenajde, nefunguje.

@@ -30,6 +30,10 @@
 
 const SUPABASE_URL = 'https://ceefzlkjnrclfpmhgdmr.supabase.co';
 const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImNlZWZ6bGtqbnJjbGZwbWhnZG1yIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzY3MTkxODYsImV4cCI6MjA5MjI5NTE4Nn0.fIewYds5zd3AICHWSpbcfOKk_SfGHuP1I-YR1yKW4NI';
+// Deník chyb (2. 11. 2026): faktura, kterou Brevo odmítl nebo která cestou
+// spadla, se zapíše i na serveru — appka se o tom dozví jen jako „sent:false"
+// a kancelář by jinak nevěděla, proč faktury nechodí.
+const { zapisChybuServeru, kodZTela } = require('./_denik.js');
 
 const BREVO_API_URL = 'https://api.brevo.com/v3/smtp/email';
 const FROM_EMAIL = process.env.BREVO_FROM_EMAIL || 'formular@subbau.cz';
@@ -154,7 +158,11 @@ module.exports = async function handler(req, res) {
     });
     const radky = profResp.ok ? await profResp.json() : null;
     profil = Array.isArray(radky) ? radky[0] : null;
-  } catch {
+  } catch (e) {
+    // Ověření přihlášení cestou spadlo (síť, Supabase) — není to špatný token,
+    // ale chyba serveru, proto do deníku. Odpověď zůstává stejná jako dřív.
+    await zapisChybuServeru('send-invoice', 'Ověření přihlášení před odesláním faktury spadlo (' + ((e && e.name) || 'chyba') + ')',
+      { krok: 'overeni', kod: (e && e.name) || undefined, ucet: caller?.id });
     res.status(401).json({ sent: false, reason: 'invalid_session' });
     return;
   }
@@ -220,11 +228,15 @@ module.exports = async function handler(req, res) {
     });
     if (!resp.ok) {
       const text = await resp.text().catch(() => '');
+      await zapisChybuServeru('send-invoice', 'Brevo fakturu neodeslal (HTTP ' + resp.status + ')',
+        { krok: 'brevo', stav: resp.status, kod: kodZTela(text) || undefined, ucet: caller?.id });
       res.status(200).json({ sent: false, reason: `Brevo ${resp.status}: ${text.slice(0, 200)}` });
       return;
     }
     res.status(200).json({ sent: true, to: TO_EMAIL });
   } catch (e) {
+    await zapisChybuServeru('send-invoice', 'Odeslání faktury přes Brevo spadlo (' + ((e && e.name) || 'chyba') + ')',
+      { krok: 'brevo-sit', kod: (e && e.name) || undefined, ucet: caller?.id });
     res.status(200).json({ sent: false, reason: String(e?.message || e) });
   }
 };

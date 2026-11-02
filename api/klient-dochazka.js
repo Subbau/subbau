@@ -36,6 +36,14 @@
 // =====================================================================
 
 const crypto = require('crypto');
+// Deník chyb (2. 11. 2026, majitel: „jakoukoliv chybu napříč aplikací to musí
+// zaznamenat"). Odběratel vidí jen „nepodařilo se uložit" a kancelář by se
+// o tom nedozvěděla — každá větev 5xx teď nechá řádek server|klient-dochazka
+// (jen krok, stav a kód; nikdy token, jméno ani text poznámky).
+// Očekávané odpovědi 4xx (špatný týden, cizí pracovník, neplatný odkaz) ne.
+const { zapisChybuServeru, kodZTela, kodVyjimky, stavVyjimky } = require('./_denik.js');
+const zapisChybuOdkazu = (krok, veta, stav, kod) =>
+  zapisChybuServeru('klient-dochazka', veta, { krok, stav, kod: kod || undefined });
 
 const SUPABASE_URL = 'https://ceefzlkjnrclfpmhgdmr.supabase.co';
 
@@ -592,10 +600,12 @@ module.exports = async (req, res) => {
           if (!r.ok) {
             const t = await r.text().catch(() => '');
             console.error('[klient] odškrtnutí týdne:', r.status, t.slice(0, 300));
+            await zapisChybuOdkazu('tyden', 'Odškrtnutí týdne odběratelem se neuložilo (HTTP ' + r.status + ')', r.status, kodZTela(t));
             res.status(500).json({ ok: false, chyba: 'nelze_ulozit' }); return;
           }
         } catch (e) {
           console.error('[klient] odškrtnutí týdne:', e);
+          await zapisChybuOdkazu('tyden', 'Odškrtnutí týdne odběratelem spadlo (' + kodVyjimky(e) + ')', stavVyjimky(e), kodVyjimky(e));
           res.status(500).json({ ok: false, chyba: 'nelze_ulozit' }); return;
         }
         res.status(200).json({ ok: true }); return;
@@ -662,22 +672,26 @@ module.exports = async (req, res) => {
               r = await zapis({ accommodation_address: text || null });
             } else {
               console.error('[klient] zápis ubytování:', r.status, t.slice(0, 300));
+              await zapisChybuOdkazu('ubytovani', 'Adresa ubytování z odkazu se neuložila (HTTP ' + r.status + ')', r.status, kodZTela(t));
               res.status(500).json({ ok: false, chyba: 'nelze_ulozit' }); return;
             }
           }
           if (!r.ok) {
             const t = await r.text().catch(() => '');
             console.error('[klient] zápis ubytování:', r.status, t.slice(0, 300));
+            await zapisChybuOdkazu('ubytovani', 'Adresa ubytování z odkazu se neuložila (HTTP ' + r.status + ')', r.status, kodZTela(t));
             res.status(500).json({ ok: false, chyba: 'nelze_ulozit' }); return;
           }
           // Zápis, který netrefí řádek, projde bez chyby — musí se to poznat.
           const trefeno = await r.json().catch(() => null);
           if (!Array.isArray(trefeno) || trefeno.length !== 1) {
             console.error('[klient] zápis ubytování: trefených řádků', trefeno && trefeno.length);
+            await zapisChybuOdkazu('ubytovani', 'Adresa ubytování z odkazu netrefila řádek profilu (' + (Array.isArray(trefeno) ? trefeno.length : 'nic') + ')', r.status, 'zapis-nic');
             res.status(500).json({ ok: false, chyba: 'nelze_ulozit' }); return;
           }
         } catch (e) {
           console.error('[klient] zápis ubytování:', e);
+          await zapisChybuOdkazu('ubytovani', 'Zápis adresy ubytování z odkazu spadl (' + kodVyjimky(e) + ')', stavVyjimky(e), kodVyjimky(e));
           res.status(500).json({ ok: false, chyba: 'nelze_ulozit' }); return;
         }
         res.status(200).json({ ok: true, ubytovani: text }); return;
@@ -746,12 +760,16 @@ module.exports = async (req, res) => {
           // pozná jako „tahle funkce ještě není připravená", ne jako závadu.
           const chybiSloupec = /42703|does not exist|schema cache/i.test(t);
           if (chybiSloupec) console.error('[klient] SPUSŤTE supabase-migrace-ukoncena-spoluprace.sql');
+          await zapisChybuOdkazu('poznamka', chybiSloupec
+            ? 'Poznámka z odkazu se neuložila — v databázi chybí sloupec (migrace?)'
+            : 'Poznámka z odkazu se neuložila (HTTP ' + r.status + ')', r.status, kodZTela(t));
           res.status(chybiSloupec ? 503 : 500)
              .json({ ok: false, chyba: chybiSloupec ? 'funkce_neni_pripravena' : 'nelze_ulozit' });
           return;
         }
       } catch (e) {
         console.error('[klient] zápis poznámky:', e);
+        await zapisChybuOdkazu('poznamka', 'Zápis poznámky z odkazu spadl (' + kodVyjimky(e) + ')', stavVyjimky(e), kodVyjimky(e));
         res.status(500).json({ ok: false, chyba: 'nelze_ulozit' }); return;
       }
       res.status(200).json({ ok: true });
@@ -1260,8 +1278,9 @@ module.exports = async (req, res) => {
                            radky, tydny, poznamky, dovolene, uhrazeno, lide });
   } catch (e) {
     // Podrobnosti si nechá log na Vercelu. Ven jde jen obecná hláška, ať
-    // z ní nejde vyčíst, jak je databáze postavená.
+    // z ní nejde vyčíst, jak je databáze postavená. Do deníku jen stav a kód.
     console.error('[klient-dochazka]', e);
+    await zapisChybuOdkazu('beh', 'Odkaz pro odběratele spadl (' + kodVyjimky(e) + ')', stavVyjimky(e), kodVyjimky(e));
     res.status(500).json({ ok: false, chyba: 'chyba_serveru' });
   }
 };

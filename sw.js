@@ -26,6 +26,68 @@ self.addEventListener('activate', (event) => {
 // Umožni stránce vynutit převzetí nové verze
 self.addEventListener('message', (event) => {
   if (event.data === 'SKIP_WAITING') self.skipWaiting();
+  // Stránka se ozvala → podržené chyby (viz níž) jí můžou odejít.
+  swVypustChyby();
+});
+
+// DENÍK CHYB (2. 11. 2026, majitel: „jakoukoliv chybu napříč aplikací to musí
+// zaznamenat"). Chyba uvnitř service workeru (tenhle soubor) se jinak nikde
+// neukáže — nemá stránku, konzoli nikdo nevidí a do databáze sám nepíše
+// (neví, kdo je přihlášený). Pošle ji proto JEDNOMU otevřenému oknu appky jako
+// zprávu {typ:'sw-chyba', druh, kde:'sw|<druh>', zprava, detail}; stránka
+// (posluchač navigator.serviceWorker 'message') ji zapíše do deníku chyb.
+// Druhy: js-chyba (chyba v kódu SW), js-neosetrena (neošetřený slib),
+// ulozeni (kopie appky se neuložila do paměti telefonu — třeba plná paměť
+// na iPhonu; offline pak běží stará verze).
+// Bez otevřeného okna se chyba podrží v paměti (nejvýš 10, stejná se jen
+// počítá) a odejde s první zprávou od stránky. Na tom, co se ukládá do
+// mezipaměti a odkud se appka bere, se NIC nemění.
+const SW_CHYBY = [];
+function swSoubor(u, nahradni) {
+  u = String(u || '').split('#')[0].split('?')[0];
+  return (u.split('/').pop() || nahradni || 'sw.js').slice(0, 80);
+}
+function swChyba(druh, zprava, detail) {
+  try {
+    const kde = 'sw|' + druh;
+    const text = String(zprava == null ? '' : zprava).slice(0, 500);
+    const stejna = SW_CHYBY.find((x) => x.kde === kde && x.zprava === text);
+    if (stejna) {
+      stejna.detail.pocet = (stejna.detail.pocet || 1) + 1;
+      stejna.detail.naposled = new Date().toISOString();
+    } else {
+      SW_CHYBY.push({ typ: 'sw-chyba', druh, kde, zprava: text,
+        detail: Object.assign({ t: 'chyba', cache: CACHE, vznikla: new Date().toISOString() }, detail || {}) });
+      if (SW_CHYBY.length > 10) SW_CHYBY.shift();
+    }
+    swVypustChyby();
+  } catch (e) { /* hlášení chyby nesmí service worker shodit */ }
+}
+async function swVypustChyby() {
+  try {
+    if (!SW_CHYBY.length) return;
+    const okna = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
+    if (!okna.length) return;
+    // Jen jednomu oknu — se dvěma záložkami by se jinak zapsala dvakrát.
+    const okno = okna.find((o) => o.focused) || okna.find((o) => o.visibilityState === 'visible') || okna[0];
+    for (const zprava of SW_CHYBY.splice(0)) okno.postMessage(zprava);
+  } catch (e) { /* bez okna to zkusí příští zpráva */ }
+}
+// Z adresy ve stacku zůstane jen jméno souboru a :řádek:sloupec (i když adresa
+// nese ?v=… — jinak by se řádek ztratil spolu s parametrem).
+const swStack = (s) => (s ? String(s).replace(/(?:https?|file):\/\/[^\s)]+/g, (m) => {
+  const rs = /(?::\d+){1,2}$/.exec(m);
+  return swSoubor(rs ? m.slice(0, rs.index) : m) + (rs ? rs[0] : '');
+}).slice(0, 1500) : undefined);
+self.addEventListener('error', (ev) => {
+  const e = ev && ev.error;
+  swChyba('js-chyba', e && e.name ? e.name + ': ' + e.message : (ev && ev.message) || 'chyba',
+    { soubor: swSoubor(ev && ev.filename), radek: (ev && ev.lineno) || 0, sloupec: (ev && ev.colno) || 0, stack: swStack(e && e.stack) });
+});
+self.addEventListener('unhandledrejection', (ev) => {
+  const r = ev && ev.reason;
+  swChyba('js-neosetrena', r && r.message !== undefined ? (r.name ? r.name + ': ' : '') + r.message : String(r),
+    { stack: swStack(r && r.stack) });
 });
 
 self.addEventListener('fetch', (event) => {
@@ -58,7 +120,11 @@ self.addEventListener('fetch', (event) => {
             const stara = await cache.match(req)
             const et = fresh.headers.get('etag')
             if (!(stara && et && stara.headers.get('etag') === et)) await cache.put(req, kopieOdpovedi)
-          } catch (e) {}
+          } catch (e) {
+            // Kopie se neuložila (nejčastěji plná paměť) — ukládání se nemění,
+            // jen se to ohlásí do deníku chyb (sw|ulozeni).
+            swChyba('ulozeni', ((e && e.name) || 'chyba') + ': ' + ((e && e.message) || ''), { soubor: swSoubor(req.url, 'stranka') })
+          }
         })())
       }
       return fresh

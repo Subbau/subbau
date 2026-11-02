@@ -16,6 +16,10 @@
 
 const SUPABASE_URL = 'https://ceefzlkjnrclfpmhgdmr.supabase.co';
 const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImNlZWZ6bGtqbnJjbGZwbWhnZG1yIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzY3MTkxODYsImV4cCI6MjA5MjI5NTE4Nn0.fIewYds5zd3AICHWSpbcfOKk_SfGHuP1I-YR1yKW4NI';
+// Deník chyb (2. 11. 2026): když změna přihlášení pracovníka spadne na
+// serveru (Supabase neodpoví, odmítne změnu), zapíše se to — správce v appce
+// uvidí jen „nepodařilo se", deník řekne proč. Nikdy ne e-mail ani heslo.
+const { zapisChybuServeru, kodZTela } = require('./_denik.js');
 
 // Brzda proti hrubému útoku / omylem opakovanému bušení do endpointu.
 // Paměť žije jen po dobu běhu instance funkce, ale i tak dá rozumnou ochranu.
@@ -98,7 +102,10 @@ module.exports = async function handler(req, res) {
     }
     const caller = await callerResp.json();
     callerId = caller?.id;
-  } catch {
+  } catch (e) {
+    // Ověření přihlášení cestou spadlo (síť) — chyba serveru, ne špatný token.
+    await zapisChybuServeru('admin-update-worker', 'Ověření přihlášení správce spadlo (' + ((e && e.name) || 'chyba') + ')',
+      { krok: 'overeni', kod: (e && e.name) || undefined });
     res.status(401).json({ ok: false, error: 'invalid_session' });
     return;
   }
@@ -118,7 +125,9 @@ module.exports = async function handler(req, res) {
       res.status(403).json({ ok: false, error: 'forbidden' });
       return;
     }
-  } catch {
+  } catch (e) {
+    await zapisChybuServeru('admin-update-worker', 'Kontrola role správce spadla (' + ((e && e.name) || 'chyba') + ')',
+      { krok: 'role', kod: (e && e.name) || undefined, ucet: callerId });
     res.status(502).json({ ok: false, error: 'role_check_failed' });
     return;
   }
@@ -167,7 +176,9 @@ module.exports = async function handler(req, res) {
         res.status(403).json({ ok: false, error: 'cannot_modify_other_admin' });
         return;
       }
-    } catch {
+    } catch (e) {
+      await zapisChybuServeru('admin-update-worker', 'Kontrola cílového účtu spadla (' + ((e && e.name) || 'chyba') + ')',
+        { krok: 'cil', kod: (e && e.name) || undefined, ucet: callerId });
       res.status(502).json({ ok: false, error: 'target_check_failed' });
       return;
     }
@@ -196,10 +207,15 @@ module.exports = async function handler(req, res) {
     );
     if (!updateResp.ok) {
       const detail = await updateResp.text().catch(() => '');
+      // Jen stav a kód (např. email_exists) — tělo může nést e-mail.
+      await zapisChybuServeru('admin-update-worker', 'Supabase změnu přihlášení odmítl (HTTP ' + updateResp.status + ')',
+        { krok: 'zmena', stav: updateResp.status, kod: kodZTela(detail) || undefined, ucet: callerId });
       res.status(502).json({ ok: false, error: 'auth_update_failed', detail: detail.slice(0, 300) });
       return;
     }
-  } catch {
+  } catch (e) {
+    await zapisChybuServeru('admin-update-worker', 'Změna přihlášení spadla cestou (' + ((e && e.name) || 'chyba') + ')',
+      { krok: 'zmena', kod: (e && e.name) || undefined, ucet: callerId });
     res.status(502).json({ ok: false, error: 'auth_update_failed' });
     return;
   }
@@ -207,7 +223,7 @@ module.exports = async function handler(req, res) {
   // 5) Ať e-mail v profiles (viditelný v appce) odpovídá tomu přihlašovacímu
   if (newEmail) {
     try {
-      await fetch(`${SUPABASE_URL}/rest/v1/profiles?id=eq.${encodeURIComponent(userId)}`, {
+      const r = await fetch(`${SUPABASE_URL}/rest/v1/profiles?id=eq.${encodeURIComponent(userId)}`, {
         method: 'PATCH',
         headers: {
           apikey: serviceKey,
@@ -217,9 +233,16 @@ module.exports = async function handler(req, res) {
         },
         body: JSON.stringify({ email: newEmail }),
       });
-    } catch {
+      // Odmítnutí nic neshodí (viz níž), jen se zapíše — dřív zmizelo beze stopy.
+      if (!r.ok) {
+        await zapisChybuServeru('admin-update-worker', 'E-mail v profilu se nesrovnal s přihlášením (HTTP ' + r.status + ')',
+          { t: 'varovani', krok: 'profil', stav: r.status, kod: kodZTela(await r.text().catch(() => '')) || undefined, ucet: callerId });
+      }
+    } catch (e) {
       // Přihlášení novým e-mailem už funguje (bod 4 proběhl) — jen se nesynchronizovala
       // zobrazovaná hodnota v tabulce profiles. Není to blokující chyba.
+      await zapisChybuServeru('admin-update-worker', 'E-mail v profilu se nesrovnal s přihlášením (' + ((e && e.name) || 'chyba') + ')',
+        { t: 'varovani', krok: 'profil', kod: (e && e.name) || undefined, ucet: callerId });
     }
   }
 

@@ -7,6 +7,127 @@
      cizí doménu, na kterou by stránka sáhla (třeba na překladač). -->
 <meta name="referrer" content="no-referrer">
 <meta name="robots" content="noindex, nofollow">
+<script>
+// DENÍK CHYB — RANÝ ODCHYT ODKAZU (2. 11. 2026, majitel: „v tom deníku to musí
+// hlídat úplně všechno … jakoukoliv chybu napříč aplikací to musí zaznamenat").
+// Odkaz pro odběratele běží bez přihlášení — když se tu něco pokazí (chyba
+// v kódu stránky, nenačtený soubor, neošetřený slib), kancelář by se to
+// nedozvěděla. Tenhle malý skript chybu pošle na /api/chyba (zápis bez
+// přihlášení, místo klient|<co>). Chyby serveru (/api/klient-dochazka) si
+// zapisuje server sám (server|klient-dochazka), tady se neopakují.
+// Psaný ve starém JavaScriptu (ES5), ať běží i na starém telefonu —
+// kontrola/zkontroluj.sh to hlídá. Nikdy nevolá preventDefault: chyba zůstává
+// vidět v konzoli. Z adresy nic neodchází: token odkazu (?t=…) se z textu
+// i ze stacku vymaže, ze souboru zůstane jen jméno. Nejvýš 5 odeslání za
+// otevření stránky, stejná chyba se jen počítá (pocet).
+// Stránka má <meta name="referrer" content="no-referrer"> — prohlížeč by pak
+// poslal Origin „null" a server by zápis odmítl jako cizí; proto u odeslání
+// referrerPolicy 'origin' (jde jen adresa webu, nikdy cesta s tokenem).
+(function () {
+  try {
+    var W = window, fronta = [], casovac = null, odeslani = 0, cizich = 0
+    function rez(s, n) {
+      if (s.length <= n) return s
+      var c = s.charCodeAt(n - 1)
+      return (c >= 0xd800 && c <= 0xdbff) ? s.slice(0, n - 1) : s.slice(0, n)
+    }
+    function cisti(t, n) {
+      return rez(String(t == null ? '' : t).slice(0, 2000)
+        .replace(/\b(?:https?|file|blob|data):[^\s"'<>)]*/gi, '_adresa_')
+        .replace(/([?&](?:t|token|sign|code|key)=)[^&#\s"'<>)]*/gi, '$1_klic_')
+        .replace(/[^\s@<>()"',;:\/]{1,64}@[^\s@<>()"',;:\/]{1,255}\.[A-Za-z]{2,}/g, '_email_')
+        .replace(/\beyJ[A-Za-z0-9_-]{5,}(?:\.[A-Za-z0-9_-]*){1,2}/g, '_klic_')
+        .replace(/[0-9a-f]{20,}/gi, '_klic_')
+        .replace(/\d{6,}/g, '_cislo_'), n || 500)
+    }
+    function soubor(u) {
+      u = String(u || '').split('#')[0].split('?')[0]
+      return (u.split('/').pop() || 'stranka').slice(0, 80)
+    }
+    function stack(s) {
+      if (!s) return undefined
+      // Z adresy zůstane jen jméno souboru a :řádek:sloupec (adresa nese ?t=…).
+      return cisti(String(s).replace(/(?:https?|file):\/\/[^\s)]+/g, function (m) {
+        var rs = /(?::\d+){1,2}$/.exec(m)
+        return soubor(rs ? m.slice(0, rs.index) : m) + (rs ? rs[0] : '')
+      }), 1500)
+    }
+    // Bajty těla v UTF-8 (čeština má víc bajtů než znaků) — server bere nejvýš 8 kB.
+    function bajtu(t) { return encodeURIComponent(t).replace(/%[0-9A-F]{2}/g, 'x').length }
+    function zapis(cil, zprava, detail) {
+      var z = cisti(zprava, 500), i, k
+      for (i = 0; i < fronta.length; i++) {
+        if (fronta[i].kde === 'klient|' + cil && fronta[i].zprava === z) {
+          fronta[i].detail.pocet = (fronta[i].detail.pocet || 1) + 1
+          return
+        }
+      }
+      var d = {
+        v: 1, t: 'chyba', sekce: 'klient', vznikla: new Date().toISOString(),
+        ua: String(navigator.userAgent || '').slice(0, 300), online: navigator.onLine !== false,
+        vid: document.visibilityState || '',
+        msOdStartu: Math.round((W.performance && performance.now) ? performance.now() : 0)
+      }
+      for (k in detail) if (Object.prototype.hasOwnProperty.call(detail, k) && detail[k] !== undefined) d[k] = detail[k]
+      fronta.push({ kde: 'klient|' + cil, zprava: z, detail: d, _id: Math.random().toString(36).slice(2, 10) })
+      if (fronta.length > 10) fronta.shift()
+      if (!casovac) casovac = setTimeout(posli, 2000)
+    }
+    function posli() {
+      casovac = null
+      try {
+        if (!fronta.length || odeslani >= 5 || location.protocol === 'file:' || !W.fetch) return
+        var jdou = fronta.splice(0, 10), telo
+        if (cizich) jdou[0].detail.cizichSkriptu = cizich
+        telo = JSON.stringify({ zaznamy: jdou })
+        while (bajtu(telo) > 7000 && jdou.length > 1) { fronta.unshift(jdou.pop()); telo = JSON.stringify({ zaznamy: jdou }) }
+        if (bajtu(telo) > 7000) { jdou[0].detail.stack = undefined; jdou[0].detail.ua = undefined; telo = JSON.stringify({ zaznamy: jdou }) }
+        odeslani++
+        W.fetch('/api/chyba', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: telo,
+          keepalive: true, credentials: 'omit', referrerPolicy: 'origin' }).then(function (r) {
+          // Server nebo databáze teď nemůže (5xx, 429) → jednou zkusit znovu za 30 s.
+          if (r && (r.status >= 500 || r.status === 429) && !jdou[0]._znovu) vratit(jdou)
+        }, function () { if (!jdou[0]._znovu) vratit(jdou) })
+        if (fronta.length && !casovac) casovac = setTimeout(posli, 2000)
+      } catch (e) { odeslani = 5 }
+    }
+    function vratit(jdou) {
+      jdou[0]._znovu = true
+      fronta = jdou.concat(fronta).slice(0, 10)
+      if (!casovac) casovac = setTimeout(posli, 30000)
+    }
+    W.__denikKlient = zapis
+    W.addEventListener('error', function (ev) {
+      try {
+        var cil = ev && ev.target
+        if (cil && cil !== W && cil.tagName) {
+          // Nenačtený soubor (capture: chyba načtení se bublinou nešíří).
+          // Fotky lidí se nepočítají — chybějící fotka je běžná a stránka ji schová.
+          var tag = String(cil.tagName).toUpperCase()
+          if (tag === 'IMG' || tag === 'VIDEO' || tag === 'AUDIO' || tag === 'SOURCE') return
+          var adr = String(cil.src || cil.href || '')
+          zapis('zdroj-nenacten', tag.toLowerCase() + ' ' + soubor(adr), { soubor: soubor(adr) })
+          return
+        }
+        var m = String((ev && ev.message) || ''), e = ev && ev.error
+        if (!(ev && ev.filename) && !(ev && ev.lineno) && /^Script error\.?$/.test(m)) { cizich++; return }
+        zapis('js-chyba', (e && e.name && e.message !== undefined) ? e.name + ': ' + e.message : m,
+          { soubor: soubor(ev && ev.filename), radek: (ev && ev.lineno) || 0, sloupec: (ev && ev.colno) || 0, stack: stack(e && e.stack) })
+      } catch (x) { /* zápis chyby nesmí nic shodit */ }
+    }, true)
+    W.addEventListener('unhandledrejection', function (ev) {
+      try {
+        var r = ev && ev.reason
+        var text = (r && r.message !== undefined) ? (r.name ? r.name + ': ' : '') + r.message
+          : (typeof r === 'string' ? r : Object.prototype.toString.call(r))
+        zapis('js-neosetrena', text, { stack: stack(r && r.stack) })
+      } catch (x) { /* zápis chyby nesmí nic shodit */ }
+    })
+    // Odchod ze stránky: co čeká, odejde hned (keepalive to dovolí).
+    W.addEventListener('pagehide', function () { if (fronta.length) posli() })
+  } catch (e) { /* raný odchyt nesmí stránku nikdy shodit */ }
+})()
+</script>
 <title>Anwesenheit</title>
 <style>
   :root{

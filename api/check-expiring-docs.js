@@ -23,6 +23,10 @@
 const SUPABASE_URL = 'https://ceefzlkjnrclfpmhgdmr.supabase.co';
 
 const crypto = require('crypto');
+// Deník chyb (2. 11. 2026, majitel: „jakoukoliv chybu napříč aplikací to musí
+// zaznamenat"). Tenhle hlídač běží ráno sám (cron) a jeho výstup končí jen
+// v logu Vercelu — kdyby spadl nebo něco nedoručil, nikdo by se to nedozvěděl.
+const { zapisChybuServeru, kodVyjimky, stavVyjimky } = require('./_denik.js');
 
 // Porovnání hesla, které trvá vždycky stejně dlouho. U běžného === se dá podle
 // doby odpovědi heslo uhodnout znak po znaku.
@@ -227,6 +231,29 @@ async function upomenChybejiciDoklady(serviceKey, dnesIso) {
   return { poslano, chyby };
 }
 
+// Co ranní běh nedotáhl, i když doběhl (přesuny, upomínky, zprávy v appce,
+// e-maily, značka „upozorněno") — jeden řádek do deníku chyb za celý běh.
+// Jména lidí ani doklady se do deníku nepíšou, jen počty.
+async function nahlasProblemyBehu(presuny, upominky, results) {
+  try {
+    const vysledky = results || [];
+    const pocty = {
+      presuny: presuny && presuny.chyba !== undefined ? 1 : 0,
+      upominky: upominky && (upominky.chyba || (upominky.chyby && upominky.chyby.length)) ? 1 : 0,
+      zpravVAppce: vysledky.filter((r) => r.inApp === 'neodesláno').length,
+      emailu: vysledky.filter((r) => typeof r.email === 'string' && /^neodesláno \((Brevo |(?!BREVO_API_KEY|chybí e-mail))/.test(r.email)).length,
+      znacek: vysledky.filter((r) => r.error).length,
+    };
+    const celkem = pocty.presuny + pocty.upominky + pocty.zpravVAppce + pocty.emailu + pocty.znacek;
+    if (!celkem) return;
+    const co = Object.entries(pocty).filter(([, n]) => n > 0).map(([k, n]) => k + ' ' + n).join(', ');
+    await zapisChybuServeru('check-expiring-docs', 'Ranní hlídač dokladů doběhl, ale něco nedotáhl: ' + co, {
+      t: 'varovani', krok: 'souhrn-behu', problemu: celkem, neodeslano: pocty.zpravVAppce + pocty.emailu,
+      stav: presuny && Number.isInteger(presuny.chyba) ? presuny.chyba : undefined,
+    });
+  } catch (e) { console.error('[check-expiring-docs] souhrn do deníku chyb:', (e && e.name) || e); }
+}
+
 module.exports = async function handler(req, res) {
   // Endpoint smí spustit jen ten, kdo zná CRON_SECRET.
   //
@@ -295,6 +322,7 @@ module.exports = async function handler(req, res) {
       .catch((e) => ({ chyba: String(e?.message || e) }));
 
     if (!docs?.length) {
+      await nahlasProblemyBehu(presuny, upominky, []);
       res.status(200).json({ ok: true, checked: 0, notified: 0, upominky, presuny, message: 'Žádné končící doklady' });
       return;
     }
@@ -437,8 +465,12 @@ module.exports = async function handler(req, res) {
     // heslo někdy dostalo ven, ať s ním neunikne rovnou seznam lidí ve firmě.
     // Podrobnosti zůstávají v logu nasazení ve Vercelu.
     const problemy = results.filter((r) => r.error).map((r) => r.error);
+    await nahlasProblemyBehu(presuny, upominky, results);
     res.status(200).json({ ok: true, checked: docs.length, notified: results.length, upominky, presuny, problemy });
   } catch (e) {
+    // Celý ranní běh spadl — upozornění na doklady dnes neodešla nikomu.
+    await zapisChybuServeru('check-expiring-docs', 'Ranní hlídač dokladů spadl — upozornění dnes neodešla (' + kodVyjimky(e) + ')',
+      { krok: 'beh', stav: stavVyjimky(e), kod: kodVyjimky(e) });
     res.status(500).json({ ok: false, error: String(e?.message || e), presuny });
   }
 };
