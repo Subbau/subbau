@@ -109,8 +109,17 @@
   // Živé aktualizace. V ukázce je nikdo jiný nevyvolá — jediný, kdo
   // data mění, je návštěvník sám. Kanál proto jen tiše přikývne.
   // ------------------------------------------------------------------
+  // state 'joined' jako skutečný kanál po přihlášení k odběru (2. 11. 2026).
+  // Bez něj hlídač živého spojení správce viděl stav „undefined", v ukázce
+  // každých 30 s spojení „obnovoval" a deník chyb by si zapisoval
+  // realtime|admin-live, i když se nic nepokazilo.
   function kanal() {
-    const k = { on() { return k }, subscribe(f) { try { f && f('SUBSCRIBED') } catch (e) {} return k }, unsubscribe() { return k } };
+    const k = {
+      state: 'joined',
+      on() { return k },
+      subscribe(f) { k.state = 'joined'; try { f && f('SUBSCRIBED') } catch (e) {} return k },
+      unsubscribe() { k.state = 'closed'; return k },
+    };
     return k;
   }
 
