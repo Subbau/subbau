@@ -22616,11 +22616,23 @@ async function mobCheckin(type) {
   if (type === 'in' || type === 'out') {
     if (await mojeFirmaChcePolohu()) {
       clearTimeout(_stuckGuard)
-      showToast('📍 Zjišťuji polohu… Když se telefon zeptá, ťukněte na „Povolit“.')
+      // Dřív tu byla 3s hláška „📍 Zjišťuji polohu…" a po ní až 12 s na obrazovce
+      // nic. 2. 11. 2026 (Petr Fuks) ji nahradil panel, který drží celou dobu
+      // měření (sekundy, „ťukněte na Povolit", Zrušit) — viz ukazMereniPolohy.
+      // Hláška by jen zopakovala jeho text a překrývala se s ním.
       povinnaPoloha = await ziskejPolohuPovinne()
       if (!povinnaPoloha) {
         checkinInProgress = false
         window.zapisProbiha = false
+        // 2. 11. 2026, Petr Fuks: šest dní nezapsal docházku a v appce po tom
+        // nezůstalo nic. Teď každé nepovedené měření nechá stopu v deníku chyb.
+        // Bez await — deník nesmí návod zdržet ani nic shodit.
+        zapisNezapsanePolohy(type, now)
+        if (window._chybaPolohy === 'zruseno') {
+          // Zrušil to sám (panel měření) — návod by mu jen překážel.
+          showToast('📍 Zápis zrušen — nic se nezapsalo.')
+          return
+        }
         showToast('📍 ' + (type === 'in' ? 'Příchod' : 'Odchod') + ' se NEZAPSAL — vaše firma zapisuje '
           + 'docházku jen s polohou.')
         ukazNavodPolohy(type, window._chybaPolohy)
@@ -22700,6 +22712,8 @@ async function mobCheckin(type) {
         // Poloha je už u záznamu. Znovu ji neměřit a hlavně NENABÍZET ruční
         // adresu — to by u firmy „jen s polohou" obešlo celé pravidlo.
         gpsAddr = povinnaPoloha.adresa; gpsLat = povinnaPoloha.lat; gpsLng = povinnaPoloha.lng
+        // Zapsáno — sledování na pozadí z dřívějšího pokusu už nemá na co čekat.
+        zahodPozdniPolohu()
       } else {
         // Zeptej se na adresu pracoviště (jen pokud ještě není potvrzená)
         askAddressIfNeeded(data.id, 'Příchod')
@@ -27426,6 +27440,115 @@ function fetchAdresy(url, volby, ms) {
   return Promise.race([fetch(url, Object.assign({}, volby || {}, ac ? { signal: ac.signal } : {})), limit])
 }
 
+// POZDNÍ POLOHA (2. 11. 2026, Petr Fuks: firma „jen s polohou", Chrome na Androidu,
+// šest dní nezapsal docházku). GPS bez „Přesnosti polohy Google" (jen satelity)
+// najde první polohu často až za 25–60 s — dřív ji appka po 15 s zahodila
+// (clearWatch) a „Zkusit znovu" začínalo od nuly. Teď, když povinné měření skončí
+// bez polohy, sledování běží ještě nejvýš 2 min na pozadí. Co přijde, se pamatuje
+// jen tady v paměti (nikam se nezapisuje) a příští ťuknutí na Začít směnu /
+// Konec směny to vezme hned — je-li to nejvýš 2 min staré. Otevřený návod mezitím
+// ukáže zelený řádek „Poloha se právě našla".
+const POZDNI_POLOHA_MS = 120000
+let _pozdniPoloha = null        // { lat, lng, acc, kdy }
+let _pozdniSledovani = null     // { zastav } — sledování na pozadí, vždy nejvýš jedno
+let _pozdniRadekCasovac = null
+function zastavPozdniSledovani() {
+  const s = _pozdniSledovani
+  _pozdniSledovani = null
+  if (s) { try { s.zastav() } catch (e) {} }
+}
+function pozdniPolohaPlati() {
+  return !!(_pozdniPoloha && Date.now() - _pozdniPoloha.kdy <= POZDNI_POLOHA_MS)
+}
+// Začíná nové povinné měření: vezmi pozdní polohu (je-li čerstvá) a sledování ukonči.
+function vezmiPozdniPolohu() {
+  const p = pozdniPolohaPlati() ? _pozdniPoloha : null
+  _pozdniPoloha = null
+  zastavPozdniSledovani()
+  return p
+}
+// Zapsáno — sledování na pozadí už nemá na co čekat.
+function zahodPozdniPolohu() {
+  _pozdniPoloha = null
+  zastavPozdniSledovani()
+}
+function zapamatujPozdniPolohu(p) {
+  try {
+    const acc = (p && p.coords && p.coords.accuracy) || 9999
+    // Drží se ta přesnější (stejně přesná novější ji nahradí).
+    if (pozdniPolohaPlati() && _pozdniPoloha.acc < acc) return
+    _pozdniPoloha = { lat: p.coords.latitude, lng: p.coords.longitude, acc, kdy: Date.now() }
+    ukazPozdniPolohuVNavodu()
+    // Dost přesná (jako u měření ≤ 50 m) — GPS už vypnout, šetří baterku.
+    if (acc <= 50) zastavPozdniSledovani()
+  } catch (e) {}
+}
+// Zelený řádek v otevřeném návodu. Po 2 min zmizí — „Zkusit znovu" by pak měřilo znovu.
+function ukazPozdniPolohuVNavodu() {
+  const dlg = document.getElementById('navod-polohy')
+  const radek = document.getElementById('navod-polohy-nalezena')
+  if (!dlg || !radek || dlg.style.display === 'none' || !pozdniPolohaPlati()) return
+  radek.style.display = 'block'
+  clearTimeout(_pozdniRadekCasovac)
+  _pozdniRadekCasovac = setTimeout(() => { if (!pozdniPolohaPlati()) radek.style.display = 'none' },
+    POZDNI_POLOHA_MS - (Date.now() - _pozdniPoloha.kdy) + 200)
+}
+
+// Stav oprávnění k poloze, ale nejvýš za `ms` (pak null) — konec měření na něj
+// nesmí čekat déle.
+function zjistiPovoleni(ms) {
+  return Promise.race([getGpsPermission(), new Promise(r => setTimeout(() => r(null), ms))]).catch(() => null)
+}
+
+// PRŮBĚH MĚŘENÍ POLOHY (2. 11. 2026, Petr Fuks). Po hlášce „Zjišťuji polohu…"
+// (3 s) bylo až 12 s na obrazovce úplně ticho a vypadalo to, že appka nic nedělá —
+// a povinné měření teď smí trvat 45 s (s dotazem na povolení i víc). Panel ukazuje
+// celou dobu, kolik sekund už appka hledá, co má člověk udělat, a „Zrušit".
+// Nahoře, ať nezakryje tlačítko, na které člověk právě ťukl; když je stránka
+// posunutá a tlačítko je až nahoře, jde panel dolů nad spodní lištu.
+// z-index 150: nad spodní lištou (100), pod všemi okny (od 200) — návod i dotazy
+// appky ho zakryjí. Počítadlo sekund je pro čtečky skryté, ať je nečte každou sekundu.
+function ukazMereniPolohy(zrusit) {
+  let el = document.getElementById('poloha-mereni')
+  if (!el) {
+    el = document.createElement('div')
+    el.id = 'poloha-mereni'
+    el.style.cssText = 'position:fixed;left:12px;right:12px;max-width:440px;margin:0 auto;box-sizing:border-box;z-index:150;display:none;align-items:center;gap:10px;padding:10px 10px 10px 14px;background:#fff;color:#211D1A;border:2px solid #1d9e75;border-radius:14px;box-shadow:0 6px 24px rgba(0,0,0,.25);font-family:inherit'
+    el.innerHTML = '<div role="status" style="flex:1;min-width:0">'
+      + '<div style="font-size:15px;font-weight:800;line-height:1.3">📍 Hledám polohu… <span id="poloha-mereni-s" aria-hidden="true"></span></div>'
+      + '<div id="poloha-mereni-rada" style="display:none;font-size:13px;line-height:1.35;color:#5b524a;margin-top:2px"></div>'
+      + '</div>'
+      + '<button type="button" id="poloha-mereni-zrusit" style="flex-shrink:0;min-height:44px;padding:0 14px;border:1px solid #d6d0c8;border-radius:10px;background:#fff;color:#555;font-size:14px;font-weight:700;font-family:inherit;cursor:pointer">Zrušit</button>'
+    document.body.appendChild(el)
+  }
+  el.querySelector('#poloha-mereni-zrusit').onclick = zrusit
+  el.style.top = 'calc(8px + env(safe-area-inset-top, 0px))'
+  el.style.bottom = 'auto'
+  el.style.display = 'flex'
+  try {
+    const r = el.getBoundingClientRect()
+    const zakryl = [...document.querySelectorAll('#att-main-btn, #att-secondary')].some(b => {
+      const q = b.getBoundingClientRect()
+      return q.height > 0 && q.top < r.bottom + 8 && q.bottom > r.top - 8
+    })
+    if (zakryl) { el.style.top = 'auto'; el.style.bottom = 'calc(76px + env(safe-area-inset-bottom, 0px))' }
+  } catch (e) {}
+  return el
+}
+function obnovMereniPolohy(sekund, rada) {
+  const s = document.getElementById('poloha-mereni-s')
+  const r = document.getElementById('poloha-mereni-rada')
+  if (s) s.textContent = sekund + ' s'
+  if (r) {
+    if (r.textContent !== rada) r.textContent = rada
+    r.style.display = rada ? 'block' : 'none'
+  }
+}
+function skryjMereniPolohy() {
+  const el = document.getElementById('poloha-mereni')
+  if (el) el.style.display = 'none'
+}
+
 // Získá ČERSTVOU a co nejpřesnější GPS adresu (vrací Promise s textem adresy nebo '').
 // Sleduje polohu a vezme nejpřesnější — skončí při ≤50 m, nebo 6 s po prvním
 // údaji vezme nejlepší dosud.
@@ -27438,14 +27561,36 @@ function fetchAdresy(url, volby, ms) {
 // na první údaj; telefon se ptá → až 60 s na odpověď a po povolení zase 15 s
 // (prohlížeč sám počítá svůj limit až od povolení). Zákaz končí hned chybou 1
 // a appka ukáže návod (ukazNavodPolohy).
-function captureLocationNow() {
+//
+// POVINNÁ POLOHA — volby.povinna (2. 11. 2026, Petr Fuks). Posílá ji jen
+// ziskejPolohuPovinne(); bez ní (dialog s adresou u ostatních firem) se nemění nic.
+// S ní:
+//  - na první údaj 45 s místo 15 s (i od povolení; 60 s na odpověď na dotaz zůstává),
+//    protože GPS bez „Přesnosti polohy Google" chytá první polohu často 25–60 s;
+//  - chyba 2/3 před prvním údajem měření neukončí — watchPosition po ní běží dál
+//    a polohu často za chvíli dá. Hned končí jen zákaz (1);
+//  - když měření skončí bez polohy, sledování běží ještě nejvýš 2 min na pozadí
+//    a co přijde, vezme příští ťuknutí (pozdní poloha, viz _pozdniPoloha);
+//  - panel s průběhem a „Zrušit" (ukazMereniPolohy) a záznam pro deník
+//    (window._polohaDiag → zapisNezapsanePolohy).
+function captureLocationNow(volby) {
+  const povinna = !!(volby && volby.povinna === true)
   return new Promise((resolve) => {
     // Proč se poloha nezjistila (1 zakázaná, 2 nedostupná, 3 nestihla se,
-    // 'nepodporuje') — podle toho návod pracovníkovi (ukazNavodPolohy).
+    // 'nepodporuje', u povinné i 'zruseno') — podle toho návod pracovníkovi (ukazNavodPolohy).
     window._chybaPolohy = null
+    // Co se při povinném měření dělo — do deníku, když se nezapíše
+    // (zapisNezapsanePolohy), a pro návod (stav oprávnění na konci). Bez souřadnic.
+    const diag = povinna ? (window._polohaDiag = {
+      povoleniStart: null, povoleniKonec: null, zmeny: [], udaju: 0, prvniUdajMs: null, nejlepsiM: null,
+      chybaText: null, limit: '60s', skryto: 0, msMereni: 0, pozdni: false
+    }) : null
     if (!navigator.geolocation) { window._chybaPolohy = 'nepodporuje'; resolve(''); return }
+    // Poloha, která po minulém povinném pokusu přišla pozdě (nejvýš 2 min stará).
+    // Bere se hned na začátku a sledování na pozadí tím končí.
+    const pozdni = povinna ? vezmiPozdniPolohu() : null
 
-    const NA_PRVNI_UDAJ_MS = 15000   // poloha povolená: čekání na první údaj
+    const NA_PRVNI_UDAJ_MS = povinna ? 45000 : 15000   // poloha povolená: čekání na první údaj
     const NA_ODPOVED_MS = 60000      // telefon se ptá: odpověď člověka + první údaj
     const ZPRESNENI_MS = 6000        // od prvního údaje aspoň tolik na ≤50 m…
     const ZPRESNENI_OD_TUKNUTI_MS = 10000   // …a nejdřív 10 s od ťuknutí (jako dřív)
@@ -27456,17 +27601,95 @@ function captureLocationNow() {
     let done = false
     let watchId = null
     let casovac = null, hlidac = null
+    // Jen povinné měření: poslední chyba 2/3 před prvním údajem, poslední zjištěný
+    // stav oprávnění, tik panelu, sledování na pozadí a „výsledek je rozhodnutý".
+    let posledniKod = null, stavPovoleni = null, tik = null, naPozadi = false, rozhodnuto = false
 
     const stopWatch = () => {
       if (watchId !== null) { try { navigator.geolocation.clearWatch(watchId) } catch(e){} watchId = null }
     }
     const odpocet = (ms) => { clearTimeout(casovac); casovac = setTimeout(() => { if (!done) finish() }, ms) }
 
+    // ---- jen povinné měření ----
+    const pocitejSkryti = () => { if (document.visibilityState === 'hidden') diag.skryto++ }
+    const obnovPanel = () => {
+      const s = Math.floor((Date.now() - start) / 1000)
+      obnovMereniPolohy(s, done ? ''
+        : stavPovoleni === 'prompt' ? 'Telefon se ptá na polohu — ťukněte na Povolit.'
+        : s >= 8 ? 'Venku nebo u okna to jde rychleji.' : '')
+    }
+    const uklid = () => {
+      clearInterval(tik); skryjMereniPolohy()
+      document.removeEventListener('visibilitychange', pocitejSkryti)
+    }
+    // Poloha povolená → na první údaj 45 s (jen jednou: od ťuknutí, nebo od povolení).
+    const poPovoleni = (stav) => {
+      if (stav === 'granted' && !done && bestLat === null && diag.limit === '60s') { diag.limit = '45s'; odpocet(NA_PRVNI_UDAJ_MS) }
+    }
+    // Každou sekundu: počítadlo na panelu a stav oprávnění (řádek „ťukněte na
+    // Povolit", 45 s od povolení, změny do záznamu).
+    const tikni = () => {
+      obnovPanel()
+      if (done) return
+      getGpsPermission().then(stav => {
+        if (rozhodnuto) return
+        if (stav !== stavPovoleni) {
+          if (stavPovoleni !== null) diag.zmeny.push((Date.now() - start) + ':' + stav)
+          stavPovoleni = stav
+        }
+        poPovoleni(stav)
+        obnovPanel()
+      }).catch(() => {})
+    }
+    // Poloha je (adresa) — platí první rozhodnutí; pozdější „Zrušit" už nic nezmění.
+    const vrat = !povinna ? resolve : (adresa) => {
+      if (rozhodnuto) return
+      rozhodnuto = true
+      uklid()
+      // Stav oprávnění na konci jen do záznamu — zápis na něj nečeká.
+      zjistiPovoleni(800).then(stav => { diag.povoleniKonec = stav || stavPovoleni })
+      resolve(adresa)
+    }
+    // Bez polohy: kód pro návod; sledovatDal = nechat sledování běžet na pozadí
+    // (u „nestihla se" / „nedostupná" — ne u zákazu ani u Zrušit).
+    const nevyslo = (kod, sledovatDal) => {
+      if (rozhodnuto) return
+      rozhodnuto = true
+      uklid()
+      window._chybaPolohy = kod
+      if (sledovatDal && watchId !== null) predejNaPozadi(); else stopWatch()
+      // Návod se řídí stavem oprávnění NA KONCI (Chrome hlásí 'denied' u zablokované
+      // stránky, 'prompt' i u vypnuté polohy) — počkat na něj, nejvýš 0,8 s.
+      zjistiPovoleni(800).then(stav => { diag.povoleniKonec = stav || stavPovoleni || 'unknown'; resolve('') })
+    }
+    // Sledování běží dál na pozadí nejvýš POZDNI_POLOHA_MS; co přijde, zapamatuje
+    // zapamatujPozdniPolohu. Vždy jen jedno sledování na pozadí.
+    const predejNaPozadi = () => {
+      zastavPozdniSledovani()
+      naPozadi = true
+      const sledovani = {
+        zastav: () => { naPozadi = false; clearTimeout(sledovani.limit); stopWatch() },
+        limit: setTimeout(() => { if (_pozdniSledovani === sledovani) zastavPozdniSledovani() }, POZDNI_POLOHA_MS)
+      }
+      _pozdniSledovani = sledovani
+    }
+    // „Zrušit" na panelu: konec hned, nic se nezapíše a na pozadí se nesleduje.
+    const zrusit = () => {
+      if (rozhodnuto) return
+      if (!done) { done = true; clearTimeout(casovac); diag.msMereni = Date.now() - start }
+      nevyslo('zruseno', false)
+    }
+
     // Přeloží nejlepší polohu na adresu a vrátí ji
     const finish = async () => {
       if (done) return
       done = true
       clearTimeout(casovac); clearInterval(hlidac)
+      if (povinna) {
+        diag.msMereni = Date.now() - start
+        // Bez polohy: poslední chyba 2/3, jinak 3 (nestihla se) — a sledovat dál na pozadí.
+        if (bestLat === null) { nevyslo(posledniKod != null ? posledniKod : 3, true); return }
+      }
       stopWatch()
       if (bestLat === null) { if (window._chybaPolohy == null) window._chybaPolohy = 3; resolve(''); return }
       gpsLat = bestLat; gpsLng = bestLng
@@ -27500,7 +27723,22 @@ function captureLocationNow() {
         } catch(e) {}
       }
       gpsAddr = resolved || (gpsLat && gpsLng ? `${gpsLat.toFixed(5)}, ${gpsLng.toFixed(5)}` : '')
-      resolve(gpsAddr)
+      vrat(gpsAddr)
+    }
+
+    if (povinna) {
+      document.addEventListener('visibilitychange', pocitejSkryti)
+      ukazMereniPolohy(zrusit)
+      obnovPanel()
+      tik = setInterval(tikni, 1000)
+      if (pozdni) {
+        // Pozdní poloha z minulého pokusu — rovnou na adresu, bez nového měření.
+        diag.pozdni = true; diag.udaju = 1; diag.prvniUdajMs = 0; diag.nejlepsiM = Math.round(pozdni.acc); diag.limit = 'zpresneni'
+        bestLat = pozdni.lat; bestLng = pozdni.lng; bestAcc = pozdni.acc
+        getGpsPermission().then(stav => { diag.povoleniStart = stav; if (stavPovoleni === null) stavPovoleni = stav }).catch(() => {})
+        finish()
+        return
+      }
     }
 
     // Dokud není jasné, jestli se telefon ptá, počítej s dotazem (60 s).
@@ -27511,8 +27749,13 @@ function captureLocationNow() {
     // Sleduj polohu — ber jen přesnější údaje. Skonči při ≤50 m. Spouští se
     // HNED po ťuknutí (bez čekání na zjištění oprávnění), ať se telefon zeptá.
     watchId = navigator.geolocation.watchPosition(p => {
-      if (done) return
+      // Po konci měření jen povinné: sledování na pozadí si polohu zapamatuje.
+      if (done) { if (naPozadi) zapamatujPozdniPolohu(p); return }
       const acc = p.coords.accuracy || 9999
+      if (povinna) {
+        diag.udaju++
+        if (diag.prvniUdajMs === null) { diag.prvniUdajMs = Date.now() - start; diag.limit = 'zpresneni' }
+      }
       // První údaj → už jen zpřesnění: aspoň 6 s, a nejdřív do 10. s od ťuknutí
       // (tak dlouho se zpřesňovalo dřív — kratší okno by ukládalo hrubší polohu).
       if (bestLat === null) { clearInterval(hlidac); odpocet(Math.max(ZPRESNENI_MS, ZPRESNENI_OD_TUKNUTI_MS - (Date.now() - start))) }
@@ -27520,9 +27763,22 @@ function captureLocationNow() {
         bestAcc = acc
         bestLat = p.coords.latitude
         bestLng = p.coords.longitude
+        if (povinna) diag.nejlepsiM = Math.round(acc)
       }
       if (bestAcc <= 50) finish()   // dost přesné → hotovo
     }, (err) => {
+      if (povinna) {
+        // Na pozadí: zákaz sledování ukončí, ostatní chyby nic neznamenají.
+        if (done) { if (naPozadi && err && err.code === 1) zastavPozdniSledovani(); return }
+        diag.chybaText = String((err && err.message) || '').slice(0, 120) || null
+        if (bestLat !== null) return   // poloha už je, jen se zpřesňuje
+        const kod = (err && err.code != null) ? err.code : 3
+        // Zákaz končí hned (prohlížeč po něm sledování zastaví). Chyba 2/3 ne —
+        // watchPosition běží dál; jen se pamatuje, co hlásit, když do limitu nic nepřijde.
+        if (kod === 1) { done = true; clearTimeout(casovac); diag.msMereni = Date.now() - start; nevyslo(1, false) }
+        else posledniKod = kod
+        return
+      }
       // chyba měření — když nemáme vůbec nic, vrať prázdné (zůstane ruční zadání / návod)
       window._chybaPolohy = (err && err.code != null) ? err.code : 3
       if (!done && bestLat === null) { done = true; clearTimeout(casovac); clearInterval(hlidac); stopWatch(); resolve('') }
@@ -27532,8 +27788,16 @@ function captureLocationNow() {
     // Čas hlídají jen vlastní odpočty výš a níž.
 
     // Je-li poloha povolená, platí 15 s; když se telefon ptá, hlídej, kdy
-    // člověk povolí, a od té chvíle zase 15 s.
+    // člověk povolí, a od té chvíle zase 15 s. (Povinné měření: 45 s a hlídá
+    // oprávnění samo, viz tikni.)
     getGpsPermission().then(stav => {
+      if (povinna) {
+        diag.povoleniStart = stav
+        if (stavPovoleni === null) stavPovoleni = stav
+        poPovoleni(stav)
+        obnovPanel()
+        return
+      }
       if (done || bestLat !== null) return
       if (stav === 'granted') { odpocet(NA_PRVNI_UDAJ_MS); return }
       if (stav === 'unknown') return   // bez Permissions API (starší Safari) platí 60 s na odpověď i údaj
@@ -27784,64 +28048,122 @@ function pauzaNetrefila() {
   try { getTodayRecord() } catch (e) {}
 }
 
+// Odkud odpověď přišla a jak je stará, si appka pamatuje kvůli deníku
+// nezapsaného příchodu/odchodu (zapisNezapsanePolohy, 2. 11. 2026, Petr Fuks):
+// window._gpsPravidloZdroj = 'pamet' | 'rpc' | 'rpc-chyba …' | 'rpc-vyjimka …',
+// window._gpsPravidloVekMs = stáří použité odpovědi (null = žádná nebyla).
 async function mojeFirmaChcePolohu(obnovit) {
   if (!obnovit && _gpsPravidlo.hodnota !== null && Date.now() - _gpsPravidlo.kdy < GPS_PRAVIDLO_PLATI_MS) {
+    window._gpsPravidloZdroj = 'pamet'
+    window._gpsPravidloVekMs = Date.now() - _gpsPravidlo.kdy
     return _gpsPravidlo.hodnota
   }
+  // Při selhání platí poslední známá odpověď — jak je stará.
+  const vekPosledni = () => (_gpsPravidlo.kdy ? Date.now() - _gpsPravidlo.kdy : null)
   try {
     const r = await Promise.race([
       sb.rpc('muj_zapis_jen_gps'),
       new Promise((_, ne) => setTimeout(() => ne(new Error('timeout')), 5000))
     ])
-    if (r?.error) return _gpsPravidlo.hodnota === true
+    if (r?.error) {
+      window._gpsPravidloZdroj = 'rpc-chyba ' + String(r.error.message || '').slice(0, 80)
+      window._gpsPravidloVekMs = vekPosledni()
+      return _gpsPravidlo.hodnota === true
+    }
     _gpsPravidlo = { hodnota: r?.data === true, kdy: Date.now() }
+    window._gpsPravidloZdroj = 'rpc'
+    window._gpsPravidloVekMs = 0
     return _gpsPravidlo.hodnota
-  } catch (e) { return _gpsPravidlo.hodnota === true }
+  } catch (e) {
+    window._gpsPravidloZdroj = 'rpc-vyjimka ' + String((e && e.message) || e || '').slice(0, 80)
+    window._gpsPravidloVekMs = vekPosledni()
+    return _gpsPravidlo.hodnota === true
+  }
 }
 
 // NÁVOD, JAK ZAPNOUT POLOHU. Firma „jen s polohou" ruční zápis nemá, takže
 // pracovník bez polohy nezapíše nic — majitel 30. 9. 2026: „ať ho to klidně
 // navede nějak", a „hodně lidí má i Android". Návod podle toho, PROČ poloha
 // nevyšla (zakázaná / vypnutá / nestihla se) a na čem je (iPhone, Android).
+//
+// ANDROID (CHROME) PŘEPSÁN 2. 11. 2026 — Petr Fuks šest dní nezapsal docházku
+// a návod mu nepomohl. Zkouška v emulovaném Chromu a dohledání ukázaly:
+//  - „Obnovit a zkusit znovu" Chromu nepomůže: zablokovanou polohu se po
+//    obnovení stránky znovu nezeptá. Když se dotaz na polohu několikrát zavře,
+//    Chrome stránku na týden zablokuje sám. Obnovení pomáhá jen v Safari (WebKit
+//    se po zákazu v téže stránce už nezeptá) — iPhone ho proto má dál.
+//  - Appka z plochy nemá adresní řádek ani vlastní povolení — všechno je
+//    v Chromu (⋮ → Nastavení → Nastavení webu → Poloha) a v Nastavení Androidu
+//    u Chromu. Chrome hlásí 'prompt' i u vypnuté polohy v telefonu nebo když mu
+//    ji nepovolil Android; 'denied' u zablokované stránky. Proto i „nestihla se"
+//    při 'prompt' dostane kroky k povolení (stav na konci: _polohaDiag).
+//  - Návod mluvil o tlačítku „Příchod", na obrazovce je „Začít směnu".
 function ukazNavodPolohy(type, kod) {
   const co = type === 'out' ? 'Odchod' : 'Příchod'
+  // Jak se tlačítko na obrazovce opravdu jmenuje.
+  const tlacitko = type === 'out' ? 'Konec směny' : 'Začít směnu'
   const ios = typeof isIOS === 'function' && isIOS()
   const android = /android/i.test(navigator.userAgent || '')
   const zPlochy = typeof isAppInstalled === 'function' && isAppInstalled()
+  // Jak dopadlo povinné měření (stav oprávnění na konci, kolik sekund se hledalo).
+  const diag = window._polohaDiag || {}
   const krok = (t) => `<li style="margin:0 0 8px">${t}</li>`
+  const androidPovoleni = !ios && android && (kod === 1 || (kod === 3 && diag.povoleniKonec === 'prompt'))
+  const androidMereni = !ios && android && !androidPovoleni && kod !== 'nepodporuje'
+  // Obnovit stránku jen tam, kde to pomáhá (Safari; jinde mimo Android jako dřív).
+  const poZakazu = kod === 1 && !androidPovoleni
   let proc, kroky
   if (kod === 'nepodporuje') {
     proc = 'Tenhle prohlížeč polohu neumí.'
     kroky = [krok(ios ? 'Otevřete appku v <b>Safari</b>.' : 'Otevřete appku v <b>Chromu</b>.')]
+  } else if (androidPovoleni) {
+    proc = diag.povoleniKonec === 'denied'
+      ? 'Chrome má polohu pro SubBau <b>zablokovanou</b>. Stává se to i samo — když se dotaz na polohu několikrát zavře, Chrome stránku na týden zablokuje.'
+      : 'Telefon appce polohu <b>nedovolil</b> — buď je v telefonu vypnutá, nebo ji Chrome nemá povolenou.'
+    kroky = [
+      krok('Stáhněte horní lištu a zapněte <b>Polohu</b>.'),
+      krok((zPlochy
+        ? 'Otevřete aplikaci <b>Chrome</b> (prohlížeč, ne ikonu SubBau) → vpravo nahoře <b>⋮</b> → <b>Nastavení</b> → <b>Nastavení webu</b> → <b>Poloha</b>.'
+        : 'V Chromu ťukněte vpravo nahoře na <b>⋮</b> → <b>Nastavení</b> → <b>Nastavení webu</b> → <b>Poloha</b>.')
+        + ' Přepínač nahoře zapněte. Když je <b>subbau.vercel.app</b> pod „Zablokováno“ nebo u něj stojí „Automaticky blokováno“, ťukněte na něj a dejte <b>Povolit</b>.'),
+      krok('<b>Nastavení</b> telefonu → <b>Aplikace</b> → <b>Chrome</b> → <b>Oprávnění</b> → <b>Poloha</b> → „Povolit jen při používání aplikace“ a zapněte „Používat přesnou polohu“.'),
+      krok('Pak ťukněte na <b>Zkusit znovu</b>. Když se Chrome zeptá na polohu, dejte <b>Povolit</b> — dotaz nezavírejte šipkou zpět, Chrome by stránku zablokoval.')
+    ]
+  } else if (androidMereni) {
+    proc = kod === 2 ? 'Telefon teď polohu <b>nezjistil</b> — nejspíš je vypnutá.'
+      : 'Poloha se <b>nestihla zjistit</b>' + (diag.msMereni ? ' (hledali jsme ji ' + Math.round(diag.msMereni / 1000) + ' s)' : '') + '.'
+    kroky = [
+      krok('Stáhněte horní lištu a zkontrolujte, že je zapnutá <b>Poloha</b>.'),
+      krok('Zapněte <b>Přesnost polohy Google</b>: v Nastavení ťukněte na lupu a napište „přesnost“. Bez ní telefon hledá polohu jen přes satelity a v budově ji často nenajde.'),
+      krok('Jděte ven nebo k oknu.'),
+      krok('Pak ťukněte na <b>Zkusit znovu</b>.')
+    ]
   } else if (kod === 1) {
-    // Po zamítnutí se prohlížeč v téže otevřené stránce už znovu nezeptá
-    // (Safari i Chrome). Obnovení stránky dá telefonu šanci zeptat se znovu;
-    // když ani pak ne, je poloha zakázaná v nastavení — kroky níž.
-    proc = 'Telefon appce polohu <b>nedovolil</b>. Ťukněte na <b>Obnovit a zkusit znovu</b> a pak znovu na <b>' + co + '</b> — když se telefon zeptá, dejte <b>Povolit</b>. Když se nezeptá, povolte polohu v nastavení:'
+    // Po zamítnutí se Safari v téže otevřené stránce už znovu nezeptá.
+    // Obnovení stránky dá telefonu šanci zeptat se znovu; když ani pak ne,
+    // je poloha zakázaná v nastavení — kroky níž.
+    proc = 'Telefon appce polohu <b>nedovolil</b>. Ťukněte na <b>Obnovit a zkusit znovu</b> a pak znovu na <b>' + tlacitko + '</b> — když se telefon zeptá, dejte <b>Povolit</b>. Když se nezeptá, povolte polohu v nastavení:'
     kroky = ios ? [
       krok('Otevřete <b>Nastavení</b> → <b>Soukromí a zabezpečení</b> → <b>Polohové služby</b> a zapněte je.'),
       krok('V tom seznamu dole ťukněte na <b>Webové stránky Safari</b> → <b>Při používání aplikace</b> a zapněte <b>Přesnou polohu</b>.')
     ].concat(zPlochy ? [] : [
       krok('V Safari ještě: <b>aA</b> vlevo v adresním řádku → <b>Nastavení webu</b> → <b>Poloha</b> → <b>Povolit</b>.')
-    ]) : android ? [
-      krok('Stáhněte horní lištu a zapněte <b>Polohu</b>.'),
-      krok('V Chromu ťukněte na ikonu <b>vlevo od adresy</b> → <b>Oprávnění</b> (nebo Nastavení webu) → <b>Poloha</b> → <b>Povolit</b>.'),
-      krok('Máte-li appku na ploše: <b>Nastavení</b> → <b>Aplikace</b> → <b>Chrome</b> → <b>Oprávnění</b> → <b>Poloha</b> → <b>Povolit při používání</b>.')
-    ] : [
+    ]) : [
       krok('Povolte polohu pro tuhle stránku v nastavení prohlížeče (ikona vlevo od adresy).')
     ]
   } else {
     proc = kod === 2 ? 'Telefon teď polohu <b>nezjistil</b> — nejspíš je vypnutá.' : 'Poloha se <b>nestihla zjistit</b>.'
     kroky = [
       krok(ios ? 'Zkontrolujte <b>Nastavení</b> → <b>Soukromí a zabezpečení</b> → <b>Polohové služby</b> — musí být zapnuté.'
-        : android ? 'Stáhněte horní lištu a zkontrolujte, že je zapnutá <b>Poloha</b>.'
         : 'Zkontrolujte, že má počítač nebo telefon zapnutou polohu.'),
       krok('Když se telefon zeptá na polohu, ťukněte na <b>Povolit</b>.'),
       krok('Uvnitř budovy to trvá déle — zkuste to u okna nebo venku.')
     ]
   }
-  const poZakazu = kod === 1
-  kroky.push(krok(poZakazu ? 'Pak ťukněte na <b>Obnovit a zkusit znovu</b>.' : 'Pak zmáčkněte <b>Zkusit znovu</b>.'))
+  // Androidí kroky končí „Zkusit znovu" samy.
+  if (!androidPovoleni && !androidMereni) {
+    kroky.push(krok(poZakazu ? 'Pak ťukněte na <b>Obnovit a zkusit znovu</b>.' : 'Pak zmáčkněte <b>Zkusit znovu</b>.'))
+  }
   let dlg = document.getElementById('navod-polohy')
   if (!dlg) {
     dlg = document.createElement('div')
@@ -27850,7 +28172,9 @@ function ukazNavodPolohy(type, kod) {
     dlg.onclick = (e) => { if (e.target === dlg) dlg.style.display = 'none' }
     document.body.appendChild(dlg)
   }
+  // Zelený řádek nahoře se ukáže, až poloha přijde pozdě (ukazPozdniPolohuVNavodu).
   dlg.innerHTML = `<div role="dialog" aria-modal="true" style="background:#fff;border-radius:16px;padding:20px;width:100%;max-width:440px;max-height:88vh;overflow-y:auto;box-shadow:0 8px 32px rgba(0,0,0,.3);color:#211D1A">
+      <div id="navod-polohy-nalezena" role="status" style="display:none;margin:0 0 12px;padding:10px 12px;border-radius:10px;background:#e3f4ec;border:1px solid #1d9e75;color:#11603f;font-size:14px;font-weight:700;line-height:1.4">✅ Poloha se právě našla — ťukněte na <b>Zkusit znovu</b>.</div>
       <div style="font-size:18px;font-weight:800;margin-bottom:6px">📍 ${co} se nezapsal</div>
       <div style="font-size:14px;line-height:1.45;margin-bottom:12px">Vaše firma zapisuje docházku <b>jen s polohou</b> — ručně to nejde. ${proc}</div>
       <ol style="font-size:14px;line-height:1.45;padding-left:20px;margin:0 0 16px">${kroky.join('')}</ol>
@@ -27861,12 +28185,14 @@ function ukazNavodPolohy(type, kod) {
     </div>`
   // Zkusit znovu = tentýž zápis (příchod, nebo odchod) ještě jednou.
   const typZapisu = type === 'out' ? 'out' : 'in'
-  // Po zákazu se stránka obnoví (jinak se telefon znovu nezeptá) a po načtení
-  // appka připomene, ať ťukne znovu — sama nic nezapisuje.
+  // Po zákazu (mimo Android) se stránka obnoví (jinak se Safari znovu nezeptá)
+  // a po načtení appka připomene, ať ťukne znovu — sama nic nezapisuje.
   dlg.querySelector('#navod-polohy-znovu').onclick = poZakazu
     ? () => { try { sessionStorage.setItem('sb_poloha_znovu', typZapisu) } catch (e) {} location.reload() }
     : () => { dlg.style.display = 'none'; mobCheckin(typZapisu) }
   dlg.style.display = 'flex'
+  // Poloha mohla přijít mezi koncem měření a otevřením návodu.
+  ukazPozdniPolohuVNavodu()
 }
 
 // Po „Obnovit a zkusit znovu" z návodu k poloze (zákaz se v téže stránce
@@ -27878,7 +28204,8 @@ function pripomenPolohuPoObnoveni() {
     const znovu = sessionStorage.getItem('sb_poloha_znovu')
     if (!znovu) return
     sessionStorage.removeItem('sb_poloha_znovu')
-    setTimeout(() => showToast('📍 Ťukněte znovu na ' + (znovu === 'out' ? 'Odchod' : 'Příchod')
+    // Jménem tlačítka, které na obrazovce opravdu je (2. 11. 2026).
+    setTimeout(() => showToast('📍 Ťukněte znovu na ' + (znovu === 'out' ? 'Konec směny' : 'Začít směnu')
       + ' — když se telefon zeptá na polohu, dejte „Povolit“.'), 1500)
   } catch (e) {}
 }
@@ -27887,12 +28214,65 @@ function pripomenPolohuPoObnoveni() {
 // captureLocationNow() při neúspěchu vrací '' a globální gpsLat/gpsLng NECHÁ
 // z minula — proto se úspěch pozná jen podle vrácené adresy, ne podle nich.
 // Jinak by se k dnešnímu příchodu zapsala včerejší poloha.
+// { povinna: true } = delší čekání, pozdní poloha, panel s průběhem a záznam
+// pro deník (viz captureLocationNow) — jen tady, dialog s adresou je beze změny.
 async function ziskejPolohuPovinne() {
   try {
-    const adresa = await captureLocationNow()
+    const adresa = await captureLocationNow({ povinna: true })
     if (!adresa || gpsLat == null || gpsLng == null) return null
     return { lat: gpsLat, lng: gpsLng, adresa }
-  } catch (e) { return null }
+  } catch (e) { skryjMereniPolohy(); return null }
+}
+
+// STOPA PO NEZAPSANÉM PŘÍCHODU / ODCHODU (2. 11. 2026). Petr Fuks (firma „jen
+// s polohou", Chrome na Androidu) šest dní nezapsal docházku a v appce po tom
+// nezůstalo nic — kancelář nevěděla, co vidí ani proč. Teď každé nepovedené
+// povinné měření (i zrušené) nechá v deníku chyb jeden záznam: kód, jak dopadl
+// dotaz na oprávnění na začátku a na konci, jak dlouho se měřilo, appka z plochy
+// nebo prohlížeč, telefon. ŽÁDNÉ souřadnice.
+// Volá se bez await: nic nevyhodí a nic nezdrží (model telefonu se čeká nejvýš
+// 0,8 s; bez sítě zápis podrží v telefonu zapisChybuAppky).
+async function zapisNezapsanePolohy(type, kdyTuknul) {
+  try {
+    // Hned, před prvním await — další pokus by _polohaDiag přepsal.
+    const d = Object.assign({}, window._polohaDiag || {})
+    const kod = window._chybaPolohy
+    const mm = (q) => { try { return window.matchMedia(q).matches } catch (e) { return false } }
+    const rezim = mm('(display-mode: fullscreen)') ? 'fullscreen'
+      : (mm('(display-mode: standalone)') || window.navigator.standalone === true) ? 'standalone'
+      : mm('(display-mode: minimal-ui)') ? 'minimal-ui' : 'browser'
+    const uad = navigator.userAgentData || null
+    const detail = {
+      verze: String(SUBBAU_VERZE).split(' — ')[0], typ: type, kod: kod ?? null,
+      chybaText: d.chybaText ?? null, povoleniStart: d.povoleniStart ?? null, povoleniKonec: d.povoleniKonec ?? null,
+      zmeny: Array.isArray(d.zmeny) ? d.zmeny.slice(0, 40) : [], limit: d.limit ?? null,
+      msOdTuknuti: kdyTuknul instanceof Date ? Date.now() - kdyTuknul.getTime() : null,
+      msMereni: d.msMereni ?? null, prvniUdajMs: d.prvniUdajMs ?? null, udaju: d.udaju ?? 0,
+      nejlepsiM: d.nejlepsiM ?? null, pozdni: !!d.pozdni,
+      rezim, zPlochy: typeof isAppInstalled === 'function' ? isAppInstalled() : null,
+      skryto: d.skryto ?? 0, viditelnost: document.visibilityState || null,
+      ua: navigator.userAgent || null,
+      uaZnacky: uad && Array.isArray(uad.brands) ? uad.brands.map(b => b.brand + ' ' + b.version) : null,
+      model: null, platformVersion: null,
+      online: navigator.onLine,
+      sit: (navigator.connection && navigator.connection.effectiveType) || null,
+      pravidlo: { zdroj: window._gpsPravidloZdroj ?? null, vekMs: window._gpsPravidloVekMs ?? null }
+    }
+    const zprava = (kod === 'zruseno' ? 'zrušeno' : 'kód ' + kod)
+      + ' · povolení ' + (detail.povoleniStart || '?') + ' → ' + (detail.povoleniKonec || '?')
+      + ' · ' + ((Number(detail.msMereni) || 0) / 1000).toFixed(1).replace('.', ',') + ' s'
+    // Model telefonu a verze Androidu — Chrome je dá jen na požádání; nejvýš 0,8 s.
+    if (uad && typeof uad.getHighEntropyValues === 'function') {
+      try {
+        const h = await Promise.race([
+          uad.getHighEntropyValues(['model', 'platformVersion']),
+          new Promise(r => setTimeout(() => r(null), 800))
+        ])
+        if (h) { detail.model = h.model || null; detail.platformVersion = h.platformVersion || null }
+      } catch (e) {}
+    }
+    await zapisChybuAppky(type === 'out' ? 'odchod-bez-polohy' : 'prichod-bez-polohy', zprava, detail)
+  } catch (e) { console.warn('[poloha] zápis do deníku se nepovedl:', e && e.message) }
 }
 
 async function ulozPovinnouPolohuOdchodu(attId, poloha) {
@@ -27909,6 +28289,8 @@ async function ulozPovinnouPolohuOdchodu(attId, poloha) {
     }).eq('id', attId).select('id'), 12000)
     if (error || !data || !data.length) { zapisChybuAppky('poloha-odchodu', error?.message || 'žádný řádek'); return false }
     window._povinnaPolohaOdchodu = attId
+    // Zapsáno — sledování na pozadí z dřívějšího pokusu už nemá na co čekat.
+    zahodPozdniPolohu()
     return true
   } catch (e) { zapisChybuAppky('poloha-odchodu', e?.message); return false }
 }
