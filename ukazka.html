@@ -3244,7 +3244,7 @@ setTimeout(function brzda() {
           <div class="card">
             <div class="card-h" style="flex-wrap:wrap;gap:10px">
               <h4>🏗️ Plán MMI</h4>
-              <span style="font-size:12px;color:var(--text3)">Kam MMI ve Stavbyplánu naplánovalo naše lidi i lidi MMI na příštích 14 dní a koho přesunulo. Jen pro čtení — měnit se to dá jen ve Stavbyplánu.</span>
+              <span style="font-size:12px;color:var(--text3)">Kam MMI ve Stavbyplánu naplánovalo naše lidi i lidi MMI na příštích 14 dní a koho přesunulo. <span id="mmi-rezim">Jen pro čtení — měnit se to dá jen ve Stavbyplánu.</span></span>
             </div>
             <div id="mmi-obsah" style="padding:14px 16px">Načítám…</div>
           </div>
@@ -30261,6 +30261,16 @@ let _mmiM = null
 let _mmiPresun = null      // otevřené okno přesunu: { i, den, cil, rozsah, bezi, chyba }
 const MMI_DEN_VZOR = /^\d{4}-\d{2}-\d{2}$/
 
+// PODNADPIS SEKCE podle povolení ze Stavbyplánu (2. 11. 2026, prověrka
+// smlouvy): pevné „Jen pro čtení" by po zapnutí přesouvání (presouvani: true)
+// tvrdilo opak toho, co sekce dělá — a smlouva slibuje, že se StavKo po
+// zapnutí už nemusí měnit. Řídí se posledním načteným plánem; bez platného
+// odkazu (formulář na odkaz) zase jen pro čtení.
+function mmiRezimPodnadpisu(lze) {
+  const el = document.getElementById('mmi-rezim')
+  if (el) el.textContent = lze ? 'Koho MMI povolilo, toho jde přesunout i odsud — zapíše se to rovnou do Stavbyplánu.' : 'Jen pro čtení — měnit se to dá jen ve Stavbyplánu.'
+}
+
 async function loadPlanMmi(znovu) {
   const el0 = document.getElementById('mmi-obsah')
   if (!el0) return
@@ -30268,6 +30278,7 @@ async function loadPlanMmi(znovu) {
   // mohl přebít pomalejší starý výsledek.
   const beh = ++_mmiBeh
   const el = { set innerHTML(h) { if (beh === _mmiBeh) el0.innerHTML = h } }
+  const jenCist = () => { if (beh === _mmiBeh) mmiRezimPodnadpisu(false) }
   let odkaz
   try { odkaz = await nactiOdkazMmi() } catch (e) {
     const chybiTabulka = /plan_mmi|42P01|PGRST205|schema cache/i.test((e?.code || '') + ' ' + (e?.message || ''))
@@ -30278,7 +30289,7 @@ async function loadPlanMmi(znovu) {
     if (!chybiTabulka) try { if (typeof _dnPanel === 'function') _dnPanel('plan-mmi', 'Odkaz na plán MMI se nepodařilo načíst: ' + String(e?.message || e).slice(0, 200), { kod: e?.code, stav: e?.status }) } catch (x) { console.warn('[deník chyb]', x) } // eslint-disable-line no-undef
     return
   }
-  if (!odkaz) { el.innerHTML = mmiFormularHtml(''); return }
+  if (!odkaz) { el.innerHTML = mmiFormularHtml(''); jenCist(); return }
   if (znovu || !_mmi.data) el.innerHTML = '<div style="color:var(--text3);font-size:13px">Načítám plán ze Stavbyplánu…</div>'
   let j
   try { j = await stahniPlanMmi(odkaz, znovu) } catch (e) {
@@ -30287,6 +30298,7 @@ async function loadPlanMmi(znovu) {
     el.innerHTML = e.message === 'neplatny'
       ? mmiFormularHtml('Odkaz už neplatí — MMI ho ve Stavbyplánu zrušilo nebo vyrobilo nový. Požádejte o nový a vložte ho sem.')
       : `<div style="color:var(--red);margin-bottom:10px">${escAttr(e.message)}</div><button onclick="loadPlanMmi(true)" style="padding:8px 14px;border:1px solid var(--brd);background:#fff;border-radius:8px;cursor:pointer;font-family:inherit">Zkusit znovu</button> <button onclick="mmiZmenitOdkaz()" style="padding:8px 14px;border:1px solid var(--brd);background:#fff;border-radius:8px;cursor:pointer;font-family:inherit">Změnit odkaz</button>`
+    if (e.message === 'neplatny') jenCist()
     return
   }
   const lide = await mmiLideOdkazu(j)
@@ -30298,6 +30310,7 @@ async function loadPlanMmi(znovu) {
     return
   }
   _mmiM = model
+  mmiRezimPodnadpisu(model.lzePresouvat)
   // Okno přesunu ukazuje na řádek starého plánu — po novém načtení ho zavřít.
   if (_mmiPresun && !_mmiPresun.bezi) { _mmiPresun = null; document.getElementById('mmi-presun')?.remove() }
   const dnes = localDateStr(new Date())
