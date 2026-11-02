@@ -36,6 +36,18 @@
         status: 200, headers: { 'Content-Type': 'application/json' },
       }));
     }
+
+    // PLÁN MMI (2. 11. 2026): ukázka má vymyšlený odkaz na Stavbyplán
+    // (vymyslena-data.js). Odpoví na něj sama — ven nejde nic. Přesun (POST)
+    // ukázka nepovolí; plán stejně posílá bez presouvani.
+    const odkazMmi = window.__demoOdkazMmi;
+    if (odkazMmi && typeof window.__demoPlanMmi === 'function' && adresa.split('?')[0] === odkazMmi) {
+      const metoda = String((nastaveni && nastaveni.method) || (vstup && vstup.method) || 'GET').toUpperCase();
+      const telo = metoda === 'POST' ? { ok: false, kod: 'ukazka' } : window.__demoPlanMmi();
+      return Promise.resolve(new Response(JSON.stringify(telo), {
+        status: 200, headers: { 'Content-Type': 'application/json' },
+      }));
+    }
     return puvodniFetch ? puvodniFetch(vstup, nastaveni)
                         : Promise.reject(new Error('fetch není k dispozici'));
   };
@@ -771,6 +783,51 @@
         vznikla: dchPred(30), msOdStartu: 61200, zarId: 'r8t9y0u1', stav: 500, kod: 'unexpected_failure', trida: 'server',
         email: 'pet…@ukazka.cz', pocet: 3, anon: true, zdroj: 'api/chyba' }),
   );
+
+  // ---- Plán MMI (2. 11. 2026) ----
+  // Ukázka sekce „Plán MMI": vymyšlený odkaz na Stavbyplán, na který odpoví
+  // ukázková vrstva (bez-serveru.js) touhle funkcí — ven nejde nic. V plánu
+  // jsou naši lidé, vlastní lidé MMI (druh 'nasi') a dva z jiné firmy ('jini'),
+  // ať je vidět štítek, počty u staveb i filtr Všichni / Jen naši. Přesuny jen
+  // u lidí MMI a jiné firmy: nástěnka ukázky zůstane jako dřív (upozorňuje jen
+  // na přesuny našich). Přesouvání vypnuté (bez presouvani) jako na ostré,
+  // dokud se Stavbyplán nepropojí. Dny se počítají při každém stažení.
+  const MMI_ODKAZ = 'https://ukazka-stavbyplan.supabase.co/functions/v1/subbau-plan?t=' + '0123456789abcdef'.repeat(4);
+  D.plan_mmi = [{ id: 1, odkaz: MMI_ODKAZ, upraveno: new Date().toISOString(), upravil: id.sef }];
+  const mmiMista = [
+    { id: uuid(), nazev: 'München Riem', druh: 'stavba', adresa: 'Riemer Straße 12, München' },
+    { id: uuid(), nazev: 'Pfaffenhofen Nord', druh: 'stavba', adresa: 'Ingolstädter Straße 96, Pfaffenhofen' },
+    { id: uuid(), nazev: 'Augsburg Lech', druh: 'stavba', adresa: 'Lechhauser Straße 40, Augsburg' },
+    { id: uuid(), nazev: 'Freising Bahnhof', druh: 'stavba', adresa: 'Bahnhofstraße 7, Freising' },
+  ];
+  // Naši: lideId[i] → stavba. Cizí: jméno, příjmení, druh, stavba
+  // a případný přesun [za kolik dní, kam, před kolika hodinami].
+  const mmiNasiNa = [0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 3];
+  const mmiNasi = lideId.map((w, i) => ({ id: uuid(), w, misto: mmiNasiNa[i % mmiNasiNa.length] }));
+  const mmiCizi = [
+    ['Luca', 'Bianchi', 'nasi', 0], ['Marco', 'Rossi', 'nasi', 0, [3, 3, 26]], ['Stefan', 'Huber', 'nasi', 1],
+    ['Andrea', 'Conti', 'nasi', 3], ['Klaus', 'Wagner', 'jini', 2, [5, 1, 3]], ['Piotr', 'Nowak', 'jini', 2],
+  ].map(r => ({ id: uuid(), jmeno: r[0], prijmeni: r[1], druh: r[2], misto: r[3], presun: r[4] || null }));
+  window.__demoOdkazMmi = MMI_ODKAZ.split('?')[0];
+  window.__demoPlanMmi = function () {
+    const vsedni = (o) => { const w = new Date(dnes(o) + 'T12:00:00').getDay(); return w !== 0 && w !== 6 };
+    const plan = [], presuny = [];
+    const naplanuj = (c) => {
+      let odkdy = null;
+      if (c.presun) { odkdy = c.presun[0]; while (!vsedni(odkdy)) odkdy++; }
+      for (let o = 0; o < 14; o++) {
+        if (vsedni(o)) plan.push({ clovek_id: c.id, den: dnes(o), misto_id: mmiMista[odkdy != null && o >= odkdy ? c.presun[1] : c.misto].id });
+      }
+      if (c.presun) presuny.push({ clovek_id: c.id, den: dnes(odkdy), z: mmiMista[c.misto].id, na: mmiMista[c.presun[1]].id, kdy: new Date(Date.now() - c.presun[2] * 3600e3).toISOString() });
+    };
+    mmiNasi.forEach(naplanuj);
+    mmiCizi.forEach(naplanuj);
+    const lide = mmiNasi.map(c => {
+      const jmeno = String((D.profiles.find(p => p.id === c.w) || {}).full_name || '').split(' ');
+      return { id: c.id, jmeno: jmeno[0] || '', prijmeni: jmeno.slice(1).join(' '), subbau_id: c.w, druh: 'subbau' };
+    }).concat(mmiCizi.map(c => ({ id: c.id, jmeno: c.jmeno, prijmeni: c.prijmeni, subbau_id: null, druh: c.druh })));
+    return { ok: true, verze: 1, rozsah: 'vsichni', od: dnes(0), do: dnes(13), lide, plan, presuny, mista: mmiMista };
+  };
 
   window.__demoUcty = {
     sef: id.sef,
@@ -3187,7 +3244,7 @@ setTimeout(function brzda() {
           <div class="card">
             <div class="card-h" style="flex-wrap:wrap;gap:10px">
               <h4>🏗️ Plán MMI</h4>
-              <span style="font-size:12px;color:var(--text3)">Kam MMI ve Stavbyplánu naplánovalo naše lidi na příštích 14 dní a koho přesunulo. Jen pro čtení — měnit se to dá jen ve Stavbyplánu.</span>
+              <span style="font-size:12px;color:var(--text3)">Kam MMI ve Stavbyplánu naplánovalo naše lidi i lidi MMI na příštích 14 dní a koho přesunulo. Jen pro čtení — měnit se to dá jen ve Stavbyplánu.</span>
             </div>
             <div id="mmi-obsah" style="padding:14px 16px">Načítám…</div>
           </div>
@@ -30099,6 +30156,7 @@ const mmiDen = (den) => { const d = new Date(den + 'T12:00:00Z'); return MMI_DNY
 const mmiKdy = (t) => { const d = new Date(t); return d.getDate() + '. ' + (d.getMonth() + 1) + '. ' + String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0') }
 
 // Naši lidé z odkazu (mají vazbu subbau_id) + jména z naší docházky.
+// Bere je i nástěnka — ta dál upozorňuje jen na naše (2. 11. 2026).
 async function mmiNasiLide(j) {
   const nasi = (j.lide || []).filter(c => c.subbau_id)
   const prof = {}
@@ -30110,7 +30168,27 @@ async function mmiNasiLide(j) {
   const lide = new Map()
   for (const c of nasi) {
     const p = prof[c.subbau_id]
-    lide.set(c.id, { jmeno: p?.full_name || ((c.jmeno || '') + ' ' + (c.prijmeni || '')).trim() || '?', vDochazce: !!p, workerId: c.subbau_id, fotka: p?.avatar_url || null })
+    lide.set(c.id, { jmeno: p?.full_name || ((c.jmeno || '') + ' ' + (c.prijmeni || '')).trim() || '?', vDochazce: !!p, workerId: c.subbau_id, fotka: p?.avatar_url || null, druh: 'subbau' })
+  }
+  return lide
+}
+
+// VŠICHNI LIDÉ Z ODKAZU (majitel 2. 11. 2026: „ať tam jsou vidět i lidi
+// zaměstnanci Stavbyplánu v MMI plánu… ať se dá plánovat u nás i u nich").
+// Dřív se brali jen naši (subbau_id) a ostatní se tiše zahodili — majitel pak
+// v plánu neviděl Mariovy lidi a nemohl s ním plánovat přesuny. Naši zůstávají
+// jako dřív (jméno a fotka z docházky), ostatní mají jméno z odkazu a štítek:
+// druh 'nasi' = vlastní zaměstnanci MMI, 'jini' = lidé jiných firem. Jména
+// jdou z cizí appky — do stránky vždy jen přes escAttr. Koho odkaz ukazuje,
+// volí MMI ve Stavbyplánu („Koho odkaz ukazuje" = rozsah).
+async function mmiLideOdkazu(j) {
+  const lide = await mmiNasiLide(j)
+  for (const c of (j.lide || [])) {
+    if (!c || !c.id || c.subbau_id || lide.has(c.id)) continue
+    lide.set(c.id, {
+      jmeno: (String(c.jmeno || '') + ' ' + String(c.prijmeni || '')).trim().slice(0, 80) || '?',
+      vDochazce: false, workerId: null, fotka: null, druh: c.druh === 'nasi' ? 'nasi' : 'jini'
+    })
   }
   return lide
 }
@@ -30163,8 +30241,22 @@ function mmiZmenitOdkaz() {
 // funkce na POST bez akce vrací plán, a to se za úspěch brát nesmí. Tlačítko
 // Přesunout se zapne, až Stavbyplán v plánu pošle presouvani: true; místa,
 // kam smí StavKo přesouvat, posílá v cile (jinak jen místa z plánu).
+// KOHO SMÍ SUBBAU PŘESOUVAT (2. 11. 2026, příprava na propojení — majitel:
+// „ať se dá plánovat u nás i u nich a ty lidi se přesouvají v obou
+// aplikacích"): rozhoduje Stavbyplán. Přednost má příznak u člověka
+// (lide[].lze_presouvat: true/false), pak seznam druhů (presouvani_druhy,
+// např. ['subbau', 'nasi']); když nepošle ani jedno, jen lidi ze StavKo.
+// POST zůstává podle smlouvy z 29. 10. — clovek_id je id ze Stavbyplánu, takže
+// jde přesunout i člověka MMI, který u nás žádný profil nemá.
+// FILTR „Všichni / Jen naši" (2. 11. 2026) si pamatuje prohlížeč (každý
+// správce zvlášť), výchozí Všichni. Platí pro všechny tři pohledy.
+const MMI_KLIC_FILTRU = 'sb_mmi_filtr'
+const MMI_PORADI_DRUHU = { subbau: 0, nasi: 1, jini: 2 }
+function mmiUlozenyFiltr() {
+  try { return localStorage.getItem(MMI_KLIC_FILTRU) === 'nasi' ? 'nasi' : 'vsichni' } catch (e) { return 'vsichni' }
+}
 let _mmiBeh = 0
-let _mmiUi = { pohled: 'stavby', den: null }
+let _mmiUi = { pohled: 'stavby', den: null, filtr: mmiUlozenyFiltr() }
 let _mmiM = null
 let _mmiPresun = null      // otevřené okno přesunu: { i, den, cil, rozsah, bezi, chyba }
 const MMI_DEN_VZOR = /^\d{4}-\d{2}-\d{2}$/
@@ -30197,7 +30289,7 @@ async function loadPlanMmi(znovu) {
       : `<div style="color:var(--red);margin-bottom:10px">${escAttr(e.message)}</div><button onclick="loadPlanMmi(true)" style="padding:8px 14px;border:1px solid var(--brd);background:#fff;border-radius:8px;cursor:pointer;font-family:inherit">Zkusit znovu</button> <button onclick="mmiZmenitOdkaz()" style="padding:8px 14px;border:1px solid var(--brd);background:#fff;border-radius:8px;cursor:pointer;font-family:inherit">Změnit odkaz</button>`
     return
   }
-  const lide = await mmiNasiLide(j)
+  const lide = await mmiLideOdkazu(j)
   if (beh !== _mmiBeh) return
   let model
   try { model = mmiModel(j, lide) } catch (e) {
@@ -30226,7 +30318,15 @@ function mmiModel(j, lideMap) {
   }
   const dny = []
   for (let d = j.od, i = 0; d <= j.do && i < 31; d = mmiPosunDen(d, 1), i++) dny.push(d)
-  const lide = [...lideMap.entries()].map(([cid, c]) => ({ cid, ...c })).sort((a, b) => a.jmeno.localeCompare(b.jmeno, 'cs'))
+  // Koho smí StavKo přesouvat — viz „KOHO SMÍ SUBBAU PŘESOUVAT" výš.
+  const surovi = {}
+  ;(j.lide || []).forEach(c => { if (c?.id) surovi[c.id] = c })
+  const druhy = Array.isArray(j.presouvani_druhy) ? j.presouvani_druhy.map(String) : ['subbau']
+  // Naši první, pak lidé MMI, pak jiné firmy; uvnitř podle jména (2. 11. 2026).
+  const lide = [...lideMap.entries()].map(([cid, c]) => {
+    const priznak = surovi[cid]?.lze_presouvat
+    return { cid, ...c, lzePresouvat: j.presouvani === true && (typeof priznak === 'boolean' ? priznak : druhy.includes(c.druh)) }
+  }).sort((a, b) => (MMI_PORADI_DRUHU[a.druh] ?? 3) - (MMI_PORADI_DRUHU[b.druh] ?? 3) || a.jmeno.localeCompare(b.jmeno, 'cs'))
   const barva = {}
   let bi = 0
   for (const d of dny) for (const c of lide) {
@@ -30247,9 +30347,40 @@ function mmiPredtim(cid, den) {
   for (let k = dny.indexOf(den) - 1; k >= 0; k--) { const m = _mmiM.plan[cid]?.[dny[k]]; if (m) return m }
   return null
 }
-function mmiPresunyNasich() {
-  const nasi = new Set(_mmiM.lide.map(c => c.cid))
-  return (_mmiM.j.presuny || []).filter(p => nasi.has(p.clovek_id)).sort((a, b) => String(b.kdy).localeCompare(String(a.kdy)))
+// Kdo je podle filtru vidět (Všichni / Jen naši) — pořadí jako v modelu.
+const mmiViditelni = () => _mmiM.lide.filter(c => _mmiUi.filtr !== 'nasi' || c.druh === 'subbau')
+// Přesuny lidí, kteří jsou podle filtru vidět (naši i lidé MMI). Nástěnka si
+// bere jen naše (nactiPresunyMmiNaNastenku).
+function mmiPresunyViditelnych() {
+  const vidim = new Set(mmiViditelni().map(c => c.cid))
+  return (_mmiM.j.presuny || []).filter(p => vidim.has(p.clovek_id)).sort((a, b) => String(b.kdy).localeCompare(String(a.kdy)))
+}
+// Tichý obrysový štítek u člověka, který není náš (2. 11. 2026). Plný štítek
+// „MMI" / „StavKo · kdo" v Přesunech říká, KDO přesouval — ať se to nepletlo.
+function mmiStitek(c) {
+  if (c.druh !== 'nasi' && c.druh !== 'jini') return ''
+  const mmi = c.druh === 'nasi'
+  return ` <span data-mmi-stitek="${c.druh}" title="${mmi ? 'Zaměstnanec MMI — jméno je ze Stavbyplánu' : 'Člověk z jiné firmy — jméno je ze Stavbyplánu'}" style="display:inline-block;margin-left:4px;padding:0 6px;border-radius:999px;border:1px solid ${mmi ? 'rgba(29,79,145,.45)' : 'rgba(0,0,0,.25)'};background:rgba(255,255,255,.65);color:${mmi ? '#1D4F91' : '#5C554D'};font-size:10.5px;font-weight:700;line-height:15px;white-space:nowrap;vertical-align:1px">${mmi ? 'MMI' : 'jiná firma'}</span>`
+}
+// Kolik je kterých — „2 naši · 1 MMI · 1 jiný" (jiný = z jiné firmy; krátce,
+// ať se vedle názvu stavby vejde). Jen když jsou v pohledu vidět i lidé, kteří
+// nejsou naši; jinak dál „3 lidé" jako dřív.
+function mmiPocty(lide, smiseni) {
+  if (!smiseni) return mmiLidi(lide.length)
+  let n = 0, m = 0, x = 0
+  lide.forEach(c => { if (c.druh === 'subbau') n++; else if (c.druh === 'nasi') m++; else x++ })
+  const tvar = (k, jeden, dva, pet) => k + ' ' + (k === 1 ? jeden : k <= 4 ? dva : pet)
+  const casti = []
+  if (n) casti.push(tvar(n, 'náš', 'naši', 'našich'))
+  if (m) casti.push(m + ' MMI')
+  if (x) casti.push(tvar(x, 'jiný', 'jiní', 'jiných'))
+  return casti.join(' · ') || mmiLidi(0)
+}
+function mmiFiltr(k) {
+  if (k !== 'vsichni' && k !== 'nasi') return
+  _mmiUi.filtr = k
+  try { localStorage.setItem(MMI_KLIC_FILTRU, k) } catch (e) {}
+  mmiPrekresli()
 }
 function mmiPrekresli() {
   const el = document.getElementById('mmi-obsah')
@@ -30269,15 +30400,24 @@ function mmiVyberDen(d) {
 function mmiHtml() {
   const M = _mmiM, j = M.j
   const tab = (k, t) => { const on = _mmiUi.pohled === k; return `<button onclick="mmiPohled('${k}')" aria-pressed="${on}" style="min-height:40px;padding:0 14px;border-radius:9px;border:1px solid ${on ? '#211D1A' : 'var(--brd)'};background:${on ? '#211D1A' : '#fff'};color:${on ? '#E8A13A' : 'inherit'};font-weight:700;font-size:13px;cursor:pointer;font-family:inherit">${t}</button>` }
-  const presuny = mmiPresunyNasich()
+  const presuny = mmiPresunyViditelnych()
+  // Filtr Všichni / Jen naši — jen když je z čeho vybírat (2. 11. 2026).
+  const cizich = M.lide.filter(c => c.druh !== 'subbau').length
+  const volba = (k, t) => { const on = _mmiUi.filtr === k; return `<button data-mmi-filtr="${k}" onclick="mmiFiltr('${k}')" aria-pressed="${on}" style="min-height:40px;padding:0 12px;border-radius:9px;border:1px solid ${on ? '#211D1A' : 'var(--brd)'};background:${on ? '#f6f4f1' : '#fff'};color:${on ? 'inherit' : 'var(--text3)'};font-weight:700;font-size:12.5px;cursor:pointer;font-family:inherit">${t}</button>` }
+  // Na počítači vpravo, na telefonu hned za záložkami (zalomené vpravo by viselo).
+  const filtr = cizich ? `<span role="group" aria-label="Koho ukázat" style="display:inline-flex;gap:6px;margin-left:${innerWidth >= 720 ? 'auto' : '0'}">${volba('vsichni', 'Všichni (' + M.lide.length + ')')}${volba('nasi', 'Jen naši (' + (M.lide.length - cizich) + ')')}</span>` : ''
+  // Odkaz s rozsahem „Jen lidi ze StavKo" lidi MMI vůbec neposílá — majitel by
+  // je tu marně hledal (2. 11. 2026). Rozsah se mění bez nového odkazu.
+  const rada = j.rozsah === 'subbau' ? '<div data-mmi-rada style="margin:-6px 0 14px;font-size:12.5px;color:var(--text3);line-height:1.5">Odkaz teď ukazuje jen lidi ze StavKo. Aby tu byli i lidé MMI, ve Stavbyplánu v <b>StavKo → Odkaz pro StavKo</b> u „Koho odkaz ukazuje“ zvolte <b>Lidi ze StavKo a naše zaměstnance</b> (odkaz zůstane stejný) a tady klepněte na Obnovit.</div>' : ''
   const hlava = `
     <div style="display:flex;flex-wrap:wrap;gap:8px 14px;align-items:center;margin-bottom:12px;font-size:12.5px;color:var(--text3)">
       <span>${mmiDen(j.od)} – ${mmiDen(j.do)} · načteno ${mmiKdy(_mmi.kdy)}</span>
       <button onclick="loadPlanMmi(true)" style="padding:5px 10px;border:1px solid var(--brd);background:#fff;border-radius:6px;cursor:pointer;font-size:12px;font-family:inherit">Obnovit</button>
       <button onclick="mmiZmenitOdkaz()" style="padding:5px 10px;border:1px solid var(--brd);background:#fff;border-radius:6px;cursor:pointer;font-size:12px;font-family:inherit">Změnit odkaz</button>
     </div>
-    <div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:14px">${tab('stavby', 'Podle staveb')}${tab('lide', 'Lidé × 14 dní')}${tab('presuny', 'Přesuny (' + presuny.length + ')')}</div>`
-  if (!M.lide.length) return hlava + '<div style="color:var(--text3);padding:8px 0">V odkazu teď nejsou žádní naši lidé. MMI v odkazu vybírá, koho ukazuje — musí v něm být aspoň „lidé ze StavKo".</div>'
+    <div style="display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin-bottom:14px">${tab('stavby', 'Podle staveb')}${tab('lide', 'Lidé × 14 dní')}${tab('presuny', 'Přesuny (' + presuny.length + ')')}${filtr}</div>${rada}`
+  if (!M.lide.length) return hlava + '<div style="color:var(--text3);padding:8px 0">V odkazu teď nejsou žádní lidé. Koho odkaz ukazuje, se volí ve Stavbyplánu v StavKo → Odkaz pro StavKo („Koho odkaz ukazuje“).</div>'
+  if (!mmiViditelni().length) return hlava + '<div style="color:var(--text3);padding:8px 0">V odkazu teď nejsou žádní naši lidé — jen lidé MMI nebo jiných firem. Uvidíte je po přepnutí na <b>Všichni</b>.</div>'
   return hlava + (_mmiUi.pohled === 'lide' ? mmiHtmlLide() : _mmiUi.pohled === 'presuny' ? mmiHtmlPresuny(presuny) : mmiHtmlStavby())
 }
 
@@ -30289,13 +30429,15 @@ function mmiFotka(c, px, zvetsit) {
   if (!zvetsit) h = h.replace(/ onclick="event\.stopPropagation\(\);showAvatarPreview\([^"]*\)"/, '').replace(' title="Kliknutím zvětšíte"', '').replace('cursor:zoom-in;', '')
   return h
 }
-const mmiVarovani = (c) => c.vDochazce ? '' : ' <span title="Tohoto člověka MMI vede jako našeho, ale v docházce ho nenacházím" style="color:var(--amber)">⚠</span>'
+const mmiVarovani = (c) => c.vDochazce || c.druh !== 'subbau' ? '' : ' <span title="Tohoto člověka MMI vede jako našeho, ale v docházce ho nenacházím" style="color:var(--amber)">⚠</span>'
 
 function mmiHtmlStavby() {
   const M = _mmiM, den = _mmiUi.den, dnes = localDateStr(new Date())
+  // Jen lidé podle filtru; naši jsou v kartě první (pořadí z modelu).
+  const vis = mmiViditelni(), smiseni = vis.some(c => c.druh !== 'subbau')
   const chipy = M.dny.map(d => {
     const on = d === den
-    const n = M.lide.filter(c => M.plan[c.cid]?.[d]).length
+    const n = vis.filter(c => M.plan[c.cid]?.[d]).length
     const [dn, ...datum] = mmiDen(d).split(' ')
     return `<button onclick="mmiVyberDen('${d}')" aria-pressed="${on}" style="flex:0 0 auto;width:74px;min-height:62px;padding:6px 2px;border-radius:9px;border:1px solid ${on ? '#211D1A' : 'var(--brd)'};background:${on ? '#211D1A' : mmiVikend(d) ? '#f4f3f1' : '#fff'};color:${on ? '#fff' : 'inherit'};cursor:pointer;font-family:inherit;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:1px">
       <span style="font-size:11.5px;font-weight:700">${dn}${d === dnes ? ' · dnes' : ''}</span>
@@ -30303,20 +30445,20 @@ function mmiHtmlStavby() {
       <span style="font-size:10.5px;color:${on ? '#E8A13A' : 'var(--text3)'}">${n ? n + ' v práci' : 'volno'}</span></button>`
   }).join('')
   const naMiste = {}, volni = []
-  for (const c of M.lide) { const m = M.plan[c.cid]?.[den]; if (m) (naMiste[m] = naMiste[m] || []).push(c); else volni.push(c) }
+  for (const c of vis) { const m = M.plan[c.cid]?.[den]; if (m) (naMiste[m] = naMiste[m] || []).push(c); else volni.push(c) }
   const poradi = Object.keys(naMiste).sort((a, b) => naMiste[b].length - naMiste[a].length || mmiNazev(a).localeCompare(mmiNazev(b), 'cs'))
   const clovek = (c, barva) => {
     const m = M.plan[c.cid]?.[den] || null, pr = mmiPredtim(c.cid, den)
-    return `<button data-mmi-clovek-den onclick="mmiOtevriPresun(${M.lide.indexOf(c)},'${den}')" style="min-height:44px;padding:4px 11px 4px 5px;border-radius:22px;border:1px solid rgba(0,0,0,.12);background:${barva};color:inherit;cursor:pointer;font-family:inherit;text-align:left;display:flex;align-items:center;gap:8px">
-      ${mmiFotka(c, 32)}<span style="display:flex;flex-direction:column;justify-content:center;min-width:0"><span style="font-weight:650;font-size:13px">${escAttr(c.jmeno)}${mmiVarovani(c)}</span>${pr && pr !== m ? `<span style="font-size:11px;color:#4A433C">předtím ${escAttr(mmiNazev(pr))}</span>` : ''}</span></button>`
+    return `<button data-mmi-clovek-den data-mmi-druh="${c.druh}" onclick="mmiOtevriPresun(${M.lide.indexOf(c)},'${den}')" style="min-height:44px;padding:4px 11px 4px 5px;border-radius:22px;border:1px solid rgba(0,0,0,.12);background:${barva};color:inherit;cursor:pointer;font-family:inherit;text-align:left;display:flex;align-items:center;gap:8px">
+      ${mmiFotka(c, 32)}<span style="display:flex;flex-direction:column;justify-content:center;min-width:0"><span style="font-weight:650;font-size:13px">${escAttr(c.jmeno)}${mmiVarovani(c)}${mmiStitek(c)}</span>${pr && pr !== m ? `<span style="font-size:11px;color:#4A433C">předtím ${escAttr(mmiNazev(pr))}</span>` : ''}</span></button>`
   }
   const karta = (nazev, adresa, barva, lide) => `<div data-mmi-stavba style="background:#fff;border:1px solid var(--brd);border-radius:12px;padding:12px 14px;display:flex;flex-direction:column;gap:8px">
-      <div style="display:flex;align-items:center;gap:8px"><span aria-hidden="true" style="width:12px;height:12px;border-radius:50%;background:${barva};border:1px solid rgba(0,0,0,.25);flex-shrink:0"></span><b style="flex:1;min-width:0;font-size:14.5px">${escAttr(nazev)}</b><span style="font-size:12px;color:var(--text3);white-space:nowrap">${mmiLidi(lide.length)}</span></div>
+      <div style="display:flex;align-items:center;gap:8px"><span aria-hidden="true" style="width:12px;height:12px;border-radius:50%;background:${barva};border:1px solid rgba(0,0,0,.25);flex-shrink:0"></span><b style="flex:1;min-width:0;font-size:14.5px">${escAttr(nazev)}</b><span data-mmi-pocet style="font-size:12px;color:var(--text3);white-space:nowrap">${mmiPocty(lide, smiseni)}</span></div>
       ${adresa ? `<div style="font-size:12px;color:var(--text3);margin-top:-4px">${escAttr(adresa)}</div>` : ''}
       <div style="display:flex;flex-wrap:wrap;gap:6px">${lide.map(c => clovek(c, barva)).join('')}</div></div>`
   const karty = poradi.map(m => karta(mmiNazev(m), M.mista[m]?.adresa || '', M.barva[m] || '#eee', naMiste[m])).join('')
     + (volni.length ? karta('Bez stavby / volno', '', '#f4f3f1', volni) : '')
-  const vPraci = M.lide.length - volni.length
+  const vPraci = vis.length - volni.length
   const souhrn = mmiDen(den) + ': ' + (vPraci
     ? mmiLidi(vPraci) + ' na ' + (poradi.length === 1 ? '1 stavbě' : poradi.length + ' stavbách') + (volni.length ? ', ' + volni.length + ' bez stavby' : '')
     : 'nikdo nemá stavbu')
@@ -30327,18 +30469,20 @@ function mmiHtmlStavby() {
 
 function mmiHtmlLide() {
   const M = _mmiM, dnes = localDateStr(new Date())
+  // Jen lidé podle filtru; ve skupině naši první (pořadí z modelu).
+  const vis = mmiViditelni(), smiseni = vis.some(c => c.druh !== 'subbau')
   const prvni = (c) => { for (const d of M.dny) { const m = M.plan[c.cid]?.[d]; if (m) return m } return '' }
   const skup = new Map()
-  for (const c of M.lide) { const k = prvni(c); if (!skup.has(k)) skup.set(k, []); skup.get(k).push(c) }
+  for (const c of vis) { const k = prvni(c); if (!skup.has(k)) skup.set(k, []); skup.get(k).push(c) }
   const klice = [...skup.keys()].sort((a, b) => (a === '') - (b === '') || mmiNazev(a).localeCompare(mmiNazev(b), 'cs'))
   const bunka = (c, d) => {
     const m = M.plan[c.cid]?.[d], pr = mmiPredtim(c.cid, d)
     const popis = escAttr(c.jmeno + ' · ' + mmiDen(d) + ' · ' + mmiNazev(m) + (m && M.mista[m]?.adresa ? ' · ' + M.mista[m].adresa : ''))
     return `<td ${m ? `data-mmi-den="${d}"` : ''} style="padding:0;border:1px solid var(--brd)"><button onclick="mmiOtevriPresun(${M.lide.indexOf(c)},'${d}')" title="${popis}" aria-label="${popis}" style="display:block;width:100%;min-height:36px;padding:4px 6px;border:${m && pr && pr !== m ? '2px solid #211D1A' : '0'};background:${m ? M.barva[m] : mmiVikend(d) ? '#f4f3f1' : '#fff'};color:${m ? 'inherit' : 'var(--text3)'};font-size:11.5px;font-family:inherit;white-space:nowrap;max-width:110px;overflow:hidden;text-overflow:ellipsis;cursor:pointer;text-align:${m ? 'left' : 'center'}">${m ? escAttr(mmiNazev(m)) : '—'}</button></td>`
   }
-  const radky = klice.map(k => `<tr><td colspan="${M.dny.length + 1}" style="padding:10px 8px 4px;border:1px solid var(--brd);background:#faf9f7;font-size:12.5px"><span aria-hidden="true" style="display:inline-block;width:10px;height:10px;border-radius:50%;background:${k ? M.barva[k] : '#f4f3f1'};border:1px solid rgba(0,0,0,.25);margin-right:6px"></span><b>${escAttr(k ? mmiNazev(k) : 'Bez stavby')}</b> <span style="color:var(--text3)">· ${mmiLidi(skup.get(k).length)}</span></td></tr>`
-    + skup.get(k).map(c => `<tr data-mmi-clovek="${escAttr(c.workerId)}"><td style="position:sticky;left:0;z-index:1;background:#fff;padding:4px 8px;border:1px solid var(--brd);white-space:nowrap;font-weight:600"><span style="display:inline-flex;align-items:center;gap:7px">${mmiFotka(c, 26, true)}<span>${escAttr(c.jmeno)}${mmiVarovani(c)}</span></span></td>${M.dny.map(d => bunka(c, d)).join('')}</tr>`).join('')).join('')
-  const pouzita = Object.keys(M.barva).filter(id => M.lide.some(c => M.dny.some(d => M.plan[c.cid]?.[d] === id)))
+  const radky = klice.map(k => `<tr><td colspan="${M.dny.length + 1}" style="padding:10px 8px 4px;border:1px solid var(--brd);background:#faf9f7;font-size:12.5px"><span aria-hidden="true" style="display:inline-block;width:10px;height:10px;border-radius:50%;background:${k ? M.barva[k] : '#f4f3f1'};border:1px solid rgba(0,0,0,.25);margin-right:6px"></span><b>${escAttr(k ? mmiNazev(k) : 'Bez stavby')}</b> <span data-mmi-pocet style="color:var(--text3)">· ${mmiPocty(skup.get(k), smiseni)}</span></td></tr>`
+    + skup.get(k).map(c => `<tr data-mmi-clovek="${escAttr(c.workerId || '')}" data-mmi-druh="${c.druh}"><td style="position:sticky;left:0;z-index:1;background:#fff;padding:4px 8px;border:1px solid var(--brd);white-space:nowrap;font-weight:600"><span style="display:inline-flex;align-items:center;gap:7px">${mmiFotka(c, 26, true)}<span>${escAttr(c.jmeno)}${mmiVarovani(c)}${mmiStitek(c)}</span></span></td>${M.dny.map(d => bunka(c, d)).join('')}</tr>`).join('')).join('')
+  const pouzita = Object.keys(M.barva).filter(id => vis.some(c => M.dny.some(d => M.plan[c.cid]?.[d] === id)))
   const legenda = pouzita.length ? `<div style="display:flex;flex-wrap:wrap;gap:8px 16px;margin-top:12px;font-size:12.5px">${pouzita.map(id => `<span style="display:inline-flex;align-items:center;gap:6px"><span style="width:14px;height:14px;border-radius:3px;background:${M.barva[id]};border:1px solid var(--brd)"></span><b>${escAttr(mmiNazev(id))}</b>${M.mista[id]?.adresa ? `<span style="color:var(--text3)">${escAttr(M.mista[id].adresa)}</span>` : ''}</span>`).join('')}<span style="color:var(--text3)">Tmavý rámeček = první den na nové stavbě. Klepnutím na políčko člověka přesunete.</span></div>` : ''
   return `<div style="overflow-x:auto;border:1px solid var(--brd);border-radius:10px">
       <table data-mmi-tabulka style="border-collapse:collapse;min-width:100%;font-size:12px">
@@ -30349,17 +30493,19 @@ function mmiHtmlLide() {
 }
 
 function mmiHtmlPresuny(presuny) {
-  const jmena = new Map(_mmiM.lide.map(c => [c.cid, c.jmeno]))
+  const lide = new Map(_mmiM.lide.map(c => [c.cid, c]))
   const radek = (p) => {
     const subbau = p.zdroj === 'subbau'
     const kdo = (subbau ? 'StavKo' : 'MMI') + (p.kdo ? ' · ' + String(p.kdo).slice(0, 80) : '')
-    return `<div data-mmi-presun style="display:flex;flex-wrap:wrap;align-items:center;gap:4px 10px;padding:9px 0;border-bottom:1px solid var(--brd);font-size:13px">
+    const c = lide.get(p.clovek_id)
+    return `<div data-mmi-presun data-mmi-druh="${c.druh}" style="display:flex;flex-wrap:wrap;align-items:center;gap:4px 10px;padding:9px 0;border-bottom:1px solid var(--brd);font-size:13px">
       <span style="color:var(--text3);min-width:84px">${mmiKdy(p.kdy)}</span>
       <span style="font-size:11.5px;font-weight:700;padding:2px 8px;border-radius:999px;background:${subbau ? '#FBEBD0' : '#E1EAF7'};color:${subbau ? '#7A4A0B' : '#1D4F91'}">${escAttr(kdo)}</span>
-      <span><b>${escAttr(jmena.get(p.clovek_id))}</b> · od ${MMI_DEN_VZOR.test(String(p.den)) ? mmiDen(p.den) : '?'}: ${escAttr(mmiNazev(p.z))} → <b>${escAttr(mmiNazev(p.na))}</b></span></div>`
+      <span><b>${escAttr(c.jmeno)}</b>${mmiStitek(c)} · od ${MMI_DEN_VZOR.test(String(p.den)) ? mmiDen(p.den) : '?'}: ${escAttr(mmiNazev(p.z))} → <b>${escAttr(mmiNazev(p.na))}</b></span></div>`
   }
-  return (presuny.length ? presuny.map(radek).join('') : '<div style="color:var(--text3);font-size:13px;padding:6px 0">Za posledních 14 dní nikoho z našich nepřesunuli.</div>')
-    + '<div style="color:var(--text3);font-size:12.5px;margin-top:10px">Přesuny od MMI vyskočí i na nástěnce. Přesun ze StavKo se zapíše do Stavbyplánu a MMI u něj uvidí, že ho udělal StavKo.</div>'
+  const jenNasi = !mmiViditelni().some(c => c.druh !== 'subbau')
+  return (presuny.length ? presuny.map(radek).join('') : `<div style="color:var(--text3);font-size:13px;padding:6px 0">Za posledních 14 dní nikoho ${jenNasi ? 'z našich ' : ''}nepřesunuli.</div>`)
+    + '<div style="color:var(--text3);font-size:12.5px;margin-top:10px">Přesuny našich lidí od MMI vyskočí i na nástěnce. Přesun ze StavKo se zapíše do Stavbyplánu a MMI u něj uvidí, že ho udělal StavKo.</div>'
 }
 
 // ── Okno přesunu ────────────────────────────────────────────────────────
@@ -30435,12 +30581,14 @@ function mmiVykresliPresun() {
       : P.rozsah === 'tyden' ? 'od ' + mmiDen(P.den) + ' do ' + mmiDen(doDne) + ' ' + kam
       : 'od ' + mmiDen(P.den) + ' ' + kam + ', dokud ho někdo znovu nepřesune') + '.'
   }
-  const lze = M.lzePresouvat && P.cil !== undefined && !P.bezi
+  // Přesunout jen s povolením ze Stavbyplánu a jen u člověka, kterého smí
+  // StavKo přesouvat (c.lzePresouvat, 2. 11. 2026 — viz mmiModel).
+  const lze = M.lzePresouvat && c.lzePresouvat && P.cil !== undefined && !P.bezi
   const sipka = (o, popis, zak) => `<button onclick="mmiPresunDen(${o})" aria-label="${popis}" ${zak ? 'disabled' : ''} style="width:44px;height:44px;border:1px solid var(--brd);border-radius:9px;background:#fff;cursor:${zak ? 'default' : 'pointer'};opacity:${zak ? .4 : 1};font-size:18px;font-family:inherit;color:inherit">${o < 0 ? '‹' : '›'}</button>`
   box.innerHTML = `<div style="background:#fff;border-radius:14px;width:100%;max-width:480px;max-height:calc(100vh - 32px);overflow-y:auto;padding:18px;box-sizing:border-box;display:flex;flex-direction:column;gap:12px">
     <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px">
       <div style="display:flex;align-items:center;gap:12px;min-width:0">${mmiFotka(c, 52)}<div style="min-width:0"><div style="font-size:11.5px;color:var(--text3);font-weight:700;letter-spacing:.04em">PŘESUN</div>
-        <div style="font-size:19px;font-weight:800">${escAttr(c.jmeno)}</div>
+        <div style="font-size:19px;font-weight:800">${escAttr(c.jmeno)}${mmiStitek(c)}</div>
         <div style="font-size:12.5px;color:var(--text3)">Teď ${mmiDen(P.den)}: ${escAttr(ted ? mmiNazev(ted) : 'bez stavby')}</div></div></div>
       <button onclick="mmiZavriPresun()" aria-label="Zavřít" style="width:44px;height:44px;flex-shrink:0;border:1px solid var(--brd);border-radius:9px;background:#fff;cursor:pointer;font-size:20px;font-family:inherit;color:inherit">×</button>
     </div>
@@ -30451,6 +30599,7 @@ function mmiVykresliPresun() {
     <div data-mmi-veta style="background:#f6f4f1;border-radius:9px;padding:10px 12px;font-size:13.5px">${veta}</div>
     ${P.chyba ? `<div data-mmi-chyba style="color:var(--red);font-size:13px">${escAttr(P.chyba)}</div>` : ''}
     ${M.lzePresouvat ? '' : '<div data-mmi-nepropojeno style="background:var(--amber-l,#faf0dc);border-radius:9px;padding:10px 12px;font-size:13px">Přesouvání se zapne po propojení se Stavbyplánem. Zatím si okno můžete jen prohlédnout, nic se neodešle.</div>'}
+    ${M.lzePresouvat && !c.lzePresouvat ? '<div data-mmi-nelze style="background:var(--amber-l,#faf0dc);border-radius:9px;padding:10px 12px;font-size:13px">Tohohle člověka může přesunout jen MMI ve Stavbyplánu — pro StavKo ho nepovolilo. Okno si můžete jen prohlédnout, nic se neodešle.</div>' : ''}
     <div style="display:flex;gap:8px;justify-content:flex-end">
       <button onclick="mmiZavriPresun()" ${P.bezi ? 'disabled' : ''} style="min-height:44px;padding:0 16px;border:1px solid var(--brd);border-radius:9px;background:#fff;font-weight:700;cursor:pointer;font-family:inherit;color:inherit">Zrušit</button>
       <button id="mmi-presunout" onclick="mmiPotvrdPresun()" ${lze ? '' : 'disabled'} style="min-height:44px;padding:0 18px;border:none;border-radius:9px;background:${lze ? '#211D1A' : '#e4ded5'};color:${lze ? '#E8A13A' : '#6B645C'};font-weight:800;cursor:${lze ? 'pointer' : 'default'};font-family:inherit">${P.bezi ? 'Přesouvám…' : 'Přesunout'}</button>
@@ -30462,17 +30611,25 @@ function mmiVykresliPresun() {
 
 async function mmiPotvrdPresun() {
   const P = _mmiPresun, M = _mmiM
-  if (!P || P.bezi || P.cil === undefined || !M?.lzePresouvat) return
+  if (!P || P.bezi || P.cil === undefined || !M?.lzePresouvat || !M.lide[P.i]?.lzePresouvat) return
   const c = M.lide[P.i]
   const odkaz = String(M.j.__odkaz || '')
   const token = (odkaz.match(/[?&]t=([0-9a-f]{64})(?:&|$)/i) || [])[1]
   if (!token) { P.chyba = 'V uloženém odkazu chybí klíč — vložte odkaz znovu.'; return mmiVykresliPresun() }
   P.bezi = true; P.chyba = ''
   mmiVykresliPresun()
+  // KLÍČ PŘESUNU (2. 11. 2026, smlouva pro Stavbyplán): týž přesun zkoušený
+  // znovu (po „neodpověděl do 20 s" nebo výpadku sítě) nese týž klic, ať ho
+  // Stavbyplán nezapíše dvakrát. Jiný člověk, stavba nebo dny = nový klíč.
+  const otisk = [c.cid, P.cil || '', P.den, mmiDoDne(P) || ''].join('|')
+  if (!P.klic || P.klicPro !== otisk) {
+    P.klic = (crypto.randomUUID && crypto.randomUUID()) || String(Date.now()) + Math.random().toString(16).slice(2)
+    P.klicPro = otisk
+  }
   const zadani = {
     token: token.toLowerCase(), akce: 'presun', clovek_id: c.cid, misto_id: P.cil || null,
     od: P.den, do: mmiDoDne(P), kdo: String(currentProfile?.full_name || '').slice(0, 80),
-    klic: (crypto.randomUUID && crypto.randomUUID()) || String(Date.now()) + Math.random().toString(16).slice(2)
+    klic: P.klic
   }
   const ovl = new AbortController()
   const stop = setTimeout(() => ovl.abort(), 20000)
@@ -30485,9 +30642,8 @@ async function mmiPotvrdPresun() {
   } finally { clearTimeout(stop) }
   if (!chyba && !(j && j.ok === true && j.akce === 'presun')) {
     const kod = String(j?.kod || '').slice(0, 40)
-    chyba = kod === 'neplatny' ? 'Odkaz už neplatí — MMI ho ve Stavbyplánu zrušilo nebo vyrobilo nový.'
-      : kod === 'nepovoleno' ? 'Stavbyplán přesouvání ze StavKo nepovolil.'
-      : j?.ok === true ? 'Stavbyplán přesun nepotvrdil — zatím neumí přijímat přesuny ze StavKo.'
+    chyba = j?.ok === true ? 'Stavbyplán přesun nepotvrdil — zatím neumí přijímat přesuny ze StavKo.'
+      : Object.prototype.hasOwnProperty.call(MMI_CHYBY_PRESUNU, kod) ? MMI_CHYBY_PRESUNU[kod]
       : 'Stavbyplán přesun odmítl' + (kod ? ' (' + kod + ')' : '') + '.'
   }
   if (_mmiPresun !== P) return
@@ -30495,12 +30651,29 @@ async function mmiPotvrdPresun() {
   if (chyba) { P.chyba = chyba; mmiVykresliPresun(); return }
   _mmiPresun = null
   document.getElementById('mmi-presun')?.remove()
-  showToast('✅ Zapsáno ve Stavbyplánu: ' + c.jmeno + ' → ' + mmiNazev(zadani.misto_id))
+  // Dny, které Stavbyplán přeskočil (dovolená, nemoc, konec stavby…) — smlouva 2. 11. 2026.
+  const preskoceno = Array.isArray(j.preskoceno) ? j.preskoceno.length : 0
+  showToast('✅ Zapsáno ve Stavbyplánu: ' + c.jmeno + ' → ' + mmiNazev(zadani.misto_id) + (preskoceno ? ' (přeskočeno dní: ' + preskoceno + ')' : ''))
   loadPlanMmi(true)
+}
+// Odmítnutí přesunu podle kódu ze Stavbyplánu (smlouva 2. 11. 2026,
+// SMLOUVA-stavbyplan.md). Neznámý kód se ukáže jako „odmítl (kód)".
+const MMI_CHYBY_PRESUNU = {
+  neplatny: 'Odkaz už neplatí — MMI ho ve Stavbyplánu zrušilo nebo vyrobilo nový.',
+  nepovoleno: 'Stavbyplán přesouvání ze StavKo nepovolil.',
+  clovek_nelze: 'Tohohle člověka Stavbyplán ze StavKo přesunout nedovolí (není mezi povolenými, skončil nebo je vyřazený).',
+  misto_nelze: 'Na tuhle stavbu Stavbyplán přesun ze StavKo nedovolí — obnovte plán a vyberte jinou.',
+  nepritomen: 'V těch dnech má dovolenou, nemoc nebo nepřítomnost — Stavbyplán nic nezměnil.',
+  neplatny_pozadavek: 'Stavbyplán přesun nepochopil — obnovte plán a zkuste to znovu.',
+  moc_pozadavku: 'Moc přesunů najednou — zkuste to za chvíli.',
+  chyba_serveru: 'Stavbyplán teď přesun nezapsal (chyba na jeho straně) — zkuste to za chvíli znovu.'
 }
 
 // Nástěnka: přesuny, které ještě nikdo ze správců neodklikl. „Viděl jsem"
 // platí pro všechny správce (doc_alert_dismissals, jako u registrací).
+// JEN NAŠI LIDÉ (mmiNasiLide): sekce Plán MMI od 2. 11. 2026 ukazuje i lidi
+// MMI a jiných firem a jejich přesuny, ale upozornění na nástěnce je dál jen
+// o našich — o lidech MMI rozhoduje a svým lidem to oznamuje MMI.
 async function nactiPresunyMmiNaNastenku() {
   const box = document.getElementById('dash-mmi-presuny')
   if (!box || !_jeAdminPrihlasen()) return
