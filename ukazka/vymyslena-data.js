@@ -259,6 +259,51 @@
         email: 'pet…@ukazka.cz', pocet: 3, anon: true, zdroj: 'api/chyba' }),
   );
 
+  // ---- Plán MMI (2. 11. 2026) ----
+  // Ukázka sekce „Plán MMI": vymyšlený odkaz na Stavbyplán, na který odpoví
+  // ukázková vrstva (bez-serveru.js) touhle funkcí — ven nejde nic. V plánu
+  // jsou naši lidé, vlastní lidé MMI (druh 'nasi') a dva z jiné firmy ('jini'),
+  // ať je vidět štítek, počty u staveb i filtr Všichni / Jen naši. Přesuny jen
+  // u lidí MMI a jiné firmy: nástěnka ukázky zůstane jako dřív (upozorňuje jen
+  // na přesuny našich). Přesouvání vypnuté (bez presouvani) jako na ostré,
+  // dokud se Stavbyplán nepropojí. Dny se počítají při každém stažení.
+  const MMI_ODKAZ = 'https://ukazka-stavbyplan.supabase.co/functions/v1/subbau-plan?t=' + '0123456789abcdef'.repeat(4);
+  D.plan_mmi = [{ id: 1, odkaz: MMI_ODKAZ, upraveno: new Date().toISOString(), upravil: id.sef }];
+  const mmiMista = [
+    { id: uuid(), nazev: 'München Riem', druh: 'stavba', adresa: 'Riemer Straße 12, München' },
+    { id: uuid(), nazev: 'Pfaffenhofen Nord', druh: 'stavba', adresa: 'Ingolstädter Straße 96, Pfaffenhofen' },
+    { id: uuid(), nazev: 'Augsburg Lech', druh: 'stavba', adresa: 'Lechhauser Straße 40, Augsburg' },
+    { id: uuid(), nazev: 'Freising Bahnhof', druh: 'stavba', adresa: 'Bahnhofstraße 7, Freising' },
+  ];
+  // Naši: lideId[i] → stavba. Cizí: jméno, příjmení, druh, stavba
+  // a případný přesun [za kolik dní, kam, před kolika hodinami].
+  const mmiNasiNa = [0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 3];
+  const mmiNasi = lideId.map((w, i) => ({ id: uuid(), w, misto: mmiNasiNa[i % mmiNasiNa.length] }));
+  const mmiCizi = [
+    ['Luca', 'Bianchi', 'nasi', 0], ['Marco', 'Rossi', 'nasi', 0, [3, 3, 26]], ['Stefan', 'Huber', 'nasi', 1],
+    ['Andrea', 'Conti', 'nasi', 3], ['Klaus', 'Wagner', 'jini', 2, [5, 1, 3]], ['Piotr', 'Nowak', 'jini', 2],
+  ].map(r => ({ id: uuid(), jmeno: r[0], prijmeni: r[1], druh: r[2], misto: r[3], presun: r[4] || null }));
+  window.__demoOdkazMmi = MMI_ODKAZ.split('?')[0];
+  window.__demoPlanMmi = function () {
+    const vsedni = (o) => { const w = new Date(dnes(o) + 'T12:00:00').getDay(); return w !== 0 && w !== 6 };
+    const plan = [], presuny = [];
+    const naplanuj = (c) => {
+      let odkdy = null;
+      if (c.presun) { odkdy = c.presun[0]; while (!vsedni(odkdy)) odkdy++; }
+      for (let o = 0; o < 14; o++) {
+        if (vsedni(o)) plan.push({ clovek_id: c.id, den: dnes(o), misto_id: mmiMista[odkdy != null && o >= odkdy ? c.presun[1] : c.misto].id });
+      }
+      if (c.presun) presuny.push({ clovek_id: c.id, den: dnes(odkdy), z: mmiMista[c.misto].id, na: mmiMista[c.presun[1]].id, kdy: new Date(Date.now() - c.presun[2] * 3600e3).toISOString() });
+    };
+    mmiNasi.forEach(naplanuj);
+    mmiCizi.forEach(naplanuj);
+    const lide = mmiNasi.map(c => {
+      const jmeno = String((D.profiles.find(p => p.id === c.w) || {}).full_name || '').split(' ');
+      return { id: c.id, jmeno: jmeno[0] || '', prijmeni: jmeno.slice(1).join(' '), subbau_id: c.w, druh: 'subbau' };
+    }).concat(mmiCizi.map(c => ({ id: c.id, jmeno: c.jmeno, prijmeni: c.prijmeni, subbau_id: null, druh: c.druh })));
+    return { ok: true, verze: 1, rozsah: 'vsichni', od: dnes(0), do: dnes(13), lide, plan, presuny, mista: mmiMista };
+  };
+
   window.__demoUcty = {
     sef: id.sef,
     pracovnik: lideId[0],

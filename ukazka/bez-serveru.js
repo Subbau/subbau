@@ -29,6 +29,18 @@
         status: 200, headers: { 'Content-Type': 'application/json' },
       }));
     }
+
+    // PLÁN MMI (2. 11. 2026): ukázka má vymyšlený odkaz na Stavbyplán
+    // (vymyslena-data.js). Odpoví na něj sama — ven nejde nic. Přesun (POST)
+    // ukázka nepovolí; plán stejně posílá bez presouvani.
+    const odkazMmi = window.__demoOdkazMmi;
+    if (odkazMmi && typeof window.__demoPlanMmi === 'function' && adresa.split('?')[0] === odkazMmi) {
+      const metoda = String((nastaveni && nastaveni.method) || (vstup && vstup.method) || 'GET').toUpperCase();
+      const telo = metoda === 'POST' ? { ok: false, kod: 'ukazka' } : window.__demoPlanMmi();
+      return Promise.resolve(new Response(JSON.stringify(telo), {
+        status: 200, headers: { 'Content-Type': 'application/json' },
+      }));
+    }
     return puvodniFetch ? puvodniFetch(vstup, nastaveni)
                         : Promise.reject(new Error('fetch není k dispozici'));
   };
