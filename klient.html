@@ -96,7 +96,20 @@
       fronta = jdou.concat(fronta).slice(0, 10)
       if (!casovac) casovac = setTimeout(posli, 30000)
     }
-    W.__denikKlient = zapis
+    // Chyba, kterou stránka chytí sama (řetěz načtení dat, uložení poznámky) —
+    // nezachycené chyby níž to nevidí (2. 11. 2026, oponentura). chyba smí být
+    // i Error: text „Jméno: zpráva" a stack očištěný stejně jako u nezachycených.
+    W.__denikKlient = function (cil, chyba, detail) {
+      try {
+        var d = {}, k
+        if (detail) for (k in detail) if (Object.prototype.hasOwnProperty.call(detail, k)) d[k] = detail[k]
+        if (chyba && typeof chyba === 'object' && chyba.message !== undefined) {
+          if (d.stack === undefined) d.stack = stack(chyba.stack)
+          chyba = (chyba.name ? chyba.name + ': ' : '') + chyba.message
+        }
+        zapis(cil, chyba, d)
+      } catch (x) { /* zápis chyby nesmí nic shodit */ }
+    }
     W.addEventListener('error', function (ev) {
       try {
         var cil = ev && ev.target
@@ -828,16 +841,24 @@ function vykreslit(d, preklady){
 // políčko vizuálně zaškrtnuté, ačkoli se nic neuložilo — a odběratel to zjistil
 // až po obnovení stránky, kdy mu volba zmizela.
 function ulozPoznamkuNaServer(data, hotovo, selhalo){
+  // Deník chyb (2. 11. 2026, oponentura): odpověď, která nejde přečíst (Vercel
+  // funkci zastavil — 504 s textem), a výjimka v obsluze po odpovědi jdou do
+  // deníku jako klient|poznamka. Naše odpovědi s kódem chyby zapsal server sám,
+  // výpadek spojení odběratel vidí a zkusí znovu. Chování stránky beze změny.
+  var stavOdpovedi = 0, precteno = false;
   fetch('/api/klient-dochazka?t=' + encodeURIComponent(TOKEN), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(data),
     cache: 'no-store',
   })
-    .then(function(r){ return r.json().catch(function(){ return {} }) })
+    .then(function(r){ stavOdpovedi = r.status; return r.json().then(function(j){ precteno = true; return j }, function(){ return {} }) })
     .then(function(j){
       if (j && j.ok) { stav('Gespeichert · uloženo'); hotovo && hotovo() }
       else {
+        if (stavOdpovedi >= 500 && !precteno) {
+          try { if (window.__denikKlient) window.__denikKlient('poznamka', 'Poznámka se neuložila — odpověď serveru nejde přečíst (HTTP ' + stavOdpovedi + ')', { stav: stavOdpovedi }) } catch (x) { /* deník nesmí nic shodit */ }
+        }
         var duvod = (j && j.chyba === 'fotka_prilis_velka')
           ? 'Foto zu groß · fotka je moc velká'
           : (j && j.chyba === 'spatne_datum')
@@ -851,7 +872,10 @@ function ulozPoznamkuNaServer(data, hotovo, selhalo){
         selhalo && selhalo(duvod);
       }
     })
-    .catch(function(){ stav('Keine Verbindung · bez připojení'); selhalo && selhalo('offline') });
+    .catch(function(e){
+      if (stavOdpovedi) { try { if (window.__denikKlient) window.__denikKlient('poznamka', e, {}) } catch (x) { /* deník nesmí nic shodit */ } }
+      stav('Keine Verbindung · bez připojení'); selhalo && selhalo('offline');
+    });
 }
 
 // Fotku zmenšíme rovnou v prohlížeči. Z mobilu chodí snímky přes 3 MB a ty
@@ -1244,6 +1268,25 @@ var prvniNacteni = true;
 var posledniTydny = null;   // viz DATA.tydny == null níž
 // Který týden si odběratel naposledy vybral, jako text („" = probíhající).
 function klicTydne(){ return TYDEN ? TYDEN.kw + '/' + TYDEN.rok : ''; }
+// DENÍK CHYB (2. 11. 2026, oponentura): řetěz načtení končí vlastním .catch,
+// takže raný odchyt nahoře chybu neuvidí a odběratel by jen koukal na
+// „Verbindungsfehler" nebo „Wird geladen…", aniž by o tom kancelář věděla.
+// Do deníku (klient|…) proto jde:
+//   • odpověď, která nejde přečíst (Vercel funkci zastavil a vrátil 504/502
+//     s textem místo JSON) — server sám to zapsat nestihl;
+//   • výjimka při zpracování a vykreslení přišlých dat.
+// Výpadek spojení ne: je to síť odběratele (nebo zavřel stránku uprostřed
+// načítání) a /api/chyba je na stejném serveru, takže by stejně neprošlo.
+// Naše vlastní odpovědi s kódem chyby taky ne — ty zapsal server sám
+// (server|klient-dochazka). Stránka se chová stejně jako dřív.
+function denikNacteni(e, stavOdpovedi, precteno){
+  try {
+    var zapis = window.__denikKlient;
+    if (!zapis || !stavOdpovedi) return;
+    if (!precteno) zapis('nacteni', 'Odpověď serveru nejde přečíst (HTTP ' + stavOdpovedi + ')', { stav: stavOdpovedi, kod: (e && e.name) ? String(e.name) : undefined });
+    else zapis('vykresleni', e, {});
+  } catch (x) { /* zápis chyby nesmí stránku shodit */ }
+}
 function nacti(rucne){
   if (rucne) stav('Wird aktualisiert…');
   var adresa = '/api/klient-dochazka?t=' + encodeURIComponent(TOKEN)
@@ -1251,8 +1294,10 @@ function nacti(rucne){
              + (TYDEN ? '&kw=' + TYDEN.kw + '&rok=' + TYDEN.rok : '');
   prvniNacteni = false;
   var tydenDotazu = klicTydne();
+  // Pro deník chyb: jaký stav odpověď měla a jestli šla přečíst jako JSON.
+  var stavOdpovedi = 0, precteno = false;
   return fetch(adresa, { cache: 'no-store' })
-    .then(function(r){ return r.json().then(function(j){ return { stav: r.status, j: j } }) })
+    .then(function(r){ stavOdpovedi = r.status; return r.json().then(function(j){ precteno = true; return { stav: r.status, j: j } }) })
     .then(function(o){
       // Seznam týdnů platí, ať odpověď patří ke kterémukoli týdnu.
       if (o.j && o.j.ok && o.j.tydny != null) posledniTydny = o.j.tydny;
@@ -1336,7 +1381,8 @@ function nacti(rucne){
         if (!dokresleno){ dokresleno = true; clearTimeout(pojistka); hotovo() }
       });
     })
-    .catch(function(){
+    .catch(function(e){
+      denikNacteni(e, stavOdpovedi, precteno);
       // Výpadek sítě není důvod smazat, co už klient vidí — jen to řekneme
       // a zkusíme to za chvíli znovu.
       if (DATA) { stav('Keine Verbindung · bez připojení'); naplanuj(); }

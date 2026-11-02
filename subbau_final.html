@@ -5541,7 +5541,7 @@ const DN_TVAR_KLICE = {
   attId: /^[\w-]{1,40}$/, workerId: /^[\w-]{1,40}$/, annId: /^[\w-]{1,40}$/, ucet: /^[0-9a-f-]{36}$/i,
   invoiceNum: /^[\w./-]{1,30}$/, cislo: /^[\w./-]{1,30}$/, kw: /^\d{1,2}$/, week: /^\d{1,2}$/, rok: /^\d{4}$/, year: /^\d{4}$/,
   docType: /^[\w-]{1,40}$/, bucket: /^[\w.-]{1,60}$/, pripona: /^\w{1,8}$/,
-  email: /^[^@\s]{1,3}…@[a-z0-9.-]{1,60}$/i, verze: /^[\w .:-]{1,40}$/,
+  email: /^[^@\s]{1,3}…@(?:[a-z0-9-]{1,63}\.){1,5}[a-z]{2,24}$/i, verze: /^[\w .:-]{1,40}$/,
   ua: /^[\x20-\x7e]{1,300}$/, prohlizec: /^[\x20-\x7e]{1,300}$/,
 }
 const DN_CITLIVY = /heslo|password|passwd|token|apikey|authorization|secret|cookie|^klic$/i
@@ -5649,8 +5649,11 @@ function denikTridaHlasky(text) {
 function _dnNormal(t) { return String(t || '').replace(/\d+/g, '#').slice(0, 100) }
 function _dnTextChyby(z) { try { return (z && typeof z === 'object' && z.message !== undefined) ? (z.name ? z.name + ': ' : '') + z.message : String(z == null ? '' : z) } catch (e) { return '' } }
 function _dnStack(s) { return s ? _dnRez(denikCisti(String(s).replace(/(?:https?|file):\/\/[^\s)]+/g, x => x.split('#')[0].split('?')[0].split('/').pop() || 'stranka')), 1500) : undefined }
-// Zkrácený e-mail „pet…@seznam.cz" — celý e-mail do deníku nikdy.
-function _dnMaskujEmail(e) { const m = /^([^@\s]{1,3})[^@\s]*@([a-z0-9.-]{1,60})$/i.exec(String(e || '').trim()); return m ? m[1] + '…@' + m[2].toLowerCase() : undefined }
+// Zkrácený e-mail „pet…@seznam.cz" — celý e-mail do deníku nikdy. Jen řetězec
+// s opravdovou doménou (tečka a koncovka z písmen), jinak nic: heslo napsané
+// omylem do pole e-mail („Heslo@2024") by se dřív zapsalo skoro celé
+// („Hes…@2024") — 2. 11. 2026, oponentura; stejný tvar hlídá api/_denik.js.
+function _dnMaskujEmail(e) { const m = /^([^@\s]{1,3})[^@\s]*@((?:[a-z0-9-]{1,63}\.){1,5}[a-z]{2,24})$/i.exec(String(e || '').trim()); return m && m[2].length <= 60 ? m[1] + '…@' + m[2].toLowerCase() : undefined }
 function _dnBajtu(t) { try { return new TextEncoder().encode(t).length } catch (e) { return String(t).length * 3 } }
 function _dnNoveId() { return Math.random().toString(36).slice(2, 10) + Date.now().toString(36).slice(-4) }
 function _dnJa() { try { return (currentUser && currentUser.id) || null } catch (e) { return null } }
@@ -5766,10 +5769,16 @@ function _dnCiste(x, klic, hloubka, videne) {
     return ven
   } catch (e) { return undefined } finally { videne.delete(x) }
 }
-function _dnPoprve(klic) {
+// „Jednou za verzi" (chybějící migrace): ulozit=false se jen zeptá, ulozit=true
+// klíč zapamatuje. Zapamatovat se smí až řádek, který opravdu projde stropem
+// za načtení (2. 11. 2026, oponentura): dřív se klíč uložil před stropem
+// a výskyt odříznutý plným stropem se do další verze appky už nikdy nezapsal —
+// kancelář by neviděla, který sloupec nebo tabulka v databázi chybí.
+function _dnPoprve(klic, ulozit) {
   try {
     if (!_dn.jednou) { let j = null; try { j = JSON.parse(lsGet(DN_KLIC_JEDNOU) || 'null') } catch (e) {} _dn.jednou = (j && j.verze === DN_VERZE && Array.isArray(j.k)) ? j : { verze: DN_VERZE, k: [] } }
     if (_dn.jednou.k.includes(klic)) return false
+    if (!ulozit) return true
     _dn.jednou.k.push(klic); if (_dn.jednou.k.length > 100) _dn.jednou.k.shift()
     lsSet(DN_KLIC_JEDNOU, JSON.stringify(_dn.jednou))
   } catch (e) {}
@@ -5813,7 +5822,7 @@ function _dnPrijmi(kde, zprava, detail, v) {
   const klic = kde + '|' + _dnNormal(text)
   // pomalost a odhlaseni mají vlastní brzdu (8004, 6057-6061) — jdou jako dřív, bez slučování a stropů.
   const vlastni = kde === 'pomalost' || kde === 'odhlaseni'
-  if (v.jednou && !_dnPoprve(klic)) return hotovo
+  if (v.jednou && !_dnPoprve(klic, false)) return hotovo
   const okno = vlastni ? null : _dn.klice.get(klic)
   if (okno && t - okno.od < okno.delka) {                             // opakování → jen počet
     if (!okno.pocet) okno.prvni = new Date(t).toISOString()
@@ -5831,10 +5840,25 @@ function _dnPrijmi(kde, zprava, detail, v) {
     _dn.nacteni[pole]++
     if (pole !== 'auto') _dn.nacteni.auto++
   }
+  // Řádek prošel stropem — teprve teď si „jednou za verzi" klíč zapamatuje.
+  if (v.jednou) _dnPoprve(klic, true)
   const d = _dnKontext(trida, sekce)
   let cisty = null
   try { cisty = (detail && typeof detail === 'object') ? _dnCiste(detail, '', 0, new Set()) : null } catch (e) { cisty = null }
   if (cisty && typeof cisty === 'object' && !Array.isArray(cisty)) for (const k of Object.keys(cisty)) d[k] = cisty[k]
+  // Stav HTTP u chyby databáze (2. 11. 2026, oponentura): chyba z knihovny
+  // (PostgrestError) stav nenese — má ho jen odpověď — takže „stav:
+  // error.status" v místech zápisu (docházka, panely, souhlas) zůstal vždy
+  // prázdný. Doplní se z posledního nepovedeného dotazu nejvýš 15 s zpátky,
+  // jen u kódu ve tvaru databáze (PGRST…, 42501, 22P02…), a stavZ řekne, ze
+  // kterého dotazu je (souběžný jiný dotaz by mohl být ten pravý).
+  if (d.stav == null && /^(?:PGRST\d{3}|(?=[0-9A-Z]*\d)[0-9A-Z]{5})$/.test(String(d.kod || ''))) {
+    for (let i = _dn.dotazy.length - 1; i >= 0; i--) {
+      const x = _dn.dotazy[i]
+      if (!x || t - x.t > 15000) break
+      if (typeof x.s === 'number' && x.s >= 400) { d.stav = x.s; d.stavZ = x.m + ' ' + x.c; break }
+    }
+  }
   // Tyhle dva určuje jádro: zdroj počítá strop v databázi (ruční / automatické
   // zvlášť), _id slučuje dvojí odeslání (keepalive + fronta) v prohlížeči.
   d.zdroj = zdroj
@@ -6560,21 +6584,25 @@ function _dnSitOk(c, stav) {
 }
 function _dnSerazeneCile(cile) { return Object.fromEntries(Object.entries(cile || {}).sort((a, b) => b[1] - a[1]).slice(0, 8)) }
 // zMinula = stav převzatý po zavřené záložce (konec výpadku už nikdo neviděl).
+// Počet nepovedených dotazů nese „dotazu", ne „pocet" (2. 11. 2026, oponentura):
+// pocet je v celém deníku „kolik výskytů řádek zastupuje" a prohlížeč ho sčítá —
+// jeden výpadek se 40 dotazy by se ukázal jako 40× výpadek a přebil by
+// skutečnou příčinu (nezapsanou docházku) v seznamu i v bloku Kdo.
 function _dnZapisVypadek(v, zMinula) {
   const trvalo = Math.max(0, (zMinula ? (v.posledni || v.od) : Date.now()) - v.od)
   if (v.pocet < 3 && !v.zapisu && trvalo < 60000) return
   denikChybZapis('vypadek', 'Bez spojení ' + Math.round(trvalo / 1000) + ' s, nepovedlo se ' + v.pocet + ' dotazů' + (v.zapisu ? ', z toho ' + v.zapisu + ' zápisů' : ''),
-    { od: new Date(v.od).toISOString(), trvaloS: Math.round(trvalo / 1000), pocet: v.pocet, zapisu: v.zapisu, cile: _dnSerazeneCile(v.cile), chyba: v.chyba, onlineNaZacatku: v.onlineNaZacatku, vidStart: v.vidStart, zMinula: zMinula || undefined }, { zdroj: 'auto' })
+    { od: new Date(v.od).toISOString(), trvaloS: Math.round(trvalo / 1000), dotazu: v.pocet, zapisu: v.zapisu, cile: _dnSerazeneCile(v.cile), chyba: v.chyba, onlineNaZacatku: v.onlineNaZacatku, vidStart: v.vidStart, zMinula: zMinula || undefined }, { zdroj: 'auto' })
 }
 function _dnZapisNeobnoveno(n, zMinula) {
   const s = Math.round(Math.max(0, (zMinula ? (n.posledni || n.od) : Date.now()) - n.od) / 1000)
   denikChybZapis('prihlaseni-neobnoveno', 'Dotazy zastavené kvůli neobnovenému přihlášení: ' + n.pocet + '× za ' + s + ' s',
-    { pocet: n.pocet, cile: _dnSerazeneCile(n.cile), prave: n.prave, nevysla: n.nevysla, trvaloS: s, zMinula: zMinula || undefined }, { zdroj: 'auto' })
+    { dotazu: n.pocet, cile: _dnSerazeneCile(n.cile), prave: n.prave, nevysla: n.nevysla, trvaloS: s, zMinula: zMinula || undefined }, { zdroj: 'auto' })
 }
 function _dnZapisProsle(p, zMinula) {
   const s = Math.round(Math.max(0, (zMinula ? (p.posledni || p.od) : Date.now()) - p.od) / 1000)
   denikChybZapis('prihlaseni-prosle', 'Prošlé přihlášení (401) u ' + p.pocet + ' dotazů za ' + s + ' s',
-    { pocet: p.pocet, cile: _dnSerazeneCile(p.cile), kod: p.kod || undefined, trvaloS: s, zMinula: zMinula || undefined }, { zdroj: 'auto' })
+    { dotazu: p.pocet, cile: _dnSerazeneCile(p.cile), kod: p.kod || undefined, trvaloS: s, zMinula: zMinula || undefined }, { zdroj: 'auto' })
 }
 // Dotaz přihlášeného zastavený, protože se nepodařilo obnovit přihlášení (_dotazSObnovenymPrihlasenim).
 function _dnNeobnoveno(url, prave) {
@@ -8109,6 +8137,12 @@ async function zkusZnovuNacist(samo) {
     try { await initApp(u) } finally { clearAuthTimeout(); authHandling = false }
   } catch (e) {
     zapisDenik('zkouším znovu — chyba', e && e.message)
+    // DENÍK CHYB (2. 11. 2026, oponentura): první pád initApp při startu
+    // odejde jako neošetřený slib (js-neosetrena). Každé další opakování
+    // (Zkusit znovu, samo, návrat do záložky) chytí tenhle catch — bez zápisu
+    // by kancelář viděla jeden pád, i když appka člověku padá dokola. Stejný
+    // druh a text jako při startu: opakování se sloučí do jedné skupiny s počtem.
+    try { if (typeof denikChybZapis === 'function') denikChybZapis('js-neosetrena', e, { stack: typeof _dnStack === 'function' && e && e.stack ? _dnStack(e.stack) : undefined, misto: 'zkusZnovuNacist' }, { zdroj: 'auto' }) } catch (x) { console.warn('[deník chyb]', x) } // eslint-disable-line no-undef
   } finally {
     _znovuBezi = false
     if (btn) { btn.disabled = false; btn.textContent = 'Zkusit znovu' }
@@ -8834,7 +8868,12 @@ function tridaChybyPrihlaseni(error) {
   if (/email[_ ]not[_ ]confirmed/i.test(zprava)) return 'nepotvrzeny'
   if (stav === 429 || /rate limit|too many/i.test(zprava)) return 'limit'
   if (/api key|refresh token|jwt|expired|signature/i.test(zprava) || stav === 401 || stav === 403) return 'klic'
-  if (stav >= 500 || /fetch|network|failed to fetch|timeout/i.test(zprava)) return 'server'
+  // Jediná vědomá odchylka od popisChybyPrihlaseni (2. 11. 2026, oponentura):
+  // Safari a iPhone hlásí přihlášení bez signálu jako „Load failed" (knihovna
+  // AuthRetryableFetchError, stav 0). Člověk dál vidí „Přihlášení se
+  // nepovedlo: Load failed" (obrazovka beze změny — majitel: měnit jen
+  // zadané), deník to ale zařadí jako server (≥500, fetch), ne „jiný důvod".
+  if (stav >= 500 || /fetch|network|failed to fetch|timeout|load failed/i.test(zprava) || error?.name === 'AuthRetryableFetchError') return 'server'
   return 'jine'
 }
 
@@ -23876,6 +23915,12 @@ async function confirmCheckout() {
   if (error) {
     console.error('[checkout] update error:', error)
     showToast(chybaText(error, 'Směna se neuzavřela'))
+    // DENÍK CHYB (2. 11. 2026, oponentura): odchod přes dialog je nejčastější
+    // cesta — nepovedený zápis tu musí být taky „Docházka se nezapsala —
+    // odchod" (denní počítadlo, pozdější „po chybě", červeně v bloku Kdo).
+    // Řádek je za hláškou, ať ji pohltí i s nepovedeným dotazem téže chvíle;
+    // stávající konec-smeny zůstává (R8).
+    try { if (typeof _dnDochazka === 'function') _dnDochazka('out', 'zapis', 'Odchod se nezapsal — chyba zápisu (' + kodChybyProDenik(error) + ')', { kod: error && error.code, stav: error && error.status, misto: 'confirmCheckout' }, 'chyba') } catch (x) { console.warn('[deník chyb]', x) } // eslint-disable-line no-undef
     zapisChybuAppky('konec-smeny', error?.message)
     return
   }
@@ -25183,6 +25228,10 @@ async function mobCheckin(type) {
           } catch(e) { pauzaUzavrena = false }
           if (!pauzaUzavrena) {
             showToast('❌ Odchod se NEZAPSAL — nepodařilo se ukončit rozdělanou pauzu. Zkuste to prosím znovu.')
+            // DENÍK CHYB (2. 11. 2026, oponentura): odchod se nezapsal — patří
+            // do „Docházka se nezapsala — odchod" jako ostatní cesty odchodu.
+            // Stávající odchod-uzavreni-pauzy zůstává (R8).
+            try { if (typeof _dnDochazka === 'function') _dnDochazka('out', 'uzavreni-pauzy', 'Odchod se nezapsal — rozdělanou pauzu se nepodařilo uzavřít', {}, 'chyba') } catch (x) { console.warn('[deník chyb]', x) } // eslint-disable-line no-undef
             zapisChybuAppky('odchod-uzavreni-pauzy', 'nepodařilo se uzavřít rozdělanou pauzu při odchodu')
             updateMobStav(current, [current])
             checkinInProgress = false
@@ -28654,7 +28703,8 @@ const DCH_DUVODY = {
   visi: 'visí („Počkejte")', 'poloha-ulozeni': 'poloha se neuložila', 'zaznam-smazan': 'záznam smazán',
   'cteni-zaznamu': 'záznam nejde přečíst', 'bez-prichodu': 'bez příchodu', rezim: 'režim přestávky',
   'pauza-uz-je': 'pauza už je', 'pauza-rozdelana': 'rozdělaná pauza', 'pres-pulnoc': 'přes půlnoc',
-  'pauza-probiha': 'pauza běží', 'pauza-nezacala': 'pauza nezačala', 'odchod-uz-je': 'odchod už je'
+  'pauza-probiha': 'pauza běží', 'pauza-nezacala': 'pauza nezačala', 'odchod-uz-je': 'odchod už je',
+  'uzavreni-pauzy': 'pauza se neuzavřela'
 }
 const DCH_T = { varovani: 'varování', udalost: 'událost', mereni: 'měření' }
 const DCH_PORADI_T = { chyba: 0, varovani: 1, udalost: 2, mereni: 3 }
@@ -28792,7 +28842,13 @@ function _dchSeskup(radky) {
     if (_dchPoradiT(r._t) < _dchPoradiT(s.t)) s.t = r._t
     if (r.duvod) s.duvody.set(r.duvod, (s.duvody.get(r.duvod) || 0) + r._pocet)
   }
-  return [...m.values()].sort((a, b) => b.vyskytu - a.vyskytu || b.naposled - a.naposled)
+  // Skupina jen ze zápisů bez přihlášení (neověřené, /api/chyba) jde až za
+  // skupiny, ve kterých je aspoň jeden ověřený výskyt (2. 11. 2026, oponentura).
+  // Zápis bez přihlášení může poslat kdokoli s vlastní hlavičkou Origin —
+  // šedesát podvržených skupin by jinak vytlačilo chyby přihlášených lidí
+  // (i „Petr — Docházka se nezapsala") za „Ukázat všech" a ze souhrnu.
+  const jenNeovereno = (s) => (s.anon >= s.vyskytu ? 1 : 0)
+  return [...m.values()].sort((a, b) => jenNeovereno(a) - jenNeovereno(b) || b.vyskytu - a.vyskytu || b.naposled - a.naposled)
 }
 function _dchJmeno(kdo, zapsane) {
   const p = _dch.jmena.get(String(kdo))
@@ -28803,7 +28859,18 @@ function _dchJmeno(kdo, zapsane) {
   return 'neznámý účet'
 }
 // Blok „Kdo": lidé podle počtu výskytů, písmeno A, B… (v souhrnu se místo jmen
-// kopírují jen písmena), nejčastější druh a od kdy.
+// kopírují jen písmena), nejvážnější druh a od kdy.
+// Hlavní řádek člověka (2. 11. 2026, oponentura): dřív vyhrál prostě
+// nejčastější druh — jedno „Živé spojení vypadlo" (varování) nebo výpadek
+// přebilo nezapsaný příchod a Petrův případ, kvůli kterému deník vznikl, se
+// v bloku Kdo vůbec neukázal. Teď rozhoduje nejdřív třída (chyba před
+// varováním, událostí a měřením), pak druh, kdy člověku něco opravdu nejde
+// (DCH_VAZNE), a až potom počet; při shodě novější řádek jako dřív.
+function _dchVaznejsi(a, b) {
+  if (a.t !== b.t) return a.t < b.t
+  if (a.vazne !== b.vazne) return a.vazne
+  return a.n > b.n
+}
 function _dchOsoby(radky) {
   const m = new Map()
   for (const r of radky) {
@@ -28812,9 +28879,10 @@ function _dchOsoby(radky) {
     if (!o) { o = { kdo: r.kdo ? String(r.kdo) : null, vyskytu: 0, druhy: new Map(), kde: new Map(), poprve: Infinity, naposled: -Infinity, zapsane: '' }; m.set(k, o) }
     o.vyskytu += r._pocet
     if (!o.zapsane && r.kdo_jmeno) o.zapsane = String(r.kdo_jmeno)
-    const d = o.druhy.get(r._druh) || { n: 0, od: Infinity }
+    const d = o.druhy.get(r._druh) || { n: 0, od: Infinity, t: _dchPoradiT(r._t) }
     d.n += r._pocet
     if (r._ms < d.od) d.od = r._ms
+    if (_dchPoradiT(r._t) < d.t) d.t = _dchPoradiT(r._t)
     o.druhy.set(r._druh, d)
     o.kde.set(r.kde, (o.kde.get(r.kde) || 0) + r._pocet)
     if (r._ms < o.poprve) o.poprve = r._ms
@@ -28824,7 +28892,10 @@ function _dchOsoby(radky) {
   let i = 0
   for (const o of pole) {
     let top = null
-    for (const [druh, d] of o.druhy) if (!top || d.n > top.n) top = { druh, n: d.n, od: d.od }
+    for (const [druh, d] of o.druhy) {
+      const x = { druh, n: d.n, od: d.od, t: d.t, vazne: DCH_VAZNE.test(druh) }
+      if (!top || _dchVaznejsi(x, top)) top = x
+    }
     o.top = top
     o.pismeno = o.kdo ? _dchPismeno(i++) : ''
     o.jmeno = o.kdo ? _dchJmeno(o.kdo, o.zapsane) : 'Bez přihlášení (neověřeno)'
@@ -29176,6 +29247,32 @@ function _dchKlik(e) {
   if (el.hasAttribute('data-denik-znovu')) nactiDenikChyb(true)
 }
 
+// Jména lidí pryč ze souhrnu (2. 11. 2026, oponentura). Souhrn slibuje „jména
+// se nekopírují", ale hláška typu „⚠️ Jan Novák je zaměstnanec firmy…" nese
+// jméno přímo ve zprávě a _dchCisti jména nepozná. Jména se berou z profilů
+// načtených pro blok Kdo a ze jmen zapsaných v deníku — celé jméno i každá
+// část od 3 znaků, jen jako celé slovo a s velkým písmenem jako v profilu
+// (příjmení Malý nesmaže slovo „malý"). Bez lookbehind (Safari 15).
+function _dchBezJmen() {
+  const casti = new Set()
+  const pridej = (j) => {
+    const s = String(j || '').replace(/\s+/g, ' ').trim()
+    if (s.length >= 3) casti.add(s)
+    for (const c of s.split(/[\s,.;()]+/)) if (c.length >= 3) casti.add(c)
+  }
+  try {
+    for (const p of _dch.jmena.values()) pridej(p && p.jmeno)
+    for (const r of _dch.radky) pridej(r.kdo_jmeno)
+  } catch (e) { console.warn('[deník chyb] jména pro souhrn:', (e && e.message) || e) }
+  if (!casti.size) return (t) => t
+  const vzor = [...casti].sort((a, b) => b.length - a.length).map(c => c.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|')
+  let re = null
+  try { re = new RegExp('(^|[^\\p{L}\\p{N}_])(?:' + vzor + ')(?=$|[^\\p{L}\\p{N}_])', 'gu') } catch (e) { re = null }
+  // Kdyby výraz nešel sestavit, souhrn se nesmí ztratit — jen bez zprávy.
+  if (!re) return () => '(zpráva vynechána)'
+  return (t) => String(t).replace(re, '$1_jmeno_')
+}
+
 // SOUHRN PRO ZPRÁVU (vedení ho pošle dál nebo vloží do chatu se mnou). Skládá
 // se z načtených dat, bez jmen, e-mailů, id, prohlížeče a podrobností —
 // lidé jsou jen písmena z bloku Kdo.
@@ -29184,7 +29281,8 @@ function _dchSouhrn() {
   const radky = druh ? _dch.radky.filter(r => r._druh === druh) : _dch.radky
   const skupiny = _dchSeskup(radky), osoby = _dchOsoby(radky)
   const lidi = osoby.filter(o => o.kdo), bez = osoby.find(o => !o.kdo)
-  const jedna = (t, n) => _dchCisti(t).replace(/\s+/g, ' ').trim().slice(0, n)
+  const bezJmen = _dchBezJmen()
+  const jedna = (t, n) => bezJmen(_dchCisti(t)).replace(/\s+/g, ' ').trim().slice(0, n)
   let verze = ''
   try { verze = String(SUBBAU_VERZE).split(' — ')[0] } catch (e) { verze = '' }
   const r = []
@@ -29219,7 +29317,7 @@ function _dchSouhrn() {
   if (lidi.length) {
     r.push('KDO (písmeno = řádek v bloku Kdo na obrazovce; jména se nekopírují)')
     for (const o of lidi) {
-      r.push(o.pismeno + ': ' + o.vyskytu + '× · nejčastěji ' + jedna(o.top.druh, 40) + (o.druhy.size > 1 ? ' ' + o.top.n + '×' : '') +
+      r.push(o.pismeno + ': ' + o.vyskytu + '× · nejvážnější ' + jedna(o.top.druh, 40) + (o.druhy.size > 1 ? ' ' + o.top.n + '×' : '') +
         ' · ' + _dchDatum(o.poprve) + ' – ' + _dchDatum(o.naposled))
     }
   }

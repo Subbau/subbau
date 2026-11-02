@@ -25,7 +25,8 @@
 --          – jeden účet: 60 ručních zápisů (appka je zapisuje sama v místě
 --            chyby) a 150 automatických (detail.zdroj = 'auto' — háčky na síti,
 --            konzoli, hláškách); souhrny rychlosti (pomalost) zvlášť 40,
---          – všechny účty dohromady 3000,
+--          – všechny účty dohromady 3000; souhrny rychlosti všech účtů
+--            dohromady zvlášť 200 (do 3000 se nepočítají),
 --          – bez přihlášení (/api/chyba, kdo prázdné) dohromady 300,
 --          – serverové funkce (server|…) zvlášť 300 — spam přes /api/chyba
 --            je tak nevytlačí.
@@ -39,8 +40,9 @@
 --      chyba úklidu zápis neshodí. Plánovač (pg_cron) se nepoužívá.
 --   4. Jednorázový úklid hned teď.
 --   5. Zkouška naostro: na prvním skutečném účtu zkusí každý strop (ruční,
---      automatický, rychlost, celkový, bez přihlášení, server), jméno a čas
---      ze serveru a zápis bez místa — a všechno vrátí. Nic z ní nezůstane.
+--      automatický, rychlost na účet i všech účtů, celkový, bez přihlášení,
+--      server), jméno a čas ze serveru a zápis bez místa — a všechno vrátí.
+--      Nic z ní nezůstane.
 --
 -- CO TO NEDĚLÁ: nemění sloupce ani pravidla (kdo smí zapisovat a číst),
 -- nepřidává nic do appky a nic nemaže mladší 90 dní. Appka funguje stejně
@@ -114,6 +116,7 @@ declare
   c_bez    constant int := 300;   -- [STROP-BEZ]    bez přihlášení (/api/chyba) za hodinu dohromady
   c_server constant int := 300;   -- [STROP-SERVER] serverových funkcí (server|…) za hodinu dohromady
   v_vse    int := 3000;           -- [STROP-VSE]    všech účtů dohromady za hodinu
+  v_mereni_vse int := 200;        -- [STROP-MERENI-VSE] souhrnů rychlosti všech účtů dohromady za hodinu
   v_txt    text;
   v_n      int;
   v_jmeno  text;
@@ -168,6 +171,24 @@ begin
         from public.chyby_appky c
        where c.kdo = new.kdo and c.kde = 'pomalost' and c.kdy > now() - interval '1 hour';
       if v_n >= c_mereni then
+        return null;
+      end if;
+      -- Všechny účty dohromady (2. 11. 2026, oponentura): do celkového stropu
+      -- 3000 se souhrny rychlosti nepočítají, takže bez vlastního celkového
+      -- stropu by si kdokoli s víc účty (registrace je otevřená) zapsal 40
+      -- řádků po 16 kB za hodinu na KAŽDÝ účet — i když skutečné chyby už
+      -- celkový strop zahazuje. Píšou je jen správci (souhrn nejvýš jednou
+      -- za 3 minuty v kartě), 200 za hodinu je pro ně víc než dost. Přebytek
+      -- se zahodí potichu jako u stropu na účet (jsou to jen měření).
+      -- Zkouška naostro (níž) ho smí na chvíli jen SNÍŽIT, nikdy zvýšit.
+      v_txt := current_setting('subbau.chyby_zk_strop_mereni_vse', true);
+      if v_txt ~ '^[0-9]{1,9}$' then
+        v_mereni_vse := least(v_mereni_vse, v_txt::int);
+      end if;
+      select count(*) into v_n
+        from public.chyby_appky c
+       where c.kde = 'pomalost' and c.kdy > now() - interval '1 hour';
+      if v_n >= v_mereni_vse then
         return null;
       end if;
       return new;
@@ -280,7 +301,7 @@ end
 $fn$;
 
 comment on function public.chyby_appky_strop() is
-  'Deník chyb: před zápisem určí čas serverem, vezme jméno z profilu, zkrátí texty a hlídá strop za hodinu (účet 60 ručních + 150 automatických, pomalost 40, všechny účty 3000, bez přihlášení 300, server 300; přebytek do jedné značky strop-zapisu). Nikdy nevyhodí chybu.';
+  'Deník chyb: před zápisem určí čas serverem, vezme jméno z profilu, zkrátí texty a hlídá strop za hodinu (účet 60 ručních + 150 automatických, pomalost 40 na účet a 200 všech účtů, všechny účty 3000, bez přihlášení 300, server 300; přebytek do jedné značky strop-zapisu, u pomalosti potichu). Nikdy nevyhodí chybu.';
 
 -- Spouští ho jen spouštěč; zvenku (přes API) volat nejde a nemá proč.
 -- Supabase dává nové funkci právo spuštění všem rolím — tady se odebere.
@@ -388,9 +409,9 @@ begin
    order by p.id
    limit 1;
 
-  foreach v_cast in array array['ucet-auto', 'ucet-rucne', 'pomalost', 'vse', 'bez-prihlaseni', 'server', 'jmeno-cas', 'bez-mista'] loop
+  foreach v_cast in array array['ucet-auto', 'ucet-rucne', 'pomalost', 'pomalost-vse', 'vse', 'bez-prihlaseni', 'server', 'jmeno-cas', 'bez-mista'] loop
     v_vysl := null;
-    if v_kdo is null and v_cast in ('ucet-auto', 'ucet-rucne', 'pomalost', 'vse', 'jmeno-cas', 'bez-mista') then
+    if v_kdo is null and v_cast in ('ucet-auto', 'ucet-rucne', 'pomalost', 'pomalost-vse', 'vse', 'jmeno-cas', 'bez-mista') then
       v_vysl := 'nebylo na kom vyzkoušet';
     else
       begin
@@ -440,14 +461,38 @@ begin
         elsif v_cast = 'pomalost' then
           select count(*) into v_pred from public.chyby_appky c
            where c.kdo = v_kdo and c.kde = 'pomalost' and c.kdy > now() - interval '1 hour';
+          select count(*) into v_vse from public.chyby_appky c
+           where c.kde = 'pomalost' and c.kdy > now() - interval '1 hour';
           insert into public.chyby_appky (kdo, kdo_jmeno, kde, zprava, detail)
           select v_kdo, 'zkouška', 'pomalost', 'zkouška rychlosti ' || g, jsonb_build_object('zk', 'strop', 'i', g)
             from generate_series(1, 50) g;
-          v_cekam := least(50, greatest(0, 40 - v_pred));
+          -- Projde, dokud je místo na účtu (40) i u všech účtů dohromady (200).
+          v_cekam := least(50, greatest(0, 40 - v_pred), greatest(0, 200 - v_vse));
           select count(*) into v_po from public.chyby_appky c
            where c.kdo = v_kdo and c.kde = 'pomalost' and c.detail ->> 'zk' = 'strop';
           v_vysl := case when v_po = v_cekam then 'drží'
                          else 'nedrží (zapsáno ' || v_po || ' z 50, čekalo se ' || v_cekam || ')' end;
+
+        elsif v_cast = 'pomalost-vse' then
+          -- Celkový strop souhrnů rychlosti se na chvíli sníží na „co už je
+          -- + 5" (jen v téhle zkoušce, vrátí se s ní) — 200 řádků by zkouška
+          -- psala zbytečně. Účet musí mít na svých 40 ještě aspoň 10 místa.
+          select count(*) into v_vse from public.chyby_appky c
+           where c.kde = 'pomalost' and c.kdy > now() - interval '1 hour';
+          select count(*) into v_pred from public.chyby_appky c
+           where c.kdo = v_kdo and c.kde = 'pomalost' and c.kdy > now() - interval '1 hour';
+          if v_pred > 30 or v_vse + 5 >= 200 then
+            v_vysl := 'nebylo na kom vyzkoušet';
+          else
+            perform set_config('subbau.chyby_zk_strop_mereni_vse', (v_vse + 5)::text, true);
+            insert into public.chyby_appky (kdo, kdo_jmeno, kde, zprava, detail)
+            select v_kdo, 'zkouška', 'pomalost', 'zkouška rychlosti všech účtů ' || g, jsonb_build_object('zk', 'strop-vse', 'i', g)
+              from generate_series(1, 10) g;
+            select count(*) into v_po from public.chyby_appky c
+             where c.kdo = v_kdo and c.kde = 'pomalost' and c.detail ->> 'zk' = 'strop-vse';
+            v_vysl := case when v_po = 5 then 'drží'
+                           else 'nedrží (zapsáno ' || v_po || ' z 10, čekalo se 5)' end;
+          end if;
 
         elsif v_cast = 'vse' then
           -- Celkový strop se na chvíli sníží na „co už je + 5" (jen v téhle
@@ -528,14 +573,15 @@ begin
     end if;
     perform set_config('subbau.chyby_zk_' || replace(v_cast, '-', '_'), coalesce(v_vysl, 'neběžela'), false);
   end loop;
-  -- Snížený celkový strop platil jen uvnitř zkoušky (vrátil se s ní);
-  -- pro jistotu ho tu ještě vynulovat.
+  -- Snížené celkové stropy platily jen uvnitř zkoušky (vrátily se s ní);
+  -- pro jistotu je tu ještě vynulovat.
   perform set_config('subbau.chyby_zk_strop_vse', '', true);
+  perform set_config('subbau.chyby_zk_strop_mereni_vse', '', true);
 
   if exists (select 1 from public.chyby_appky c
               where c.kde in ('zk-strop', 'server|zk-strop', 'zk-jmeno')
                  or c.zprava in ('zk-bez-mista-1', 'zk-bez-mista-2')
-                 or (c.kde = 'pomalost' and c.detail ->> 'zk' = 'strop')) then
+                 or (c.kde = 'pomalost' and c.detail ->> 'zk' in ('strop', 'strop-vse'))) then
     raise exception 'Zkouška po sobě neuklidila (zůstaly její řádky). Nic se neuložilo, pošlete mi prosím tuhle hlášku.';
   end if;
 end $zkouska$;
@@ -566,11 +612,12 @@ zkousky as (
     from (values (1, 'ucet_auto',      'zkouška: účet, automatické zápisy (150 za hodinu)', 'drží'),
                  (2, 'ucet_rucne',     'zkouška: účet, ruční zápisy (60 za hodinu)',        'drží'),
                  (3, 'pomalost',       'zkouška: souhrny rychlosti (40 za hodinu)',         'drží'),
-                 (4, 'vse',            'zkouška: všechny účty dohromady (3000 za hodinu)',  'drží'),
-                 (5, 'bez_prihlaseni', 'zkouška: bez přihlášení (300 za hodinu)',           'drží'),
-                 (6, 'server',         'zkouška: serverové funkce (300 za hodinu)',         'drží'),
-                 (7, 'jmeno_cas',      'zkouška: jméno z profilu a čas ze serveru',         'v pořádku'),
-                 (8, 'bez_mista',      'zkouška: zápis bez místa a velké podrobnosti',      'v pořádku'))
+                 (4, 'pomalost_vse',   'zkouška: souhrny rychlosti všech účtů (200 za hodinu)', 'drží'),
+                 (5, 'vse',            'zkouška: všechny účty dohromady (3000 za hodinu)',  'drží'),
+                 (6, 'bez_prihlaseni', 'zkouška: bez přihlášení (300 za hodinu)',           'drží'),
+                 (7, 'server',         'zkouška: serverové funkce (300 za hodinu)',         'drží'),
+                 (8, 'jmeno_cas',      'zkouška: jméno z profilu a čas ze serveru',         'v pořádku'),
+                 (9, 'bez_mista',      'zkouška: zápis bez místa a velké podrobnosti',      'v pořádku'))
          as x(poradi, klic, kdo, ceka)
 ),
 problemy as (

@@ -240,7 +240,7 @@
     dchRadek(31, lideId[0], 'hlaska|prac/dochazka', '⚠️ Slabý signál — příchod se nezapsal, zkuste to prosím znovu',
       dchKontext(31, { zarId: 'q4w1e8rt', pocet: 4, poprve: dchPred(31), naposled: dchPred(30.85), souhrn: true, odeslanoPozdeji: true }), 30),
     dchRadek(52, lideId[2], 'vypadek', 'výpadek připojení: 5 dotazů nevyšlo (2 zápisy), 74 s',
-      dchKontext(52, { zarId: 'z9c3v6bn', zar: 'Android 13 · Samsung 28', pocet: 5, zapisu: 2, trvaloS: 74, cile: ['rest/attendance', 'rpc/muj_zapis_jen_gps'] })),
+      dchKontext(52, { zarId: 'z9c3v6bn', zar: 'Android 13 · Samsung 28', dotazu: 5, zapisu: 2, trvaloS: 74, cile: ['rest/attendance', 'rpc/muj_zapis_jen_gps'] })),
     dchRadek(75, id.sef, 'db-server|rest/attendance', 'HTTP 500 · PATCH rest/attendance · XX000',
       dchKontext(75, { sekce: 'admin/dochazka', role: 'admin', zar: 'Mac · Safari 18', ua: dchMac,
         zarId: 'a1s2d3f4', stav: 500, kod: 'XX000', metoda: 'PATCH', filtry: ['id'], ms: 812 })),

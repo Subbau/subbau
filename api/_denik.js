@@ -151,7 +151,9 @@ const POVOLENE = {
   zalozka: RET(5, /^[a-z0-9]+$/), zarId: RET(12, /^[a-z0-9]{6,12}$/), _id: RET(16, /^[A-Za-z0-9]{4,16}$/),
   soubor: RET(80, /^[\w.@-]+$/), radek: CELE(0, 1e7), sloupec: CELE(0, 1e7), stack: TEXT(1500),
   kod: KOD, stav: STAV, metoda: RET(7, /^[A-Z]+$/),
-  email: RET(70, /^[^@\s]{1,3}…@[a-z0-9.-]{1,60}$/i), ucet: RET(36, /^[0-9a-f-]{36}$/i),
+  // Zkrácený e-mail jen s opravdovou doménou (tečka + koncovka z písmen) —
+  // „Hes…@2024" je heslo napsané do pole e-mail, ne adresa (2. 11. 2026).
+  email: RET(70, /^[^@\s]{1,3}…@(?:[a-z0-9-]{1,63}\.){1,5}[a-z]{2,24}$/i), ucet: RET(36, /^[0-9a-f-]{36}$/i),
   trida: RET(20, /^[a-z-]+$/), duvod: RET(40, /^[\w-]+$/), typ: RET(20, /^[\w-]+$/),
   error_code: KOD, pokusu: CELE(0, 100000), minut: CELE(0, 1000000),
   skriptDobehl: ANO_NE, jadro: ANO_NE, knihovna: ANO_NE, rane: ANO_NE, pred: ANO_NE,
@@ -284,6 +286,13 @@ async function zapisChybuServeru(funkce, zprava, detail) {
   }
 }
 
+// Strop počtu výskytů u zápisu bez přihlášení. Počet tvrdí telefon (nebo kdokoli
+// s vlastní hlavičkou Origin) a nic ho neověří. Prohlížeč deníku řadí skupiny
+// podle součtu výskytů — šest požadavků s pocet 1 000 000 by jinak vytlačilo
+// skutečné chyby přihlášených lidí za „Ukázat všech" (2. 11. 2026, oponentura).
+// 50 pořád řekne „hodně"; skutečné zacyklení před přihlášením to neschová.
+const POCET_BEZ_PRIHLASENI = 50;
+
 // Záznam z telefonu bez přihlášení (/api/chyba) → řádek pro databázi,
 // nebo null, když druh není na seznamu nebo místo nemá správný tvar.
 function cistyZaznamBezPrihlaseni(z, druhy) {
@@ -292,6 +301,7 @@ function cistyZaznamBezPrihlaseni(z, druhy) {
   const m = TVAR_KDE.exec(kde);
   if (!m || !druhy.has(m[1])) return null;
   const d = cistyDetail(z.detail);
+  if (d.pocet !== undefined) d.pocet = Math.min(d.pocet, POCET_BEZ_PRIHLASENI);
   // _id řádku (slučování dvojího odeslání v prohlížeči deníku) smí ležet
   // u záznamu i v podrobnostech.
   if (d._id === undefined && POVOLENE._id(z._id) !== undefined) d._id = z._id;
