@@ -592,6 +592,15 @@ tr:hover td{background:#fafbfc}
 button:not(.x-close) > svg:first-child{margin-right:6px}
 /* Tlačítka docházky 2 s po zápisu ignorují klepnutí a jsou zešedlá (2. 11. 2026, viz attZamkniPoZapisu) */
 #osvec-app .att-zamceno{opacity:.45!important;cursor:default!important}
+/* Obrazovka Docházka bez „ukotvení posunu" (2. 11. 2026, kontrola větve tlačítka-niz).
+   Když bylo „Začít směnu" u horního okraje a karta nad ním už mimo obrazovku,
+   prohlížeč (Chrome i Safari) si po příchodu podržel na místě samotné tlačítko —
+   posunul stránku o vložený proužek, takže „Jdu na pauzu" sedělo přesně tam, kam
+   člověk před chvílí ťukl. Majitel: „aby tam, kde klikneš začít směnu, v žádném
+   případě po odkliknutí nebylo tlačítko jít na přestávku nebo konec směny".
+   Platí pro celou obrazovku: kdyby se vyřadila jen karta docházky, prohlížeč by se
+   chytil karty „Tento týden" pod ní a posunul stránku ještě víc (změřeno). */
+#mob-v-dochazka{overflow-anchor:none}
 
 /* Buttons */
 .big-btn{width:100%;padding:18px;border:none;border-radius:14px;font-size:16px;font-weight:800;cursor:pointer;font-family:inherit;letter-spacing:-0.2px;transition:opacity .15s;-webkit-tap-highlight-color:transparent}
@@ -2672,8 +2681,15 @@ setTimeout(function brzda() {
              konec. Po příchodu tohle místo zabere proužek se stavem — není to
              tlačítko a nic nedělá — a tlačítka jsou až pod ním (o 28 px níž, než
              končilo „Začít směnu"). Před příchodem je schovaný, „Začít směnu"
-             zůstává tam, kde bylo. Text, barvu a výšku nastavuje updateMobStav. -->
-        <div id="att-pruh" role="status" style="display:none;box-sizing:border-box;min-height:62px;margin:0 0 28px;padding:8px 14px;border:2px dashed #cfe5d8;border-radius:16px;align-items:center;justify-content:center;text-align:center;font-size:14px;font-weight:700;line-height:1.3;color:#2f6b45;cursor:default;-webkit-user-select:none;user-select:none"></div>
+             zůstává tam, kde bylo. Text, barvu a výšku nastavuje updateMobStav.
+             Proužek je spodní díl stavové karty: stejný podklad, nad ním jen
+             tenká čára a karta po dobu, co je vidět, nemá spodní okraj ani spodní
+             zaoblení (setPruh). Samostatný rámeček vypadal jako tlačítko, které
+             nefunguje — přerušovaný okraj a tučný text uprostřed mají v appce
+             pracovníka klepací tlačítka („+ Přidat další položku", „Požádat
+             o smazání účtu") a rámeček s textem vlevo rozbalovací „Jak zapisovat
+             hodiny" nad kartou (kontrola 2. 11. 2026). -->
+        <div id="att-pruh" role="status" style="display:none;box-sizing:border-box;min-height:76px;margin:0 0 28px;padding:8px 18px 12px;background:#e6f0e9;border-top:1px solid #cfe5d8;border-radius:0 0 18px 18px;align-items:center;justify-content:center;text-align:center;font-size:13px;font-weight:600;line-height:1.35;color:#2f6b45;cursor:default;-webkit-user-select:none;user-select:none;transition:background .2s"></div>
 
         <!-- HLAVNÍ AKČNÍ TLAČÍTKO (mění se podle stavu) -->
         <button id="att-main-btn" onclick="attMainAction()" style="width:100%;border:none;border-radius:16px;padding:18px;font-size:17px;font-weight:800;cursor:pointer;font-family:'Archivo',-apple-system,sans-serif;display:flex;align-items:center;justify-content:center;gap:10px;letter-spacing:-.2px;transition:transform .1s"></button>
@@ -23918,7 +23934,10 @@ async function confirmCheckout() {
   // 2. 11. 2026: dialog zmizel a pod prstem je zase docházka — 2 s klid, a znovu,
   // až se karta přepne na „Začít další směnu" (attZamkniPoZapisu).
   attZamkniPoZapisu(true)
-  getTodayRecord().then(() => attZamkniPoZapisu(true), () => {})
+  // Bez vlastní větve pro chybu: nepovedená obnova dne má dál skončit jako
+  // neošetřená chyba, kterou deník chyb zapíše (js-neosetrena) — tak jako dřív,
+  // když tu stálo jen getTodayRecord() (kontrola 2. 11. 2026).
+  getTodayRecord().then(() => attZamkniPoZapisu(true))
   loadMobWeek()
   zapisPomalouDochazku('out', _mer)
 }
@@ -24382,15 +24401,23 @@ function updateMobStav(rec, allToday, castecne) {
   if (!card || !mainBtn) return
   // Proužek na místě „Začít směnu" (2. 11. 2026, viz HTML u #att-pruh): po
   // příchodu vždy vidět, před příchodem schovaný. Text a barvy podle stavu.
+  // Je spodním dílem stavové karty: když je vidět, karta nad ním nemá spodní
+  // okraj (14 px převzal proužek) ani spodní zaoblení; schovaný = karta jako dřív.
   const pruh = document.getElementById('att-pruh')
-  function setPruh(text, barva, ramecek) {
+  function setPruh(text, barva, podklad, cara) {
     if (!pruh) return
-    if (!text) { pruh.style.display = 'none'; pruh.dataset.text = ''; return }
+    if (!text) {
+      pruh.style.display = 'none'; pruh.dataset.text = ''
+      card.style.marginBottom = '14px'; card.style.borderRadius = '18px'
+      return
+    }
     pruh.dataset.text = text
     // Jen při změně — proužek je role="status" a čtečka by ho jinak hlásila při každé obnově.
     if (pruh.textContent !== text) pruh.textContent = text
     pruh.style.color = barva
-    pruh.style.borderColor = ramecek
+    pruh.style.background = podklad
+    pruh.style.borderTopColor = cara
+    card.style.marginBottom = '0'; card.style.borderRadius = '18px 18px 0 0'
     pruh.style.display = 'flex'
   }
   // Hlídání posunu tlačítek pod prstem (attZmerTlacitka) běží jen u pracovníka.
@@ -24461,7 +24488,7 @@ function updateMobStav(rec, allToday, castecne) {
     cardTitle.textContent = 'Na pauze'
     cardSub.style.color = '#9a6b15'
     cardSub.textContent = 'Pauza začala v ' + rec.break_start.slice(0,5)
-    setPruh('☕ Pauza běží od ' + rec.break_start.slice(0,5), '#9a6b15', '#f5e2bf')
+    setPruh('☕ Pauza běží od ' + rec.break_start.slice(0,5), '#9a6b15', '#faf0dc', '#f5e2bf')
     setMain('Pokračovat v práci', icoPlay, '#3f7d54', '#fff')
     // vedlejší: konec směny
     secondary.innerHTML = `<button onclick="koncitSmenu()" style="flex:1;background:#fff;color:#9c3b22;border:2px solid #9c3b22;border-radius:14px;padding:14px;font-size:14px;font-weight:800;cursor:pointer;font-family:inherit;display:flex;align-items:center;justify-content:center;gap:8px">${icoDoor}<span>Konec směny</span></button>`
@@ -24485,7 +24512,7 @@ function updateMobStav(rec, allToday, castecne) {
       + (pevna && hotovePauzy
           ? ' · přestávka ' + (hotovePauzy > 1 ? hotovePauzy + '× ' : '') + nast.minut + ' min zapsaná'
           : '')
-    setPruh('✅ Směna běží od ' + rec.check_in.slice(0,5), '#2f6b45', '#cfe5d8')
+    setPruh('✅ Směna běží od ' + rec.check_in.slice(0,5), '#2f6b45', '#e6f0e9', '#cfe5d8')
 
     if (pevna && !jdeDalsi) {
       // PŘESTÁVKU UŽ MÁ A DALŠÍ MU NEPŘÍSLUŠÍ — HLAVNÍ TLAČÍTKO SE SCHOVÁ.
@@ -24532,10 +24559,30 @@ function updateMobStav(rec, allToday, castecne) {
       wlDone.style.display = 'none'
     }
   }
-  // Proužek je vysoký jako hlavní tlačítko, tedy jako „Začít směnu" před
-  // příchodem — tlačítka pod ním pak začínají o jeho spodní okraj (28 px) níž,
-  // než „Začít směnu" končilo, i když telefon písmo zvětší.
-  if (pruh && pruh.style.display !== 'none' && mainBtn.offsetHeight) pruh.style.minHeight = Math.max(62, mainBtn.offsetHeight) + 'px'
+  // Výška proužku: sahá aspoň tam, kde končilo „Začít (další) směnu", takže
+  // tlačítka pod ním začínají o jeho spodní okraj (28 px) níž. Kde „Začít" končilo,
+  // si appka změřila, dokud bylo vidět (attZmerMistoZacit) — od horní hrany stavové
+  // karty, ta se příchodem nehne. Dřív se výška brala jen z hlavního tlačítka po
+  // příchodu: při zvětšeném písmu nebo zvětšené stránce se texty karty před
+  // příchodem zalomily do dvou řádků („Až dorazíš na stavbu, začni směnu",
+  // „Začít další směnu"), po příchodu ne — karta se zkrátila, proužek začal výš
+  // a „Jdu na pauzu" zasáhlo až 67 px do místa, kde bylo „Začít" (kontrola
+  // 2. 11. 2026). Bez změřeného místa (appka naběhla rovnou „V práci", na „Začít"
+  // se neťukalo) nebo při jiné šířce karty (otočený telefon) platí výška tlačítka
+  // a 14 px spodního okraje karty, který proužek převzal.
+  if (pruh && pruh.style.display !== 'none' && mainBtn.offsetHeight) {
+    let vyskaPruhu = 14 + Math.max(62, mainBtn.offsetHeight)
+    try {
+      const k = card.getBoundingClientRect()
+      if (_attMistoZacit.odKarty > 0 && Math.abs(k.width - _attMistoZacit.sirka) <= 2) {
+        const pruhOdKarty = pruh.getBoundingClientRect().top - k.top
+        vyskaPruhu = Math.max(vyskaPruhu, Math.ceil(_attMistoZacit.odKarty - pruhOdKarty))
+      }
+    } catch (e) {}
+    pruh.style.minHeight = vyskaPruhu + 'px'
+  } else if (window._attState === 'in') {
+    try { attZmerMistoZacit() } catch (e) {}
+  }
   // Běží-li zámek po zápisu, jsou zešedlá i právě nakreslená tlačítka.
   try { attVzhledZamku() } catch (e) {}
 }
@@ -24599,6 +24646,22 @@ const ATT_TLACITKA = '#att-main-btn, #att-secondary button'
 const _attZamek = { do: 0, zapsano: false, casovac: null }
 // Poslední vzorek polohy tlačítek: hl = hlavní, ko = vedlejší (Konec směny).
 const _attPolohy = { hl: null, ko: null, pohledVidet: false, hlidac: null }
+// Kde končilo „Začít (další) směnu": spodní hrana tlačítka od horní hrany stavové
+// karty a šířka karty při měření. Podle toho updateMobStav po příchodu nastaví
+// výšku proužku (kontrola 2. 11. 2026 — při větším písmu se karta po příchodu
+// zkrátí a pevná výška proužku nestačila).
+const _attMistoZacit = { odKarty: 0, sirka: 0 }
+// Měří, dokud je „Začít" vidět: po překreslení (updateMobStav), každých 250 ms
+// (attZmerTlacitka) a při ťuknutí — tedy i po dočtení písma nebo zvětšení stránky.
+function attZmerMistoZacit() {
+  if (window._attState !== 'in') return
+  const karta = document.getElementById('att-state-card'), hl = document.getElementById('att-main-btn')
+  if (!karta || !hl) return
+  const k = karta.getBoundingClientRect(), b = hl.getBoundingClientRect()
+  if (!k.width || !b.height) return
+  _attMistoZacit.odKarty = b.bottom - k.top
+  _attMistoZacit.sirka = k.width
+}
 function _attTed() { try { return performance.now() } catch (e) { return Date.now() } }
 function attZamcenoTed() { return _attTed() < _attZamek.do }
 // Volá mobCheckin a confirmCheckout, když se po klepnutí docházka přepnula.
@@ -24652,6 +24715,8 @@ function attZmerTlacitka() {
       p.v = v
     }
     _attPolohy.pohledVidet = vidim
+    // Místo „Začít" (výška proužku po příchodu) — jen když je docházka vidět.
+    if (vidim) attZmerMistoZacit()
     // Pojistka: zámek vypršel a zešednutí zůstalo (časovač v pozadí nedoběhl).
     if (!attZamcenoTed() && document.querySelector('#osvec-app .att-zamceno')) attVzhledZamku()
   } catch (e) {}
@@ -24682,7 +24747,9 @@ document.addEventListener('click', function (e) {
   } catch (x) {}
 }, true)
 // Co je teď na tlačítkách docházky. mobCheckin podle změny pozná, že se po
-// klepnutí docházka přepnula (pak zámek).
+// klepnutí docházka přepnula (pak zámek) i tam, kde se nic nezapsalo (např.
+// „Přestávka již probíhá" překreslí zastaralá tlačítka). Po zápisu, který
+// prošel, se zamyká vždy.
 function attPodpisStavu() {
   try {
     const hl = document.getElementById('att-main-btn'), ko = document.getElementById('att-secondary')
@@ -25540,7 +25607,11 @@ async function mobCheckin(type) {
     window.zapisProbiha = false
     // 2. 11. 2026: docházka se po tomhle klepnutí přepnula → tlačítka 2 s klid
     // (attZamkniPoZapisu). Pomalý zápis, který prošel → řádek do deníku.
-    try { if (attPodpisStavu() !== _stavPred) attZamkniPoZapisu(_zapsano) } catch (e) {}
+    // Zápis, který prošel, zamyká vždy — i když tlačítka vypadají stejně jako
+    // před ním: u „Další přestávka 30 min" (fix30x) je popisek před druhou
+    // přestávkou i po ní stejný, podpis se nezměnil a dvojí ťuknutí zapsalo
+    // další přestávku, tj. dalších 30 min dolů (kontrola 2. 11. 2026).
+    try { if (_zapsano || attPodpisStavu() !== _stavPred) attZamkniPoZapisu(_zapsano) } catch (e) {}
     if (_zapsano) zapisPomalouDochazku(type, _mer)
   }
 }
