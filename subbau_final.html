@@ -590,6 +590,17 @@ tr:hover td{background:#fafbfc}
 /* SVG ikony v tlačítkách — zarovnání vedle textu */
 #osvec-app button:not(.x-close) svg, #app button:not(.x-close) svg{vertical-align:-2px}
 button:not(.x-close) > svg:first-child{margin-right:6px}
+/* Tlačítka docházky 2 s po zápisu ignorují klepnutí a jsou zešedlá (2. 11. 2026, viz attZamkniPoZapisu) */
+#osvec-app .att-zamceno{opacity:.45!important;cursor:default!important}
+/* Obrazovka Docházka bez „ukotvení posunu" (2. 11. 2026, kontrola větve tlačítka-niz).
+   Když bylo „Začít směnu" u horního okraje a karta nad ním už mimo obrazovku,
+   prohlížeč (Chrome i Safari) si po příchodu podržel na místě samotné tlačítko —
+   posunul stránku o vložený proužek, takže „Jdu na pauzu" sedělo přesně tam, kam
+   člověk před chvílí ťukl. Majitel: „aby tam, kde klikneš začít směnu, v žádném
+   případě po odkliknutí nebylo tlačítko jít na přestávku nebo konec směny".
+   Platí pro celou obrazovku: kdyby se vyřadila jen karta docházky, prohlížeč by se
+   chytil karty „Tento týden" pod ní a posunul stránku ještě víc (změřeno). */
+#mob-v-dochazka{overflow-anchor:none}
 
 /* Buttons */
 .big-btn{width:100%;padding:18px;border:none;border-radius:14px;font-size:16px;font-weight:800;cursor:pointer;font-family:inherit;letter-spacing:-0.2px;transition:opacity .15s;-webkit-tap-highlight-color:transparent}
@@ -2664,6 +2675,23 @@ setTimeout(function brzda() {
           <div id="att-state-title" style="font-size:19px;font-weight:800;font-family:'Archivo',-apple-system,sans-serif;letter-spacing:-.3px"></div>
           <div id="att-state-sub" style="font-size:13px;margin-top:3px;opacity:.85"></div>
         </div>
+
+        <!-- PROUŽEK NA MÍSTĚ „ZAČÍT SMĚNU" (2. 11. 2026). Majitel: „aby tam, kde
+             klikneš začít směnu, v žádném případě po odkliknutí nebylo tlačítko jít
+             na přestávku nebo konec směny, aby to bylo prostě níž". Na pomalém
+             internetu lidi klepnou podruhé a to druhé klepnutí trefilo pauzu nebo
+             konec. Po příchodu tohle místo zabere proužek se stavem — není to
+             tlačítko a nic nedělá — a tlačítka jsou až pod ním (o 28 px níž, než
+             končilo „Začít směnu"). Před příchodem je schovaný, „Začít směnu"
+             zůstává tam, kde bylo. Text, barvu a výšku nastavuje updateMobStav.
+             Proužek je spodní díl stavové karty: stejný podklad, nad ním jen
+             tenká čára a karta po dobu, co je vidět, nemá spodní okraj ani spodní
+             zaoblení (setPruh). Samostatný rámeček vypadal jako tlačítko, které
+             nefunguje — přerušovaný okraj a tučný text uprostřed mají v appce
+             pracovníka klepací tlačítka („+ Přidat další položku", „Požádat
+             o smazání účtu") a rámeček s textem vlevo rozbalovací „Jak zapisovat
+             hodiny" nad kartou (kontrola 2. 11. 2026). -->
+        <div id="att-pruh" role="status" style="display:none;box-sizing:border-box;min-height:76px;margin:0 0 28px;padding:8px 18px 12px;background:#e6f0e9;border-top:1px solid #cfe5d8;border-radius:0 0 18px 18px;align-items:center;justify-content:center;text-align:center;font-size:13px;font-weight:600;line-height:1.35;color:#2f6b45;cursor:default;-webkit-user-select:none;user-select:none;transition:background .2s"></div>
 
         <!-- HLAVNÍ AKČNÍ TLAČÍTKO (mění se podle stavu) -->
         <button id="att-main-btn" onclick="attMainAction()" style="width:100%;border:none;border-radius:16px;padding:18px;font-size:17px;font-weight:800;cursor:pointer;font-family:'Archivo',-apple-system,sans-serif;display:flex;align-items:center;justify-content:center;gap:10px;letter-spacing:-.2px;transition:transform .1s"></button>
@@ -23837,6 +23865,8 @@ async function confirmCheckout() {
   if(descEl) descEl.style.borderColor='#e0e0e0'
 
   lsSet('lastConstructionSite', site)
+  // Měření pomalého zápisu od ťuknutí na Uložit (2. 11. 2026, viz zapisPomalouDochazku).
+  const _mer = _attNoveMereni()
 
   // Teprve tady se směna uzavírá: čas odchodu, hodiny i zápis práce jdou do databáze
   // naráz. Bez vyplněné stavby a náplně práce se hodiny neuloží vůbec a směna zůstane
@@ -23852,7 +23882,7 @@ async function confirmCheckout() {
     // Co upravil SubBau, to platí — přečti záznam čerstvě, ať se jeho zápis nepřepíše
     let rec = null, chybaCteni = null
     try {
-      const { data: fresh, error: eFresh } = await withTimeout(sb.from('attendance').select('*').eq('id', attId).single(), 15000)
+      const { data: fresh, error: eFresh } = await _attMerFaze(_mer, 'kontrola', withTimeout(sb.from('attendance').select('*').eq('id', attId).single(), 15000))
       rec = fresh || null
       chybaCteni = eFresh || null
     } catch (e) { chybaCteni = e; console.warn('[checkout] záznam se nepodařilo načíst:', e?.message) }
@@ -23896,14 +23926,14 @@ async function confirmCheckout() {
     if (adminOwnsField(rec, 'work_description')) keptByAdmin = true
     else payload.work_description = desc
 
-    ;({ data: savedRows, error } = await withTimeout(sb.from('attendance').update(payload).eq('id', attId).select(), 15000))
+    ;({ data: savedRows, error } = await _attMerFaze(_mer, 'zapis', withTimeout(sb.from('attendance').update(payload).eq('id', attId).select(), 15000)))
     // Kdyby v databázi chyběl sloupec s popisem, pracovník by směnu neuzavřel vůbec —
     // ulož aspoň čas odchodu a hodiny a řekni to nahlas.
     if (error && /column|schema cache/i.test(error.message || '')) {
       console.warn('[checkout] popis se neuložil, chybí sloupec:', error.message)
-      const r2 = await withTimeout(sb.from('attendance').update({
+      const r2 = await _attMerFaze(_mer, 'zapis', withTimeout(sb.from('attendance').update({
         check_out: payload.check_out, total_hours: payload.total_hours
-      }).eq('id', attId).select(), 15000)
+      }).eq('id', attId).select(), 15000))
       savedRows = r2.data; error = r2.error
       if (!error) showToast('⚠️ Hodiny uloženy, popis ne — v databázi chybí sloupec work_description')
     }
@@ -23934,6 +23964,7 @@ async function confirmCheckout() {
     try { if (typeof _dnDochazka === 'function') _dnDochazka('out', 'neulozil-radek', 'Odchod se neuložil — zápis nezměnil žádný řádek', { misto: 'confirmCheckout' }, 'chyba') } catch (x) { console.warn('[deník chyb]', x) } // eslint-disable-line no-undef
     return
   }
+  _attMerHotovo(_mer)   // zápis prošel — fotky níž se do doby zápisu nepočítají
   // Poloha při odchodu — až po jistém zápisu a jen na pozadí. Odchod na ni
   // nečeká. Vidí ji pouze správce v docházce, do dokladů nejde.
   zachytPolohuOdchodu(attId)
@@ -23955,8 +23986,15 @@ async function confirmCheckout() {
   showToast('✅ Směna ukončena a zapsána')
   // DENÍK CHYB (2. 11. 2026): odchod se zapsal — šel-li dnes předtím nezdar, deník zapíše „po chybě" s počtem pokusů.
   try { if (typeof _dnDochazkaOk === 'function') _dnDochazkaOk('out') } catch (x) { console.warn('[deník chyb]', x) } // eslint-disable-line no-undef
-  getTodayRecord()
+  // 2. 11. 2026: dialog zmizel a pod prstem je zase docházka — 2 s klid, a znovu,
+  // až se karta přepne na „Začít další směnu" (attZamkniPoZapisu).
+  attZamkniPoZapisu(true)
+  // Bez vlastní větve pro chybu: nepovedená obnova dne má dál skončit jako
+  // neošetřená chyba, kterou deník chyb zapíše (js-neosetrena) — tak jako dřív,
+  // když tu stálo jen getTodayRecord() (kontrola 2. 11. 2026).
+  getTodayRecord().then(() => attZamkniPoZapisu(true))
   loadMobWeek()
+  zapisPomalouDochazku('out', _mer)
 }
 
 // Druhá stavba jako samostatný záznam dne byla z appky odebrána. Zakládala pro
@@ -24364,12 +24402,32 @@ async function zkontrolujStarouOtevrenouSmenu() {
   } catch (e) { console.warn('[stará směna] kontrola selhala:', e?.message) }
 }
 
-function updateMobStav(rec, allToday) {
+// Dokončené směny dneška z posledního ÚPLNÉHO výpisu (getTodayRecord, čtení po
+// příchodu) — pro překreslení hned po ťuknutí, viz `castecne` níž.
+let _attHotoveDnes = { den: '', radky: [] }
+
+// castecne = true: překreslení hned po ťuknutí (mobCheckin), které zná jen právě
+// zapisovaný den, ne celý dnešek. Dřív se tím u druhé směny schoval přehled
+// „Dnes odpracováno" a celý blok docházky poskočil asi o 100 px nahoru — pod
+// prst, který právě klepl, se tak dostalo „Jdu na pauzu" nebo „Konec směny"
+// (2. 11. 2026, majitel: „kliknou znovu … a kliknou, že přestávka nebo že
+// konec"). Teď se v takovém překreslení drží dokončené směny z posledního
+// úplného výpisu. Úplný výpis (bez `castecne`) platí jako dřív.
+function updateMobStav(rec, allToday, castecne) {
   const bar = document.getElementById('mob-status')
   if (bar) bar.style.display = 'none'
 
   // Zobraz přehled dokončených směn
-  const done = (allToday || []).filter(r => r.check_out)
+  let done = (allToday || []).filter(r => r.check_out)
+  const dnesKlic = localDateStr()
+  if (castecne) {
+    if (_attHotoveDnes.den === dnesKlic) {
+      const uz = new Set(done.map(r => r.id))
+      done = done.concat(_attHotoveDnes.radky.filter(r => !uz.has(r.id)))
+    }
+  } else {
+    _attHotoveDnes = { den: dnesKlic, radky: done.slice() }
+  }
   const smenyDiv = document.getElementById('dnes-smeny')
   const smenyList = document.getElementById('dnes-smeny-list')
   if (smenyDiv && smenyList && done.length > 0) {
@@ -24396,6 +24454,29 @@ function updateMobStav(rec, allToday) {
   const mainBtn = document.getElementById('att-main-btn')
   const secondary = document.getElementById('att-secondary')
   if (!card || !mainBtn) return
+  // Proužek na místě „Začít směnu" (2. 11. 2026, viz HTML u #att-pruh): po
+  // příchodu vždy vidět, před příchodem schovaný. Text a barvy podle stavu.
+  // Je spodním dílem stavové karty: když je vidět, karta nad ním nemá spodní
+  // okraj (14 px převzal proužek) ani spodní zaoblení; schovaný = karta jako dřív.
+  const pruh = document.getElementById('att-pruh')
+  function setPruh(text, barva, podklad, cara) {
+    if (!pruh) return
+    if (!text) {
+      pruh.style.display = 'none'; pruh.dataset.text = ''
+      card.style.marginBottom = '14px'; card.style.borderRadius = '18px'
+      return
+    }
+    pruh.dataset.text = text
+    // Jen při změně — proužek je role="status" a čtečka by ho jinak hlásila při každé obnově.
+    if (pruh.textContent !== text) pruh.textContent = text
+    pruh.style.color = barva
+    pruh.style.background = podklad
+    pruh.style.borderTopColor = cara
+    card.style.marginBottom = '0'; card.style.borderRadius = '18px 18px 0 0'
+    pruh.style.display = 'flex'
+  }
+  // Hlídání posunu tlačítek pod prstem (attZmerTlacitka) běží jen u pracovníka.
+  try { attHlidejTlacitka() } catch (e) {}
 
   // Docházka zablokovaná adminem — pracovník vidí appku, ale nemůže zapisovat
   if (currentProfile && currentProfile.can_track_hours === false) {
@@ -24405,6 +24486,7 @@ function updateMobStav(rec, allToday) {
     if (cardSub) { cardSub.style.color = '#9c3b22'; cardSub.textContent = 'Zaznamenávání hodin je dočasně vypnuté. Kontaktujte SubBau.' }
     mainBtn.style.display = 'none'
     if (secondary) secondary.innerHTML = ''
+    setPruh('')
     window._attState = null
     const wlB = document.getElementById('att-btn-worklog'); if (wlB) wlB.style.display = 'none'
     return
@@ -24450,6 +24532,7 @@ function updateMobStav(rec, allToday) {
     cardSub.style.color = '#6b6157'
     cardSub.textContent = done.length > 0 ? 'Můžeš začít novou směnu' : 'Až dorazíš na stavbu, začni směnu'
     setMain(done.length > 0 ? 'Začít další směnu' : 'Začít směnu', icoPlay, '#3f7d54', '#fff')
+    setPruh('')
 
   } else if (rec.break_start && !rec.break_end) {
     // STAV: na pauze
@@ -24460,6 +24543,7 @@ function updateMobStav(rec, allToday) {
     cardTitle.textContent = 'Na pauze'
     cardSub.style.color = '#9a6b15'
     cardSub.textContent = 'Pauza začala v ' + rec.break_start.slice(0,5)
+    setPruh('☕ Pauza běží od ' + rec.break_start.slice(0,5), '#9a6b15', '#faf0dc', '#f5e2bf')
     setMain('Pokračovat v práci', icoPlay, '#3f7d54', '#fff')
     // vedlejší: konec směny
     secondary.innerHTML = `<button onclick="koncitSmenu()" style="flex:1;background:#fff;color:#9c3b22;border:2px solid #9c3b22;border-radius:14px;padding:14px;font-size:14px;font-weight:800;cursor:pointer;font-family:inherit;display:flex;align-items:center;justify-content:center;gap:8px">${icoDoor}<span>Konec směny</span></button>`
@@ -24483,6 +24567,7 @@ function updateMobStav(rec, allToday) {
       + (pevna && hotovePauzy
           ? ' · přestávka ' + (hotovePauzy > 1 ? hotovePauzy + '× ' : '') + nast.minut + ' min zapsaná'
           : '')
+    setPruh('✅ Směna běží od ' + rec.check_in.slice(0,5), '#2f6b45', '#e6f0e9', '#cfe5d8')
 
     if (pevna && !jdeDalsi) {
       // PŘESTÁVKU UŽ MÁ A DALŠÍ MU NEPŘÍSLUŠÍ — HLAVNÍ TLAČÍTKO SE SCHOVÁ.
@@ -24529,6 +24614,32 @@ function updateMobStav(rec, allToday) {
       wlDone.style.display = 'none'
     }
   }
+  // Výška proužku: sahá aspoň tam, kde končilo „Začít (další) směnu", takže
+  // tlačítka pod ním začínají o jeho spodní okraj (28 px) níž. Kde „Začít" končilo,
+  // si appka změřila, dokud bylo vidět (attZmerMistoZacit) — od horní hrany stavové
+  // karty, ta se příchodem nehne. Dřív se výška brala jen z hlavního tlačítka po
+  // příchodu: při zvětšeném písmu nebo zvětšené stránce se texty karty před
+  // příchodem zalomily do dvou řádků („Až dorazíš na stavbu, začni směnu",
+  // „Začít další směnu"), po příchodu ne — karta se zkrátila, proužek začal výš
+  // a „Jdu na pauzu" zasáhlo až 67 px do místa, kde bylo „Začít" (kontrola
+  // 2. 11. 2026). Bez změřeného místa (appka naběhla rovnou „V práci", na „Začít"
+  // se neťukalo) nebo při jiné šířce karty (otočený telefon) platí výška tlačítka
+  // a 14 px spodního okraje karty, který proužek převzal.
+  if (pruh && pruh.style.display !== 'none' && mainBtn.offsetHeight) {
+    let vyskaPruhu = 14 + Math.max(62, mainBtn.offsetHeight)
+    try {
+      const k = card.getBoundingClientRect()
+      if (_attMistoZacit.odKarty > 0 && Math.abs(k.width - _attMistoZacit.sirka) <= 2) {
+        const pruhOdKarty = pruh.getBoundingClientRect().top - k.top
+        vyskaPruhu = Math.max(vyskaPruhu, Math.ceil(_attMistoZacit.odKarty - pruhOdKarty))
+      }
+    } catch (e) {}
+    pruh.style.minHeight = vyskaPruhu + 'px'
+  } else if (window._attState === 'in') {
+    try { attZmerMistoZacit() } catch (e) {}
+  }
+  // Běží-li zámek po zápisu, jsou zešedlá i právě nakreslená tlačítka.
+  try { attVzhledZamku() } catch (e) {}
 }
 
 // Hlavní tlačítko volá akci podle aktuálního stavu.
@@ -24566,6 +24677,183 @@ function attMainAction() {
 function koncitSmenu() { mobCheckin('out') }
 
 let checkinInProgress = false
+
+// ===== ZÁMEK PO ZÁPISU A POSUN POD PRSTEM (2. 11. 2026) =====
+// Majitel: „oni kliknou, zasekne se jim to určitě, a tak kliknou znovu, jenže
+// v tu chvíli ono se jim to odblokuje a kliknou, že přestávka nebo že konec …
+// když mají třeba slabší internet, tak pak kliknou na něco jiného."
+// Klepnutí BĚHEM zápisu odbude „⏳ Počkejte..." (checkinInProgress) a tak to
+// zůstává. Škodí klepnutí, které přijde těsně PO zápisu — pod prstem je už nová
+// akce. Proto:
+//  1) Když se docházka po klepnutí pracovníka přepne (příchod, pauza, konec
+//     pauzy, pevná přestávka, odchod), tlačítka docházky 2 s klepnutí ignorují.
+//     Jsou zešedlá a proužek nad nimi říká „✅ Zapsáno". Po načtení appky ani po
+//     obnově, kterou nespustilo klepnutí, se nezamyká.
+//  2) Klepnutí na tlačítko docházky, které se během poslední 1 s posunulo nebo
+//     objevilo (nahoře se dočetl obsah a blok sjel pod prst), se ignoruje.
+// Hlídá se jen klepnutí (click v zachytávací fázi) na #att-main-btn a tlačítka
+// v #att-secondary — volání funkcí ani rozjetý zápis to nezastaví. Zámek je
+// časový (performance.now, změna hodin v telefonu ho neprodlouží) a po 2 s
+// vždy skončí sám, i kdyby se zešednutí nestihlo vrátit.
+const ATT_ZAMEK_MS = 2000
+const ATT_POSUN_MS = 1000
+const ATT_TLACITKA = '#att-main-btn, #att-secondary button'
+const _attZamek = { do: 0, zapsano: false, casovac: null }
+// Poslední vzorek polohy tlačítek: hl = hlavní, ko = vedlejší (Konec směny).
+const _attPolohy = { hl: null, ko: null, pohledVidet: false, hlidac: null }
+// Kde končilo „Začít (další) směnu": spodní hrana tlačítka od horní hrany stavové
+// karty a šířka karty při měření. Podle toho updateMobStav po příchodu nastaví
+// výšku proužku (kontrola 2. 11. 2026 — při větším písmu se karta po příchodu
+// zkrátí a pevná výška proužku nestačila).
+const _attMistoZacit = { odKarty: 0, sirka: 0 }
+// Měří, dokud je „Začít" vidět: po překreslení (updateMobStav), každých 250 ms
+// (attZmerTlacitka) a při ťuknutí — tedy i po dočtení písma nebo zvětšení stránky.
+function attZmerMistoZacit() {
+  if (window._attState !== 'in') return
+  const karta = document.getElementById('att-state-card'), hl = document.getElementById('att-main-btn')
+  if (!karta || !hl) return
+  const k = karta.getBoundingClientRect(), b = hl.getBoundingClientRect()
+  if (!k.width || !b.height) return
+  _attMistoZacit.odKarty = b.bottom - k.top
+  _attMistoZacit.sirka = k.width
+}
+function _attTed() { try { return performance.now() } catch (e) { return Date.now() } }
+function attZamcenoTed() { return _attTed() < _attZamek.do }
+// Volá mobCheckin a confirmCheckout, když se po klepnutí docházka přepnula.
+// zapsano = zápis prošel → proužek řekne „✅ Zapsáno".
+function attZamkniPoZapisu(zapsano) {
+  try {
+    _attZamek.do = _attTed() + ATT_ZAMEK_MS
+    _attZamek.zapsano = !!zapsano
+    clearTimeout(_attZamek.casovac)
+    _attZamek.casovac = setTimeout(attVzhledZamku, ATT_ZAMEK_MS + 30)
+    attVzhledZamku()
+  } catch (e) {}
+}
+// Zešedne nebo vrátí tlačítka a text proužku podle toho, jestli zámek běží.
+function attVzhledZamku() {
+  const zamceno = attZamcenoTed()
+  document.querySelectorAll(ATT_TLACITKA).forEach(b => b.classList.toggle('att-zamceno', zamceno))
+  const pruh = document.getElementById('att-pruh')
+  if (pruh && pruh.style.display !== 'none') {
+    const text = zamceno && _attZamek.zapsano ? '✅ Zapsáno' : (pruh.dataset.text || '')
+    if (pruh.textContent !== text) pruh.textContent = text
+  }
+}
+// Kde tlačítko je: na obrazovce (vy, vx) a v dokumentu (dy, dx). Posun stránky
+// prstem mění jen polohu na obrazovce, posun obsahu i tu v dokumentu — za posun
+// pod prstem se bere jen změna obojího.
+function _attVzorek(b) {
+  if (!b || !b.isConnected) return null
+  const r = b.getBoundingClientRect()
+  if (!r.width || !r.height) return null
+  return { vy: r.top, vx: r.left, dy: r.top + window.pageYOffset, dx: r.left + window.pageXOffset, w: r.width, h: r.height }
+}
+// Vzorek každých 250 ms (jen když je docházka vidět) a při každém klepnutí.
+// Zapamatuje si, kdy se tlačítko naposledy posunulo nebo objevilo.
+function attZmerTlacitka() {
+  try {
+    const ted = _attTed()
+    const pohled = document.getElementById('mob-v-dochazka')
+    const vidim = document.visibilityState !== 'hidden' && !!pohled && pohled.offsetParent !== null
+    const tlacitka = { hl: document.getElementById('att-main-btn'), ko: document.querySelector('#att-secondary button') }
+    const jinde = (a, b) => Math.abs(a - b) > 2
+    for (const k of ['hl', 'ko']) {
+      const v = vidim ? _attVzorek(tlacitka[k]) : null
+      const p = _attPolohy[k]
+      if (!v) { _attPolohy[k] = null; continue }
+      // Objevilo se: byla-li docházka vidět už při minulém vzorku, objevilo se
+      // pod rukou. Po načtení, přepnutí obrazovky nebo návratu do appky ne.
+      if (!p) { _attPolohy[k] = { v, od: _attPolohy.pohledVidet ? ted : -Infinity }; continue }
+      const posun = (jinde(v.dy, p.v.dy) || jinde(v.dx, p.v.dx)) && (jinde(v.vy, p.v.vy) || jinde(v.vx, p.v.vx))
+      if (posun || jinde(v.w, p.v.w) || jinde(v.h, p.v.h)) p.od = ted
+      p.v = v
+    }
+    _attPolohy.pohledVidet = vidim
+    // Místo „Začít" (výška proužku po příchodu) — jen když je docházka vidět.
+    if (vidim) attZmerMistoZacit()
+    // Pojistka: zámek vypršel a zešednutí zůstalo (časovač v pozadí nedoběhl).
+    if (!attZamcenoTed() && document.querySelector('#osvec-app .att-zamceno')) attVzhledZamku()
+  } catch (e) {}
+}
+function attHlidejTlacitka() {
+  if (_attPolohy.hlidac) return
+  _attPolohy.hlidac = setInterval(attZmerTlacitka, 250)
+  // Schovaná appka: po návratu se poloha bere znovu (pracovník vidí, co je teď).
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'hidden') { _attPolohy.hl = null; _attPolohy.ko = null; _attPolohy.pohledVidet = false }
+  })
+}
+// Klepnutí na tlačítko docházky během zámku, nebo když se tlačítko v poslední
+// 1 s posunulo či objevilo, se zahodí dřív, než dojde na jeho onclick.
+document.addEventListener('click', function (e) {
+  try {
+    const t = e.target && e.target.closest ? e.target.closest(ATT_TLACITKA) : null
+    if (!t) return
+    attZmerTlacitka()   // čerstvý vzorek: posun mezi posledním vzorkem a klepnutím
+    const p = _attPolohy[t.id === 'att-main-btn' ? 'hl' : 'ko']
+    const duvod = attZamcenoTed() ? 'zámek po zápisu'
+      : (p && _attTed() - p.od < ATT_POSUN_MS) ? 'tlačítko se právě posunulo' : null
+    if (!duvod) return
+    e.preventDefault()
+    e.stopPropagation()
+    if (e.stopImmediatePropagation) e.stopImmediatePropagation()
+    console.log('[docházka] klepnutí nepřijato — ' + duvod)
+  } catch (x) {}
+}, true)
+// Co je teď na tlačítkách docházky. mobCheckin podle změny pozná, že se po
+// klepnutí docházka přepnula (pak zámek) i tam, kde se nic nezapsalo (např.
+// „Přestávka již probíhá" překreslí zastaralá tlačítka). Po zápisu, který
+// prošel, se zamyká vždy.
+function attPodpisStavu() {
+  try {
+    const hl = document.getElementById('att-main-btn'), ko = document.getElementById('att-secondary')
+    return (window._attState || '-') + '|' + (hl ? hl.textContent + '|' + hl.disabled + '|' + hl.style.display : '') + '|' + (ko ? ko.textContent : '')
+  } catch (e) { return '' }
+}
+
+// POMALÝ ZÁPIS DOCHÁZKY → DENÍK CHYB (2. 11. 2026). Majitel: „ten systém
+// zpomalený … to nebylo takhle pomalý, nevím proč". Neodhadovat, změřit: zápis,
+// který prošel, ale od ťuknutí trval přes 5 s, nechá v deníku jeden řádek
+// dochazka-pomala|<typ> (třída měření) s časy fází v ms: prihlaseni (čekání na
+// obnovu přihlášení), pravidlo (dotaz „jen s polohou"), poloha (měření GPS),
+// adresa (dohledání adresy), kontrola (čtení před zápisem), zapis (samotný
+// zápis). Fáze, která neproběhla, v řádku chybí. Čas, kdy appka čekala na
+// odpověď člověka v „Opravdu…?", se nepočítá. Řádek jde až po zápisu
+// a překreslení, nic na něj nečeká a nic nemůže shodit.
+function _attNoveMereni() { return { t0: _attTed(), t0Cas: Date.now(), faze: {}, dotaz: 0, hotovo: 0, hotovoCas: 0 } }
+async function _attMerFaze(m, faze, slib) {
+  const t = _attTed()
+  try { return await slib } finally { m.faze[faze] = (m.faze[faze] || 0) + (_attTed() - t) }
+}
+function _attMerHotovo(m) { m.hotovo = _attTed(); m.hotovoCas = Date.now() }
+function zapisPomalouDochazku(typ, m) {
+  try {
+    if (!m || !m.hotovo) return
+    const ms = Math.round(m.hotovo - m.t0 - m.dotaz)
+    if (!(ms > 5000)) return
+    const faze = {}
+    for (const k of Object.keys(m.faze)) faze[k] = Math.round(m.faze[k])
+    // Obnova přihlášení během zápisu: dotazy na obnovu (auth/obnova z deníku
+    // dotazů), které se s ním časově překryly — knihovna na ni před dotazem čeká.
+    try {
+      if (typeof _dn !== 'undefined' && _dn && Array.isArray(_dn.dotazy)) {
+        let obnova = 0
+        for (const d of _dn.dotazy) {
+          if (!d || d.c !== 'auth/obnova') continue
+          const prekryv = Math.min(d.t, m.hotovoCas) - Math.max(d.t - (d.ms || 0), m.t0Cas)
+          if (prekryv > 0) obnova += prekryv
+        }
+        faze.prihlaseni = Math.round((faze.prihlaseni || 0) + obnova)
+      }
+    } catch (e) {}
+    const co = { in: 'Příchod trval', out: 'Odchod trval', 'break-start': 'Začátek pauzy trval', 'break-end': 'Konec pauzy trval', 'break-fix': 'Přestávka trvala' }[typ] || 'Zápis docházky trval'
+    const zprava = co + ' ' + (ms / 1000).toFixed(1).replace('.', ',') + ' s'
+    setTimeout(() => {
+      try { if (typeof denikChybZapis === 'function') denikChybZapis('dochazka-pomala|' + typ, zprava, { ms, faze }, { trida: 'mereni', zdroj: 'auto' }) } catch (x) { console.warn('[deník chyb]', x) }
+    }, 0)
+  } catch (e) {}
+}
 
 // SKUPINA U ZÁZNAMU DOCHÁZKY
 //
@@ -24680,6 +24968,12 @@ async function mobCheckin(type) {
     return
   }
   window._dnTuknuti = Date.now()   // DENÍK: od ťuknutí se měří msOdTuknuti u nezapsané docházky
+  // 2. 11. 2026: měření pomalého zápisu po fázích (zapisPomalouDochazku) a co bylo
+  // na tlačítkách před ťuknutím — když se po něm docházka přepne, tlačítka se na
+  // 2 s zamknou (attZamkniPoZapisu, ve finally níž).
+  const _mer = _attNoveMereni()
+  const _stavPred = attPodpisStavu()
+  let _zapsano = false
   // Panel s ruční adresou ukážeme až po zápisu (viz níž), ať nic nezdržuje.
   // DOCHÁZKA SE MUSÍ ZAPSAT VŽDYCKY. Dřív tady stálo `return`, když appka
   // neznala adresu stavby — pauza ani odchod se tím vůbec nezapsaly a lidem
@@ -24692,6 +24986,7 @@ async function mobCheckin(type) {
   }
   // Když currentUser chybí (Chrome občas ztratí proměnnou) — zkus ho dotáhnout ze session
   if (!currentUser) {
+    const tPrihlaseni = _attTed()   // měření: čekání na obnovu přihlášení
     // 1) aktivní session
     try {
       const { data: sess } = await sb.auth.getSession()
@@ -24711,6 +25006,7 @@ async function mobCheckin(type) {
         if (ref?.session?.user) currentUser = ref.session.user
       } catch(e) { console.warn('[mobCheckin] refreshSession selhal:', e) }
     }
+    _mer.faze.prihlaseni = _attTed() - tPrihlaseni
   }
   if (!currentUser) {
     showToast('❌ Relace vypršela — přihlaste se prosím znovu')
@@ -24768,7 +25064,7 @@ async function mobCheckin(type) {
     // už patří dalšímu — tomu se z tohohle pokusu nic neukáže ani nezapíše.
     const kdoTukl = { id: currentUser.id, jmeno: currentProfile?.full_name || null }
     const odhlasilSe = () => !currentUser || currentUser.id !== kdoTukl.id
-    if (await mojeFirmaChcePolohu()) {
+    if (await _attMerFaze(_mer, 'pravidlo', mojeFirmaChcePolohu())) {
       clearTimeout(_stuckGuard)
       // Odhlášení během zjišťování pravidla — měřit už není pro koho.
       if (odhlasilSe()) { checkinInProgress = false; window.zapisProbiha = false; return }
@@ -24780,7 +25076,15 @@ async function mobCheckin(type) {
       // nic. 2. 11. 2026 (Petr Fuks) ji nahradil panel, který drží celou dobu
       // měření (sekundy, „ťukněte na Povolit", Zrušit) — viz ukazMereniPolohy.
       // Hláška by jen zopakovala jeho text a překrývala se s ním.
+      const tPoloha = _attTed()
       povinnaPoloha = await ziskejPolohuPovinne()
+      // Měření (2. 11. 2026): GPS a dohledání adresy zvlášť — oboje si změří
+      // captureLocationNow (msMereni, msAdresa v _polohaDiag).
+      try {
+        const celkem = _attTed() - tPoloha, dg = window._polohaDiag || {}
+        _mer.faze.poloha = typeof dg.msMereni === 'number' ? dg.msMereni : celkem
+        _mer.faze.adresa = typeof dg.msAdresa === 'number' ? dg.msAdresa : Math.max(0, celkem - _mer.faze.poloha)
+      } catch (e) {}
       // Během měření se odhlásil (měření ukončilo odhlášení, ukonciPovinnouPolohu):
       // žádný zápis docházky, hláška ani návod. Nepovedený pokus jde do deníku
       // s tím, kdo ťukal (detail.ucet, odhlaseno) — jádro deníku zapisuje jen za
@@ -24822,13 +25126,13 @@ async function mobCheckin(type) {
       // by ranní směna zůstala viset otevřená s 0 h.
       let activeRows = null, activeErr = null
       try {
-        const res = await withTimeout(sb.from('attendance').select('id,check_in')
+        const res = await _attMerFaze(_mer, 'kontrola', withTimeout(sb.from('attendance').select('id,check_in')
           .eq('worker_id', currentUser.id)
           .eq('work_date', today)
           .is('check_out', null)
           .not('check_in', 'is', null)
           .order('check_in', { ascending: false })
-          .limit(1), 15000)
+          .limit(1), 15000))
         activeRows = res.data; activeErr = res.error
       } catch (e) { activeErr = e }
       if (activeErr) {
@@ -24854,7 +25158,7 @@ async function mobCheckin(type) {
       // změří askAddressIfNeeded(). Dřív se sem kopírovaly globální gpsAddr/gpsLat/
       // gpsLng z předchozí směny, takže druhý příchod téhož dne zdědil adresu
       // i souřadnice ranní stavby a tvářil se jako ověřený GPS záznam.
-      const { data, error } = await dochazkaInsert({
+      const { data, error } = await _attMerFaze(_mer, 'zapis', dochazkaInsert({
         worker_id: currentUser.id,
         work_date: today,
         check_in: timeStr,
@@ -24872,7 +25176,7 @@ async function mobCheckin(type) {
         // zpětně z profilu, pozdější změna nastavení by přepsala výklad staré
         // docházky a rozešly by se hodiny na už vystavených fakturách.
         rezim_prestavky: rezimPrestavky(currentProfile)
-      }, { vratit: true, timeout: 12000 })
+      }, { vratit: true, timeout: 12000 }))
 
       if (error) {
         showToast(chybaText(error, 'Příchod se nezapsal')); checkinInProgress = false
@@ -24880,10 +25184,11 @@ async function mobCheckin(type) {
         try { if (typeof _dnDochazka === 'function') _dnDochazka('in', 'zapis', 'Příchod se nezapsal — chyba zápisu (' + kodChybyProDenik(error) + ')', { kod: error.code, stav: error.status }, 'chyba') } catch (x) { console.warn('[deník chyb]', x) } // eslint-disable-line no-undef
         return
       }
+      _zapsano = true; _attMerHotovo(_mer)
       todayAttId = data.id
       todayRecord = { ...data }  // Ulož lokálně okamžitě
       // Aktualizuj UI ihned z čerstvých dat — nezávisle na serveru
-      updateMobStav(data, [data])
+      updateMobStav(data, [data], true)
       showToast('✅ Příchod zaznamenán — ' + timeStr)
       // DENÍK CHYB: příchod se zapsal — šel-li dnes předtím nezdar, deník zapíše „po chybě" s počtem pokusů.
       try { if (typeof _dnDochazkaOk === 'function') _dnDochazkaOk('in') } catch (x) { console.warn('[deník chyb]', x) } // eslint-disable-line no-undef
@@ -24921,7 +25226,7 @@ async function mobCheckin(type) {
     } else {
       // Přestávka / Odchod
       if (!todayAttId) {
-        await getTodayRecord()
+        await _attMerFaze(_mer, 'kontrola', getTodayRecord())
         if (!todayAttId) {
           showToast('⚠️ Nejprve zaznamenejte příchod')
           checkinInProgress = false
@@ -24935,7 +25240,7 @@ async function mobCheckin(type) {
       let current = todayRecord
       if (!current || current.id !== todayAttId) {
         // Fallback: načti ze serveru pokud lokální kopie chybí
-        const { data: fetched } = await withTimeout(sb.from('attendance').select('*').eq('id', todayAttId).single(), 12000)
+        const { data: fetched } = await _attMerFaze(_mer, 'kontrola', withTimeout(sb.from('attendance').select('*').eq('id', todayAttId).single(), 12000))
         if (!fetched) {
           showToast('❌ Záznam nenalezen'); checkinInProgress = false
           try { if (typeof _dnDochazka === 'function') _dnDochazka(type, 'nenalezen', 'Docházka se nezapsala — dnešní záznam nenalezen', {}, 'chyba') } catch (x) { console.warn('[deník chyb]', x) } // eslint-disable-line no-undef
@@ -24980,14 +25285,14 @@ async function mobCheckin(type) {
         const dosavadni = attAllBreaks(current).filter(b => b.bs && b.be)
         if (dosavadni.length && !nastT.vicKrat) {
           showToast('⚠️ Přestávku už máte dnes zapsanou')
-          updateMobStav(current, [current])
+          updateMobStav(current, [current], true)
           checkinInProgress = false
           try { if (typeof _dnDochazka === 'function') _dnDochazka(type, 'pauza-uz-je', 'Přestávka už je dnes zapsaná', {}, 'varovani') } catch (x) { console.warn('[deník chyb]', x) } // eslint-disable-line no-undef
           return
         }
         if (current.break_start && !current.break_end) {
           showToast('⚠️ Máte rozdělanou přestávku — nejdřív ji ukončete')
-          updateMobStav(current, [current])
+          updateMobStav(current, [current], true)
           checkinInProgress = false
           try { if (typeof _dnDochazka === 'function') _dnDochazka(type, 'pauza-rozdelana', 'Rozdělaná přestávka — pevná pauza se nezapsala', {}, 'varovani') } catch (x) { console.warn('[deník chyb]', x) } // eslint-disable-line no-undef
           return
@@ -25015,12 +25320,12 @@ async function mobCheckin(type) {
         const zapisT = { breaks: poleT }
         if (poleT.length === 1) { zapisT.break_start = bsT + ':00'; zapisT.break_end = beT + ':00' }
         else if (poleT.length === 2) { zapisT.break2_start = bsT + ':00'; zapisT.break2_end = beT + ':00' }
-        let { data: radkyT, error: chybaT } = await withTimeout(sb.from('attendance').update(zapisT).eq('id', todayAttId).select('id'), 12000)
+        let { data: radkyT, error: chybaT } = await _attMerFaze(_mer, 'zapis', withTimeout(sb.from('attendance').update(zapisT).eq('id', todayAttId).select('id'), 12000))
         if (chybaT) {
           // Starší databáze nemusí mít sloupec `breaks` — pauzu ulož aspoň do časů.
           console.warn('[pauza] zápis s polem breaks selhal, zkouším bez něj:', chybaT.message)
           const bezPole = { ...zapisT }; delete bezPole.breaks
-          const r2 = await withTimeout(sb.from('attendance').update(bezPole).eq('id', todayAttId).select('id'), 12000)
+          const r2 = await _attMerFaze(_mer, 'zapis', withTimeout(sb.from('attendance').update(bezPole).eq('id', todayAttId).select('id'), 12000))
           chybaT = r2.error; radkyT = r2.data
         }
         if (chybaT) {
@@ -25029,6 +25334,7 @@ async function mobCheckin(type) {
           return
         }
         if (!radkyT || !radkyT.length) { pauzaNetrefila(type); return }
+        _zapsano = true; _attMerHotovo(_mer)
         Object.assign(updated, zapisT)
         todayRecord = { ...updated }
         showToast('☕ Přestávka ' + nastT.minut + ' min zapsaná — ' + bsT + '–' + beT)
@@ -25039,18 +25345,19 @@ async function mobCheckin(type) {
       } else if (type === 'break-start') {
         if (current.break_start && !current.break_end) {
           showToast('⚠️ Přestávka již probíhá')
-          updateMobStav(current, [current])
+          updateMobStav(current, [current], true)
           checkinInProgress = false
           try { if (typeof _dnDochazka === 'function') _dnDochazka(type, 'pauza-probiha', 'Začátek pauzy — přestávka už probíhá', {}, 'varovani') } catch (x) { console.warn('[deník chyb]', x) } // eslint-disable-line no-undef
           return
         }
-        const { data: radkyZ, error } = await withTimeout(sb.from('attendance').update({ break_start: timeStr, break_end: null }).eq('id', todayAttId).select('id'), 12000)
+        const { data: radkyZ, error } = await _attMerFaze(_mer, 'zapis', withTimeout(sb.from('attendance').update({ break_start: timeStr, break_end: null }).eq('id', todayAttId).select('id'), 12000))
         if (error) {
           showToast(chybaText(error, 'Začátek pauzy se nezapsal')); checkinInProgress = false
           try { if (typeof _dnDochazka === 'function') _dnDochazka(type, 'zapis', 'Začátek pauzy se nezapsal — chyba zápisu (' + kodChybyProDenik(error) + ')', { kod: error.code, stav: error.status }, 'chyba') } catch (x) { console.warn('[deník chyb]', x) } // eslint-disable-line no-undef
           return
         }
         if (!radkyZ || !radkyZ.length) { pauzaNetrefila(type); return }
+        _zapsano = true; _attMerHotovo(_mer)
         updated.break_start = timeStr
         updated.break_end = null
         todayRecord = { ...updated }  // Aktualizuj lokální kopii
@@ -25061,7 +25368,7 @@ async function mobCheckin(type) {
       } else if (type === 'break-end') {
         if (!current.break_start) {
           showToast('⚠️ Přestávka nebyla zahájena')
-          updateMobStav(current, [current])
+          updateMobStav(current, [current], true)
           checkinInProgress = false
           try { if (typeof _dnDochazka === 'function') _dnDochazka(type, 'pauza-nezacala', 'Konec pauzy — přestávka nebyla zahájena', {}, 'varovani') } catch (x) { console.warn('[deník chyb]', x) } // eslint-disable-line no-undef
           return
@@ -25069,11 +25376,11 @@ async function mobCheckin(type) {
         // Přidej dokončenou pauzu do pole breaks (kvůli více pauzám za směnu)
         const existingBreaks = Array.isArray(current.breaks) ? current.breaks.slice() : []
         existingBreaks.push({ bs: current.break_start.slice(0,5), be: timeStr.slice(0,5) })
-        let { data: radkyK, error } = await withTimeout(sb.from('attendance').update({ break_end: timeStr, breaks: existingBreaks }).eq('id', todayAttId).select('id'), 12000)
+        let { data: radkyK, error } = await _attMerFaze(_mer, 'zapis', withTimeout(sb.from('attendance').update({ break_end: timeStr, breaks: existingBreaks }).eq('id', todayAttId).select('id'), 12000))
         if (error) {
           // Kdyby sloupec breaks neexistoval, ulož aspoň break_end (zpětná kompatibilita)
           console.warn('[break-end] update s breaks selhal, zkouším bez:', error.message)
-          const r2 = await withTimeout(sb.from('attendance').update({ break_end: timeStr }).eq('id', todayAttId).select('id'), 12000)
+          const r2 = await _attMerFaze(_mer, 'zapis', withTimeout(sb.from('attendance').update({ break_end: timeStr }).eq('id', todayAttId).select('id'), 12000))
           if (r2.error) {
             showToast(chybaText(r2.error, 'Konec pauzy se nezapsal')); checkinInProgress = false
             try { if (typeof _dnDochazka === 'function') _dnDochazka(type, 'zapis', 'Konec pauzy se nezapsal — chyba zápisu (' + kodChybyProDenik(r2.error) + ')', { kod: r2.error.code, stav: r2.error.status }, 'chyba') } catch (x) { console.warn('[deník chyb]', x) } // eslint-disable-line no-undef
@@ -25082,6 +25389,7 @@ async function mobCheckin(type) {
           radkyK = r2.data
         }
         if (!radkyK || !radkyK.length) { pauzaNetrefila(type); return }
+        _zapsano = true; _attMerHotovo(_mer)
         updated.break_end = timeStr
         updated.breaks = existingBreaks
         todayRecord = { ...updated }  // Aktualizuj lokální kopii
@@ -25092,7 +25400,7 @@ async function mobCheckin(type) {
       } else if (type === 'out') {
         if (current.check_out) {
           showToast('⚠️ Odchod již byl zaznamenán')
-          updateMobStav(current, [current])
+          updateMobStav(current, [current], true)
           checkinInProgress = false
           try { if (typeof _dnDochazka === 'function') _dnDochazka(type, 'odchod-uz-je', 'Odchod už byl zaznamenán', {}, 'varovani') } catch (x) { console.warn('[deník chyb]', x) } // eslint-disable-line no-undef
           return
@@ -25104,8 +25412,11 @@ async function mobCheckin(type) {
           const ciMin = timeToMin(current.check_in)
           const coMin = timeToMin(timeStr)
           if (ciMin !== null && coMin !== null && coMin >= ciMin && coMin - ciMin < 15) {
-            if (!confirm('Od příchodu uplynulo jen ' + (coMin - ciMin) + ' min.\n\nOpravdu ukončit směnu?\n\n• OK = ukončit (den se zapíše na 0 h)\n• Zrušit = zpět do práce')) {
-              updateMobStav(current, [current])
+            const tDotaz = _attTed()   // měření: odpověď člověka se do doby zápisu nepočítá
+            const ukoncit = confirm('Od příchodu uplynulo jen ' + (coMin - ciMin) + ' min.\n\nOpravdu ukončit směnu?\n\n• OK = ukončit (den se zapíše na 0 h)\n• Zrušit = zpět do práce')
+            _mer.dotaz += _attTed() - tDotaz
+            if (!ukoncit) {
+              updateMobStav(current, [current], true)
               checkinInProgress = false
               return
             }
@@ -25113,9 +25424,9 @@ async function mobCheckin(type) {
         }
         // Firma „jen s polohou": poloha odchodu se uloží HNED a musí se uložit.
         // Neuloží-li se, odchod nepustíme — jinak by šlo odejít bez polohy.
-        if (povinnaPoloha && !(await ulozPovinnouPolohuOdchodu(todayAttId, povinnaPoloha))) {
+        if (povinnaPoloha && !(await _attMerFaze(_mer, 'zapis', ulozPovinnouPolohuOdchodu(todayAttId, povinnaPoloha)))) {
           showToast('📍 Odchod se NEZAPSAL — polohu se nepodařilo uložit. Zkuste to prosím znovu.')
-          updateMobStav(current, [current])
+          updateMobStav(current, [current], true)
           checkinInProgress = false
           // DENÍK CHYB (kritika bod 15): vlastní chybu uložení zapsala už ulozPovinnouPolohuOdchodu (poloha-odchodu); tady, že odchod kvůli ní neprošel.
           try { if (typeof _dnDochazka === 'function') _dnDochazka('out', 'poloha-ulozeni', 'Odchod se nezapsal — poloha odchodu se neuložila', {}, 'chyba') } catch (x) { console.warn('[deník chyb]', x) } // eslint-disable-line no-undef
@@ -25156,7 +25467,7 @@ async function mobCheckin(type) {
             if (srovnane[0]) { opr.break_start = srovnane[0].bs + ':00'; opr.break_end = srovnane[0].be + ':00' }
             if (srovnane[1]) { opr.break2_start = srovnane[1].bs + ':00'; opr.break2_end = srovnane[1].be + ':00' }
             // DENÍK CHYB (kritika bod 15): `.select('id')` jen kvůli deníku — nic jiného se nemění.
-            const { data: radkyOpr, error: eOpr } = await withTimeout(sb.from('attendance').update(opr).eq('id', todayAttId).select('id'), 12000)
+            const { data: radkyOpr, error: eOpr } = await _attMerFaze(_mer, 'zapis', withTimeout(sb.from('attendance').update(opr).eq('id', todayAttId).select('id'), 12000))
             if (!eOpr) { Object.assign(current, opr); Object.assign(updated, opr) }
             else console.warn('[pauza] srovnání konce pauzy s odchodem selhalo:', eOpr.message)
             if (!eOpr && (!radkyOpr || !radkyOpr.length)) { try { if (typeof denikChybZapis === 'function') denikChybZapis('db-zapis-nic|rest/attendance', 'Posun pauzy před odchod se nezapsal — zápis nezměnil žádný řádek', { misto: 'mobCheckin-srovnani-pauzy', pole: Object.keys(opr).join(','), attId: todayAttId }, { trida: 'varovani' }) } catch (x) { console.warn('[deník chyb]', x) } } // eslint-disable-line no-undef
@@ -25188,9 +25499,11 @@ async function mobCheckin(type) {
               + ' — to je ' + delkaText + ', které se odečtou z odpracovaných hodin.'
               + (delkaMin > 180 ? '\n⚠️ To je nezvykle dlouho — nezapomněli jste pauzu ukončit dřív?' : '')
             : ''
+          const tDotaz = _attTed()   // měření: odpověď člověka se do doby zápisu nepočítá
           const goOut = confirm('Máte rozdělanou pauzu, která ještě neskončila.' + varovani + '\n\nOpravdu chcete ukončit pracovní dobu (odchod)?\n\n• OK = ukončit pracovní dobu\n• Zrušit = zpět (pak zvolte „Konec pauzy")')
+          _mer.dotaz += _attTed() - tDotaz
           if (!goOut) {
-            updateMobStav(current, [current])
+            updateMobStav(current, [current], true)
             checkinInProgress = false
             window.zapisProbiha = false
             return
@@ -25213,7 +25526,7 @@ async function mobCheckin(type) {
             if (current.break_start && !current.break_end) {
               const bl = Array.isArray(current.breaks) ? current.breaks.slice() : []
               bl.push({ bs: current.break_start.slice(0,5), be: timeStr.slice(0,5) })
-              const jak = await zavri({ break_end: timeStr, breaks: bl }, { break_end: timeStr })
+              const jak = await _attMerFaze(_mer, 'zapis', zavri({ break_end: timeStr, breaks: bl }, { break_end: timeStr }))
               if (!jak) pauzaUzavrena = false
               else { if (jak === 'plne') updated.breaks = bl; updated.break_end = timeStr }
             }
@@ -25221,7 +25534,7 @@ async function mobCheckin(type) {
               const bl2 = Array.isArray(updated.breaks) ? updated.breaks.slice()
                         : (Array.isArray(current.breaks) ? current.breaks.slice() : [])
               bl2.push({ bs: current.break2_start.slice(0,5), be: timeStr.slice(0,5) })
-              const jak2 = await zavri({ break2_end: timeStr, breaks: bl2 }, { break2_end: timeStr })
+              const jak2 = await _attMerFaze(_mer, 'zapis', zavri({ break2_end: timeStr, breaks: bl2 }, { break2_end: timeStr }))
               if (!jak2) pauzaUzavrena = false
               else { if (jak2 === 'plne') updated.breaks = bl2; updated.break2_end = timeStr }
             }
@@ -25233,7 +25546,7 @@ async function mobCheckin(type) {
             // Stávající odchod-uzavreni-pauzy zůstává (R8).
             try { if (typeof _dnDochazka === 'function') _dnDochazka('out', 'uzavreni-pauzy', 'Odchod se nezapsal — rozdělanou pauzu se nepodařilo uzavřít', {}, 'chyba') } catch (x) { console.warn('[deník chyb]', x) } // eslint-disable-line no-undef
             zapisChybuAppky('odchod-uzavreni-pauzy', 'nepodařilo se uzavřít rozdělanou pauzu při odchodu')
-            updateMobStav(current, [current])
+            updateMobStav(current, [current], true)
             checkinInProgress = false
             window.zapisProbiha = false
             return
@@ -25243,9 +25556,9 @@ async function mobCheckin(type) {
         // Načti aktuální pauzy ze serveru, ať se nespoléháme na možná neúplnou lokální kopii.
         let brkSrc = updated
         try {
-          const { data: fresh } = await withTimeout(sb.from('attendance')
+          const { data: fresh } = await _attMerFaze(_mer, 'kontrola', withTimeout(sb.from('attendance')
             .select('break_start,break_end,break2_start,break2_end,breaks')
-            .eq('id', todayAttId).single(), 8000)
+            .eq('id', todayAttId).single(), 8000))
           if (fresh) brkSrc = { ...updated, ...fresh }
         } catch(e) { /* fallback: lokální kopie */ }
         const adjOut = applyAttendanceRules({
@@ -25267,9 +25580,9 @@ async function mobCheckin(type) {
           // `.select('id')` tu není navíc: bez něj se nepozná zápis, který
           // projde bez chyby, ale nezmění ani řádek — a pracovník by uviděl
           // „odchod zapsán", přestože se nic neuložilo.
-          const { data: outRows, error: outErr } = await withTimeout(sb.from('attendance').update({
+          const { data: outRows, error: outErr } = await _attMerFaze(_mer, 'zapis', withTimeout(sb.from('attendance').update({
             check_out: timeStr, total_hours: h
-          }).eq('id', todayAttId).select('id'), 12000)
+          }).eq('id', todayAttId).select('id'), 12000))
           if (outErr) {
             showToast(chybaText(outErr, 'Odchod se nezapsal')); checkinInProgress = false
             try { if (typeof _dnDochazka === 'function') _dnDochazka('out', 'zapis', 'Odchod se nezapsal — chyba zápisu (' + kodChybyProDenik(outErr) + ')', { kod: outErr.code, stav: outErr.status }, 'chyba') } catch (x) { console.warn('[deník chyb]', x) } // eslint-disable-line no-undef
@@ -25281,6 +25594,7 @@ async function mobCheckin(type) {
             try { if (typeof _dnDochazka === 'function') _dnDochazka('out', 'neulozil-radek', 'Odchod se neuložil — zápis nezměnil žádný řádek', {}, 'chyba') } catch (x) { console.warn('[deník chyb]', x) } // eslint-disable-line no-undef
             checkinInProgress = false; return
           }
+          _zapsano = true; _attMerHotovo(_mer)
           updated.check_out = timeStr
           updated.total_hours = h
           // Poloha při odchodu — na pozadí, nic se tím nezdržuje. Vidí ji
@@ -25291,7 +25605,7 @@ async function mobCheckin(type) {
           showToast('🚪 Odchod zaznamenán — ' + timeStr + ' (' + h + 'h)')
           // DENÍK CHYB: odchod se zapsal — šel-li dnes předtím nezdar, deník zapíše „po chybě" s počtem pokusů.
           try { if (typeof _dnDochazkaOk === 'function') _dnDochazkaOk('out') } catch (x) { console.warn('[deník chyb]', x) } // eslint-disable-line no-undef
-          updateMobStav(null, [updated])
+          updateMobStav(null, [updated], true)
           getTodayRecord()
           loadMobWeek()
           checkinInProgress = false
@@ -25332,7 +25646,8 @@ async function mobCheckin(type) {
       // Po odchodu: todayAttId=null, předáme null jako rec a updated v allToday pro přehled
       updateMobStav(
         todayAttId ? updated : null,
-        [updated]  // Vždy předej updated pro přehled směn
+        [updated],  // Vždy předej updated pro přehled směn
+        true        // jen tenhle den — dokončené směny zůstanou (2. 11. 2026)
       )
     }
 
@@ -25351,6 +25666,14 @@ async function mobCheckin(type) {
     clearTimeout(_stuckGuard)
     checkinInProgress = false
     window.zapisProbiha = false
+    // 2. 11. 2026: docházka se po tomhle klepnutí přepnula → tlačítka 2 s klid
+    // (attZamkniPoZapisu). Pomalý zápis, který prošel → řádek do deníku.
+    // Zápis, který prošel, zamyká vždy — i když tlačítka vypadají stejně jako
+    // před ním: u „Další přestávka 30 min" (fix30x) je popisek před druhou
+    // přestávkou i po ní stejný, podpis se nezměnil a dvojí ťuknutí zapsalo
+    // další přestávku, tj. dalších 30 min dolů (kontrola 2. 11. 2026).
+    try { if (_zapsano || attPodpisStavu() !== _stavPred) attZamkniPoZapisu(_zapsano) } catch (e) {}
+    if (_zapsano) zapisPomalouDochazku(type, _mer)
   }
 }
 
@@ -30925,6 +31248,7 @@ function captureLocationNow(volby) {
       if (bestLat === null) { if (window._chybaPolohy == null) window._chybaPolohy = 3; resolve(''); return }
       gpsLat = bestLat; gpsLng = bestLng
       _gpsAccuracy = bestAcc
+      const tAdresa = Date.now()   // jen měření (2. 11. 2026): jak dlouho trvalo dohledání adresy → diag.msAdresa
       let resolved = ''
       try {
         const r = await fetchAdresy(`https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${gpsLat}&lon=${gpsLng}&addressdetails=1&accept-language=cs&zoom=18`, { headers: { 'Accept':'application/json' } })
@@ -30954,6 +31278,7 @@ function captureLocationNow(volby) {
         } catch(e) {}
       }
       gpsAddr = resolved || (gpsLat && gpsLng ? `${gpsLat.toFixed(5)}, ${gpsLng.toFixed(5)}` : '')
+      if (povinna) diag.msAdresa = Date.now() - tAdresa
       vrat(gpsAddr)
     }
 
