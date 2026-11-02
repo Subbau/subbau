@@ -19,6 +19,11 @@ const POVOLENE = [
   'https://translate.googleapis.com/translate_a/single?',
   'https://api.mymemory.translated.net/get?',
 ];
+// Deník chyb (2. 11. 2026): když služba vůbec neodpoví (síť, 8 s limit),
+// zapíše se to jednou za minutu — výkazy pak čekají na překlad a kancelář
+// neví proč. Limit dotazů (429) a odpovědi služeb se NEZAPISUJÍ: limit je
+// očekávaný a appka ho počítá sama.
+const { zapisChybuServeru } = require('./_denik.js');
 
 // Brzda proti zneužití jako volný neomezený relay (audit 16. 10. 2026):
 // endpoint neměl žádné omezení počtu volání, na rozdíl od sesterských API
@@ -99,6 +104,10 @@ module.exports = async function handler(req, res) {
     res.setHeader('Content-Type', 'application/json; charset=utf-8');
     res.status(odp.status).send(telo);
   } catch (e) {
+    await zapisChybuServeru('preklad', 'Překladač neodpověděl (' + ((e && e.name) || 'chyba') + ')', {
+      t: 'varovani', krok: 'sluzba', kod: (e && e.name) || undefined,
+      sluzba: url.startsWith(POVOLENE[0]) ? 'google' : 'mymemory',
+    });
     res.setHeader('Cache-Control', 'no-store');
     res.status(502).json({ chyba: String((e && e.message) || e) });
   } finally {
