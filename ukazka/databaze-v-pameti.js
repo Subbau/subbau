@@ -103,6 +103,11 @@
     const prosté = [];
     for (const c of casti) {
       const t = c.trim();
+      // Klíč z JSON sloupce jako text: `pocet:detail->>pocet` (deník chyb čte
+      // z detailu jen pár klíčů, ne celý objekt — 2. 11. 2026). Dřív se to tu
+      // potichu vynechalo a prohlížeč deníku by v ukázce neměl počty ani časy.
+      const mj = t.match(/^(?:([a-zA-Z0-9_]+)\s*:\s*)?([a-zA-Z0-9_]+)->>([a-zA-Z0-9_]+)$/);
+      if (mj) { prosté.push({ alias: mj[1] || mj[3], sloupec: mj[2], klic: mj[3] }); continue; }
       const m = t.match(/^([a-zA-Z0-9_]+)\s*:?\s*([a-zA-Z0-9_]*)(?:!([a-zA-Z0-9_]+))?\s*\((.*)\)$/s);
       if (m) {
         vysledek.vnorene.push({
@@ -142,7 +147,17 @@
   function omezSloupce(radek, sloupce) {
     if (!sloupce || !sloupce.length) return radek;
     const v = {};
-    for (const s of sloupce) if (s in radek) v[s] = radek[s];
+    for (const s of sloupce) {
+      if (s && typeof s === 'object') {
+        // `->>` vrací text (jako PostgREST): číslo i ano/ne jako řetězec,
+        // objekt jako JSON, chybějící klíč jako null.
+        const o = radek[s.sloupec];
+        const x = (o && typeof o === 'object') ? o[s.klic] : undefined;
+        v[s.alias] = x == null ? null : (typeof x === 'object' ? JSON.stringify(x) : String(x));
+        continue;
+      }
+      if (s in radek) v[s] = radek[s];
+    }
     return v;
   }
 
@@ -171,6 +186,9 @@
         const nove = (Array.isArray(stav.data) ? stav.data : [stav.data]).map(r => {
           const radek = { id: r.id || uuid(), created_at: new Date().toISOString(), ...kopie(r) };
           if (!radek.id) radek.id = uuid();
+          // Deník chyb: skutečná databáze doplní čas zápisu (kdy) sama. Bez něj
+          // by filtr „posledních 7 dní" řádky zapsané v ukázce schoval.
+          if (stav.tabulka === 'chyby_appky' && !radek.kdy) radek.kdy = radek.created_at;
           return radek;
         });
         t.push(...nove);
