@@ -126,6 +126,17 @@ declare
   v_id     uuid;
   v_druh   text;
 begin
+  -- CIZÍ ÚČET (kontrola Codexem 2. 11. 2026): hlídač běží s právy vlastníka
+  -- (security definer) a účet bere z new.kdo, které posílá telefon. Přihlášený,
+  -- který pošle cizí kdo (nebo žádné), by jinak ještě PŘED kontrolou práv
+  -- (kdo = auth.uid()) přičetl zahozený zápis cizí značce strop-zapisu nebo
+  -- značce „bez přihlášení" a vrátil null — kontrola práv by se o zápisu vůbec
+  -- nedozvěděla. Takový řádek proto hlídač pustí beze změny dál a práva ho
+  -- odmítnou. Server (servisní klíč) a SQL Editor auth.uid() nemají, ty se
+  -- hlídají jako dřív.
+  if auth.uid() is not null and new.kdo is distinct from auth.uid() then
+    return new;
+  end if;
   new.kdy := now();
   new.kde := left(coalesce(nullif(btrim(new.kde), ''), 'neuvedeno'), 100);
   -- „strop-zapisu" píše jen tenhle hlídač. Podvržený řádek s tímhle místem
