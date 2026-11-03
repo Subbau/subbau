@@ -25377,8 +25377,10 @@ async function mobCheckin(type) {
         if (poleT.length === 1) { zapisT.break_start = bsT + ':00'; zapisT.break_end = beT + ':00' }
         else if (poleT.length === 2) { zapisT.break2_start = bsT + ':00'; zapisT.break2_end = beT + ':00' }
         let { data: radkyT, error: chybaT } = await _attMerFaze(_mer, 'zapis', withTimeout(sb.from('attendance').update(zapisT).eq('id', todayAttId).select('id'), 12000))
-        if (chybaT) {
+        if (chybaT && chybiSloupec(chybaT)) {
           // Starší databáze nemusí mít sloupec `breaks` — pauzu ulož aspoň do časů.
+          // Jen při chybějícím sloupci (chybiSloupec, D3: dřív při jakékoli chybě, i při výpadku
+          // sítě — pak pole `breaks` chybělo a pauza se z hodin neodečetla); jiná chyba se hlásí níž.
           console.warn('[pauza] zápis s polem breaks selhal, zkouším bez něj:', chybaT.message)
           const bezPole = { ...zapisT }; delete bezPole.breaks
           const r2 = await _attMerFaze(_mer, 'zapis', withTimeout(sb.from('attendance').update(bezPole).eq('id', todayAttId).select('id'), 12000))
@@ -25434,9 +25436,13 @@ async function mobCheckin(type) {
         existingBreaks.push({ bs: current.break_start.slice(0,5), be: timeStr.slice(0,5) })
         let { data: radkyK, error } = await _attMerFaze(_mer, 'zapis', withTimeout(sb.from('attendance').update({ break_end: timeStr, breaks: existingBreaks }).eq('id', todayAttId).select('id'), 12000))
         if (error) {
-          // Kdyby sloupec breaks neexistoval, ulož aspoň break_end (zpětná kompatibilita)
-          console.warn('[break-end] update s breaks selhal, zkouším bez:', error.message)
-          const r2 = await _attMerFaze(_mer, 'zapis', withTimeout(sb.from('attendance').update({ break_end: timeStr }).eq('id', todayAttId).select('id'), 12000))
+          // Kdyby sloupec breaks neexistoval, ulož aspoň break_end (zpětná kompatibilita).
+          // Jen při chybějícím sloupci (chybiSloupec) — při výpadku sítě by break_end
+          // bez pole `breaks` pauzu z hodin neodečetl; tehdy se zápis nezdaří celý.
+          if (chybiSloupec(error)) console.warn('[break-end] update s breaks selhal, zkouším bez:', error.message)
+          const r2 = chybiSloupec(error)
+            ? await _attMerFaze(_mer, 'zapis', withTimeout(sb.from('attendance').update({ break_end: timeStr }).eq('id', todayAttId).select('id'), 12000))
+            : { error, data: null }
           if (r2.error) {
             showToast(chybaText(r2.error, 'Konec pauzy se nezapsal')); checkinInProgress = false
             try { if (typeof _dnDochazka === 'function') _dnDochazka(type, 'zapis', 'Konec pauzy se nezapsal — chyba zápisu (' + kodChybyProDenik(r2.error) + ')', { kod: r2.error.code, stav: r2.error.status }, 'chyba') } catch (x) { console.warn('[deník chyb]', x) } // eslint-disable-line no-undef
@@ -25574,6 +25580,9 @@ async function mobCheckin(type) {
           const zavri = async (plne, zaloha) => {
             const r1 = await withTimeout(sb.from('attendance').update(plne).eq('id', todayAttId).select('id'), 12000)
             if (!r1.error && r1.data && r1.data.length) return 'plne'
+            // Náhradní zápis bez `breaks` jen při chybějícím sloupci (chybiSloupec, D3):
+            // po výpadku sítě by pauza zůstala jen v break_end a z hodin by se neodečetla.
+            if (r1.error && !chybiSloupec(r1.error)) return null
             const r2 = await withTimeout(sb.from('attendance').update(zaloha).eq('id', todayAttId).select('id'), 12000)
             return (!r2.error && r2.data && r2.data.length) ? 'zaloha' : null
           }
