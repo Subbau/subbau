@@ -1147,10 +1147,14 @@ module.exports = async (req, res) => {
         // Jedna položka na člověka. Kdo nemá telefon, řidičák ani adresu
         // ubytování, do mapy se nedostane — stránka pak u něj ukáže jen
         // prázdné políčko pro adresu.
+        // Ubytování jen u lidí, kteří do skupin odkazu patří TEĎ (audit 3. 11. 2026).
+        // Staré dny přinesou i bývalé — jejich současnou adresu (třeba u jiného
+        // odběratele) tenhle odkaz vidět nesmí. Stejné pravidlo jako u zápisu.
+        const patriTed = new Set(lideVeSkupinach);
         for (const id of ids) {
           const tel = telefony[id] || '';
           const rp = ridicaky[id] || null;
-          const ub = ubytovani[id] || '';
+          const ub = patriTed.has(id) ? (ubytovani[id] || '') : '';
           const fo = fotky[id] || '';
           if (!tel && !rp && !ub && !fo) continue;
           lide[id] = { telefon: tel, ridicak: rp ? { do: rp.do || '' } : null, ubytovani: ub, fotka: fo };
