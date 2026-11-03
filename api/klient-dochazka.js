@@ -195,7 +195,8 @@ const TVAR_TOKENU = /^[0-9a-f]{64}$/;
 // Směna a zaokrouhlování — MUSÍ souhlasit s appkou (applyAttendanceRules
 // v subbau_final.html). Kdyby se to rozešlo, klient by viděl jiná čísla,
 // než jsou na faktuře, kterou od SubBau dostane.
-const SMENA = { start: 7 * 60, delkaPauzy: 30 };
+// zacatekPauzy = SHIFT.breakStart v appce (11:00).
+const SMENA = { start: 7 * 60, zacatekPauzy: 11 * 60, delkaPauzy: 30 };
 // 10 minut po celé hodině dolů platí už jen pro dny před 4. 11. 2026 —
 // od toho dne (majitel 3. 11.) příchod VŽDY nahoru na celou nebo půl hodinu.
 // Stejně jako hajenaDobaPrichodu v appce.
@@ -279,11 +280,25 @@ function upravDen(z, nyni) {
   }
   let pauzaMin = 0;
   const kPrehledu = [];
+  // Délka pauzy se počítá PŘESNĚ jako attBreakMinutes v appce (audit 3. 11. 2026, D5)
+  // — kdo by to měnil, ať změní obojí. Bez uložených hodin (total_hours) by se jinak
+  // odběrateli ukázaly jiné hodiny, než jsou ve výkazu.
   for (const p of pauzy) {
-    const zac = naMinuty(p.bs);
+    const zacSurovy = naMinuty(p.bs);
     const kon = naMinuty(p.be);
-    if (zac == null || kon == null) continue;
-    const delka = kon - zac;
+    if (zacSurovy == null || kon == null) continue;
+    // Pauza začínající 1–2 minuty před 11:00 se počítá od 11:00.
+    const posunuty = (zacSurovy < SMENA.zacatekPauzy && SMENA.zacatekPauzy - zacSurovy <= 2)
+      ? SMENA.zacatekPauzy : zacSurovy;
+    // Posun na 11:00 nesmí přeskočit konec pauzy (10:58–10:59): jinak by vyšla
+    // záporná, přičetl by se den a odečetlo by se 1439 minut. Konec mezi skutečným
+    // začátkem a 11:00 = počítá se od skutečného začátku. Noční pauza (23:50–0:20)
+    // má konec před skutečným začátkem, takže se jí to netýká.
+    const zac = (kon <= posunuty && kon >= zacSurovy) ? zacSurovy : posunuty;
+    // Pauza přes půlnoc: konec je v minutách dne menší než začátek, ale uplynula
+    // kladná doba — záporná délka se NEpřeskakuje, přičte se den.
+    const surova = kon - zac;
+    const delka = surova < 0 ? surova + 24 * 60 : surova;
     if (delka <= 0) continue;
     const zapocteno = delka < SMENA.delkaPauzy ? SMENA.delkaPauzy : delka;
     pauzaMin += zapocteno;
