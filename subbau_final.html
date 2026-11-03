@@ -5440,7 +5440,7 @@ async function submitAdminSignatureWithPlacement() {
 // Po nahrání nové verze se snadno pozná, jestli se opravdu nasadila: otevřete
 // appku, zmáčkněte F12 (na Macu ⌥⌘I) a v konzoli je vypsané tohle datum. Když
 // tam svítí starší, prohlížeč nebo GitHub drží starou verzi.
-const SUBBAU_VERZE = '2026-11-03 b — Příchod bez 10 minut tolerance, vždy nahoru na celou nebo půl'
+const SUBBAU_VERZE = '2026-11-03 b — Příchod bez 10 minut tolerance, správci se nesekají (živé spojení), nahlášené nepřítomnosti'
 console.log('SubBau docházka — verze ' + SUBBAU_VERZE)
 // Verze i dole v menu správce. Když někdo novinku „nevidí", podle ní se hned
 // pozná, jestli nemá otevřenou starou kopii appky — bez hledání v konzoli.
@@ -8748,15 +8748,28 @@ function _startAdminRealtimeWatchdog() {
 function startAdminRealtime() {
   if (typeof sb === 'undefined' || !sb) return
   if (_rtRetryTimer) { clearTimeout(_rtRetryTimer); _rtRetryTimer = null }
-  // Nezakládej duplicitní kanál
-  if (adminRealtimeSub) { try { sb.removeChannel(adminRealtimeSub) } catch(e) {} adminRealtimeSub = null }
+  // Nezakládej duplicitní kanál. Starý se nejdřív ODPOJÍ z adminRealtimeSub
+  // a teprve pak zavře — jeho zavření (CLOSED) pak v odběru níž nevypadá jako
+  // výpadek nového spojení. Dřív to vypadalo: každé zavření starého kanálu
+  // spustilo další přepojení a to zase zavřelo nový kanál. Deník 3. 11. 2026
+  // (Švamberk, „adminovi se to pořád seká"): od prvního výpadku ve 14:05 se
+  // spojení přepojovalo dokola, 2624× za 3,5 h — mezitím správci nechodily
+  // živé změny (smazaný záznam zmizel až po čase) a každých 45 s se
+  // překreslovala celá otevřená sekce (náhradní obnova bez spojení).
+  const starySub = adminRealtimeSub
+  adminRealtimeSub = null
+  if (starySub) { try { sb.removeChannel(starySub) } catch(e) {} }
   const tables = ['profiles','documents','teams','team_assignments','subteams','companies','contracts','attendance','notifications','announcements','site_photos','chat_messages','doc_alert_dismissals','vacations']
   // Nový název kanálu při každém pokusu — server si po výpadku někdy drží ten starý
   let ch = sb.channel('admin-live-' + Date.now())
   tables.forEach(t => {
     ch = ch.on('postgres_changes', { event: '*', schema: 'public', table: t }, (payload) => _onAdminDbChange(t, payload))
   })
+  const tentoKanal = ch
   adminRealtimeSub = ch.subscribe((status, err) => {
+    // Hlásí se jen kanál, který je pořád ten aktuální. Zavřený starý kanál
+    // (nahrazený novým, nebo zavřený při odhlášení) žádné přepojení nespouští.
+    if (adminRealtimeSub !== tentoKanal) return
     if (status === 'SUBSCRIBED') {
       _rtRetryDelay = 2000                 // spojení drží → reset čekací doby
       console.log('[admin realtime] živá aktualizace aktivní')
@@ -9407,7 +9420,8 @@ async function doLogout() {
   todayAttId = null
   stopClock()
   // Odpoj živou aktualizaci admin dat
-  if (adminRealtimeSub) { try { sb.removeChannel(adminRealtimeSub) } catch(e) {} adminRealtimeSub = null }
+  // Nejdřív odpojit, pak zavřít — zavření pak nespustí přepojení (3. 11. 2026).
+  { const s = adminRealtimeSub; adminRealtimeSub = null; if (s) { try { sb.removeChannel(s) } catch(e) {} } }
   if (osvecRealtimeSub) { try { sb.removeChannel(osvecRealtimeSub) } catch(e) {} osvecRealtimeSub = null }
   if (window._adminPendingInt) { clearInterval(window._adminPendingInt); window._adminPendingInt = null }
   // Zastav hlídače spojení, ať se po odhlášení zbytečně nepokoušejí připojovat
@@ -12496,7 +12510,11 @@ async function loadVacationAlerts() {
   let data = null
   try {
     const res = await sb.from('vacations')
-      .select('id, worker_id, date_from, date_to, note, type, created_by, worker:profiles(full_name,team_id)')
+      // Vazba přes worker_id výslovně: vacations má na profiles dvě vazby
+      // (worker_id i created_by) a bez upřesnění server dotaz odmítne (PGRST201)
+      // — okno s nahlášenými nepřítomnostmi se pak správci vůbec neukázalo
+      // (deník 3. 11. 2026, db-cteni|rest/vacations HTTP 300).
+      .select('id, worker_id, date_from, date_to, note, type, created_by, worker:profiles!worker_id(full_name,team_id)')
       .not('created_by', 'is', null)
       .gte('date_to', localDateStr(hranice))
       .order('date_from', { ascending: false })
