@@ -789,7 +789,13 @@ body.ubyt-tahne,body.ubyt-tahne *{cursor:grabbing!important;user-select:none!imp
    příchod / pauza od / pauza do / odchod, pak stavba a co dělal. Okno karty
    jde na telefonu přes celou šířku. Na počítači se nemění nic. */
 @media (max-width:700px){
-  #worker-modal{padding:6px !important}
+  /* Okno začíná pod stavovým řádkem telefonu (majitel 3. 11. 2026: „když si na
+     telefonu jako admin otevřu profil člověka tak to nemůžu zavřít ten křížek je
+     moc vysoko a nejde na něj máčknout"). Stejné odsazení jako lišta správce. */
+  #worker-modal{padding:calc(6px + env(safe-area-inset-top)) 6px 6px !important}
+  @media (display-mode: browser) {
+    #worker-modal{padding-top:max(calc(6px + env(safe-area-inset-top)), 24px) !important}
+  }
   #worker-modal > div{width:100% !important;border-radius:12px !important}
   #worker-modal .wd-hlava{padding:14px 12px !important;gap:8px}
   #worker-modal .wd-hlava-kdo{gap:10px !important;min-width:0}
@@ -5440,7 +5446,7 @@ async function submitAdminSignatureWithPlacement() {
 // Po nahrání nové verze se snadno pozná, jestli se opravdu nasadila: otevřete
 // appku, zmáčkněte F12 (na Macu ⌥⌘I) a v konzoli je vypsané tohle datum. Když
 // tam svítí starší, prohlížeč nebo GitHub drží starou verzi.
-const SUBBAU_VERZE = '2026-11-03 c — Mazání docházky bez čekání a bez druhého klepnutí'
+const SUBBAU_VERZE = '2026-11-03 c — Mazání docházky bez čekání a bez druhého klepnutí, křížek profilu na telefonu'
 console.log('SubBau docházka — verze ' + SUBBAU_VERZE)
 // Verze i dole v menu správce. Když někdo novinku „nevidí", podle ní se hned
 // pozná, jestli nemá otevřenou starou kopii appky — bez hledání v konzoli.
@@ -12942,7 +12948,7 @@ function opravDlouhyDen(workerId, workDate, kw, kwYear, jmeno) {
 // proto se ptáme a v otázce je vidět, koho a který den se to týká.
 async function deleteLongDayRecord(id, workerId, jmeno, popis, tlacitko, kw, kwRok, den) {
   if (!id) return
-  const odemkni = zamkniMazani('dlouhy|' + id, [tlacitko])
+  const odemkni = zamkniMazani('dlouhy|' + id)
   if (!odemkni) return
   try {
     if (!await hlidejVyfakturovanyTyden(workerId, workerId ? tydenProKontrolu([id], kw, kwRok, den) : { ids: [id] }, 'Opravdu SMAZAT celý záznam docházky?\n\n'
@@ -12964,7 +12970,7 @@ async function deleteLongDayRecord(id, workerId, jmeno, popis, tlacitko, kw, kwR
     // nejbližším načtení — smaže jen ta skrytí, ke kterým už žádný dlouhý den není.
     // Položka zmizí hned; když byla poslední, zmizí celý blok (nástěnka se
     // po smazání přenačítá s odkladem 1,5 s kvůli ranní vlně příchodů).
-    odeberRadekPoSmazani(tlacitko, '.unclosed-row')
+    odeberRadekPoSmazani(tlacitko, '.unclosed-row', '#dash-unclosed-shifts button[onclick*="deleteLongDayRecord(\'' + _selId(id) + '\'"]')
     const blok = document.getElementById('dash-unclosed-shifts')
     if (blok && !blok.querySelector('.unclosed-row')) blok.style.display = 'none'
     showToast('🗑 Záznam docházky smazán')
@@ -15118,6 +15124,9 @@ async function loadTodayTimeline() {
     }
     const g = byWorker[wid]
     if (r.id) g.ids.push(r.id)
+    // Záznamy dne s různým uloženým týdnem (oprava z okna jiného týdne):
+    // koš pak kontroluje fakturu postaru podle id, každý záznam za svůj týden.
+    if (String(r.kw) !== String(g.kw) || String(r.kw_year) !== String(g.kw_year)) { g.kw = null; g.kw_year = null }
     if (r.odchylka_ok !== true) g.okVse = false
     const ci = r.check_in ? r.check_in.slice(0,5) : null
     const co = r.check_out ? r.check_out.slice(0,5) : null
@@ -15313,7 +15322,7 @@ async function deleteTodayRecord(id, name, den, tlacitko, workerId, kw, kwRok) {
   // druhé směny a admin měl dojem, že mazání nefunguje.
   const ids = String(id).split(',').filter(Boolean)
   if (!ids.length) return
-  const odemkni = zamkniMazani('dnes|' + ids.join(','), [tlacitko])
+  const odemkni = zamkniMazani('dnes|' + ids.join(','))
   if (!odemkni) return
   try {
     const kolik = ids.length > 1 ? '\n\nDen má ' + ids.length + ' záznamy — smažou se všechny.' : ''
@@ -15329,7 +15338,7 @@ async function deleteTodayRecord(id, name, den, tlacitko, workerId, kw, kwRok) {
       if (typeof loadTodayTimeline === 'function') loadTodayTimeline()
       return
     }
-    odeberRadekPoSmazani(tlacitko, 'tr.today-row')
+    odeberRadekPoSmazani(tlacitko, 'tr.today-row', '#today-timeline button[onclick^="deleteTodayRecord(\'' + _selId(ids.join(',')) + '\'"]')
     showToast('🗑 Záznam smazán')
     refreshAttendanceEverywhere()
   } finally { odemkni() }
@@ -34475,6 +34484,7 @@ function editAttRecord(id, date, ci, co, bs, be) {
   document.getElementById('edit-att-worker').value = ''
   document.getElementById('edit-att-id').value = id
   _editAttOtisk = null
+  _editAttRadek = null
   _editAttDen = id ? String(date || '').slice(0, 10) || null : null
   document.getElementById('edit-att-date').value = date
   setEditTime('ci', ci ? ci.slice(0,5) : '')
@@ -34509,6 +34519,7 @@ function editAttRecord(id, date, ci, co, bs, be) {
       if (siteEl && siteEl.dataset.dotknuto !== '1') siteEl.value = attData.construction_site || ''
       if (descEl && descEl.dataset.dotknuto !== '1') descEl.value = attData.work_description || ''
       nastavVyplatuDne(attData)
+      if (String(document.getElementById('edit-att-id').value) === String(attData.id)) _editAttRadek = attData
       _editAttOtisk = otiskDneProUpravu({ ...attData, check_in: ci || null, check_out: co || null })
       naplnPauzyDoFormulare(attData)
       if (ulozBtn) { ulozBtn.disabled = false; ulozBtn.textContent = ulozBtn.dataset.puvodni || 'Uložit' }
@@ -34859,23 +34870,25 @@ function odeberDalsiPauzu(i) {
 // řádek, který tabulka už má), tlačítko mezitím nic neukázalo a druhé klepnutí
 // skončilo druhou otázkou a falešným „nesmazalo se" — první už záznam smazalo.
 // A řádek zmizel, až když se celá docházka znovu načetla.
-// Teď: tlačítko se hned zamkne, totéž mazání podruhé neprojde (ani z řádku,
-// který se mezitím překreslil), týden jde do kontroly rovnou z řádku (jedno
-// kolo) a smazaný řádek zmizí hned; tabulky se dorovnají na pozadí.
+// Teď: totéž mazání podruhé neprojde (ani z řádku, který se mezitím
+// překreslil), týden jde do kontroly rovnou z řádku (jedno kolo) a smazaný
+// řádek zmizí hned; tabulky se dorovnají na pozadí.
+// Zámek je jen v paměti, tlačítek se nedotýká — majitel 3. 11. 2026: „nesmí se
+// změnit žádný vzhled dokud neřeknu co a jak se má změnit jde mi jen o opravy".
 const _mazaniBezi = new Set()
-function zamkniMazani(klic, tlacitka) {
+function zamkniMazani(klic) {
   if (_mazaniBezi.has(klic)) return null
   _mazaniBezi.add(klic)
-  const zamcene = (tlacitka || []).filter(b => b && !b.disabled)
-    .map(b => ({ b, opacity: b.style.opacity, cursor: b.style.cursor }))
-  zamcene.forEach(z => { z.b.disabled = true; z.b.style.opacity = '.5'; z.b.style.cursor = 'wait' })
-  return () => {
-    _mazaniBezi.delete(klic)
-    zamcene.forEach(z => { z.b.disabled = false; z.b.style.opacity = z.opacity; z.b.style.cursor = z.cursor })
-  }
+  return () => { _mazaniBezi.delete(klic) }
 }
-function odeberRadekPoSmazani(tlacitko, selektor) {
-  const radek = tlacitko && tlacitko.closest ? tlacitko.closest(selektor) : null
+// Do selektoru jde jen id záznamu — uvozovky a zpětná lomítka pryč, ať nespadne.
+const _selId = id => String(id == null ? '' : id).replace(/["\\]/g, '')
+// Tabulka se mohla během čekání překreslit (živá nebo tichá obnova) — tlačítko,
+// na které se klepnulo, pak visí na starém neviditelném řádku. Odebrat je
+// potřeba viditelnou náhradu: najde ji `aktualni`, selektor tlačítka téhož mazání.
+function odeberRadekPoSmazani(tlacitko, selektor, aktualni) {
+  const tl = (tlacitko && tlacitko.isConnected) ? tlacitko : (aktualni ? document.querySelector(aktualni) : null)
+  const radek = tl && tl.closest ? tl.closest(selektor) : null
   if (radek) radek.remove()
   return radek
 }
@@ -34980,6 +34993,9 @@ async function hlidejVyfakturovanyTyden(workerId, kde, otazka) {
 // pravidlo se proto řídí dnem, se kterým se okno otevřelo. Nový záznam
 // (bez id) má den z pole.
 let _editAttDen = null
+// Řádek dne, který editAttRecord načetl z karty pracovníka — koš v okně z něj
+// vezme člověka a týden pro kontrolu faktury (3. 11. 2026), ať se neptá znovu.
+let _editAttRadek = null
 function denProPravidloUpravy() {
   const id = (document.getElementById('edit-att-id') || {}).value
   return (id && _editAttDen) || (document.getElementById('edit-att-date') || {}).value || null
@@ -35207,14 +35223,14 @@ async function deleteAttRecord() {
   // Den a řádek dne HNED (3. 11. 2026): dřív se datum četlo až po kontrole
   // faktury — kdo mezitím přepnul den, promítl smazání do jiného dne.
   const den = document.getElementById('edit-att-date').value
-  const radek = workerId ? ((_weekEditRecords[den] || []).find(r => String(r.id) === String(id)) || null) : null
-  const okno = document.getElementById('edit-att-modal')
-  const odemkni = zamkniMazani('okno|' + id, okno ? [okno.querySelector('button[onclick="deleteAttRecord()"]'),
-    okno.querySelector('button[onclick="saveEditAttRecord()"]')] : [])
+  // Řádek dne: v týdenním režimu z paměti okna, z karty pracovníka ten, který
+  // editAttRecord načetl (dokud se nenačetl, kontrola si ho dočte podle id).
+  const radek = workerId ? ((_weekEditRecords[den] || []).find(r => String(r.id) === String(id)) || null)
+    : ((_editAttRadek && String(_editAttRadek.id) === String(id)) ? _editAttRadek : null)
+  const odemkni = zamkniMazani('okno|' + id)
   if (!odemkni) return
   try {
-    // Vyfakturovaný týden — v týdenním režimu má okno řádek dne v paměti,
-    // z karty pracovníka si člověka a týden dočte z řádku podle id.
+    // Vyfakturovaný týden — člověk a týden z řádku dne, bez řádku postaru podle id.
     const kde = radek ? tydenProKontrolu([id], radek.kw, radek.kw_year, radek.work_date) : { ids: [id] }
     if (!await hlidejVyfakturovanyTyden((radek && radek.worker_id) || workerId, kde, 'Opravdu smazat tento záznam docházky?')) return
     const { data: smazano, error } = await sb.from('attendance').delete().eq('id', id).select('id')
@@ -35224,15 +35240,27 @@ async function deleteAttRecord() {
 
     // Týdenní režim — zůstaň v modalu: smazaný den zmizí hned, přehledy na pozadí
     if (workerId) {
-      promitniDenDoTydne(den, null, id)
+      const ted = document.getElementById('edit-att-date').value
+      if (ted === den) promitniDenDoTydne(den, null, id)
+      else {
+        // Správce mezitím přepnul na jiný den: smazaný den jen zmizí z lišty a okno
+        // zůstane na dni, který má na očích, i s tím, co do něj napsal.
+        const zbyva = (_weekEditRecords[den] || []).filter(r => String(r.id) !== String(id))
+        if (zbyva.length) _weekEditRecords[den] = zbyva; else delete _weekEditRecords[den]
+        vykresliDnyTydne(parseInt(document.getElementById('edit-att-kw').value), parseInt(document.getElementById('edit-att-kwyear').value))
+        document.querySelectorAll('.edit-day-btn').forEach(b => {
+          const active = b.dataset.date === ted
+          b.style.outline = active ? '2px solid var(--blue)' : 'none'
+          b.style.outlineOffset = active ? '1px' : '0'
+        })
+      }
       refreshAttendanceEverywhere(workerId).catch(e => console.warn('[refresh]', e?.message))
       return
     }
 
     closeEditAttModal()
     // Z karty pracovníka: řádek dne pryč hned, karta se dorovná přenačtením.
-    const tlRadku = document.querySelector('#wd-att-table .att-edit-btn[data-id="' + String(id).replace(/["\\]/g, '') + '"]')
-    if (tlRadku) odeberRadekPoSmazani(tlRadku, 'tr')
+    odeberRadekPoSmazani(null, 'tr', '#wd-att-table .att-edit-btn[data-id="' + _selId(id) + '"]')
     await refreshAttendanceEverywhere(currentWorkerId)
   } finally { odemkni() }
 }
@@ -46104,7 +46132,7 @@ async function loadWdAttendance() {
       <td class="wa-stavba" data-l="Stavba" style="font-size:12px;font-weight:600;color:var(--blue)">${escAttr(attDisplaySite(r))}${attOriginBadge(r)}${odchodPolohaHtml(r)}</td>
       <td class="wa-popis" data-l="Co dělal" style="font-size:11px;color:var(--text2)">${escAttr(r.work_description||'—')}</td>
       <td class="wa-akce" style="white-space:nowrap"><button class="att-edit-btn" title="Upravit den" data-id="${r.id}" data-date="${r.work_date}" data-ci="${r.check_in||''}" data-co="${r.check_out||''}" data-bs="${r.break_start||''}" data-be="${r.break_end||''}" style="padding:3px 8px;font-size:11px;border:1px solid var(--brd);border-radius:6px;cursor:pointer;background:var(--bg);font-family:inherit"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:1em;height:1em;flex-shrink:0;vertical-align:-2px"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/></svg> </button>
-        <button onclick="deleteWorkerDay('${r.id}','${r.work_date}',this,${parseInt(r.kw)||0},${parseInt(r.kw_year)||0})" title="Smazat tento den" style="padding:3px 8px;font-size:11px;border:1px solid var(--red);border-radius:6px;cursor:pointer;background:none;color:var(--red);font-family:inherit;margin-left:4px"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:1em;height:1em;flex-shrink:0;vertical-align:-2px"><path d="M3 6h18M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6M14 11v6"/></svg> </button></td>
+        <button onclick="deleteWorkerDay('${r.id}','${r.work_date}',this,${parseInt(r.kw)||0},${parseInt(r.kw_year)||0},'${r.worker_id||''}')" title="Smazat tento den" style="padding:3px 8px;font-size:11px;border:1px solid var(--red);border-radius:6px;cursor:pointer;background:none;color:var(--red);font-family:inherit;margin-left:4px"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:1em;height:1em;flex-shrink:0;vertical-align:-2px"><path d="M3 6h18M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6M14 11v6"/></svg> </button></td>
     </tr>`
   }).join('')
   const nowStr2 = new Date().toTimeString().slice(0,8)
@@ -46173,17 +46201,21 @@ async function loadWdForemanSheet(week, year) {
 }
 
 // Admin — smazání celého dne docházky pracovníka (s potvrzením)
-async function deleteWorkerDay(id, workDate, tlacitko, kw, kwRok) {
+async function deleteWorkerDay(id, workDate, tlacitko, kw, kwRok, workerId) {
   if (!id) return
-  const odemkni = zamkniMazani('karta|' + id, [tlacitko])
+  const odemkni = zamkniMazani('karta|' + id)
   if (!odemkni) return
   try {
     const dateLabel = workDate ? new Date(workDate).toLocaleDateString('cs-CZ', {weekday:'long', day:'2-digit', month:'2-digit', year:'numeric'}) : 'tento den'
-    if (!await hlidejVyfakturovanyTyden(currentWorkerId, tydenProKontrolu([id], kw, kwRok, workDate), 'Opravdu smazat docházku za ' + dateLabel + '?\n\nTato akce je nevratná.')) return
+    // Člověk z ŘÁDKU: po přepnutí karty na jiného člověka tabulka chvíli ukazuje
+    // řádky předchozího a currentWorkerId už patří novému. Bez člověka z řádku
+    // (starší volání) postaru podle id — kontrola si řádek dočte sama.
+    const kde = workerId ? tydenProKontrolu([id], kw, kwRok, workDate) : { ids: [id] }
+    if (!await hlidejVyfakturovanyTyden(workerId || currentWorkerId, kde, 'Opravdu smazat docházku za ' + dateLabel + '?\n\nTato akce je nevratná.')) return
     const { data: smazano, error } = await sb.from('attendance').delete().eq('id', id).select('id')
     if (error) { showToast('❌ Chyba mazání: ' + error.message); return }
     if (!smazano || !smazano.length) { showToast('❌ Den se nesmazal — databáze to nepovolila'); return }
-    odeberRadekPoSmazani(tlacitko, 'tr')
+    odeberRadekPoSmazani(tlacitko, 'tr', '#wd-att-table .att-edit-btn[data-id="' + _selId(id) + '"]')
     showToast('🗑 Den smazán')
     loadWdAttendance()
   } finally { odemkni() }
