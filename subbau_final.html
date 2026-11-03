@@ -23747,8 +23747,13 @@ function nactiRozdelanyOdchod() {
     const raw = lsGet(_ODCHOD_KLIC)
     if (!raw) return null
     const p = JSON.parse(raw)
-    // Platí jen pro dnešek a pro přihlášeného pracovníka — jinak zahoď
-    if (!p || p.den !== localDateStr() || (p.worker && currentUser?.id && p.worker !== currentUser.id)) {
+    // Platí jen pro dnešek a VČEREJŠEK a pro přihlášeného pracovníka — jinak zahoď.
+    // Včerejšek (audit 3. 11. 2026, D4): noční směna — odchod rozdělaný ve 2:00 nese
+    // včerejší datum od půlnoci nebo dnešní, ale směna samotná patří včerejšímu dni;
+    // a kdo rozdělal odchod ve 23:50, otevře appku už po půlnoci. Shodu s konkrétní
+    // otevřenou směnou hlídá volající (attId), tady se jen nezahazuje.
+    const vcera = new Date(); vcera.setDate(vcera.getDate() - 1)
+    if (!p || (p.den !== localDateStr() && p.den !== localDateStr(vcera)) || (p.worker && currentUser?.id && p.worker !== currentUser.id)) {
       zapomenRozdelanyOdchod(); return null
     }
     return p
@@ -24386,6 +24391,15 @@ async function getTodayRecord() {
     todayRecord = { ...vceraOtevrena }
     updateMobStav(vceraOtevrena, (data || []).concat([vceraOtevrena]))
     if (typeof updateGpsStrip === 'function') updateGpsStrip()
+    // Rozdělaný odchod noční směny (audit 3. 11. 2026, D4): kdo ve 2:00 ťukl na Konec
+    // směny a dialog nevyplnil, dostane po znovuotevření dialog zpátky se svým časem —
+    // dřív se tahle větev vrátila dřív, než se na rozdělaný odchod vůbec podívala,
+    // a odchod se zapsal až později (třeba o hodinu). Shodu hlídá attId + otevřená směna.
+    const rozdelanyVcera = nactiRozdelanyOdchod()
+    if (rozdelanyVcera && !pendingCheckout && rozdelanyVcera.attId === vceraOtevrena.id) {
+      pendingCheckout = { timeStr: rozdelanyVcera.timeStr, hours: rozdelanyVcera.hours, attId: rozdelanyVcera.attId }
+      showCheckoutDialog()
+    }
     return
   }
 
