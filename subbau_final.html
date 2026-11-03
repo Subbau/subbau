@@ -25610,16 +25610,29 @@ async function mobCheckin(type) {
         }
         // Spočítej hodiny podle pravidel směny (včetně 2. pauzy!)
         // Načti aktuální pauzy ze serveru, ať se nespoléháme na možná neúplnou lokální kopii.
+        // Audit 3. 11. 2026 (D2): čte se i příchod, odchod a datum dne. Lokální kopie
+        // může být stará — SubBau mezitím mohl den opravit (příchod) nebo uzavřít
+        // (odchod) a odchod z mobilu by jeho zápis přepsal. Stejně jako confirmCheckout.
         let brkSrc = updated
+        let cerstvy = null
         try {
           const { data: fresh } = await _attMerFaze(_mer, 'kontrola', withTimeout(sb.from('attendance')
-            .select('break_start,break_end,break2_start,break2_end,breaks')
+            .select('check_in,check_out,work_date,break_start,break_end,break2_start,break2_end,breaks')
             .eq('id', todayAttId).single(), 8000))
-          if (fresh) brkSrc = { ...updated, ...fresh }
+          if (fresh) { brkSrc = { ...updated, ...fresh }; cerstvy = fresh }
         } catch(e) { /* fallback: lokální kopie */ }
+        if (cerstvy && cerstvy.check_out) {
+          // SubBau směnu mezitím uzavřel sám — jeho časy mají přednost před našimi
+          // (stejný postup i hláška jako v confirmCheckout).
+          pendingCheckout = null; zapomenRozdelanyOdchod(); todayAttId = null; todayRecord = null
+          checkinInProgress = false
+          showToast('ℹ️ Tuto směnu už uzavřel SubBau — platí jeho zápis')
+          getTodayRecord(); loadMobWeek()
+          return
+        }
         const adjOut = applyAttendanceRules({
-          work_date: updated.work_date,   // pravidlo příchodu podle dne (3. 11. 2026)
-          check_in: updated.check_in,
+          work_date: brkSrc.work_date || updated.work_date,   // pravidlo příchodu podle dne (3. 11. 2026); čerstvé, jinak lokální
+          check_in: brkSrc.check_in || updated.check_in,      // čerstvý příchod (SubBau ho mohl opravit), jinak lokální
           check_out: timeStr,
           break_start: brkSrc.break_start,
           break_end: brkSrc.break_end,
@@ -25637,9 +25650,12 @@ async function mobCheckin(type) {
           // `.select('id')` tu není navíc: bez něj se nepozná zápis, který
           // projde bez chyby, ale nezmění ani řádek — a pracovník by uviděl
           // „odchod zapsán", přestože se nic neuložilo.
+          // `.is('check_out', null)`: zápis projde jen u směny, která je pořád otevřená.
+          // Kdyby ji mezi čtením a zápisem uzavřel SubBau, nezmění se ani řádek
+          // a platí níž existující hláška „Odchod se neuložil“ (D2).
           const { data: outRows, error: outErr } = await _attMerFaze(_mer, 'zapis', withTimeout(sb.from('attendance').update({
             check_out: timeStr, total_hours: h
-          }).eq('id', todayAttId).select('id'), 12000))
+          }).eq('id', todayAttId).is('check_out', null).select('id'), 12000))
           if (outErr) {
             showToast(chybaText(outErr, 'Odchod se nezapsal')); checkinInProgress = false
             try { if (typeof _dnDochazka === 'function') _dnDochazka('out', 'zapis', 'Odchod se nezapsal — chyba zápisu (' + kodChybyProDenik(outErr) + ')', { kod: outErr.code, stav: outErr.status }, 'chyba') } catch (x) { console.warn('[deník chyb]', x) } // eslint-disable-line no-undef
