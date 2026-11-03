@@ -3478,7 +3478,7 @@ setTimeout(function brzda() {
 
             <div style="margin-top:14px;padding-top:14px;border-top:1px solid var(--brd)">
               <b style="color:#211D1A;display:block;margin-bottom:8px">Zaokrouhlování časů</b>
-              <div style="display:flex;gap:8px;margin-bottom:7px"><span style="color:#9c3b22;flex-shrink:0">•</span><span><b style="color:#211D1A">Příchod</b> vždy nahoru na nejbližší celou nebo půl hodinu (6:31–7:00 → <b style="color:#211D1A">7:00</b>, 7:01–7:30 → <b style="color:#211D1A">7:30</b>, 6:30 → <b style="color:#211D1A">6:30</b>); od 3. 11. 2026 už bez 10 minut tolerance (starší dny se počítají jako dřív). Skutečný čas se vždy <b style="color:#211D1A">zaznamená</b>.</span></div>
+              <div style="display:flex;gap:8px;margin-bottom:7px"><span style="color:#9c3b22;flex-shrink:0">•</span><span><b style="color:#211D1A">Příchod</b> vždy nahoru na nejbližší celou nebo půl hodinu (6:31–7:00 → <b style="color:#211D1A">7:00</b>, 7:01–7:30 → <b style="color:#211D1A">7:30</b>, 6:30 → <b style="color:#211D1A">6:30</b>); od 4. 11. 2026 už bez 10 minut tolerance (starší dny se počítají jako dřív). Skutečný čas se vždy <b style="color:#211D1A">zaznamená</b>.</span></div>
               <div style="display:flex;gap:8px;margin-bottom:7px"><span style="color:#9c3b22;flex-shrink:0">•</span><span><b style="color:#211D1A">Přestávka</b> kratší než 30 min se počítá jako plných <b style="color:#211D1A">30 min</b>.</span></div>
               <div style="display:flex;gap:8px"><span style="color:#9c3b22;flex-shrink:0">•</span><span><b style="color:#211D1A">Odchod</b> na celou půlhodinu <b style="color:#211D1A">dolů</b> (16:25 → <b style="color:#211D1A">16:00</b>, 16:45 → <b style="color:#211D1A">16:30</b>).</span></div>
             </div>
@@ -35301,6 +35301,7 @@ function editAttRecord(id, date, ci, co, bs, be) {
   document.getElementById('edit-att-worker').value = ''
   document.getElementById('edit-att-id').value = id
   _editAttOtisk = null
+  _editAttDen = id ? String(date || '').slice(0, 10) || null : null
   document.getElementById('edit-att-date').value = date
   setEditTime('ci', ci ? ci.slice(0,5) : '')
   setEditTime('co', co ? co.slice(0,5) : '')
@@ -35494,6 +35495,7 @@ function pickEditDay(ds, idx) {
 
   document.getElementById('edit-att-id').value = rec?.id || ''
   _editAttOtisk = rec ? otiskDneProUpravu(rec) : null
+  _editAttDen = rec ? String(rec.work_date || ds || '').slice(0, 10) || null : null
   document.getElementById('edit-att-date').value = ds
   if (rec) {
     // Existující záznam — naplň přesně z DB
@@ -35599,8 +35601,9 @@ function updateEditHoursPreview() {
     if (bs2 && be2) pauzyProNahled.push({ bs: bs2, be: be2 })
     _editDalsiPauzy.forEach(b => { if (b && b.bs && b.be) pauzyProNahled.push({ bs: b.bs, be: b.be }) })
     const adj = applyAttendanceRules({
-      // Den rozhoduje o pravidle příchodu (do 2. 11. 2026 ještě 10 minut tolerance).
-      work_date: (document.getElementById('edit-att-date') || {}).value || null,
+      // Den rozhoduje o pravidle příchodu (do 3. 11. 2026 ještě 10 minut tolerance) —
+      // u existujícího záznamu jeho SKUTEČNÝ den, ne pole Datum (to se neukládá).
+      work_date: denProPravidloUpravy(),
       check_in: ci+':00', check_out: co+':00',
       break_start: bs?bs+':00':null, break_end: be?be+':00':null,
       break2_start: bs2?bs2+':00':null, break2_end: be2?be2+':00':null,
@@ -35766,6 +35769,16 @@ async function hlidejVyfakturovanyTyden(workerId, kde, otazka) {
     + (otazka || 'Uložit změnu?'))
 }
 
+// Skutečný den záznamu v okně Upravit den (pravidlo příchodu, 3. 11. 2026).
+// Pole Datum jde v okně přepsat, ale u opravy existujícího dne se neukládá —
+// pravidlo se proto řídí dnem, se kterým se okno otevřelo. Nový záznam
+// (bez id) má den z pole.
+let _editAttDen = null
+function denProPravidloUpravy() {
+  const id = (document.getElementById('edit-att-id') || {}).value
+  return (id && _editAttDen) || (document.getElementById('edit-att-date') || {}).value || null
+}
+
 async function saveEditAttRecord() {
   const id = document.getElementById('edit-att-id').value
   const ci = document.getElementById('edit-att-ci').value
@@ -35818,7 +35831,9 @@ async function saveEditAttRecord() {
   _editDalsiPauzy.forEach(b => { if (b && b.bs && b.be) pauzyProVypocet.push({ bs: b.bs, be: b.be }) })
 
   const hours = (ci && co) ? applyAttendanceRules({
-    work_date: dateStr,   // starý den se při úpravě počítá postaru (3. 11. 2026)
+    // Starý den se při úpravě počítá postaru (3. 11. 2026). U existujícího záznamu
+    // rozhoduje jeho skutečný den — pole Datum se u opravy neukládá.
+    work_date: (puvodniRadek && puvodniRadek.work_date) || (id && _editAttDen) || dateStr,
     check_in: ci+':00', check_out: co+':00',
     break_start: bs?bs+':00':null, break_end: be?be+':00':null,
     break2_start: bs2?bs2+':00':null, break2_end: be2?be2+':00':null,
@@ -45495,21 +45510,24 @@ function buildKWOptions() {
 const SHIFT = { start: 7*60, breakStart: 11*60, breakLen: 30, end: 16*60, abnormal: 20*60+30 }
 // PŘÍCHOD K OČNÍ KONTROLE (majitel 29. 9. 2026): 7:01 až 7:30.
 // Právě v tomhle pásmu dělá zaokrouhlení největší rozdíl a vyplatí se na to
-// mrknout: od 3. 11. 2026 jde každý příchod po 7:00 NAHORU na 7:30 (člověk
+// mrknout: od 4. 11. 2026 jde každý příchod po 7:00 NAHORU na 7:30 (člověk
 // přijde o půl hodiny); u starších dnů se do 7:10 šlo dolů na 7:00. Vykřičník
 // je proto, ať se nemusí procházet čtyřicet lidí řádek po řádku.
 //
 // HODINY ANI ZAOKROUHLENÍ SE TÍM NEMĚNÍ — je to jen značka na obrazovce.
 const KONTROLA_PRICHODU = { od: 7*60 + 1, do: 7*60 + 30 }
 // Kolik minut po CELÉ hodině se ještě odpouštělo dolů (7:08 → 7:00, 7:11 → 7:30).
-// PLATÍ UŽ JEN PRO DNY PŘED 3. 11. 2026 — majitel 3. 11. 2026: „ten 10minutový
+// PLATÍ UŽ JEN PRO DNY PŘED 4. 11. 2026 — majitel 3. 11. 2026: „ten 10minutový
 // rozdíl aby se úplně zrušil i od těch 7 všude … 6.50 je od 7, 6.32 je taky od 7,
 // ale 6.30 už je od půl 7. Když to bude od 9, tak v 8.58 je [od] 9, 9:01 je půl 10."
-// Od toho dne se příchod zaokrouhluje VŽDY nahoru na nejbližší celou nebo půl
+// Od 4. 11. se příchod zaokrouhluje VŽDY nahoru na nejbližší celou nebo půl
 // hodinu. Starší dny zůstávají podle starého pravidla, ať se nezmění výkazy
-// a faktury, které už odešly.
+// a faktury, které už odešly. Hranice je až zítřek, ne den zadání: směny
+// 3. 11. se uzavřely ještě na staré verzi a jejich uložené hodiny mají
+// 10 minut toleranci — nové pravidlo by jim ukázalo jiný příchod, než podle
+// jakého se hodiny spočítaly (oponentura 3. 11.).
 const HAJENA_DOBA_MIN = 10
-const PRICHOD_BEZ_HAJENE_DOBY_OD = '2026-11-03'
+const PRICHOD_BEZ_HAJENE_DOBY_OD = '2026-11-04'
 // Kolik minut se u téhle směny odpouští dolů: 10 jen u dnů před zrušením, jinak 0.
 // Záznam bez data (rozdělaná směna, nový zápis) jede podle nového pravidla.
 function hajenaDobaPrichodu(record) {
@@ -45671,10 +45689,10 @@ function applyAttendanceRules(record) {
   }
 
   // --- 1. PŘÍCHOD ---
-  // Od 3. 11. 2026 (majitel) VŽDY NAHORU na nejbližší celou nebo půl hodinu:
+  // Od 4. 11. 2026 (majitel 3. 11.) VŽDY NAHORU na nejbližší celou nebo půl hodinu:
   //   6:50 → 7:00,  6:32 → 7:00,  8:58 → 9:00,  9:01 → 9:30,  9:37 → 10:00.
   //   Přesná celá nebo půl zůstává:  6:30 → 6:30,  9:00 → 9:00.
-  // U dnů PŘED 3. 11. platí staré pravidlo: do 10 minut po celé hodině dolů
+  // U dnů PŘED 4. 11. platí staré pravidlo: do 10 minut po celé hodině dolů
   // na celou (7:08 → 7:00), jinak nahoru — ať se nezmění, co už se vyplatilo.
   // Platí to v kterýkoli čas, ráno i odpoledne — neplatí se doba, kdy člověk
   // ještě nebyl na stavbě.

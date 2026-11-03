@@ -196,11 +196,11 @@ const TVAR_TOKENU = /^[0-9a-f]{64}$/;
 // v subbau_final.html). Kdyby se to rozešlo, klient by viděl jiná čísla,
 // než jsou na faktuře, kterou od SubBau dostane.
 const SMENA = { start: 7 * 60, delkaPauzy: 30 };
-// 10 minut po celé hodině dolů platí už jen pro dny před 3. 11. 2026 —
-// od toho dne (majitel) příchod VŽDY nahoru na celou nebo půl hodinu.
+// 10 minut po celé hodině dolů platí už jen pro dny před 4. 11. 2026 —
+// od toho dne (majitel 3. 11.) příchod VŽDY nahoru na celou nebo půl hodinu.
 // Stejně jako hajenaDobaPrichodu v appce.
 const HAJENA_DOBA_MIN = 10;
-const PRICHOD_BEZ_HAJENE_DOBY_OD = '2026-11-03';
+const PRICHOD_BEZ_HAJENE_DOBY_OD = '2026-11-04';
 function hajenaDobaPrichodu(z) {
   const den = String((z && z.work_date) || '').slice(0, 10);
   return (den && den < PRICHOD_BEZ_HAJENE_DOBY_OD) ? HAJENA_DOBA_MIN : 0;
@@ -240,7 +240,7 @@ function naCas(m) {
 }
 
 // Zaokrouhlení jednoho dne — stejná pravidla jako v appce:
-// příchod nahoru na nejbližší celou nebo půl hodinu (u dnů před 3. 11. 2026
+// příchod nahoru na nejbližší celou nebo půl hodinu (u dnů před 4. 11. 2026
 // ještě do 10 minut po celé hodině dolů na celou).
 // Odchod vždycky dolů na půlhodinu. Pauza kratší než 30 minut se počítá jako 30.
 function upravDen(z, nyni) {
