@@ -15795,9 +15795,14 @@ function fotkaBarva(jmeno) {
   return `hsl(${h}, 42%, 42%)`
 }
 
+// Pořadí volání přehledu týdne. Odpověď na starší volání (jiný týden, starší
+// hledání) dorazí i po novější — nesmí pak přepsat tabulku (audit 3. 11. 2026).
+let _kwBeh = 0
 async function loadKWData() {
   const val = document.getElementById('kw-select')?.value
   if (!val) return
+  const beh = ++_kwBeh
+  const zastaraly = () => beh !== _kwBeh
   const [week, year] = val.split('-').map(Number)
   const tbody = document.getElementById('kw-table')
   const vlajkyNactene = Promise.all([nactiVlajky(), nactiPuntikyVsech(), nactiSkupinky()])   // vlaječky, němčina, puntíky a ubytování u jmen (souběžně)
@@ -15878,7 +15883,9 @@ async function loadKWData() {
     })
   } catch(e) { /* tabulka dovolených nemusí být dostupná */ }
 
-  if (!allWorkers?.length) { tbody.innerHTML='<tr><td colspan="9" style="text-align:center;color:var(--text3);padding:20px">Žádní pracovníci</td></tr>'; return }
+  if (zastaraly()) return
+  // kwHtml pryč, jinak by se tabulka po návratu stejných dat už nepřekreslila
+  if (!allWorkers?.length) { tbody.dataset.kwHtml = ''; tbody.innerHTML='<tr><td colspan="9" style="text-align:center;color:var(--text3);padding:20px">Žádní pracovníci</td></tr>'; return }
 
   const nowAdmin = new Date()
   const nowStrAdmin = nowAdmin.toTimeString().slice(0,8)
@@ -16042,7 +16049,11 @@ async function loadKWData() {
   if (q) {
     list = list.filter(w => (w.name||'').toLowerCase().includes(q) || (w.firm||'').toLowerCase().includes(q) || (w.sub||'').toLowerCase().includes(q))
   }
-  if (!list.length) { tbody.innerHTML = '<tr><td colspan="10" style="text-align:center;color:var(--text3);padding:20px">Nikdo neodpovídá hledání</td></tr>'; return }
+  if (!list.length) {
+    if (zastaraly()) return
+    tbody.dataset.kwHtml = ''
+    tbody.innerHTML = '<tr><td colspan="10" style="text-align:center;color:var(--text3);padding:20px">Nikdo neodpovídá hledání</td></tr>'; return
+  }
 
   // Seřaď podle firmy, pak podskupiny, pak jména — nezařazení pracovníci nakonec
   list.sort((a,b) => {
@@ -16076,6 +16087,7 @@ async function loadKWData() {
   // by na obrazovce probliklo, i když admin jen sedí a nic se neděje. Přepiš tedy
   // jen když se tabulka opravdu liší od té, co je tam už teď (běžící směna hodiny
   // pořád mění, takže se stejně obnoví, jakmile se něco reálně změní).
+  if (zastaraly()) return
   if (tbody.dataset.kwHtml !== kwHtml) {
     tbody.dataset.kwHtml = kwHtml
     tbody.innerHTML = kwHtml
@@ -33093,6 +33105,14 @@ function loadWorkerAccommodation(profile) {
   if (p) p.value = profile.accommodation_parking_price || ''
   const notes = document.getElementById('wd-acc-notes')
   if (notes) notes.value = profile.accommodation_notes || ''
+  // Kontakt a platbu ukládá „Uložit ubytování“ taky — bez načtení by je smazal
+  // (nebo přepsal tím, co zůstalo z karty předchozího člověka). Audit 3. 11. 2026.
+  const ph = document.getElementById('wd-acc-phone')
+  if (ph) ph.value = profile.accommodation_phone || ''
+  const em = document.getElementById('wd-acc-email')
+  if (em) em.value = profile.accommodation_email || ''
+  const pay = document.getElementById('wd-acc-payment')
+  if (pay) pay.value = profile.accommodation_payment || 'hotove'
 }
 
 async function saveWorkerAccommodation() {
@@ -35507,6 +35527,7 @@ async function saveManualAttendance() {
         location_lng: null,
         kw: kw.week,
         kw_year: kw.year,
+        manual_note: note || null,
         is_saturday: isSaturdayDate(date),
         is_manual: true
       }))
@@ -44077,6 +44098,9 @@ let currentWorkerId = null
 async function openWorkerModal(id) {
   currentWorkerId = id
   const { data: w } = await sb.from('profiles').select('*').eq('id', id).maybeSingle()
+  // Mezitím se kliklo na jiného člověka — jeho karta má přednost. Bez téhle
+  // kontroly by pozdní odpověď ukázala A, zatímco uložení míří na B (audit 3. 11. 2026).
+  if (String(currentWorkerId) !== String(id)) return
   if (!w) return
   currentWorkerProfile = w  // Ulož pro použití v dalších tabech
   vykresliRadekZamestnance(w)
