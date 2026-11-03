@@ -31718,6 +31718,36 @@ function pauzaNetrefila(typ) {
   try { getTodayRecord() } catch (e) {}
 }
 
+// POSLEDNÍ ODPOVĚĎ I V TELEFONU (audit 3. 11. 2026, D6). Paměť stránky se při
+// každém čerstvém načtení (probuzení telefonu, obnovení appky) vymaže. Když pak
+// dotaz na pravidlo hned selže (přihlášení se ještě obnovuje, slabý signál),
+// nebyla žádná „poslední známá odpověď“ a příchod u firmy „jen s polohou“ se
+// zapsal bez polohy — přesně případ Petra Fukse. Proto se poslední úspěšná
+// odpověď ukládá do localStorage POD ID PŘIHLÁŠENÉHO (na sdíleném telefonu se
+// odpovědi dvou lidí nesmí mísit) a při selhání platí, když v paměti žádná není.
+// Bez uložené odpovědi (první spuštění, jiný člověk, zakázané úložiště) je to
+// jako dřív: výpadek nezablokuje příchod. Všechno v try/catch — úložiště
+// v soukromém režimu nebo plné nesmí shodit docházku.
+const GPS_PRAVIDLO_KLIC = 'gps-pravidlo-posledni:'
+function gpsPravidloUloz(hodnota, kdy) {
+  try {
+    const id = currentUser && currentUser.id
+    if (!id) return
+    localStorage.setItem(GPS_PRAVIDLO_KLIC + id, JSON.stringify({ h: hodnota === true, t: kdy }))
+  } catch (e) { /* bez úložiště stačí paměť stránky */ }
+}
+function gpsPravidloNactiUlozene() {
+  try {
+    const id = currentUser && currentUser.id
+    if (!id) return null
+    const raw = localStorage.getItem(GPS_PRAVIDLO_KLIC + id)
+    if (!raw) return null
+    const p = JSON.parse(raw)
+    if (!p || typeof p.h !== 'boolean') return null
+    return { hodnota: p.h, kdy: Number(p.t) || 0 }
+  } catch (e) { return null }
+}
+
 // Odkud odpověď přišla a jak je stará, si appka pamatuje kvůli deníku
 // nezapsaného příchodu/odchodu (zapisNezapsanePolohy, 2. 11. 2026, Petr Fuks):
 // window._gpsPravidloZdroj = 'pamet' | 'rpc' | 'rpc-chyba …' | 'rpc-vyjimka …',
@@ -31728,26 +31758,37 @@ async function mojeFirmaChcePolohu(obnovit) {
     window._gpsPravidloVekMs = Date.now() - _gpsPravidlo.kdy
     return _gpsPravidlo.hodnota
   }
-  // Při selhání platí poslední známá odpověď — jak je stará.
-  const vekPosledni = () => (_gpsPravidlo.kdy ? Date.now() - _gpsPravidlo.kdy : null)
+  // Při selhání platí poslední známá odpověď — z paměti stránky, a když tu žádná
+  // není (čerstvě načtená stránka), ta uložená v telefonu. Jak je stará, se zapíše.
+  const posledni = () => {
+    if (_gpsPravidlo.hodnota !== null) {
+      return { ano: _gpsPravidlo.hodnota === true, vek: _gpsPravidlo.kdy ? Date.now() - _gpsPravidlo.kdy : null, zTelefonu: false }
+    }
+    const u = gpsPravidloNactiUlozene()
+    if (u) return { ano: u.hodnota === true, vek: u.kdy ? Date.now() - u.kdy : null, zTelefonu: true }
+    return { ano: false, vek: null, zTelefonu: false }
+  }
   try {
     const r = await Promise.race([
       sb.rpc('muj_zapis_jen_gps'),
       new Promise((_, ne) => setTimeout(() => ne(new Error('timeout')), 5000))
     ])
     if (r?.error) {
-      window._gpsPravidloZdroj = 'rpc-chyba ' + String(r.error.message || '').slice(0, 80)
-      window._gpsPravidloVekMs = vekPosledni()
-      return _gpsPravidlo.hodnota === true
+      const pos = posledni()
+      window._gpsPravidloZdroj = 'rpc-chyba ' + (pos.zTelefonu ? '[z telefonu] ' : '') + String(r.error.message || '').slice(0, 80)
+      window._gpsPravidloVekMs = pos.vek
+      return pos.ano
     }
     _gpsPravidlo = { hodnota: r?.data === true, kdy: Date.now() }
+    gpsPravidloUloz(_gpsPravidlo.hodnota, _gpsPravidlo.kdy)
     window._gpsPravidloZdroj = 'rpc'
     window._gpsPravidloVekMs = 0
     return _gpsPravidlo.hodnota
   } catch (e) {
-    window._gpsPravidloZdroj = 'rpc-vyjimka ' + String((e && e.message) || e || '').slice(0, 80)
-    window._gpsPravidloVekMs = vekPosledni()
-    return _gpsPravidlo.hodnota === true
+    const pos = posledni()
+    window._gpsPravidloZdroj = 'rpc-vyjimka ' + (pos.zTelefonu ? '[z telefonu] ' : '') + String((e && e.message) || e || '').slice(0, 80)
+    window._gpsPravidloVekMs = pos.vek
+    return pos.ano
   }
 }
 
