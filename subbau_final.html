@@ -23847,8 +23847,13 @@ function nactiRozdelanyOdchod() {
     const raw = lsGet(_ODCHOD_KLIC)
     if (!raw) return null
     const p = JSON.parse(raw)
-    // Platí jen pro dnešek a pro přihlášeného pracovníka — jinak zahoď
-    if (!p || p.den !== localDateStr() || (p.worker && currentUser?.id && p.worker !== currentUser.id)) {
+    // Platí jen pro dnešek a VČEREJŠEK a pro přihlášeného pracovníka — jinak zahoď.
+    // Včerejšek (audit 3. 11. 2026, D4): noční směna — odchod rozdělaný ve 2:00 nese
+    // včerejší datum od půlnoci nebo dnešní, ale směna samotná patří včerejšímu dni;
+    // a kdo rozdělal odchod ve 23:50, otevře appku už po půlnoci. Shodu s konkrétní
+    // otevřenou směnou hlídá volající (attId), tady se jen nezahazuje.
+    const vcera = new Date(); vcera.setDate(vcera.getDate() - 1)
+    if (!p || (p.den !== localDateStr() && p.den !== localDateStr(vcera)) || (p.worker && currentUser?.id && p.worker !== currentUser.id)) {
       zapomenRozdelanyOdchod(); return null
     }
     return p
@@ -24486,6 +24491,15 @@ async function getTodayRecord() {
     todayRecord = { ...vceraOtevrena }
     updateMobStav(vceraOtevrena, (data || []).concat([vceraOtevrena]))
     if (typeof updateGpsStrip === 'function') updateGpsStrip()
+    // Rozdělaný odchod noční směny (audit 3. 11. 2026, D4): kdo ve 2:00 ťukl na Konec
+    // směny a dialog nevyplnil, dostane po znovuotevření dialog zpátky se svým časem —
+    // dřív se tahle větev vrátila dřív, než se na rozdělaný odchod vůbec podívala,
+    // a odchod se zapsal až později (třeba o hodinu). Shodu hlídá attId + otevřená směna.
+    const rozdelanyVcera = nactiRozdelanyOdchod()
+    if (rozdelanyVcera && !pendingCheckout && rozdelanyVcera.attId === vceraOtevrena.id) {
+      pendingCheckout = { timeStr: rozdelanyVcera.timeStr, hours: rozdelanyVcera.hours, attId: rozdelanyVcera.attId }
+      showCheckoutDialog()
+    }
     return
   }
 
@@ -25477,8 +25491,10 @@ async function mobCheckin(type) {
         if (poleT.length === 1) { zapisT.break_start = bsT + ':00'; zapisT.break_end = beT + ':00' }
         else if (poleT.length === 2) { zapisT.break2_start = bsT + ':00'; zapisT.break2_end = beT + ':00' }
         let { data: radkyT, error: chybaT } = await _attMerFaze(_mer, 'zapis', withTimeout(sb.from('attendance').update(zapisT).eq('id', todayAttId).select('id'), 12000))
-        if (chybaT) {
+        if (chybaT && chybiSloupec(chybaT)) {
           // Starší databáze nemusí mít sloupec `breaks` — pauzu ulož aspoň do časů.
+          // Jen při chybějícím sloupci (chybiSloupec, D3: dřív při jakékoli chybě, i při výpadku
+          // sítě — pak pole `breaks` chybělo a pauza se z hodin neodečetla); jiná chyba se hlásí níž.
           console.warn('[pauza] zápis s polem breaks selhal, zkouším bez něj:', chybaT.message)
           const bezPole = { ...zapisT }; delete bezPole.breaks
           const r2 = await _attMerFaze(_mer, 'zapis', withTimeout(sb.from('attendance').update(bezPole).eq('id', todayAttId).select('id'), 12000))
@@ -25534,9 +25550,13 @@ async function mobCheckin(type) {
         existingBreaks.push({ bs: current.break_start.slice(0,5), be: timeStr.slice(0,5) })
         let { data: radkyK, error } = await _attMerFaze(_mer, 'zapis', withTimeout(sb.from('attendance').update({ break_end: timeStr, breaks: existingBreaks }).eq('id', todayAttId).select('id'), 12000))
         if (error) {
-          // Kdyby sloupec breaks neexistoval, ulož aspoň break_end (zpětná kompatibilita)
-          console.warn('[break-end] update s breaks selhal, zkouším bez:', error.message)
-          const r2 = await _attMerFaze(_mer, 'zapis', withTimeout(sb.from('attendance').update({ break_end: timeStr }).eq('id', todayAttId).select('id'), 12000))
+          // Kdyby sloupec breaks neexistoval, ulož aspoň break_end (zpětná kompatibilita).
+          // Jen při chybějícím sloupci (chybiSloupec) — při výpadku sítě by break_end
+          // bez pole `breaks` pauzu z hodin neodečetl; tehdy se zápis nezdaří celý.
+          if (chybiSloupec(error)) console.warn('[break-end] update s breaks selhal, zkouším bez:', error.message)
+          const r2 = chybiSloupec(error)
+            ? await _attMerFaze(_mer, 'zapis', withTimeout(sb.from('attendance').update({ break_end: timeStr }).eq('id', todayAttId).select('id'), 12000))
+            : { error, data: null }
           if (r2.error) {
             showToast(chybaText(r2.error, 'Konec pauzy se nezapsal')); checkinInProgress = false
             try { if (typeof _dnDochazka === 'function') _dnDochazka(type, 'zapis', 'Konec pauzy se nezapsal — chyba zápisu (' + kodChybyProDenik(r2.error) + ')', { kod: r2.error.code, stav: r2.error.status }, 'chyba') } catch (x) { console.warn('[deník chyb]', x) } // eslint-disable-line no-undef
@@ -25674,6 +25694,9 @@ async function mobCheckin(type) {
           const zavri = async (plne, zaloha) => {
             const r1 = await withTimeout(sb.from('attendance').update(plne).eq('id', todayAttId).select('id'), 12000)
             if (!r1.error && r1.data && r1.data.length) return 'plne'
+            // Náhradní zápis bez `breaks` jen při chybějícím sloupci (chybiSloupec, D3):
+            // po výpadku sítě by pauza zůstala jen v break_end a z hodin by se neodečetla.
+            if (r1.error && !chybiSloupec(r1.error)) return null
             const r2 = await withTimeout(sb.from('attendance').update(zaloha).eq('id', todayAttId).select('id'), 12000)
             return (!r2.error && r2.data && r2.data.length) ? 'zaloha' : null
           }
@@ -25710,16 +25733,29 @@ async function mobCheckin(type) {
         }
         // Spočítej hodiny podle pravidel směny (včetně 2. pauzy!)
         // Načti aktuální pauzy ze serveru, ať se nespoléháme na možná neúplnou lokální kopii.
+        // Audit 3. 11. 2026 (D2): čte se i příchod, odchod a datum dne. Lokální kopie
+        // může být stará — SubBau mezitím mohl den opravit (příchod) nebo uzavřít
+        // (odchod) a odchod z mobilu by jeho zápis přepsal. Stejně jako confirmCheckout.
         let brkSrc = updated
+        let cerstvy = null
         try {
           const { data: fresh } = await _attMerFaze(_mer, 'kontrola', withTimeout(sb.from('attendance')
-            .select('break_start,break_end,break2_start,break2_end,breaks')
+            .select('check_in,check_out,work_date,break_start,break_end,break2_start,break2_end,breaks')
             .eq('id', todayAttId).single(), 8000))
-          if (fresh) brkSrc = { ...updated, ...fresh }
+          if (fresh) { brkSrc = { ...updated, ...fresh }; cerstvy = fresh }
         } catch(e) { /* fallback: lokální kopie */ }
+        if (cerstvy && cerstvy.check_out) {
+          // SubBau směnu mezitím uzavřel sám — jeho časy mají přednost před našimi
+          // (stejný postup i hláška jako v confirmCheckout).
+          pendingCheckout = null; zapomenRozdelanyOdchod(); todayAttId = null; todayRecord = null
+          checkinInProgress = false
+          showToast('ℹ️ Tuto směnu už uzavřel SubBau — platí jeho zápis')
+          getTodayRecord(); loadMobWeek()
+          return
+        }
         const adjOut = applyAttendanceRules({
-          work_date: updated.work_date,   // pravidlo příchodu podle dne (3. 11. 2026)
-          check_in: updated.check_in,
+          work_date: brkSrc.work_date || updated.work_date,   // pravidlo příchodu podle dne (3. 11. 2026); čerstvé, jinak lokální
+          check_in: brkSrc.check_in || updated.check_in,      // čerstvý příchod (SubBau ho mohl opravit), jinak lokální
           check_out: timeStr,
           break_start: brkSrc.break_start,
           break_end: brkSrc.break_end,
@@ -25737,9 +25773,12 @@ async function mobCheckin(type) {
           // `.select('id')` tu není navíc: bez něj se nepozná zápis, který
           // projde bez chyby, ale nezmění ani řádek — a pracovník by uviděl
           // „odchod zapsán", přestože se nic neuložilo.
+          // `.is('check_out', null)`: zápis projde jen u směny, která je pořád otevřená.
+          // Kdyby ji mezi čtením a zápisem uzavřel SubBau, nezmění se ani řádek
+          // a platí níž existující hláška „Odchod se neuložil“ (D2).
           const { data: outRows, error: outErr } = await _attMerFaze(_mer, 'zapis', withTimeout(sb.from('attendance').update({
             check_out: timeStr, total_hours: h
-          }).eq('id', todayAttId).select('id'), 12000))
+          }).eq('id', todayAttId).is('check_out', null).select('id'), 12000))
           if (outErr) {
             showToast(chybaText(outErr, 'Odchod se nezapsal')); checkinInProgress = false
             try { if (typeof _dnDochazka === 'function') _dnDochazka('out', 'zapis', 'Odchod se nezapsal — chyba zápisu (' + kodChybyProDenik(outErr) + ')', { kod: outErr.code, stav: outErr.status }, 'chyba') } catch (x) { console.warn('[deník chyb]', x) } // eslint-disable-line no-undef
@@ -31782,6 +31821,36 @@ function pauzaNetrefila(typ) {
   try { getTodayRecord() } catch (e) {}
 }
 
+// POSLEDNÍ ODPOVĚĎ I V TELEFONU (audit 3. 11. 2026, D6). Paměť stránky se při
+// každém čerstvém načtení (probuzení telefonu, obnovení appky) vymaže. Když pak
+// dotaz na pravidlo hned selže (přihlášení se ještě obnovuje, slabý signál),
+// nebyla žádná „poslední známá odpověď“ a příchod u firmy „jen s polohou“ se
+// zapsal bez polohy — přesně případ Petra Fukse. Proto se poslední úspěšná
+// odpověď ukládá do localStorage POD ID PŘIHLÁŠENÉHO (na sdíleném telefonu se
+// odpovědi dvou lidí nesmí mísit) a při selhání platí, když v paměti žádná není.
+// Bez uložené odpovědi (první spuštění, jiný člověk, zakázané úložiště) je to
+// jako dřív: výpadek nezablokuje příchod. Všechno v try/catch — úložiště
+// v soukromém režimu nebo plné nesmí shodit docházku.
+const GPS_PRAVIDLO_KLIC = 'gps-pravidlo-posledni:'
+function gpsPravidloUloz(hodnota, kdy) {
+  try {
+    const id = currentUser && currentUser.id
+    if (!id) return
+    localStorage.setItem(GPS_PRAVIDLO_KLIC + id, JSON.stringify({ h: hodnota === true, t: kdy }))
+  } catch (e) { /* bez úložiště stačí paměť stránky */ }
+}
+function gpsPravidloNactiUlozene() {
+  try {
+    const id = currentUser && currentUser.id
+    if (!id) return null
+    const raw = localStorage.getItem(GPS_PRAVIDLO_KLIC + id)
+    if (!raw) return null
+    const p = JSON.parse(raw)
+    if (!p || typeof p.h !== 'boolean') return null
+    return { hodnota: p.h, kdy: Number(p.t) || 0 }
+  } catch (e) { return null }
+}
+
 // Odkud odpověď přišla a jak je stará, si appka pamatuje kvůli deníku
 // nezapsaného příchodu/odchodu (zapisNezapsanePolohy, 2. 11. 2026, Petr Fuks):
 // window._gpsPravidloZdroj = 'pamet' | 'rpc' | 'rpc-chyba …' | 'rpc-vyjimka …',
@@ -31792,26 +31861,37 @@ async function mojeFirmaChcePolohu(obnovit) {
     window._gpsPravidloVekMs = Date.now() - _gpsPravidlo.kdy
     return _gpsPravidlo.hodnota
   }
-  // Při selhání platí poslední známá odpověď — jak je stará.
-  const vekPosledni = () => (_gpsPravidlo.kdy ? Date.now() - _gpsPravidlo.kdy : null)
+  // Při selhání platí poslední známá odpověď — z paměti stránky, a když tu žádná
+  // není (čerstvě načtená stránka), ta uložená v telefonu. Jak je stará, se zapíše.
+  const posledni = () => {
+    if (_gpsPravidlo.hodnota !== null) {
+      return { ano: _gpsPravidlo.hodnota === true, vek: _gpsPravidlo.kdy ? Date.now() - _gpsPravidlo.kdy : null, zTelefonu: false }
+    }
+    const u = gpsPravidloNactiUlozene()
+    if (u) return { ano: u.hodnota === true, vek: u.kdy ? Date.now() - u.kdy : null, zTelefonu: true }
+    return { ano: false, vek: null, zTelefonu: false }
+  }
   try {
     const r = await Promise.race([
       sb.rpc('muj_zapis_jen_gps'),
       new Promise((_, ne) => setTimeout(() => ne(new Error('timeout')), 5000))
     ])
     if (r?.error) {
-      window._gpsPravidloZdroj = 'rpc-chyba ' + String(r.error.message || '').slice(0, 80)
-      window._gpsPravidloVekMs = vekPosledni()
-      return _gpsPravidlo.hodnota === true
+      const pos = posledni()
+      window._gpsPravidloZdroj = 'rpc-chyba ' + (pos.zTelefonu ? '[z telefonu] ' : '') + String(r.error.message || '').slice(0, 80)
+      window._gpsPravidloVekMs = pos.vek
+      return pos.ano
     }
     _gpsPravidlo = { hodnota: r?.data === true, kdy: Date.now() }
+    gpsPravidloUloz(_gpsPravidlo.hodnota, _gpsPravidlo.kdy)
     window._gpsPravidloZdroj = 'rpc'
     window._gpsPravidloVekMs = 0
     return _gpsPravidlo.hodnota
   } catch (e) {
-    window._gpsPravidloZdroj = 'rpc-vyjimka ' + String((e && e.message) || e || '').slice(0, 80)
-    window._gpsPravidloVekMs = vekPosledni()
-    return _gpsPravidlo.hodnota === true
+    const pos = posledni()
+    window._gpsPravidloZdroj = 'rpc-vyjimka ' + (pos.zTelefonu ? '[z telefonu] ' : '') + String((e && e.message) || e || '').slice(0, 80)
+    window._gpsPravidloVekMs = pos.vek
+    return pos.ano
   }
 }
 
@@ -44997,7 +45077,15 @@ function attBreakMinutes(record, nowMin) {
     // Pauza přes půlnoc: konec vyjde v minutách dne menší než začátek, i když
     // reálně uplynula kladná doba — bez přičtení dne by appka takovou pauzu
     // tiše počítala jako 0 minut (audit 16. 10. 2026, noční směna).
-    const lenSurovy = end - start
+    // Audit 3. 11. 2026 (D1): posun začátku na 11:00 nesmí přeskočit konec pauzy.
+    // Pauza 10:58–10:59 by se po posunu začínala o dvě minuty PO svém konci, jako
+    // „přes půlnoc“ by dostala +24 h a odečetlo by se 1439 minut — celá směna by
+    // vyšla na 0 h. Leží-li konec mezi skutečným začátkem a 11:00, počítá se pauza
+    // od skutečného začátku (10:58–10:59 = krátká pauza = 30 min). Pauza 10:59–11:00
+    // se naopak odečetla jako 0 minut. Skutečná noční pauza (23:50–0:20) má konec
+    // před začátkem, takže se jí tohle netýká.
+    const zac = (end <= start && end >= rawStart) ? rawStart : start
+    const lenSurovy = end - zac
     const len = lenSurovy < 0 ? lenSurovy + 24 * 60 : lenSurovy
     if (len <= 0) return
     total += (len < SHIFT.breakLen ? SHIFT.breakLen : len)
