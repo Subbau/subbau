@@ -31370,9 +31370,11 @@ async function nactiNuloveSazbyNaNastenku() {
   if (!box || !_jeAdminPrihlasen()) return
   const skryt = () => { box.style.display = 'none'; box.innerHTML = '' }
   const [lideR, provR, vimR] = await Promise.all([
-    // spoluprace_ukoncena v profilu není (je u odkazu odběratele, client_link_workers) —
-    // dotaz s ním od 31. 10. pokaždé spadl na 42703 a blok se nikdy neukázal (deník 4. 11. 2026).
-    sb.from('profiles').select('id, full_name, hourly_rate_worker, team_id, subteam_id, zamestnavatel_id, registration_status')
+    // Konec spolupráce je v profilu cooperation_end (pole v kartě pracovníka).
+    // Dřív se tu četlo spoluprace_ukoncena, které v profilu není (je u odkazu
+    // odběratele) — dotaz od 31. 10. pokaždé spadl na 42703 a blok se nikdy
+    // neukázal (deník 4. 11. 2026).
+    sb.from('profiles').select('id, full_name, hourly_rate_worker, team_id, subteam_id, zamestnavatel_id, cooperation_end, registration_status')
       .in('role', ['osvec', 'partak']).eq('is_active', true),
     sb.from('worker_commissions').select('worker_id, provize, bez_provize'),
     sb.from('doc_alert_dismissals').select('dismiss_key').like('dismiss_key', SAZBA0_KLIC + '%')
@@ -31385,7 +31387,8 @@ async function nactiNuloveSazbyNaNastenku() {
   const nula = v => v == null || v === '' || !(Number(v) > 0)
   const chybi = []
   ;(lideR.data || []).forEach(w => {
-    if (w.zamestnavatel_id || w.registration_status === 'pending' || jeSkrytaFirmaPracovnika(w)) return
+    const skoncil = w.cooperation_end && String(w.cooperation_end).slice(0, 10) < localDateStr(new Date())
+    if (w.zamestnavatel_id || skoncil || w.registration_status === 'pending' || jeSkrytaFirmaPracovnika(w)) return
     const co = []
     if (nula(w.hourly_rate_worker) && !vim.has(sazba0Klic('sazba', w.id))) co.push('sazba')
     const c = prov[w.id]
