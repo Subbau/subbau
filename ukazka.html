@@ -22293,7 +22293,10 @@ function tiskSoupisuFaktur(kw, rok) {
 // velká písmena („matuszynski" najde Matuszyński), i šedé řádky „faktura
 // nepřišla". Firma, ve které nikdo nezbude, se schová; hlavička týdne zůstane.
 // Platí spolu s horním hledáním a filtry a stejně jako u nich: co je vypsané,
-// to se tiskne a na to platí „Zaplaceno všem".
+// to se tiskne a na to platí „Zaplaceno všem". Souhrn nad tabulkou (Faktur ve
+// výběru, Nevyřízené) a „✓ vše zaplaceno" / „⏸ nezaplacené jsou jen odložené"
+// u firmy ale hledání v týdnu NEMĚNÍ — hledá se člověk v jednom týdnu, ne nový
+// výběr (kontrola 4. 11. 2026, viz renderWorkerInvoices).
 // Text se pamatuje pro každý týden zvlášť, dokud je appka otevřená (schválně ne
 // natrvalo v prohlížeči), a přežije překreslení tabulky. Do HTML hlavičky se
 // nepíše — hlavička má pořád stejné HTML, při překreslení jen změněných řádků
@@ -22315,8 +22318,13 @@ function invHledatVTydnuKlavesa(e, el, kw, rok) {
   invHledatVTydnu(el, kw, rok)
 }
 // Tvar k porovnání: bez háčků a čárek, malá písmena (textKHledani, jako
-// v Ubytování) a polské „ł" jako „l" — to se na „l" + znaménko nerozkládá.
-function _invHledaciTvar(s) { return textKHledani(s).replace(/ł/g, 'l') }
+// v Ubytování). Písmena, která se na písmeno + znaménko nerozkládají, se
+// převedou zvlášť: polské „ł", chorvatské, srbské a vietnamské „đ" (i „ð" —
+// velké Ð vypadá jako Đ), dánské a norské „ø" a „æ", turecké „ı" bez tečky,
+// francouzské „œ". Kontrola 4. 11. 2026: „duric" nenašlo Đurić, „kilic" Kılıç
+// a „ostergaard" Østergaard — Čech háček ani přeškrtnutí nenapíše.
+const _INV_ZVLAST = { 'ł': 'l', 'đ': 'd', 'ð': 'd', 'ø': 'o', 'ı': 'i', 'æ': 'ae', 'œ': 'oe' }
+function _invHledaciTvar(s) { return textKHledani(s).replace(/[łđðøıæœ]/g, z => _INV_ZVLAST[z]) }
 // Políčko hledání v týdnu, do kterého se zrovna píše (i s kurzorem), nebo null.
 function _invFokusVTydnu(tbody) {
   const a = document.activeElement
@@ -22402,7 +22410,8 @@ function renderWorkerInvoices() {
 
   // Hledání jména v týdnu (políčko v hlavičce týdne, viz _invHledaniTydne) —
   // jen když jsou hlavičky týdnů vidět. Každé slovo musí být ve jménu nebo
-  // u dodavatele. Skryté řádky nejsou vypsané: nepočítají se, netisknou se.
+  // u dodavatele. Skryté řádky nejsou vypsané: netisknou se a „Zaplaceno všem"
+  // je nezaplatí. Souhrn nad tabulkou a stav firmy se ale počítají i s nimi.
   const hledatVTydnu = new Map()   // 'kw/rok' → slova
   if (delitTydny) _invHledaniTydne.forEach((text, k) => {
     const slova = _invHledaciTvar(text).split(/\s+/).filter(Boolean)
@@ -22416,7 +22425,11 @@ function renderWorkerInvoices() {
   })) : null
   const vypsane = skrytVTydnu ? rows.filter(r => !skrytVTydnu.has(r)) : rows
 
-  renderInvoiceStats(vypsane.filter(r => !r._sedy))
+  // Souhrn nad tabulkou (Faktur ve výběru, Nevyřízené) jako dřív jen podle
+  // horního hledání a filtrů. Kontrola 4. 11. 2026: „Filip Marek" v KW 44 ho
+  // měnil z 800 / 43 na 753 / 27 — ani celek, ani čísla Filipa — a text v políčku
+  // platí, i když je týden odrolovaný z obrazovky; „Nevyřízené 0" by pak lhalo.
+  renderInvoiceStats(rows.filter(r => !r._sedy))
   // Pro tisk soupisu: přesně to, co je vypsané (hledání a filtry platí) —
   // jen skutečné faktury, šedé řádky do soupisu nepatří.
   window._invZobrazene = vypsane.filter(r => !r._sedy)
@@ -22457,12 +22470,20 @@ function renderWorkerInvoices() {
   // Kolik faktur firmy v týdnu ještě není zaplacených (bez odložených) —
   // podle toho se u firmy nabídne „Zaplaceno všem". Z vypsaných (i po hledání
   // v týdnu), protože zaplacenoFirme bere právě ty.
-  const _nezaplaceno = new Map(), _odlozeneCekaji = new Map()
-  if (delitTydny) vypsane.forEach(r => {
+  // „✓ vše zaplaceno" a „⏸ nezaplacené jsou jen odložené" ale mluví o celé firmě
+  // v týdnu — ty se počítají bez hledání v týdnu (horní hledání a filtry platí
+  // jako dřív): _nezaplacenoFirmy a _odlozeneCekaji. Kontrola 4. 11. 2026: „jan
+  // novak" v KW 44 nechal u München — Riem jen Novákovy zaplacené faktury a nadpis
+  // hlásil „✓ vše zaplaceno", přestože Svoboda a Dvořák měli 4 nezaplacené, jen
+  // skryté. Když hledání skryje nezaplacenou fakturu, není u firmy tlačítko ani
+  // „vše zaplaceno" — o stavu řekne každý vypsaný řádek sám.
+  const _nezaplaceno = new Map(), _nezaplacenoFirmy = new Map(), _odlozeneCekaji = new Map()
+  if (delitTydny) rows.forEach(r => {
     if (r._sedy || (r.status || 'new') === 'paid' || !r.kw) return
     const k = r.kw + '/' + r.kw_year + '|' + firmaFaktury(r)
-    const m = r.odlozeno_at ? _odlozeneCekaji : _nezaplaceno
+    const m = r.odlozeno_at ? _odlozeneCekaji : _nezaplacenoFirmy
     m.set(k, (m.get(k) || 0) + 1)
+    if (!r.odlozeno_at && !(skrytVTydnu && skrytVTydnu.has(r))) _nezaplaceno.set(k, (_nezaplaceno.get(k) || 0) + 1)
   })
 
   // Souhrn u firmy v týdnu: kolik lidí pracovalo, kolik je faktur, kdo chybí.
@@ -22550,7 +22571,8 @@ function renderWorkerInvoices() {
         const prvniVTydnu = _poslFirma === null
         casti.push(`<tr data-inv-firma="${escAttr(kwTeto)}"><td colspan="10" style="padding:${prvniVTydnu ? '6px' : '14px'} 12px 4px 24px;${prvniVTydnu ? '' : 'border-top:2px solid var(--text3);'}border-bottom:2px solid var(--text3);background:var(--bg,#f4efe7);font-size:12px;font-weight:700;color:var(--text3)"><div class="inv-firma-hlava" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap"><span>${escAttr(firmaTeto)}</span>${r.kw ? souhrnFirmyHtml(r.kw, r.kw_year, firmaTeto) : ''}${zbyva
           ? `<button onclick="event.stopPropagation();zaplacenoFirme('${jsStr(r.kw)}','${jsStr(r.kw_year)}','${jsStr(firmaTeto)}', this)" title="Označí jako zaplacené všechny nezaplacené faktury téhle firmy v tomhle týdnu (odložené ne). Propíše se to i do Provizí." style="font-size:11px;padding:3px 9px;border:1px solid var(--amber);border-radius:6px;cursor:pointer;background:var(--amber-l);color:var(--amber);font-family:inherit;font-weight:800">✅ Zaplaceno všem (${zbyva})</button>`
-          : ((!r.kw || !(_souhrnFirmy.get(r.kw + '/' + r.kw_year + '|' + firmaTeto)?.faktur)) ? '' : (_odlozeneCekaji.get(r.kw + '/' + r.kw_year + '|' + firmaTeto)
+          : ((!r.kw || !(_souhrnFirmy.get(r.kw + '/' + r.kw_year + '|' + firmaTeto)?.faktur)
+              || _nezaplacenoFirmy.get(r.kw + '/' + r.kw_year + '|' + firmaTeto)) ? '' : (_odlozeneCekaji.get(r.kw + '/' + r.kw_year + '|' + firmaTeto)
             ? '<span style="font-size:11px;font-weight:700;color:#1d4ed8">⏸ nezaplacené jsou jen odložené</span>'
             : '<span style="font-size:11px;font-weight:700;color:var(--green)">✓ vše zaplaceno</span>'))}</div></td></tr>`)
         _poslFirma = firmaTeto
