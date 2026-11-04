@@ -10757,6 +10757,32 @@ async function rozpisTydne(workerId, radky, sazbaVPoli) {
   return hodinyPodleSazeb(radky, sazbaKDni)
 }
 
+// Základní sazba z formuláře faktury pracovníka — tu, ze které se počítá týden.
+// Sazba z profilu má přednost (pracovník ji přepsat nesmí), jinak platí pole.
+function sazbaFormulareFaktury() {
+  const sazba = isRateFromProvize(currentProfile)
+    ? parseFloat(currentProfile?.hourly_rate_worker)
+    : parseFloat(document.getElementById('inv-rate')?.value)
+  return Number.isFinite(sazba) ? sazba : 0
+}
+
+// Hodiny a částka týdne pro fakturu pracovníka — JEDINÉ místo, které je počítá.
+// Používá ho výběr týdne (onInvoiceWeekChange) i kontrola při vystavení faktury
+// (generateInvoiceMobImpl), ať se ty dvě cesty nemůžou rozejít: lidé pod
+// zaměstnavatelem, sazba a její historie, dny bez výplaty i srážky.
+// Audit 3. 11. 2026: správce mezitím opravil docházku, faktura se vystavila
+// s hodinami z nové docházky, ale s částkou z předvyplnění.
+// Vrací { rozpis } nebo { chyba: 'dochazka' | 'sazby' } — nikdy nehází.
+async function vypocitatTydenFaktury(workerId, week, year) {
+  let att
+  try { att = await dochazkaProFakturu(workerId, week, year) }
+  catch (e) { return { chyba: 'dochazka' } }
+  // Sazba se čte až po docházce (jako vždy), ať odpovídá tomu, co je na obrazovce.
+  // Když SubBau změnil sazbu uprostřed týdne, počítá se každý den svou sazbou.
+  try { return { rozpis: await rozpisTydne(workerId, att, sazbaFormulareFaktury()) } }
+  catch (e) { return { chyba: 'sazby' } }
+}
+
 // Rozdělí odpracované hodiny podle sazby, která ten den platila.
 // Vrací { hodiny, castka, skupiny: [{ sazba, hodiny, od, do }] } seřazené podle data.
 function hodinyPodleSazeb(radky, sazbaKDni) {
@@ -20140,7 +20166,7 @@ async function smazZalohu(id) {
 // Když má pracovník otevřenou zálohovou fakturu, odečte se mu z faktury,
 // kterou si vystaví. Bere se i záloha, která už byla zúčtovaná PRÁVĚ TOUHLE
 // fakturou — jinak by při opravě a znovuodeslání téhož dokladu odečet zmizel.
-async function zalohyKOdecteni(workerId, invoiceNum, celkem) {
+async function zalohyKOdecteni(workerId, invoiceNum, celkem, bezHlasky) {
   const prazdno = { castka: 0, popis: '', pouzite: [], chyba: false }
   if (!workerId) return prazdno
   try {
@@ -20193,7 +20219,7 @@ async function zalohyKOdecteni(workerId, invoiceNum, celkem) {
       // Nespuštěná migrace — tohle NENÍ dočasná chyba sítě, je to trvalý stav,
       // dokud se migrace nespustí. Fakturu kvůli tomu nezdržujeme (nikdo tu
       // appku ani zálohy ještě nezačal používat).
-      showToast('⚠️ Zálohy zatím nejdou odečítat — spusťte migraci supabase-migrace-zalohove-faktury.sql')
+      if (!bezHlasky) showToast('⚠️ Zálohy zatím nejdou odečítat — spusťte migraci supabase-migrace-zalohove-faktury.sql')
       return prazdno
     }
     // Skutečná (nejspíš síťová) chyba čtení — na rozdíl od výš nejde říct, že
@@ -21228,6 +21254,30 @@ function invoiceDataFromRow(r, extra) {
   }
 }
 
+// Období plnění kalendářního týdne (pondělí–neděle) jako YYYY-MM-DD — stejně, jak
+// ho počítá vystavení faktury (generateInvoiceMobImpl).
+function obdobiTydneISO(kw, rok) {
+  const od = getWeekStartDate(parseInt(kw), parseInt(rok))
+  const do7 = new Date(od); do7.setDate(od.getDate() + 6)
+  const iso = d => d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0')
+  return { od: iso(od), do: iso(do7) }
+}
+
+// Změní správce v okně úpravy týden faktury, má se s ním posunout i období plnění
+// (audit 3. 11. 2026: PDF i databáze zůstávaly s datem starého týdne). Přepočítá se JEN
+// tehdy, když původní období přesně odpovídalo původnímu týdnu — ručně upravené nebo
+// jiné období se nechává být a mění se jen číslo týdne. Vrací { period_from, period_to }
+// (YYYY-MM-DD), nebo null, když se období měnit nemá.
+function obdobiPoZmeneTydne(r, kwNovy, kwRokNovy) {
+  if (kwNovy == null || kwRokNovy == null) return null
+  if (String(r.kw ?? '') === String(kwNovy) && String(r.kw_year ?? '') === String(kwRokNovy)) return null
+  if (r.kw == null || r.kw_year == null) return null
+  const stare = obdobiTydneISO(r.kw, r.kw_year)
+  if (String(r.period_from || '').slice(0, 10) !== stare.od || String(r.period_to || '').slice(0, 10) !== stare.do) return null
+  const nove = obdobiTydneISO(kwNovy, kwRokNovy)
+  return { period_from: nove.od, period_to: nove.do }
+}
+
 let _invEditId = null
 
 function openInvoiceEdit(id) {
@@ -21409,13 +21459,40 @@ async function saveInvoiceEdit() {
     (vzEl2 && vzEl2.dataset.dotknuto === '1' ? Number(vzEl2.value) : 0)
     || Number(r.design_idx) || extra.designIdx || 1))
 
+  // Kalendářní týden. Prázdno se nechává být — starší faktury ho mít
+  // nemusí a nutit ho dodatečně by znamenalo hádat, za co byly.
+  // Čte se a kontroluje HNED, ještě před vykreslením PDF: PDF se kreslí z týdne
+  // z formuláře a špatný týden nesmí nechat v úložišti osiřelý soubor
+  // (audit 3. 11. 2026: týden se dřív četl až po nahrání PDF a PDF nesl starý).
+  const kwSurovy = String(document.getElementById('invedit-kw')?.value || '').trim()
+  const kwRokSurovy = String(document.getElementById('invedit-kw-rok')?.value || '').trim()
+  const kwNovy = kwSurovy === '' ? null : parseInt(kwSurovy, 10)
+  const kwRokNovy = kwRokSurovy === '' ? null : parseInt(kwRokSurovy, 10)
+  if (kwNovy != null && (!Number.isInteger(kwNovy) || kwNovy < 1 || kwNovy > 53)) {
+    finish('⚠️ Týden musí být číslo od 1 do 53'); return
+  }
+  if (kwRokNovy != null && (!Number.isInteger(kwRokNovy) || kwRokNovy < 2000 || kwRokNovy > 2100)) {
+    finish('⚠️ Rok u týdne vypadá nesmyslně'); return
+  }
+  // Půlka údaje je horší než žádný: podle dvojice se páruje uhrazená provize.
+  if ((kwNovy == null) !== (kwRokNovy == null)) {
+    finish('⚠️ Vyplňte týden i rok, nebo ani jedno'); return
+  }
+  // Období plnění se posune s týdnem jen tehdy, když odpovídalo původnímu týdnu.
+  const noveObdobi = obdobiPoZmeneTydne(r, kwNovy, kwRokNovy)
+
   // 1) Vykresli fakturu znovu — už se zálohou
   const cashTyp = (document.querySelector('input[name="invedit-cash-typ"]:checked') || {}).value === 'ucet'
     ? 'ucet' : 'hotovost'
   const dataForRender = invoiceDataFromRow({ ...r, items: polozky, total_amount: total,
     cash_paid: cash, cash_paid_note: note, cash_paid_typ: cashTyp,
     iban: ibanNovy, swift: swiftNovy,
-    design_idx: vzhledZvoleny, invoice_number: cisloNove }, extra)
+    design_idx: vzhledZvoleny, invoice_number: cisloNove,
+    kw: kwNovy, kw_year: kwRokNovy,
+    ...(noveObdobi || {}) }, extra)
+  // Faktura, která týden dřív neměla a nemá ani období, by dostala řádek „KW x/y · –“
+  // s prázdnými daty — PDF zůstane bez řádku s týdnem jako dřív.
+  if (!r.kw && !dataForRender.periodFrom && !dataForRender.periodTo) dataForRender.serviceDescSub = ''
   try {
     renderInvoice(dataForRender, 'en')
   } catch (e) {
@@ -21438,23 +21515,6 @@ async function saveInvoiceEdit() {
   closeInvoiceOverlay()
 
   // 3) Zápis do databáze
-  // Kalendářní týden. Prázdno se nechává být — starší faktury ho mít
-  // nemusí a nutit ho dodatečně by znamenalo hádat, za co byly.
-  const kwSurovy = String(document.getElementById('invedit-kw')?.value || '').trim()
-  const kwRokSurovy = String(document.getElementById('invedit-kw-rok')?.value || '').trim()
-  const kwNovy = kwSurovy === '' ? null : parseInt(kwSurovy, 10)
-  const kwRokNovy = kwRokSurovy === '' ? null : parseInt(kwRokSurovy, 10)
-  if (kwNovy != null && (!Number.isInteger(kwNovy) || kwNovy < 1 || kwNovy > 53)) {
-    finish('⚠️ Týden musí být číslo od 1 do 53'); return
-  }
-  if (kwRokNovy != null && (!Number.isInteger(kwRokNovy) || kwRokNovy < 2000 || kwRokNovy > 2100)) {
-    finish('⚠️ Rok u týdne vypadá nesmyslně'); return
-  }
-  // Půlka údaje je horší než žádný: podle dvojice se páruje uhrazená provize.
-  if ((kwNovy == null) !== (kwRokNovy == null)) {
-    finish('⚠️ Vyplňte týden i rok, nebo ani jedno'); return
-  }
-
   const upd = {
     cash_paid: cash, cash_paid_note: note || null, cash_paid_typ: cashTyp,
     edited_at: new Date().toISOString(),
@@ -21463,6 +21523,7 @@ async function saveInvoiceEdit() {
     design_idx: vzhledZvoleny,
     invoice_number: cisloNove,
     kw: kwNovy, kw_year: kwRokNovy,
+    ...(noveObdobi || {}),
   }
 
   // Když správce zálohu na faktuře změní, musí se tomu přizpůsobit i rozpis,
@@ -28556,32 +28617,22 @@ async function onInvoiceWeekChange() {
     prepocitatPolozky('inv')
     // Celková částka faktury je daná: odpracované hodiny × sazba. Pracovník ji
     // nemění, jen si volí, na kolik položek si ji rozepíše.
-    let att
-    try { att = await dochazkaProFakturu(currentUser?.id, week, year) }
-    catch (e) {
+    // Hodiny i částka týdne se počítají společnou funkcí (vypocitatTydenFaktury) —
+    // stejnou použije i vystavení faktury, aby se částka nemohla rozejít s hodinami.
+    const vypocet = await vypocitatTydenFaktury(currentUser?.id, week, year)
+    if (vypocet.chyba) {
       // Bez docházky se částka spočítat nedá. Nesmí ale zůstat viset ta
       // z předchozího týdne — radši nula a říct to.
       if (sel.value !== v || poradi !== _invNacitaniTydne) return
       window._invTydenniCastka = 0
       rozpocitatCastku('inv')
-      showToast('⚠️ Docházku se nepodařilo načíst — částka faktury se nespočítala. Vyberte týden znovu.')
+      showToast(vypocet.chyba === 'dochazka'
+        ? '⚠️ Docházku se nepodařilo načíst — částka faktury se nespočítala. Vyberte týden znovu.'
+        : '⚠️ Sazby se nepodařilo načíst — částka faktury se nespočítala. Vyberte týden znovu.')
       return
     }
-    const sazba = isRateFromProvize(currentProfile)
-      ? parseFloat(currentProfile?.hourly_rate_worker)
-      : parseFloat(document.getElementById('inv-rate')?.value)
-    const zaklad = Number.isFinite(sazba) ? sazba : 0
-    // Když SubBau změnil sazbu uprostřed týdne, počítá se každý den svou sazbou —
-    // jinak by faktura zvedla i dny odpracované za starou sazbu.
-    let castka, rozpisTydnePracovnika = null
-    try { rozpisTydnePracovnika = await rozpisTydne(currentUser?.id, att, zaklad); castka = rozpisTydnePracovnika.castka }
-    catch (e) {
-      if (sel.value !== v || poradi !== _invNacitaniTydne) return
-      window._invTydenniCastka = 0
-      rozpocitatCastku('inv')
-      showToast('⚠️ Sazby se nepodařilo načíst — částka faktury se nespočítala. Vyberte týden znovu.')
-      return
-    }
+    const rozpisTydnePracovnika = vypocet.rozpis
+    const castka = rozpisTydnePracovnika.castka
     // Než se docházka a historie načetly, mohl pracovník přepnout na jiný týden.
     // Bez téhle kontroly by se mu do faktury dosadila částka za týden předchozí.
     if (sel.value !== v || poradi !== _invNacitaniTydne) return
@@ -35879,6 +35930,36 @@ async function generateInvoiceMobImpl(lang = 'en', override = null) {
     showToast('⚠️ Týden se mezitím změnil — počkejte, až se načte, a vytvořte fakturu znovu')
     return
   }
+  // Částka v položkách pochází z výběru týdne, docházka se ale výš načetla znovu.
+  // Mezitím ji mohl správce opravit (hodiny, den bez výplaty, srážka za puntíky)
+  // nebo se mohla změnit sazba — faktura by pak měla nové hodiny a starou částku
+  // (audit 3. 11. 2026). Částku proto spočítáme znovu TOUTÉŽ cestou jako při výběru
+  // týdne. Liší-li se, formulář se přepočítá a faktura se nevystaví — pracovník ji
+  // zkontroluje a vytvoří znovu. Podruhé už sedí, takže se nic neopakuje.
+  // Admin (override) má vlastní formulář a může částku přepsat ručně — ten se nemění.
+  if (!override) {
+    const cerstve = await vypocitatTydenFaktury(workerId, week, year)
+    // Za čekání na docházku mohl pracovník přepnout týden — jeho formulář už patří k jinému.
+    if (!invCastkaPatriKTydnu() || document.getElementById('inv-week-sel')?.value !== week + '/' + year) {
+      showToast('⚠️ Týden se mezitím změnil — počkejte, až se načte, a vytvořte fakturu znovu')
+      return
+    }
+    if (cerstve.chyba) {
+      showToast(cerstve.chyba === 'dochazka'
+        ? '⚠️ Docházku se nepodařilo načíst — zkuste to prosím znovu'
+        : '⚠️ Historii sazeb se nepodařilo načíst — faktura se nevystavila. Zkuste to prosím znovu.')
+      return
+    }
+    const puvodniCastka = Number(window._invTydenniCastka) || 0
+    if (Math.abs(cerstve.rozpis.castka - puvodniCastka) > 0.005) {
+      window._invTydenniCastka = cerstve.rozpis.castka
+      rozpocitatCastku('inv')
+      ukazSrazkuVeFakture('inv', cerstve.rozpis)
+      showToast('⚠️ Docházka za týden se mezitím změnila — částka faktury je teď ' + cerstve.rozpis.castka.toFixed(2)
+        + ' € (bylo ' + puvodniCastka.toFixed(2) + ' €). Zkontrolujte ji a vytvořte fakturu znovu.')
+      return
+    }
+  }
   const polozkyFaktury = (override && Array.isArray(override.items) && override.items.length)
     ? override.items
     : (typeof sebratPolozkyFaktury === 'function' ? sebratPolozkyFaktury() : [])
@@ -39884,6 +39965,13 @@ async function storeInvoiceRow(row) {
         try {
           const cerstva = await zalohyKOdecteni(row.worker_id, row.invoice_number, row.total_amount)
           if (!cerstva.chyba) {
+            // Audit 3. 11. 2026: PDF (a e-mail) už odešly se starým odečtem. Obě cesty odeslání
+            // to teď hlídají PŘED vykreslením PDF; sem se dostane už jen výjimka (záloha se
+            // změnila během odesílání, nebo fronta podržené faktury). Chování se nemění,
+            // jen zůstane stopa, že PDF a databáze nesedí.
+            if (Math.abs((Number(row.cash_paid) || 0) - cerstva.castka) > 0.005) {
+              try { if (typeof denikChybZapis === 'function') denikChybZapis('faktura-zaloha-rozdil', 'Záloha na faktuře se změnila mezi náhledem a zápisem — PDF může mít jiný odečet než databáze', { invoiceNum: row.invoice_number, workerId: row.worker_id, vPdf: Number(row.cash_paid) || 0, vDatabazi: cerstva.castka, celkem: Number(row.total_amount) || 0 }, { trida: 'varovani', zdroj: 'auto' }) } catch (x) { console.warn('[deník chyb]', x) } // eslint-disable-line no-undef
+            }
             row = { ...row, cash_paid: cerstva.castka, cash_paid_note: cerstva.popis || null, zalohy_pouzite: cerstva.pouzite }
           }
         } catch (e) { console.warn('[záloha] přepočet před zápisem selhal:', e?.message) }
@@ -40229,6 +40317,47 @@ function updateInvoiceSendUi() {
   }
 }
 
+// Odečet zálohy se na faktuře spočítal při jejím vytvoření. Do odeslání ho ale mohla
+// změnit kancelář: stornovat zálohu, nebo ji spotřebovat jiná faktura, případně přibyla
+// nová. storeInvoiceRow pak odečet před zápisem přepočítá — jenže PDF je tou dobou
+// hotové (nahrané do složky, nebo už odeslané e-mailem) a nesedí s databází
+// (audit 3. 11. 2026). Proto se odečet ověří ještě PŘED vykreslením PDF. Liší-li se,
+// náhled se překreslí s novým odečtem a nic se neodešle — pracovník ho zkontroluje a
+// pošle znovu. Vrací true, když se odesílání má zastavit.
+// Bez spojení (nebo když se záloha nedá přečíst) se nic neblokuje: faktura se pošle
+// nebo podrží v telefonu jako dřív a zápis ji přepočítá sám.
+async function zalohaSeMezitimZmenila(d) {
+  if (!d || !d.workerId || d.ukazka) return false
+  let cerstva = null
+  let casovac = null
+  try {
+    // Pomalé spojení odesílání nezdrží: po 6 s se jede dál jako dřív.
+    const limit = new Promise(r => { casovac = setTimeout(() => r(null), 6000) })
+    cerstva = await Promise.race([zalohyKOdecteni(d.workerId, d.invoiceNum, d.totalAmount, true), limit])
+  } catch (e) { return false }
+  finally { if (casovac) clearTimeout(casovac) }
+  if (!cerstva || cerstva.chyba) return false
+  const bylo = Number(d.cashPaid) || 0
+  if (Math.abs(cerstva.castka - bylo) <= 0.005) return false
+  // Už vyřízená nebo zaplacená faktura téhož čísla si při zápisu nechá odečet z databáze
+  // (viz storeInvoiceRow) — není co hlídat.
+  try {
+    const { data: existujici, error } = await sb.from('worker_invoices').select('status')
+      .eq('worker_id', d.workerId).eq('invoice_number', String(d.invoiceNum || '')).maybeSingle()
+    if (error) return false
+    if (existujici && (existujici.status === 'paid' || existujici.status === 'seen')) return false
+  } catch (e) { return false }
+  // Překreslit náhled s novým odečtem (stejná data, jen záloha) — zároveň se tím
+  // aktualizuje window._lastInvoice, ze kterého se staví řádek do databáze.
+  try {
+    renderInvoice({ ...d, cashPaid: cerstva.castka, cashPaidNote: cerstva.popis,
+      zalohaZeZalohoveFaktury: cerstva.castka > 0, zalohyPouzite: cerstva.pouzite }, 'en')
+  } catch (e) { return false }
+  showToast('⚠️ Záloha na faktuře se mezitím změnila — odečet je teď ' + cerstva.castka.toFixed(2)
+    + ' € (bylo ' + bylo.toFixed(2) + ' €). Zkontrolujte fakturu a odešlete ji znovu.')
+  return true
+}
+
 async function sendInvoiceToSubbau() {
   if (_invSending) return
   // Pojistka: ukázka vzhledu není faktura. Lišta s odesláním je v ní schovaná,
@@ -40250,6 +40379,8 @@ async function sendInvoiceToSubbau() {
     // Appka zrovna sama posílá podržené faktury — počkat, ať starší podržená
     // verze nepřepíše tuhle novější.
     await pockejNaFrontuFaktur(row.worker_id, row.invoice_number)
+    // Záloha se mezitím mohla změnit — PDF se musí vykreslit s tím, co se zapíše.
+    if (await zalohaSeMezitimZmenila(d)) return
     // PDF: když se nepovede, fakturu i tak zapíšeme — ať se práce neztratí
     try {
       out = await buildInvoicePdf()
@@ -40318,6 +40449,8 @@ async function emailInvoiceToSubbau() {
   _invSendBusy(true, 'inv-email-label', 'Připravuji fakturu…')
   let out = null
   try {
+    // E-mail se vrátit nedá — záloha se proto ověří dřív, než se PDF vykreslí a odešle.
+    if (await zalohaSeMezitimZmenila(d)) return
     try { out = await buildInvoicePdf() }
     catch (e) { showToast('❌ ' + (e?.message || e)); return }
 
