@@ -5070,6 +5070,7 @@ function closeWorkerSignPlaceModal() {
   const doc = wspState.pdfDoc
   wspState.pdfDoc = null
   pdfjsUvolni(doc)
+  wspState.zavreno = true   // rozběhnuté wspLoadPDF dočtený dokument zavře (viz tam)
 }
 
 async function wspLoadPDF(url) {
@@ -5083,7 +5084,9 @@ async function wspLoadPDF(url) {
     const doc = await pdfjsLib.getDocument({ data: buf }).promise
     // Mezitím se otevřela jiná smlouva — tenhle dokument už nikdo neukáže (a nesmí
     // přepsat ten novější); zavře se i s vláknem.
-    if (st !== wspState) { pdfjsUvolni(doc); return }
+    // Okno se mezitím zavřelo (Codex 4. 11. 2026) — stav zůstává týž objekt,
+    // pozná se podle značky z closeWorkerSignPlaceModal.
+    if (st !== wspState || st.zavreno) { pdfjsUvolni(doc); return }
     wspState.pdfDoc = doc
     wspState.totalPages = wspState.pdfDoc.numPages
     // Skoč rovnou na POSLEDNÍ stranu — tam bývá místo na podpis, ať admin nepřemačkává
@@ -5648,6 +5651,9 @@ function closeAdminSignModal() {
   const doc = pdfSignState.pdfDoc
   pdfSignState.pdfDoc = null
   pdfjsUvolni(doc)
+  // Zavřeno ještě během načítání (Codex 4. 11. 2026): pořadové číslo se posune,
+  // takže loadPDFForSigning dočtený dokument rovnou zavře a do stavu ho nedá.
+  pdfSignState.nacitani = (pdfSignState.nacitani || 0) + 1
 }
 
 async function pdfNextPage() {
@@ -42771,6 +42777,9 @@ async function openPdfFillModal(contractId, title, fileUrl) {
   // má jen admin, ale funkce je dostupná i z konzole prohlížeče, tak ať je jistota.
   if (currentProfile?.role !== 'admin') { showToast('🔒 Smlouvu smí upravovat jen SubBau'); return }
   if (!fileUrl) { showToast('❌ Smlouva nemá PDF'); return }
+  // Pořadové číslo otevření (Codex 4. 11. 2026): okno zavřené nebo otevřené
+  // znovu ještě během načítání — dočtený dokument se rovnou zavře (viz níž).
+  const otevreni = pdfFillState.otevreni = (pdfFillState.otevreni || 0) + 1
   pdfFillState.contractId = contractId
   pdfFillState.fileUrl = fileUrl
   pdfFillState.fields = []
@@ -42883,6 +42892,7 @@ async function openPdfFillModal(contractId, title, fileUrl) {
     // pdf.js potřebuje vlastní kopii (arrayBuffer se „spotřebuje")
     const task = pdfjsLib.getDocument({ data: pdfFillState.pdfBytes.slice(0) })
     const doc = await task.promise
+    if (otevreni !== pdfFillState.otevreni) { pdfjsUvolni(doc); return }
     // Předchozí dokument (kdyby okno nezavřel closePdfFillModal) i s vláknem pryč.
     if (pdfFillState.pdfDoc && pdfFillState.pdfDoc !== doc) pdfjsUvolni(pdfFillState.pdfDoc)
     pdfFillState.pdfDoc = doc
@@ -42909,6 +42919,7 @@ function closePdfFillModal() {
   // ní už nepřidají — hlídá to pořadové číslo v pdfFillRenderPage.
   const doc = pdfFillState.pdfDoc, kresli = pdfFillState.renderTask
   pdfFillState.renderSeq = (pdfFillState.renderSeq || 0) + 1
+  pdfFillState.otevreni = (pdfFillState.otevreni || 0) + 1   // rozběhnuté načítání dokument zavře
   if (kresli && kresli.promise) kresli.promise.then(() => pdfjsUvolni(doc), () => pdfjsUvolni(doc))
   else pdfjsUvolni(doc)
   pdfFillState.pdfDoc = null
