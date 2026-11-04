@@ -1040,7 +1040,13 @@
           // Nenačtený soubor (capture: chyba načtení se nešíří bublinou).
           var tag = String(cil.tagName).toUpperCase()
           var adr = String(cil.currentSrc || cil.src || cil.href || '')
-          if (tag === 'IMG' || tag === 'IMAGE' || tag === 'VIDEO' || tag === 'AUDIO' || tag === 'SOURCE' || tag === 'TRACK') { pocitej('obrazek', cilObrazku(adr)); return }
+          if (tag === 'IMG' || tag === 'IMAGE' || tag === 'VIDEO' || tag === 'AUDIO' || tag === 'SOURCE' || tag === 'TRACK') {
+            // Skrytý obrázek, kterému appka adresu teprve dá (src=""), hlásí chybu
+            // při každém otevření — čtyři takové jsou v HTML (náhled, ořez, podpis,
+            // fotka v kartě). V deníku to dělalo „Nenačetlo se 4× obrázků“ u všech (4. 11. 2026).
+            if (cil.getAttribute && cil.getAttribute('src') === '') return
+            pocitej('obrazek', cilObrazku(adr)); return
+          }
           // Knihovnu pro databázi hlásí „start-knihovna" (jen když selže i záloha).
           if (/\/supabase\.js|supabase-js/.test(adr)) return
           if (jeRozsireni(adr)) { pocitej('rozsireni'); return }
@@ -6295,7 +6301,7 @@ async function submitAdminSignatureWithPlacement() {
 // Po nahrání nové verze se snadno pozná, jestli se opravdu nasadila: otevřete
 // appku, zmáčkněte F12 (na Macu ⌥⌘I) a v konzoli je vypsané tohle datum. Když
 // tam svítí starší, prohlížeč nebo GitHub drží starou verzi.
-const SUBBAU_VERZE = '2026-11-04 a — Opravy z auditu: pauzy a odchod, faktury, chat, karta pracovníka, odkaz odběratele'
+const SUBBAU_VERZE = '2026-11-04 b — Nástěnka: nulové sazby, deník bez falešných obrázků'
 console.log('StavKo docházka — verze ' + SUBBAU_VERZE)
 // Verze i dole v menu správce. Když někdo novinku „nevidí", podle ní se hned
 // pozná, jestli nemá otevřenou starou kopii appky — bez hledání v konzoli.
@@ -9207,7 +9213,7 @@ function startInvoiceRealtime() {
     })
     .subscribe((status, err) => {
       if (status === 'SUBSCRIBED') console.log('[faktury realtime] aktivní')
-      else if (status === 'CHANNEL_ERROR') console.warn('[faktury realtime] neaktivní — nejspíš chybí tabulka worker_invoices (migrace)')
+      else if (status === 'CHANNEL_ERROR') console.warn('[faktury realtime] spojení přerušeno:', status, (err && err.message) || '')
       // DENÍK CHYB: faktury od lidí pak správci živě nechodí (CLOSED je vlastní
       // odpojení při novém kanálu nebo odhlášení — to se nezapisuje).
       if ((status === 'CHANNEL_ERROR' || status === 'TIMED_OUT') && currentUser) realtimeDoDeniku('admin-faktury', status, err)
@@ -31364,7 +31370,9 @@ async function nactiNuloveSazbyNaNastenku() {
   if (!box || !_jeAdminPrihlasen()) return
   const skryt = () => { box.style.display = 'none'; box.innerHTML = '' }
   const [lideR, provR, vimR] = await Promise.all([
-    sb.from('profiles').select('id, full_name, hourly_rate_worker, team_id, subteam_id, zamestnavatel_id, spoluprace_ukoncena, registration_status')
+    // spoluprace_ukoncena v profilu není (je u odkazu odběratele, client_link_workers) —
+    // dotaz s ním od 31. 10. pokaždé spadl na 42703 a blok se nikdy neukázal (deník 4. 11. 2026).
+    sb.from('profiles').select('id, full_name, hourly_rate_worker, team_id, subteam_id, zamestnavatel_id, registration_status')
       .in('role', ['osvec', 'partak']).eq('is_active', true),
     sb.from('worker_commissions').select('worker_id, provize, bez_provize'),
     sb.from('doc_alert_dismissals').select('dismiss_key').like('dismiss_key', SAZBA0_KLIC + '%')
@@ -31377,7 +31385,7 @@ async function nactiNuloveSazbyNaNastenku() {
   const nula = v => v == null || v === '' || !(Number(v) > 0)
   const chybi = []
   ;(lideR.data || []).forEach(w => {
-    if (w.zamestnavatel_id || w.spoluprace_ukoncena || w.registration_status === 'pending' || jeSkrytaFirmaPracovnika(w)) return
+    if (w.zamestnavatel_id || w.registration_status === 'pending' || jeSkrytaFirmaPracovnika(w)) return
     const co = []
     if (nula(w.hourly_rate_worker) && !vim.has(sazba0Klic('sazba', w.id))) co.push('sazba')
     const c = prov[w.id]
