@@ -23450,7 +23450,8 @@ function renderTeamMembers(t, members, qWorker, profLabels) {
         style="flex:0 0 auto;width:auto;max-width:max-content;font-size:11px;padding:2px 4px;border:1.5px solid ${sm ? 'var(--brd)' : 'var(--amber)'};border-radius:6px;background:${sm ? 'var(--bg2)' : '#fdf3e3'};color:var(--text2);cursor:pointer;font-family:inherit;font-weight:700">
         <option value="" ${!sm ? 'selected' : ''}>⏰ směna ?</option>
         <option value="1" ${sm === 1 ? 'selected' : ''}>⏰ směna 1</option>
-        <option value="2" ${sm === 2 ? 'selected' : ''}>⏰ směna 2</option>
+        <option value="2" ${sm === 2 ? 'selected' : ''}>⏰ směna 2</option>${cislaDalsichSmen(t).map(n => `
+        <option value="${n}" ${sm === n ? 'selected' : ''}>⏰ směna ${n}</option>`).join('')}
       </select>` : ''
     return `
       <div style="display:flex;flex-wrap:wrap;justify-content:space-between;align-items:center;gap:6px;padding:8px 10px;background:${match?'#fff8cc':'var(--bg)'};border-radius:8px">
@@ -23828,25 +23829,158 @@ function smena2Html(t) {
       ${t.prac_doba2_od || t.prac_doba2_do ? `<button onclick="event.stopPropagation();nastavPracDobuTymu('${t.id}', true, 2)" ${vyp}
         style="min-height:40px;padding:6px 10px;border:1px solid var(--brd);border-radius:8px;background:#fff;cursor:pointer;font-family:inherit;font-size:12px">zrušit</button>` : ''}
     </div>
-    ${maSloupce ? '' : `<span style="font-size:11px;color:var(--amber);font-weight:700">⚠️ pro dvě směny spusťte migraci supabase-migrace-dve-smeny.sql</span>`}
+    ${maSloupce ? '' : `<span style="font-size:11px;color:var(--amber);font-weight:700">⚠️ pro dvě směny spusťte migraci supabase-migrace-dve-smeny.sql</span>`}${dalsiSmenyHtml(t)}
     ${dve ? `<div style="font-size:11.5px;color:${bezSmeny ? 'var(--amber)' : 'var(--text3)'};font-weight:600">${bezSmeny
       ? '⚠️ ' + bezSmeny + (bezSmeny === 1 ? ' člověk nemá' : (bezSmeny < 5 ? ' lidé nemají' : ' lidí nemá')) + ' vybranou směnu — jejich příchody a odchody se nehlídají. Směnu vyberete u jména výš.'
-      : 'Každý ve skupině má vybranou směnu 1 nebo 2 (u jména výš).'}</div>` : ''}`
+      : 'Každý ve skupině má vybranou směnu ' + [1, 2, ...cislaDalsichSmen(t)].join(', ').replace(/, (\d+)$/, ' nebo $1') + ' (u jména výš).'}</div>` : ''}`
 }
 
-// Směna jednoho člověka (1, 2, nebo nic). Uloží se do teams.smeny; před
+// SMĚNY 3 A DÁL (majitel 4. 11. 2026: „potřebuji prostě směnu jedna, dva,
+// tři"; „klidně je tam tlačítko … na přidání ještě další"). Prázdná směna 3
+// se nabídne sama, až má skupina směnu 2 (jako směna 2 po směně 1); další
+// přidá „+ Přidat směnu". Uloží se, až je vyplněný začátek i konec. Zrušit
+// jde jen poslední (směny jdou po sobě). Bez migrace je směna 3 zašedlá
+// s hláškou, kterou migraci spustit — směny 1 a 2 fungují dál jako dřív.
+const _smenyRozepsane = new Set()   // skupiny s přidanou, ještě neuloženou směnou
+function dalsiSmenyHtml(t) {
+  if (!dvaSmenyTymu(t)) return ''
+  const maSloupec = 'prac_doby_dalsi' in t
+  const vyp = maSloupec ? '' : 'disabled'
+  const pole = Array.isArray(t.prac_doby_dalsi) ? t.prac_doby_dalsi.slice(0, NEJVIC_SMEN - 2) : []
+  const radek = (k, p, zrusit) => `<div style="display:flex;align-items:center;gap:7px;flex-wrap:wrap;font-size:12.5px;font-weight:700;color:var(--text2)"
+      title="Další pracovní doba skupiny: vyplňte směnu ${k} a u každého člověka výš vyberte, jakou směnu má. Kdo vybranou nemá, nehlídá se.">
+      <span>⏰ Směna ${k}</span>
+      <input type="time" id="tym-od${k}-${t.id}" value="${casSmeny(p && p.od)}" ${vyp} onchange="nastavPracDobuTymu('${t.id}', false, ${k})"
+        style="min-height:40px;padding:6px 8px;border:1.5px solid var(--brd);border-radius:8px;font-family:inherit;font-size:13px">
+      <span>–</span>
+      <input type="time" id="tym-do${k}-${t.id}" value="${casSmeny(p && p.do)}" ${vyp} onchange="nastavPracDobuTymu('${t.id}', false, ${k})"
+        style="min-height:40px;padding:6px 8px;border:1.5px solid var(--brd);border-radius:8px;font-family:inherit;font-size:13px">
+      ${zrusit ? `<button onclick="event.stopPropagation();nastavPracDobuTymu('${t.id}', true, ${k})" ${vyp}
+        style="min-height:40px;padding:6px 10px;border:1px solid var(--brd);border-radius:8px;background:#fff;cursor:pointer;font-family:inherit;font-size:12px">zrušit</button>` : ''}
+    </div>`
+  let html = pole.map((p, i) => radek(i + 3, p, i === pole.length - 1)).join('')
+  const dalsi = pole.length + 3
+  if (dalsi <= NEJVIC_SMEN) {
+    if (!pole.length || _smenyRozepsane.has(String(t.id))) html += radek(dalsi, null, false)
+    else html += `<div style="display:flex;align-items:center;gap:7px;flex-wrap:wrap">
+      <button onclick="event.stopPropagation();pridejSmenuTymu('${t.id}')" title="Přidá další prázdnou směnu. Uloží se, až vyplníte začátek i konec."
+        style="min-height:40px;padding:6px 12px;border:1px dashed var(--blue);border-radius:8px;background:var(--blue-l);color:var(--blue);cursor:pointer;font-family:inherit;font-size:12px;font-weight:600">+ Přidat směnu</button>
+    </div>`
+  }
+  if (!maSloupec) html += `<span style="font-size:11px;color:var(--amber);font-weight:700">⚠️ pro další směny spusťte migraci supabase-migrace-dalsi-smeny.sql</span>`
+  return html
+}
+
+function pridejSmenuTymu(teamId) {
+  const t = (_teamsCache || []).find(x => String(x.id) === String(teamId))
+  if (!t || !dvaSmenyTymu(t) || !('prac_doby_dalsi' in t)) return
+  _smenyRozepsane.add(String(teamId))
+  renderTeams()
+}
+
+// Kopie teams.smeny bez lidí se směnou `od` a vyšší; null = nikdo takový není.
+function smenyBezOd(smeny, od) {
+  const m = (smeny && typeof smeny === 'object' && !Array.isArray(smeny)) ? smeny : {}
+  const nove = {}
+  let zmena = false
+  Object.keys(m).forEach(k => { if (Number(m[k]) >= od) zmena = true; else nove[k] = m[k] })
+  return zmena ? nove : null
+}
+
+// Uloží nebo zruší směnu 3 a dál. Před zápisem načte čerstvý stav skupiny
+// (jako nastavSmenuClena), ať si dva správci nepřepíšou směny ani výběr lidí;
+// když se mezitím počet směn změnil, neukládá naslepo a ukáže, jak to je.
+// Zrušením směny se vymaže i výběr u lidí, kteří ji (nebo pozdější) měli.
+async function nastavDalsiSmenuTymu(teamId, zrusit, k) {
+  if (!Number.isInteger(k) || k < 3 || k > NEJVIC_SMEN) return
+  const od = zrusit ? '' : (document.getElementById('tym-od' + k + '-' + teamId)?.value || '')
+  const doo = zrusit ? '' : (document.getElementById('tym-do' + k + '-' + teamId)?.value || '')
+  if (!zrusit && (!od || !doo)) {
+    if (od || doo) showToast('⏰ Doplňte začátek i konec pracovní doby')
+    return
+  }
+  if (!zrusit && od >= doo) { showToast('⏰ Začátek musí být dřív než konec'); return }
+  const t = (_teamsCache || []).find(x => String(x.id) === String(teamId))
+  const meli = Array.isArray(t && t.prac_doby_dalsi) ? t.prac_doby_dalsi.slice(0, NEJVIC_SMEN - 2).length : 0
+  const { data: c, error: e1 } = await sb.from('teams')
+    .select('id, prac_doba_od, prac_doba_do, prac_doba2_od, prac_doba2_do, smeny, prac_doby_dalsi').eq('id', teamId).maybeSingle()
+  if (e1 || !c) {
+    showToast(e1 && /prac_doby_dalsi|column|schema cache/i.test(e1.message || '')
+      ? '❌ Chybí sloupec — spusťte migraci supabase-migrace-dalsi-smeny.sql'
+      : '❌ Směna se neuložila' + (e1 ? ': ' + e1.message : ''))
+    renderTeams(); return
+  }
+  const pole = Array.isArray(c.prac_doby_dalsi) ? c.prac_doby_dalsi.slice(0, NEJVIC_SMEN - 2) : []
+  if (pole.length !== meli || (!zrusit && (!dvaSmenyTymu(c) || k - 3 > pole.length))) {
+    if (t) Object.assign(t, c)
+    _smenyRozepsane.delete(String(teamId))
+    showToast('⚠️ Směny skupiny mezitím změnil někdo jiný — zkontrolujte je a zkuste to znovu')
+    renderTeams(); return
+  }
+  const zapis = {}
+  if (zrusit) {
+    zapis.prac_doby_dalsi = pole.slice(0, k - 3)
+    const smeny = smenyBezOd(c.smeny, k)
+    if (smeny) zapis.smeny = smeny
+  } else {
+    pole[k - 3] = { od, do: doo }
+    zapis.prac_doby_dalsi = pole
+  }
+  const { data, error } = await sb.from('teams').update(zapis).eq('id', teamId).select('id, ' + Object.keys(zapis).join(', '))
+  if (error || !data || !data.length) {
+    showToast(error && /prac_doby_dalsi|column|schema cache/i.test(error.message || '')
+      ? '❌ Chybí sloupec — spusťte migraci supabase-migrace-dalsi-smeny.sql'
+      : '❌ Směna se neuložila' + (error ? ': ' + error.message : ' — zkontrolujte oprávnění'))
+    return
+  }
+  if (t) Object.keys(zapis).forEach(x => { t[x] = data[0][x] })
+  _smenyRozepsane.delete(String(teamId))
+  showToast(zrusit ? '✅ Směna ' + k + ' zrušena' : '✅ Směna ' + k + ' ' + od + '–' + doo)
+  renderTeams()
+}
+
+// Zrušením směny 1 nebo 2 zmizí i směny 3 a dál (jdou po sobě) a lidem, kteří
+// je měli, se výběr vymaže. Výběr směny 1 a 2 zůstává jako dřív. Vrací
+// { zapis, pryc } k přidání do zápisu, nebo null, když se stav nenačetl.
+// Bez migrace (sloupec v načtené skupině není) nic navíc — jako dřív.
+async function zapisBezDalsichSmen(teamId) {
+  const t0 = (_teamsCache || []).find(x => String(x.id) === String(teamId))
+  if (!t0 || !('prac_doby_dalsi' in t0)) return { zapis: {}, pryc: 0 }
+  const { data: c, error } = await sb.from('teams').select('id, smeny, prac_doby_dalsi').eq('id', teamId).maybeSingle()
+  if (error || !c) return null
+  const zapis = {}
+  const pryc = Array.isArray(c.prac_doby_dalsi) ? c.prac_doby_dalsi.length : 0
+  if (pryc) zapis.prac_doby_dalsi = []
+  const smeny = smenyBezOd(c.smeny, 3)
+  if (smeny) zapis.smeny = smeny
+  return { zapis, pryc }
+}
+
+// Směna jednoho člověka (1, 2, … nebo nic). Uloží se do teams.smeny; před
 // zápisem se načte čerstvý stav, ať si dva správci nepřepíšou změny.
 async function nastavSmenuClena(teamId, workerId, hodnota, el) {
   const n = Number(hodnota)
-  const { data: cerstve, error: e1 } = await sb.from('teams').select('id, smeny').eq('id', teamId).maybeSingle()
+  // Směna 3 a dál (4. 11. 2026) se uloží, jen když ji skupina v čerstvém stavu
+  // opravdu má — jinak by člověk „měl" směnu, která není.
+  const dalsi = Number.isInteger(n) && n >= 3
+  const { data: cerstve, error: e1 } = await sb.from('teams')
+    .select(dalsi ? 'id, smeny, prac_doba_od, prac_doba_do, prac_doba2_od, prac_doba2_do, prac_doby_dalsi' : 'id, smeny').eq('id', teamId).maybeSingle()
   if (e1 || !cerstve) {
-    showToast(e1 && /smeny|column|schema cache/i.test(e1.message || '')
+    showToast(e1 && dalsi && /prac_doby_dalsi|column|schema cache/i.test(e1.message || '')
+      ? '❌ Chybí sloupec — spusťte migraci supabase-migrace-dalsi-smeny.sql'
+      : e1 && /smeny|column|schema cache/i.test(e1.message || '')
       ? '❌ Chybí sloupec — spusťte migraci supabase-migrace-dve-smeny.sql'
       : '❌ Směna se neuložila' + (e1 ? ': ' + e1.message : ''))
     renderTeams(); return
   }
+  if (dalsi && !dobaDalsiSmeny(cerstve, n)) {
+    const t0 = (_teamsCache || []).find(x => String(x.id) === String(teamId))
+    if (t0) Object.assign(t0, cerstve)
+    showToast('⚠️ Směna ' + n + ' ve skupině není — zkontrolujte směny skupiny')
+    renderTeams(); return
+  }
   const smeny = Object.assign({}, (cerstve.smeny && typeof cerstve.smeny === 'object') ? cerstve.smeny : {})
-  if (n === 1 || n === 2) smeny[String(workerId)] = n
+  if (n === 1 || n === 2 || dalsi) smeny[String(workerId)] = n
   else delete smeny[String(workerId)]
   const { data, error } = await sb.from('teams').update({ smeny }).eq('id', teamId).select('id, smeny')
   if (error || !data || !data.length) {
@@ -23856,7 +23990,7 @@ async function nastavSmenuClena(teamId, workerId, hodnota, el) {
   const t = (_teamsCache || []).find(x => String(x.id) === String(teamId))
   if (t) t.smeny = data[0].smeny
   const w = (_workersCache || []).find(x => String(x.id) === String(workerId))
-  showToast((n === 1 || n === 2 ? '⏰ ' + (w ? w.full_name + ': ' : '') + 'směna ' + n
+  showToast((n === 1 || n === 2 || dalsi ? '⏰ ' + (w ? w.full_name + ': ' : '') + 'směna ' + n
     : '⏰ ' + (w ? w.full_name + ': ' : '') + 'bez směny — nehlídá se'))
   renderTeams()
 }
@@ -23955,6 +24089,7 @@ async function nastavGpsPodskupiny(subteamId, el) {
 }
 
 async function nastavPracDobuTymu(teamId, zrusit, smena) {
+  if (smena >= 3) return nastavDalsiSmenuTymu(teamId, zrusit, smena)
   const dva = smena === 2
   const odEl = document.getElementById((dva ? 'tym-od2-' : 'tym-od-') + teamId)
   const doEl = document.getElementById((dva ? 'tym-do2-' : 'tym-do-') + teamId)
@@ -23971,6 +24106,13 @@ async function nastavPracDobuTymu(teamId, zrusit, smena) {
   const zapis = { [sOd]: od || null, [sDo]: doo || null }
   // Zrušit směnu 1 a nechat jen směnu 2 nedává smysl — zruší se obě.
   if (!dva && zrusit) { const t0 = (_teamsCache || []).find(x => x.id === teamId); if (t0 && ('prac_doba2_od' in t0)) { zapis.prac_doba2_od = null; zapis.prac_doba2_do = null } }
+  // Se směnou 1 nebo 2 zmizí i směny 3 a dál (majitel 4. 11. 2026 — jdou po sobě).
+  let pryc = 0
+  if (zrusit) {
+    const z = await zapisBezDalsichSmen(teamId)
+    if (!z) { showToast('❌ Pracovní doba se neuložila — zkuste to znovu'); return }
+    Object.assign(zapis, z.zapis); pryc = z.pryc
+  }
   const { data, error } = await sb.from('teams').update(zapis).eq('id', teamId).select('id, ' + Object.keys(zapis).join(', '))
   if (error || !data || !data.length) {
     showToast(error && /prac_doba|column|schema cache/i.test(error.message || '')
@@ -23981,7 +24123,8 @@ async function nastavPracDobuTymu(teamId, zrusit, smena) {
   const t = (_teamsCache || []).find(x => x.id === teamId)
   if (t) Object.keys(zapis).forEach(k => { t[k] = data[0][k] })
   const co = dva ? 'Směna 2' : (t && dvaSmenyTymu(t) ? 'Směna 1' : 'Běžná pracovní doba')
-  showToast(zrusit ? '✅ ' + co + ' zrušena' : '✅ ' + co + ' ' + od + '–' + doo)
+  if (zrusit) _smenyRozepsane.delete(String(teamId))
+  showToast(zrusit ? '✅ ' + co + ' zrušena' + (pryc ? ' i se ' + (pryc === 1 ? 'směnou 3' : 'směnami 3–' + (pryc + 2)) : '') : '✅ ' + co + ' ' + od + '–' + doo)
   renderTeams()
 }
 
@@ -46728,16 +46871,47 @@ const TOLERANCE_NAVIC_MIN = 30
 // DVĚ SMĚNY (majitel 10. 10. 2026: „u nějaké firmy se dělají dvě pracovní
 // doby — u každého v Týmech zaškrtnu, že má směnu 1 nebo 2"). Skupina má
 // směnu 1 (prac_doba_od/do) a může mít směnu 2 (prac_doba2_od/do); kdo má
-// jakou, je v teams.smeny ({ id pracovníka: 1 | 2 }). Dokud skupina směnu 2
+// jakou, je v teams.smeny ({ id pracovníka: 1 | 2 }, od 4. 11. 2026 i 3 a dál —
+// viz DALŠÍ SMĚNY níž). Dokud skupina směnu 2
 // nemá, platí směna 1 pro všechny (jako dřív). Když ji má, hlídá se jen ten,
 // komu je směna vybraná — kdo vybranou nemá, nehlídá se (majitel).
 function dvaSmenyTymu(tym) {
   return !!(tym && tym.prac_doba_od && tym.prac_doba_do && tym.prac_doba2_od && tym.prac_doba2_do)
 }
+// DALŠÍ SMĚNY 3, 4, … (majitel 4. 11. 2026: „u Máry … přidat ještě jednu
+// směnu. Jo, klidně je tam tlačítko ještě jako na přidání ještě další, ale
+// potřebuji prostě směnu jedna, dva, tři, teď mám 1, 2").
+// Jsou v teams.prac_doby_dalsi jako pole [{ od: 'HH:MM', do: 'HH:MM' }, …]:
+// první prvek = směna 3, druhý = směna 4 (supabase-migrace-dalsi-smeny.sql).
+// Jdou po sobě: směna 3 platí, jen když skupina má směnu 2. Neplatný nebo
+// neúplný prvek = ta směna neexistuje (nehlídá se). Víc než 6 směn ne.
+const NEJVIC_SMEN = 6
+// Čas z pole další směny jako 'HH:MM', jinak '' — pole je jsonb, takže v něm
+// může být cokoli (do value="" v Týmech nesmí projít nic jiného než čas).
+function casSmeny(v) {
+  const s = typeof v === 'string' ? v : ''
+  return /^([01]\d|2[0-3]):[0-5]\d(:[0-5]\d)?$/.test(s) ? s.slice(0, 5) : ''
+}
+function dobaDalsiSmeny(tym, n) {
+  if (!dvaSmenyTymu(tym) || !Number.isInteger(n) || n < 3 || n > NEJVIC_SMEN) return null
+  const p = Array.isArray(tym.prac_doby_dalsi) ? tym.prac_doby_dalsi[n - 3] : null
+  const od = casSmeny(p && p.od), doo = casSmeny(p && p.do)
+  // Noční směny se nepojedou (majitel) — začátek po konci je neplatná směna.
+  return od && doo && od < doo ? { od, do: doo } : null
+}
+// Čísla platných směn 3 a dál (na výběr u člověka v Týmech).
+function cislaDalsichSmen(tym) {
+  const out = []
+  for (let n = 3; n <= NEJVIC_SMEN; n++) if (dobaDalsiSmeny(tym, n)) out.push(n)
+  return out
+}
 function smenaClena(tym, workerId) {
   const m = (tym && tym.smeny && typeof tym.smeny === 'object') ? tym.smeny : {}
   const n = Number(m[String(workerId)])
-  return n === 1 || n === 2 ? n : null
+  if (n === 1 || n === 2) return n
+  // Směna 3 a dál jen, když ji skupina opravdu má — jinak je člověk bez směny
+  // (nehlídá se a v Týmech svítí, že směnu vybranou nemá).
+  return dobaDalsiSmeny(tym, n) ? n : null
 }
 function dobaClena(tym, workerId) {
   if (!tym || !tym.prac_doba_od || !tym.prac_doba_do) return null
@@ -46745,6 +46919,7 @@ function dobaClena(tym, workerId) {
   const n = smenaClena(tym, workerId)
   if (n === 1) return { od: tym.prac_doba_od, do: tym.prac_doba_do }
   if (n === 2) return { od: tym.prac_doba2_od, do: tym.prac_doba2_do }
+  if (n) return dobaDalsiSmeny(tym, n)
   return null
 }
 function odchylkaOdDoby(rec, tym) {
