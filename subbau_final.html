@@ -23862,7 +23862,10 @@ function dalsiSmenyHtml(t) {
   const dalsi = pole.length + 3
   if (dalsi <= NEJVIC_SMEN) {
     if (!pole.length || _smenyRozepsane.has(String(t.id))) html += radek(dalsi, null, false)
-    else html += `<div style="display:flex;align-items:center;gap:7px;flex-wrap:wrap">
+    // Odsazené od řádku nad ním (kontrola 4. 11. 2026): „zrušit" poslední směny
+    // leželo jen 2 px nad tímhle tlačítkem — kdo na telefonu ťukl kousek výš,
+    // směnu hned zrušil i s výběrem lidí, kteří ji měli.
+    else html += `<div style="display:flex;align-items:center;gap:7px;flex-wrap:wrap;margin-top:8px">
       <button onclick="event.stopPropagation();pridejSmenuTymu('${t.id}')" title="Přidá další prázdnou směnu. Uloží se, až vyplníte začátek i konec."
         style="min-height:40px;padding:6px 12px;border:1px dashed var(--blue);border-radius:8px;background:var(--blue-l);color:var(--blue);cursor:pointer;font-family:inherit;font-size:12px;font-weight:600">+ Přidat směnu</button>
     </div>`
@@ -23874,6 +23877,11 @@ function dalsiSmenyHtml(t) {
 function pridejSmenuTymu(teamId) {
   const t = (_teamsCache || []).find(x => String(x.id) === String(teamId))
   if (!t || !dvaSmenyTymu(t) || !('prac_doby_dalsi' in t)) return
+  // Nad strop se nepřidává ani příznak — rozepsaná směna končí jen uložením
+  // nebo zrušením poslední (kontrola 4. 11. 2026), takže by zůstal viset
+  // a prázdný řádek by vyskočil, až nějaká směna ubude.
+  const n = Array.isArray(t.prac_doby_dalsi) ? t.prac_doby_dalsi.slice(0, NEJVIC_SMEN - 2).length : 0
+  if (n + 3 > NEJVIC_SMEN) return
   _smenyRozepsane.add(String(teamId))
   renderTeams()
 }
@@ -23891,7 +23899,19 @@ function smenyBezOd(smeny, od) {
 // (jako nastavSmenuClena), ať si dva správci nepřepíšou směny ani výběr lidí;
 // když se mezitím počet směn změnil, neukládá naslepo a ukáže, jak to je.
 // Zrušením směny se vymaže i výběr u lidí, kteří ji (nebo pozdější) měli.
-async function nastavDalsiSmenuTymu(teamId, zrusit, k) {
+// Uložení jedné skupiny jdou PO SOBĚ (kontrola 4. 11. 2026): když správce
+// opravil čas, zatímco se první uložení ještě nevrátilo, srovnalo se druhé
+// s mezipamětí, kterou první přepíše až po svém zápisu — vlastní zápis pak
+// vypadal jako změna od jiného správce („mezitím změnil někdo jiný") a oprava
+// se zahodila; a úprava jedné směny hned po druhé mohla tu první zapsat zpátky
+// postaru. Časy se berou hned z políček (co správce napsal), zapíší se až po
+// předchozím uložení. Když předchozí uložení zjistí, že směny mezitím změnil
+// někdo jiný, čekající změny se nezapíší — vznikly nad starým stavem (jinak
+// by třeba rozepsaná směna 4 přepsala směnu 4, kterou mezitím přidal jiný
+// správce). Pojistka: na zaseknuté uložení se čeká nejvýš 20 s.
+const _smenyUklada = new Map()   // skupina → poslední rozběhnuté uložení dalších směn
+const _smenyKolo = new Map()     // skupina → kolikrát uložení zjistilo cizí změnu
+function nastavDalsiSmenuTymu(teamId, zrusit, k) {
   if (!Number.isInteger(k) || k < 3 || k > NEJVIC_SMEN) return
   const od = zrusit ? '' : (document.getElementById('tym-od' + k + '-' + teamId)?.value || '')
   const doo = zrusit ? '' : (document.getElementById('tym-do' + k + '-' + teamId)?.value || '')
@@ -23900,6 +23920,22 @@ async function nastavDalsiSmenuTymu(teamId, zrusit, k) {
     return
   }
   if (!zrusit && od >= doo) { showToast('⏰ Začátek musí být dřív než konec'); return }
+  const klic = String(teamId)
+  const kolo = _smenyKolo.get(klic) || 0
+  const pred = _smenyUklada.get(klic)
+  const ted = (pred ? Promise.race([pred.catch(() => {}), new Promise(r => setTimeout(r, 20000))]) : Promise.resolve())
+    .then(() => ulozDalsiSmenuTymu(teamId, zrusit, k, od, doo, kolo))
+  _smenyUklada.set(klic, ted)
+  const uklid = () => { if (_smenyUklada.get(klic) === ted) _smenyUklada.delete(klic) }
+  ted.then(uklid, uklid)
+  return ted
+}
+async function ulozDalsiSmenuTymu(teamId, zrusit, k, od, doo, kolo) {
+  const klic = String(teamId)
+  if ((_smenyKolo.get(klic) || 0) !== kolo) {
+    showToast('⚠️ Směny skupiny mezitím změnil někdo jiný — zkontrolujte je a zkuste to znovu')
+    return
+  }
   const t = (_teamsCache || []).find(x => String(x.id) === String(teamId))
   const meli = Array.isArray(t && t.prac_doby_dalsi) ? t.prac_doby_dalsi.slice(0, NEJVIC_SMEN - 2).length : 0
   const { data: c, error: e1 } = await sb.from('teams')
@@ -23912,11 +23948,18 @@ async function nastavDalsiSmenuTymu(teamId, zrusit, k) {
   }
   const pole = Array.isArray(c.prac_doby_dalsi) ? c.prac_doby_dalsi.slice(0, NEJVIC_SMEN - 2) : []
   if (pole.length !== meli || (!zrusit && (!dvaSmenyTymu(c) || k - 3 > pole.length))) {
+    _smenyKolo.set(klic, (_smenyKolo.get(klic) || 0) + 1)
     if (t) Object.assign(t, c)
     _smenyRozepsane.delete(String(teamId))
     showToast('⚠️ Směny skupiny mezitím změnil někdo jiný — zkontrolujte je a zkuste to znovu')
     renderTeams(); return
   }
+  // Ukládá se nová směna za poslední uloženou (prázdná směna 3 nebo ta
+  // z „+ Přidat směnu")? Jen pak rozepsaná směna končí — kontrola 4. 11. 2026:
+  // po uložení jiné směny dřív rozepsaný řádek celý zmizel a správce musel
+  // znovu na „+ Přidat směnu" (neuložený napsaný čas se při překreslení
+  // ztratí dál, stejně jako u směny 2).
+  const nova = !zrusit && k - 3 === pole.length
   const zapis = {}
   if (zrusit) {
     zapis.prac_doby_dalsi = pole.slice(0, k - 3)
@@ -23934,7 +23977,7 @@ async function nastavDalsiSmenuTymu(teamId, zrusit, k) {
     return
   }
   if (t) Object.keys(zapis).forEach(x => { t[x] = data[0][x] })
-  _smenyRozepsane.delete(String(teamId))
+  if (zrusit || nova) _smenyRozepsane.delete(String(teamId))
   showToast(zrusit ? '✅ Směna ' + k + ' zrušena' : '✅ Směna ' + k + ' ' + od + '–' + doo)
   renderTeams()
 }
