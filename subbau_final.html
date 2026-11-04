@@ -2685,8 +2685,20 @@ setTimeout(function brzda() {
               background: var(--mmir-plocha); width: 100%; max-width: 520px; max-height: 92vh; max-height: 92dvh;
               overflow-y: auto; border-radius: var(--mmir-radius) var(--mmir-radius) 0 0;
               padding: 14px 16px 20px; padding-bottom: max(20px, env(safe-area-inset-bottom));
+              /* PEVNÁ HLAVIČKA A PATIČKA (4. 11. 2026, nezávislá kontrola dávky d):
+                 s více stavbami je okno vyšší než obrazovka a Přesunout / Zrušit
+                 byly pod dolním okrajem okna (i na 1440 × 900) — kdo neroloval, neviděl je.
+                 Jako okno__akce v Okno.jsx jsou tlačítka v patičce mimo tělo; roluje
+                 jen tělo, hlavička a patička stojí. --mmir-pod-oknem: výška pruhu
+                 UKÁZKA, který v ukázce leží dole přes okno (v ostré appce 0). */
+              padding-bottom: calc(max(20px, env(safe-area-inset-bottom)) + var(--mmir-pod-oknem, 0px));
+              display: flex; flex-direction: column;
             }
-            .mmir-okno-pozadi .mmir-okno__telo { min-width: 0; }
+            .mmir-okno-pozadi .mmir-okno__hlavicka, .mmir-okno-pozadi .mmir-okno__akce, .mmir-okno-pozadi .mmir-okno > .mmir-napoveda { flex: none; }
+            .mmir-okno-pozadi .mmir-okno__telo { min-width: 0; flex: 1 1 auto; min-height: 0; overflow-y: auto; }
+            /* Okraj posledního odstavce těla se dřív slil s 14 px nad tlačítky
+               (rolovací tělo okraje neslévá) — mezera nad patičkou zůstává 14 px. */
+            .mmir-okno-pozadi .mmir-okno__telo > :last-child { margin-bottom: 0; }
             .mmir-okno-pozadi .mmir-okno__hlavicka { display: flex; align-items: center; gap: 12px; margin-bottom: 10px; }
             .mmir-okno-pozadi .mmir-okno__nadpis { font-size: 18px; font-weight: 700; margin: 0; min-width: 0; overflow-wrap: anywhere; }
             .mmir-okno-pozadi .mmir-okno__hlavicka .mmir-tlacitko { margin-left: auto; flex: none; }
@@ -31885,7 +31897,15 @@ function mmirVyska() {
   dny.style.maxHeight = Math.round(zbyva >= 360 ? Math.min(zbyva, strop) : strop) + 'px'
 }
 let _mmirVyskaCeka = 0
-window.addEventListener('resize', () => { clearTimeout(_mmirVyskaCeka); _mmirVyskaCeka = setTimeout(mmirVyska, 150) })
+window.addEventListener('resize', () => {
+  clearTimeout(_mmirVyskaCeka)
+  _mmirVyskaCeka = setTimeout(() => {
+    mmirVyska()
+    // Otočený telefon: pruh UKÁZKA se zalomí jinak — patička okna za ním.
+    const box = document.getElementById('mmi-presun')
+    if (box) box.style.setProperty('--mmir-pod-oknem', mmirPodOknem() + 'px')
+  }, 150)
+})
 // Kde rozpis stál (týden a odrolování) — po novém vykreslení (filtr, Obnovit,
 // přesun) se vrátí na totéž místo; jiný týden začne na vybraném dni.
 function mmirRolovani() {
@@ -31999,7 +32019,9 @@ function mmiVykresliPresun() {
     box.addEventListener('click', e => { if (e.target === box) mmiZavriPresun() })
     document.body.appendChild(box)
   }
-  const odscrolovano = box.firstElementChild?.scrollTop || 0
+  box.style.setProperty('--mmir-pod-oknem', mmirPodOknem() + 'px')
+  // Roluje tělo okna (patička stojí); okno samo jen na úplně nízké obrazovce.
+  const odscrolovano = [box.firstElementChild?.scrollTop || 0, box.querySelector('.mmir-okno__telo')?.scrollTop || 0]
   // Volby jsou přepínače (radio): šipkou se jde na další volbu a okno se při
   // tom vykreslí znovu — fokus se proto vrátí na totéž místo.
   const ovladace = () => [...box.querySelectorAll('button, input')]
@@ -32043,12 +32065,25 @@ function mmiVykresliPresun() {
       ${P.chyba ? `<p class="mmir-formular__chyba" data-mmi-chyba role="alert">${escAttr(P.chyba)}</p>` : ''}
       ${M.lzePresouvat ? '' : '<p class="mmir-nabidka__upozorneni" data-mmi-nepropojeno>Přesouvání se zapne po propojení se Stavbyplánem. Zatím si okno můžete jen prohlédnout, nic se neodešle.</p>'}
       ${M.lzePresouvat && !c.lzePresouvat ? '<p class="mmir-nabidka__upozorneni" data-mmi-nelze>Tohohle člověka může přesunout jen MMI ve Stavbyplánu — pro SubBau ho nepovolilo. Okno si můžete jen prohlédnout, nic se neodešle.</p>' : ''}
-      <div class="mmir-okno__akce"><button type="button" id="mmi-presunout" class="mmir-tlacitko mmir-tlacitko--hlavni" onclick="mmiPotvrdPresun()"${lze ? '' : ' disabled'}>${P.bezi ? 'Přesouvám…' : 'Přesunout'}</button><button type="button" class="mmir-tlacitko" onclick="mmiZavriPresun()"${zak}>Zrušit</button></div>
-      <p class="mmir-napoveda">Zapíše se hned do Stavbyplánu. MMI u přesunu uvidí, že ho udělal SubBau.</p>
     </div>
+    <div class="mmir-okno__akce"><button type="button" id="mmi-presunout" class="mmir-tlacitko mmir-tlacitko--hlavni" onclick="mmiPotvrdPresun()"${lze ? '' : ' disabled'}>${P.bezi ? 'Přesouvám…' : 'Přesunout'}</button><button type="button" class="mmir-tlacitko" onclick="mmiZavriPresun()"${zak}>Zrušit</button></div>
+    <p class="mmir-napoveda">Zapíše se hned do Stavbyplánu. MMI u přesunu uvidí, že ho udělal SubBau.</p>
   </div>`
-  if (box.firstElementChild) box.firstElementChild.scrollTop = odscrolovano
+  if (box.firstElementChild) box.firstElementChild.scrollTop = odscrolovano[0]
+  const telo = box.querySelector('.mmir-okno__telo')
+  if (telo) telo.scrollTop = odscrolovano[1]
   if (fokus >= 0) ovladace()[fokus]?.focus({ preventScroll: true })
+}
+// Výška pruhu UKÁZKA (#demo-pruh, jen v ukazka.html: pevně dole přes celou
+// šířku, nad oknem) — o tolik se v okně zvedne patička s Přesunout / Zrušit.
+// V ostré appce pruh není → 0 a okno je beze změny (4. 11. 2026).
+function mmirPodOknem() {
+  try {
+    const pruh = document.getElementById('demo-pruh')
+    if (!pruh || getComputedStyle(pruh).position !== 'fixed') return 0
+    const r = pruh.getBoundingClientRect()
+    return r.height ? Math.max(0, Math.round(innerHeight - r.top)) : 0
+  } catch (e) { return 0 }
 }
 // Esc zavře okno jako ve Stavbyplánu (Okno.jsx) — na iPadu s klávesnicí je to
 // jediná cesta ven, když se okno nevejde na výšku. Během odesílání se nezavře
