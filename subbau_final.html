@@ -18552,6 +18552,11 @@ async function sendAdminChatMessage() {
   const input = document.getElementById('admin-chat-input')
   const msg = input?.value?.trim()
   if (!msg) return
+  // AUDIT 3. 11. 2026 (C1): komu zpráva patří, se zapamatuje HNED se zprávou.
+  // Dřív se activeChatWorkerId četlo až po čekání (přihlášení, databáze) — když
+  // správce mezitím klikl na jiného pracovníka (nebo odešel ze sekce), uložila
+  // se zpráva i oznámení s jejím textem (i soukromým) druhému, případně nikomu.
+  const wid = activeChatWorkerId
 
   // Dřív se tu jen tiše skončilo, když appka na chvíli ztratila přihlášeného
   // uživatele (Chrome to občas udělá). Zpráva zmizela z políčka, nikam se
@@ -18559,14 +18564,7 @@ async function sendAdminChatMessage() {
   // Teď se přihlášení zkusí dotáhnout ze session a když ani to nepomůže,
   // aspoň se to řekne nahlas a text v políčku zůstane.
   if (!await zajistiPrihlaseni()) { showToast('⚠️ Přihlášení vypršelo — načtěte stránku a zkuste to znovu'); return }
-  if (!activeChatWorkerId) { showToast('⚠️ Není vybraný pracovník — otevřete konverzaci znovu'); return }
-
-  // AUDIT 3. 11. 2026 (C1): komu zpráva patří, se zapamatuje HNED. Dřív se
-  // activeChatWorkerId četlo znovu až po čekání na databázi — když správce
-  // mezitím klikl na jiného pracovníka (nebo odešel ze sekce), uložila se
-  // zpráva jednomu a oznámení s jejím textem (i soukromým) přišlo druhému,
-  // případně nikomu.
-  const wid = activeChatWorkerId
+  if (!wid) { showToast('⚠️ Není vybraný pracovník — otevřete konverzaci znovu'); return }
 
   input.value = ''
   input.style.height = 'auto'
@@ -36072,6 +36070,20 @@ async function generateInvoiceMobImpl(lang = 'en', override = null) {
     }
     const puvodniCastka = Number(window._invTydenniCastka) || 0
     if (Math.abs(cerstve.rozpis.castka - puvodniCastka) > 0.005) {
+      window._invTydenniCastka = cerstve.rozpis.castka
+      rozpocitatCastku('inv')
+      ukazSrazkuVeFakture('inv', cerstve.rozpis)
+      showToast('⚠️ Docházka za týden se mezitím změnila — částka faktury je teď ' + cerstve.rozpis.castka.toFixed(2)
+        + ' € (bylo ' + puvodniCastka.toFixed(2) + ' €). Zkontrolujte ji a vytvořte fakturu znovu.')
+      return
+    }
+    // Hodiny na faktuře jsou z prvního čtení docházky (výš), kontrola částky
+    // z druhého. Kdyby se docházka změnila právě mezi nimi, měla by faktura
+    // hodiny z jednoho stavu a částku z druhého (Codex 4. 11. 2026). Hodiny
+    // nezávisí na sazbě, takže se dají porovnat bez rizika, že se faktura
+    // zablokuje napořád — liší-li se, je to čerstvá změna: formulář se přepočítá
+    // a faktura se vytvoří znovu.
+    if (Math.abs((Number(cerstve.rozpis.hodiny) || 0) - (Number(totalHours) || 0)) > 0.001) {
       window._invTydenniCastka = cerstve.rozpis.castka
       rozpocitatCastku('inv')
       ukazSrazkuVeFakture('inv', cerstve.rozpis)
