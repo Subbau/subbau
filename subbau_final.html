@@ -542,6 +542,26 @@ tr:hover td{background:#fafbfc}
 .card-search input:focus{background:none}
 .card-search svg{width:15px;height:15px;color:var(--text3);flex-shrink:0}
 @media(max-width:640px){.card-search{width:100%}}
+/* FOTKY STAVBY PO FIRMÁCH (4. 11. 2026) — složky firem v galerii správce.
+   Jen třídy fotky-* uvnitř #v-fotky, jinde se nic nemění. Ikona složky cihlová
+   jako ikony nadpisů (.main h4 svg), u skončené firmy šedá. Na telefonu dvě
+   složky vedle sebe (karta je tam užší, jedna pod druhou by se nekonečně rolovalo). */
+#v-fotky .fotky-slozky{grid-column:1/-1;display:grid;grid-template-columns:repeat(auto-fill,minmax(170px,1fr));gap:12px}
+#v-fotky .fotky-slozka{display:flex;flex-direction:column;min-width:0;padding:0;text-align:left;border:1px solid var(--brd);border-radius:12px;overflow:hidden;background:#fff;color:var(--text);cursor:pointer;font-family:inherit;transition:border-color .15s,box-shadow .15s}
+@media(hover:hover){#v-fotky .fotky-slozka:hover{border-color:rgba(232,161,58,.65);box-shadow:0 2px 10px rgba(33,29,26,.08)}}
+#v-fotky .fotky-slozka:focus-visible{outline:2px solid var(--amber);outline-offset:2px}
+#v-fotky .fotky-slozka-obal{display:flex;align-items:center;justify-content:center;aspect-ratio:4/3;background:var(--bg);color:var(--text3)}
+#v-fotky .fotky-slozka-obal img{width:100%;height:100%;object-fit:cover;display:block}
+#v-fotky .fotky-slozka-obal svg{width:38px;height:38px;opacity:.55}
+#v-fotky .fotky-slozka-text{display:flex;flex-direction:column;gap:3px;padding:9px 11px 11px;min-width:0}
+#v-fotky .fotky-slozka-nazev{display:flex;align-items:flex-start;gap:6px;font-size:13px;font-weight:800;line-height:1.25;color:var(--text);word-break:break-word}
+#v-fotky .fotky-slozka-nazev svg{width:15px;height:15px;flex-shrink:0;margin-top:1px;color:#9c3b22}
+#v-fotky .fotky-slozka-pocet{font-size:12px;font-weight:700;color:var(--text2)}
+#v-fotky .fotky-slozka-kdy{font-size:11px;color:var(--text3)}
+#v-fotky .fotky-konec{align-self:flex-start;margin-top:3px;font-size:10.5px;font-weight:700;color:var(--text3);background:var(--bg);border:1px solid var(--brd);border-radius:20px;padding:1px 8px;white-space:nowrap}
+#v-fotky .fotky-slozka.skoncila .fotky-slozka-obal img{filter:grayscale(1);opacity:.75}
+#v-fotky .fotky-slozka.skoncila .fotky-slozka-nazev svg{color:var(--text3)}
+@media(max-width:520px){#v-fotky .fotky-slozky{grid-template-columns:1fr 1fr;gap:10px}}
 /* ===== Výběr pracovníků (export docházky) — čistý přehledný styl ===== */
 #export-worker-list{max-height:300px;overflow-y:auto;border:1px solid var(--brd);border-radius:12px;padding:6px;background:var(--bg)}
 .export-wrow{display:flex;align-items:center;gap:11px;padding:10px 12px;margin-bottom:4px;cursor:pointer;border-radius:10px;background:#fff;border:1px solid transparent;transition:background .12s,border-color .12s,box-shadow .12s;-webkit-tap-highlight-color:transparent}
@@ -2112,6 +2132,8 @@ setTimeout(function brzda() {
               </div>
             </div>
             <div style="padding:14px">
+              <!-- Fotky po firmách (4. 11. 2026): nad mřížkou cesta zpět a název otevřené složky -->
+              <div id="fotky-cesta" style="display:none;margin-bottom:12px"></div>
               <div id="fotky-gallery" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:10px">
                 <div style="grid-column:1/-1;text-align:center;color:var(--text3);padding:30px">Načítám fotky…</div>
               </div>
@@ -17814,48 +17836,378 @@ async function loadDocuments() {
 }
 
 // ===== GALERIE FOTEK STAVBY (admin) =====
-let _sitePhotosCache = []
+// FOTKY PO FIRMÁCH (4. 11. 2026). Majitel: „Fotky ze stavby u nás [v] docházce
+// se musí třídit podle firem. Musí tam být jakoby roztříděný do složek jako podle
+// firem. A to i kdyby už ta firma… už jsme s ní spolupracovali, tak ta složka tam
+// zůstane. A musí tam být uložený. … pod tou firmou to musí být uložený."
+// • Nahoře složky: jedna za každou firmu, která má fotky — i za smazanou nebo
+//   vypnutou skupinu (název z fotky, štítek „spolupráce skončila") — a „Bez firmy".
+//   Složka je vidět, dokud má aspoň jednu fotku; skončení spolupráce ji neschová.
+// • Firma = skupina z Týmů (🏢 u lidí v Pracovnících i v Týmech), a to ta, která
+//   je ULOŽENÁ U FOTKY (team_id a team_name z chvíle nahrání) — ne dnešní skupina
+//   člověka. Kdo přešel k jiné firmě, má staré fotky pořád u té staré.
+// • Složky se poznají podle názvu firmy: smazaná skupina, která má u fotek už jen
+//   název, a nově založená skupina se stejným jménem jsou jedna složka.
+// • Dřív se načetlo jen 300 nejnovějších fotek a starší nebyly vidět vůbec. Teď
+//   se počty berou ze VŠECH fotek (lehké sloupce, po 1000) a celé řádky (adresa
+//   fotky, autor, profese) se dotahují až pro karty, které jsou na obrazovce.
+// • Karty fotek ve složce jsou stejné jako dřív (_fotkaKartaHtml).
+let _sitePhotosCache = []      // celé řádky fotek, které jsou právě vidět jako karty
+let _fotkySurove = null        // lehké řádky VŠECH fotek od nejnovější (null = ještě nenačteno)
+let _fotkyPrehled = null       // totéž bez schovaných firem — z toho jsou složky a počty
+let _fotkyTymy = null          // id skupiny → { name, is_active }, i vypnuté (null = nevíme)
+let _fotkySlozky = []          // složky firem v pořadí, jak se ukazují
+let _fotkySlozka = null        // klíč otevřené složky; null = přehled firem
+let _fotkyStran = 1            // kolik stránek karet je vidět („Načíst další")
+let _fotkyOtisk = ''           // počet fotek | nejnovější fotka při posledním stažení
+let _fotkyChyba = null         // chyba načtení — ukáže se, jen když není co ukázat
+const _fotkyPlne = new Map()   // id → celý řádek s autorem (null = mezitím smazaná)
+const FOTKY_NA_STRANKU = 60
+const FOTKY_LEHKE = 'id, worker_id, worker_name, team_id, team_name, location, created_at, thumb_url'
+
+let _fotkyNacitani = null, _fotkyZnovu = false
 async function loadSitePhotosAdmin() {
-  let data = []
-  try {
-    const res = await sb.from('site_photos')
-      .select('*, worker:profiles!worker_id(full_name, profession)')
-      .order('created_at', { ascending: false }).limit(300)
-    // supabase-js chybu nevyhazuje, vrací ji v objektu — bez tohohle by se
-    // záložní dotaz bez joinu nikdy nespustil a správce by viděl prázdnou galerii
-    if (res.error) throw res.error
-    data = res.data || []
-  } catch (e) {
-    console.warn('[admin fotky] load s joinem selhal, zkouším bez:', e?.message)
+  // Živé spojení i obnova sekce chodí často dvakrát těsně za sebou — druhé
+  // načtení počká na první a proběhne po něm jen jednou.
+  if (_fotkyNacitani) { _fotkyZnovu = true; return _fotkyNacitani }
+  _fotkyNacitani = (async () => {
+    try { await _fotkyNacti() }
+    catch (e) { console.warn('[admin fotky] load:', e?.message || e) }
+    finally { _fotkyNacitani = null }
+    if (_fotkyZnovu) { _fotkyZnovu = false; return loadSitePhotosAdmin() }
+  })()
+  return _fotkyNacitani
+}
+
+async function _fotkyNacti() {
+  // Sekce se obnovuje po KAŽDÉ změně v databázi (ráno příchody), ne jen u fotek.
+  // Jeden malý dotaz — kolik fotek je a která je nejnovější — řekne, jestli je
+  // vůbec co stahovat. Když nevyjde, stáhne se všechno jako napoprvé.
+  let otisk = ''
+  if (_fotkySurove) {
     try {
-      const res2 = await sb.from('site_photos').select('*').order('created_at', { ascending: false }).limit(300)
-      data = res2.data || []
-    } catch (e2) { console.warn('[admin fotky] load:', e2?.message) }
+      const r = await sb.from('site_photos').select('id', { count: 'exact' })
+        .order('created_at', { ascending: false }).order('id', { ascending: false }).limit(1)
+      if (!r.error && r.count != null) otisk = r.count + '|' + (r.data && r.data[0] ? r.data[0].id : '')
+    } catch (e) { /* stáhne se všechno */ }
   }
+  // Skupiny i vypnuté (is_active=false) — u nich je název a poznáme podle nich
+  // „spolupráce skončila". Nenačtou-li se, platí ty z minula (nebo názvy z fotek).
+  const [rTymy, skryti] = await Promise.all([
+    sb.from('teams').select('id, name, is_active').then(r => r, e => ({ data: null, error: e })),
+    skrytiLideIds()
+  ])
+  if (!rTymy.error && rTymy.data) _fotkyTymy = new Map(rTymy.data.map(t => [String(t.id), t]))
+  else console.warn('[admin fotky] skupiny se nenačetly:', rTymy.error?.message)
+  let surove = _fotkySurove
+  if (!surove || !otisk || otisk !== _fotkyOtisk) {
+    try { surove = await _fotkyStahniVse() }
+    catch (e) {
+      _fotkyChyba = e
+      console.warn('[admin fotky] load:', e?.message || e)
+      // Bez fotek z minula se ukáže chyba. S nimi zůstane vidět, co bylo —
+      // výpadek sítě při obnově na pozadí nesmí galerii vyprázdnit.
+      if (!_fotkySurove) {
+        renderSitePhotosAdmin()
+        try { if (typeof _dnPanel === 'function') _dnPanel('fotky', 'Fotky stavby se nepodařilo načíst: ' + (e?.message || e), { kod: e?.code, stav: e?.status }) } catch (x) { console.warn('[deník chyb]', x) } // eslint-disable-line no-undef
+        return
+      }
+      surove = _fotkySurove
+    }
+    if (surove !== _fotkySurove) {
+      _fotkyPlne.clear()   // autor a profese se po změně dotáhnou čerstvé
+      _fotkyOtisk = surove.length + '|' + (surove[0] ? surove[0].id : '')
+      _fotkyChyba = null
+    }
+  }
+  _fotkySurove = surove
   // Fotky od lidí ze schovaných firem pryč — u fotky je vidět jméno autora
-  // i název skupiny, tedy přímo to, co má zůstat schované.
-  { const skryti = await skrytiLideIds(); data = data.filter(p => !skryti.has(p.worker_id)
-      && !(p.team_id != null && !tymJeVidet(p.team_id))) }
-  _sitePhotosCache = data
+  // i název skupiny, tedy přímo to, co má zůstat schované. (Stejné pravidlo
+  // jako tymJeVidet, jen seznam schovaných přečtený jednou, ne u každé fotky.)
+  const skryteT = skryteTymy()
+  _fotkyPrehled = surove.filter(p => !skryti.has(p.worker_id)
+    && !(p.team_id != null && skryteT.has(String(p.team_id))))
+  _fotkySlozky = _fotkyVypoctiSlozky(_fotkyPrehled, _fotkyTymy)
   const cnt = document.getElementById('fotky-count')
-  if (cnt) cnt.textContent = data.length ? data.length : ''
+  if (cnt) cnt.textContent = _fotkyPrehled.length ? _fotkyPrehled.length : ''
   renderSitePhotosAdmin()
 }
 
-function renderSitePhotosAdmin() {
+// Všechny fotky, jen lehké sloupce. Server vrátí nejvýš 1000 řádků na dotaz:
+// první stránka přijde i s počtem všech fotek a zbylé stránky se pak stáhnou
+// naráz, ne jedna po druhé (u tisíců fotek by se jinak čekalo na každou zvlášť).
+// Krok stránky = kolik řádků opravdu přišlo — kdyby měl server strop nižší než
+// 1000, nic se nepřeskočí. `id` v řazení je nutný tiebreaker — bez něj by se
+// stránky u fotek se stejným časem mohly překrývat nebo řádek přeskočit.
+async function _fotkyStahniVse() {
+  let sloupce = FOTKY_LEHKE
+  const stranka = (od, kolik, sPoctem) => sb.from('site_photos').select(sloupce, sPoctem ? { count: 'exact' } : undefined)
+    .order('created_at', { ascending: false }).order('id', { ascending: false }).range(od, od + kolik - 1)
+  let r = await stranka(0, 1000, true)
+  // Starší databáze nemusí mít sloupec thumb_url — složky pak jen bez náhledu.
+  if (r.error && /thumb_url|42703|schema cache/i.test((r.error.code || '') + ' ' + (r.error.message || ''))) {
+    sloupce = FOTKY_LEHKE.replace(', thumb_url', '')
+    r = await stranka(0, 1000, true)
+  }
+  if (r.error) throw r.error
+  const radky = [], videno = new Set()
+  const pridej = data => {
+    for (const p of data || []) {
+      const k = String(p.id)
+      if (!videno.has(k)) { videno.add(k); radky.push(p) }
+    }
+  }
+  pridej(r.data)
+  const krok = (r.data || []).length
+  const celkem = typeof r.count === 'number' ? Math.min(r.count, 200000) : null
+  if (krok && celkem != null && krok < celkem) {
+    const dalsi = []
+    for (let od = krok; od < celkem; od += krok) dalsi.push(stranka(od, krok))
+    for (const x of await Promise.all(dalsi)) { if (x.error) throw x.error; pridej(x.data) }
+  } else if (krok && celkem == null) {
+    // Počet nepřišel — po stránkách, dokud nějaké řádky chodí
+    for (let od = krok; od < 200000; od += krok) {
+      const x = await stranka(od, krok)
+      if (x.error) throw x.error
+      pridej(x.data)
+      if (!x.data || x.data.length < krok) break
+    }
+  }
+  return radky
+}
+
+// Celé řádky (s autorem a profesí) pro karty na obrazovce — po kusech naráz.
+async function _fotkyDotahni(ids) {
+  const kusy = []
+  for (let i = 0; i < ids.length; i += FOTKY_NA_STRANKU) kusy.push(ids.slice(i, i + FOTKY_NA_STRANKU))
+  await Promise.all(kusy.map(async kus => {
+    let r = await sb.from('site_photos')
+      .select('*, worker:profiles!worker_id(full_name, profession)').in('id', kus)
+    // supabase-js chybu nevyhazuje, vrací ji v objektu — bez joinu to zkusíme
+    // znovu, ať se karty ukážou aspoň se jménem uloženým u fotky.
+    if (r.error) {
+      console.warn('[admin fotky] load s joinem selhal, zkouším bez:', r.error?.message)
+      r = await sb.from('site_photos').select('*').in('id', kus)
+    }
+    if (r.error) throw r.error
+    const prisly = new Set()
+    for (const row of r.data || []) { _fotkyPlne.set(String(row.id), row); prisly.add(String(row.id)) }
+    for (const id of kus) if (!prisly.has(String(id))) _fotkyPlne.set(String(id), null)
+  }))
+}
+
+function _fotkyNorm(s) { return String(s || '').trim().replace(/\s+/g, ' ').toLocaleLowerCase('cs') }
+function fotekText(n) { return n + (n === 1 ? ' fotka' : (n >= 2 && n <= 4) ? ' fotky' : ' fotek') }
+function _fotkyDatum(iso) {
+  const d = iso ? new Date(iso) : null
+  return d && !isNaN(d) ? d.toLocaleDateString('cs-CZ', { day: '2-digit', month: '2-digit', year: 'numeric' }) : ''
+}
+
+// Složky z fotek (fotky jdou od nejnovější). Název: dnešní název skupiny, když
+// v Týmech pořád je; jinak název uložený u fotek. Pořadí: firmy, se kterými
+// spolupráce běží, podle abecedy; pak skončené podle abecedy; „Bez firmy" na
+// konec. Abeceda, ne „nejnovější nahoře" — složky neposkakují pokaždé, když
+// někdo nahraje fotku, a firma se hledá pořád na stejném místě.
+function _fotkyVypoctiSlozky(fotky, tymy) {
+  // Smazaná skupina: název z první její fotky, která ho má
+  const nazevZFotek = new Map()
+  for (const p of fotky) {
+    const tid = p.team_id != null ? String(p.team_id) : null
+    const n = String(p.team_name || '').trim()
+    if (tid && n && !nazevZFotek.has(tid)) nazevZFotek.set(tid, n)
+  }
+  const slozky = new Map()
+  for (const p of fotky) {
+    const tid = p.team_id != null ? String(p.team_id) : null
+    const t = tid && tymy ? tymy.get(tid) : null
+    const nazev = String((t && t.name) || (tid && nazevZFotek.get(tid)) || p.team_name || '').trim()
+    const klic = nazev ? 'n:' + _fotkyNorm(nazev) : (tid ? 'id:' + tid : 'bez')
+    let s = slozky.get(klic)
+    if (!s) {
+      s = { klic, nazev: nazev || (tid ? 'Firma bez názvu' : 'Bez firmy'), bezFirmy: klic === 'bez',
+        aktivni: false, fotky: [], nejnovejsi: p.created_at || null, obalka: '' }
+      slozky.set(klic, s)
+    }
+    s.fotky.push(p)
+    if (!s.obalka) s.obalka = bezpecnaFotkaStavby(p.thumb_url)   // nejnovější fotka s náhledem
+    if (t && t.is_active !== false && !s.aktivni) { s.aktivni = true; s.nazev = String(t.name || '').trim() || s.nazev }
+  }
+  const vse = [...slozky.values()]
+  // Skončená = skupina v Týmech už není nebo je vypnutá. Když se skupiny
+  // nenačetly, nevíme to — pak se nic jako skončené neoznačí.
+  vse.forEach(s => { s.skoncila = !!tymy && !s.bezFirmy && !s.aktivni })
+  const poradi = s => s.bezFirmy ? 2 : (s.skoncila ? 1 : 0)
+  vse.sort((a, b) => poradi(a) - poradi(b) || a.nazev.localeCompare(b.nazev, 'cs'))
+  return vse
+}
+
+const _FOTKY_IKONA_SLOZKY = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>'
+
+function _fotkySlozkaHtml(s) {
+  const kdy = _fotkyDatum(s.nejnovejsi)
+  // Klíč jde do data-klic (escAttr), ne do onclick — název firmy u fotky zapisuje
+  // prohlížeč pracovníka, do kódu v atributu se proto nedává.
+  return `<button type="button" class="fotky-slozka${s.skoncila ? ' skoncila' : ''}" data-klic="${escAttr(s.klic)}" onclick="otevriSlozkuFotek(this.dataset.klic)" title="${escAttr(s.nazev)}">
+    <span class="fotky-slozka-obal">${s.obalka ? `<img src="${escAttr(s.obalka)}" loading="lazy" alt="">` : _FOTKY_IKONA_SLOZKY}</span>
+    <span class="fotky-slozka-text">
+      <span class="fotky-slozka-nazev">${_FOTKY_IKONA_SLOZKY}<span>${escAttr(s.nazev)}</span></span>
+      <span class="fotky-slozka-pocet">${fotekText(s.fotky.length)}</span>
+      ${kdy ? `<span class="fotky-slozka-kdy">poslední ${kdy}</span>` : ''}
+      ${s.skoncila ? '<span class="fotky-konec">spolupráce skončila</span>' : ''}
+    </span>
+  </button>`
+}
+
+// Lišta nad kartami: cesta zpět na firmy, název otevřené složky a počet.
+function _fotkyCestaHtml(slozka, nalezeno, celkem, q) {
+  const zpet = `<button type="button" onclick="zavriSlozkuFotek()" style="display:inline-flex;align-items:center;gap:6px;padding:7px 12px;font-size:13px;font-weight:700;border:1px solid var(--brd);border-radius:9px;background:#fff;color:var(--text);cursor:pointer;font-family:inherit;flex-shrink:0"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:15px;height:15px"><path d="M19 12H5M12 19l-7-7 7-7"/></svg>Všechny firmy</button>`
+  if (!slozka) {
+    return `<div style="display:flex;align-items:center;gap:10px 14px;flex-wrap:wrap">${zpet}
+      <div style="font-size:13px;font-weight:700;color:var(--text2)">Hledání ve všech firmách: ${nalezeno ? fotekText(nalezeno) : 'nic nenalezeno'}</div>
+    </div>`
+  }
+  const kdy = _fotkyDatum(slozka.nejnovejsi)
+  const pod = q ? 'Hledání ve složce: ' + (nalezeno ? fotekText(nalezeno) + ' z ' + celkem : 'nic nenalezeno')
+    : fotekText(celkem) + (kdy ? ' · poslední ' + kdy : '')
+  return `<div style="display:flex;align-items:center;gap:10px 14px;flex-wrap:wrap">${zpet}
+    <div style="min-width:0;flex:1 1 200px">
+      <div style="display:flex;align-items:center;gap:6px 8px;flex-wrap:wrap">
+        <h4 data-fotky-slozka style="display:flex;align-items:center;gap:7px;margin:0;font-size:15px;font-weight:800;color:var(--text);word-break:break-word">${_FOTKY_IKONA_SLOZKY.replace('<svg ', `<svg style="width:17px;height:17px;flex-shrink:0;vertical-align:0${slozka.skoncila ? ';color:var(--text3)' : ''}" `)}${escAttr(slozka.nazev)}</h4>
+        ${slozka.skoncila ? '<span style="font-size:10.5px;font-weight:700;color:var(--text3);background:var(--bg);border:1px solid var(--brd);border-radius:20px;padding:1px 8px;white-space:nowrap">spolupráce skončila</span>' : ''}
+      </div>
+      <div style="font-size:12px;color:var(--text3);margin-top:2px">${pod}</div>
+    </div>
+  </div>`
+}
+
+function _fotkyDalsiHtml(zbyva) {
+  return `<div style="grid-column:1/-1;display:flex;justify-content:center;padding:6px 0 2px">
+    <button type="button" onclick="fotkyNactiDalsi(this)" style="padding:10px 18px;font-size:13px;font-weight:700;border:1px solid var(--brd);border-radius:9px;background:#fff;color:var(--text);cursor:pointer;font-family:inherit">Načíst další (zbývá ${zbyva})</button>
+  </div>`
+}
+
+// akce: co udělá „Zkusit znovu" — celé načtení, nebo jen dotažení karet.
+function _fotkyChybaHtml(e, akce) {
+  const m = e && e.message ? String(e.message).slice(0, 160) : ''
+  return `<div style="grid-column:1/-1;text-align:center;color:var(--red);padding:30px;font-weight:700">❌ Fotky se nepodařilo načíst${m ? `<div style="font-weight:400;color:var(--text3);margin-top:6px">${escAttr(m)}</div>` : ''}
+    <div style="margin-top:12px"><button type="button" onclick="${akce || 'fotkyZkusZnovu()'}" style="padding:8px 14px;font-size:13px;font-weight:700;border:1px solid var(--brd);border-radius:9px;background:#fff;color:var(--text);cursor:pointer;font-family:inherit">Zkusit znovu</button></div></div>`
+}
+function fotkyZkusZnovu() {
+  _fotkyChyba = null
+  renderSitePhotosAdmin()   // „Načítám fotky…" místo staré chyby
+  loadSitePhotosAdmin()
+}
+
+// Otevřít složku firmy / zpět na všechny firmy. Hledání se při tom vymaže —
+// po návratu jsou vidět složky, ne výsledky starého hledání.
+// bezPosunu: vstup do sekce z menu — tam se nikam neroluje, stejně jako u ostatních sekcí.
+function otevriSlozkuFotek(klic) { _fotkyJdi(klic || null) }
+function zavriSlozkuFotek(bezPosunu) { _fotkyJdi(null, bezPosunu) }
+function _fotkyJdi(klic, bezPosunu) {
+  _fotkySlozka = klic
+  _fotkyStran = 1
+  const hledej = document.getElementById('fotky-search')
+  if (hledej) hledej.value = ''
+  renderSitePhotosAdmin()
+  if (bezPosunu) return
+  // Klik dole v dlouhém přehledu: ať je vidět začátek složky, ne její konec.
+  // Lišta nahoře je přilepená (počítač .topbar, telefon hlavička správce) —
+  // začátek karty musí vyjít pod ni, ne pod ní zmizet.
+  const karta = document.getElementById('fotky-cesta')?.closest('.card')
+  if (!karta) return
+  const lista = Math.max(0, ...['#mob-admin-header', '.topbar'].map(sel => {
+    const el = document.querySelector(sel)
+    return el && getComputedStyle(el).display !== 'none' ? el.offsetHeight : 0
+  }))
+  const nahore = karta.getBoundingClientRect().top
+  if (nahore < lista) window.scrollBy(0, nahore - lista - 8)
+}
+function fotkyNactiDalsi(btn) {
+  if (btn) { btn.disabled = true; btn.textContent = 'Načítám…' }
+  _fotkyStran++
+  renderSitePhotosAdmin()
+}
+
+let _fotkyBeh = 0, _fotkyHledano = ''
+function renderSitePhotosAdmin() { return _fotkyVykresli() }
+
+async function _fotkyVykresli() {
   const gallery = document.getElementById('fotky-gallery')
   if (!gallery) return
+  const beh = ++_fotkyBeh
+  const cesta = document.getElementById('fotky-cesta')
   const q = (document.getElementById('fotky-search')?.value || '').trim().toLowerCase()
-  let list = _sitePhotosCache
-  if (q) list = list.filter(p =>
+  if (q !== _fotkyHledano) { _fotkyHledano = q; _fotkyStran = 1 }
+  // Hledá se jako dřív: pracovník, firma (skupina) a místo uložené u fotky.
+  const sedi = p =>
     (p.worker_name || '').toLowerCase().includes(q) ||
     (p.team_name || '').toLowerCase().includes(q) ||
-    (p.location || '').toLowerCase().includes(q))
-  if (!list.length) {
-    gallery.innerHTML = '<div style="grid-column:1/-1;text-align:center;color:var(--text3);padding:30px">Žádné fotky</div>'
-    return
+    (p.location || '').toLowerCase().includes(q)
+  // Stejné HTML se nepřepisuje — obnova na pozadí jinak znovu natáhla všechny
+  // obrázky a stránka poskočila, i když se nic nezměnilo.
+  const vloz = (html, rezim) => {
+    if (gallery._fotkyHtml !== html) { gallery.innerHTML = html; gallery._fotkyHtml = html }
+    gallery._fotkyRezim = rezim
   }
-  gallery.innerHTML = list.map((p, idx) => {
+  const prazdno = t => `<div style="grid-column:1/-1;text-align:center;color:var(--text3);padding:30px">${t}</div>`
+  const ukazCestu = html => {
+    if (!cesta) return
+    if (cesta._fotkyHtml !== html) { cesta.innerHTML = html; cesta._fotkyHtml = html }
+    cesta.style.display = html ? '' : 'none'
+  }
+
+  // Přehled ještě není (první načtení běží nebo spadlo). Co je v paměti jako
+  // karty, ukáže se jako dřív prostý seznam.
+  if (!_fotkyPrehled) {
+    ukazCestu('')
+    if (_sitePhotosCache.length) {
+      const list = q ? _sitePhotosCache.filter(sedi) : _sitePhotosCache
+      return vloz(list.length ? list.map(_fotkaKartaHtml).join('') : prazdno('Žádné fotky'), 'seznam')
+    }
+    return vloz(_fotkyChyba ? _fotkyChybaHtml(_fotkyChyba) : prazdno('Načítám fotky…'), 'nacitam')
+  }
+
+  // Otevřená složka mezitím zmizela (smazaná poslední fotka, schovaná firma)
+  let slozka = _fotkySlozka ? _fotkySlozky.find(s => s.klic === _fotkySlozka) : null
+  if (_fotkySlozka && !slozka) { _fotkySlozka = null; _fotkyStran = 1 }
+
+  // PŘEHLED: složky firem
+  if (!slozka && !q) {
+    _sitePhotosCache = []
+    ukazCestu('')
+    return vloz(_fotkySlozky.length
+      ? `<div class="fotky-slozky">${_fotkySlozky.map(_fotkySlozkaHtml).join('')}</div>`
+      : prazdno('Žádné fotky'), 'slozky')
+  }
+
+  // KARTY: otevřená složka, nebo hledání ve všech fotkách
+  const zdroj = slozka ? slozka.fotky : _fotkyPrehled
+  const seznam = q ? zdroj.filter(sedi) : zdroj
+  const videt = seznam.slice(0, _fotkyStran * FOTKY_NA_STRANKU)
+  const rezim = slozka ? 'slozka:' + slozka.klic : 'hledani'
+  ukazCestu(_fotkyCestaHtml(slozka, seznam.length, zdroj.length, q))
+  const chybi = videt.filter(p => !_fotkyPlne.has(String(p.id))).map(p => p.id)
+  let chybaDotazeni = null
+  if (chybi.length) {
+    // Ze složek do složky: místo dlaždic firem „Načítám". Při psaní do hledání
+    // a u „Načíst další" zůstanou vidět dosavadní karty, dokud nepřijdou nové.
+    if (gallery._fotkyRezim !== rezim) vloz(prazdno('Načítám fotky…'), rezim)
+    await new Promise(ok => setTimeout(ok, 120))   // při psaní ne po každém písmenu
+    if (beh !== _fotkyBeh) return
+    try { await _fotkyDotahni(chybi) }
+    catch (e) { chybaDotazeni = e; console.warn('[admin fotky] karty:', e?.message || e) }
+    if (beh !== _fotkyBeh) return
+  }
+  const plne = videt.map(p => _fotkyPlne.get(String(p.id))).filter(Boolean)
+  _sitePhotosCache = plne
+  const zbyva = seznam.length - videt.length
+  vloz((plne.length ? plne.map(_fotkaKartaHtml).join('') : (chybaDotazeni ? '' : prazdno(q ? 'Nic neodpovídá hledání' : 'Žádné fotky')))
+    + (chybaDotazeni ? _fotkyChybaHtml(chybaDotazeni, 'renderSitePhotosAdmin()')
+      : (zbyva > 0 ? _fotkyDalsiHtml(zbyva) : '')), rezim)
+}
+
+// Karta jedné fotky — beze změny proti dřívější galerii (jen přesunutá do funkce).
+function _fotkaKartaHtml(p) {
     const when = p.created_at ? new Date(p.created_at).toLocaleString('cs-CZ', { day:'2-digit', month:'2-digit', year:'numeric', hour:'2-digit', minute:'2-digit' }) : ''
     const loc = [p.team_name, p.location].filter(Boolean).join(' · ')
     const author = p.worker?.full_name || p.worker_name || 'Neznámý pracovník'
@@ -17888,7 +18240,18 @@ function renderSitePhotosAdmin() {
         <button onclick="deleteSitePhoto('${jsStr(p.id)}','${jsStr(url)}')" style="width:100%;display:flex;align-items:center;justify-content:center;gap:5px;margin-top:6px;padding:7px 8px;font-size:11.5px;font-weight:700;border:1px solid var(--red);border-radius:7px;background:var(--red-l);color:var(--red);cursor:pointer;font-family:inherit"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:14px;height:14px"><path d="M3 6h18M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6M14 11v6"/></svg>Smazat</button>
       </div>
     </div>`
-  }).join('')
+}
+
+// Fotka zmizí i z přehledu firem: počet ve složce i nahoře se hned sníží.
+function _fotkyOdeber(id) {
+  const k = String(id)
+  _fotkyPlne.delete(k)
+  if (!_fotkySurove) return
+  _fotkySurove = _fotkySurove.filter(p => String(p.id) !== k)
+  _fotkyPrehled = (_fotkyPrehled || []).filter(p => String(p.id) !== k)
+  // Otisk jako po stažení — obnova po smazání (živé spojení) pak nestahuje vše znovu
+  _fotkyOtisk = _fotkySurove.length + '|' + (_fotkySurove[0] ? _fotkySurove[0].id : '')
+  _fotkySlozky = _fotkyVypoctiSlozky(_fotkyPrehled, _fotkyTymy)
 }
 
 // Smaže fotku ze stavby — záznam v galerii i soubor v úložišti.
@@ -17914,8 +18277,10 @@ async function deleteSitePhoto(id, url) {
     return
   }
   _sitePhotosCache = _sitePhotosCache.filter(x => String(x.id) !== String(id))
+  _fotkyOdeber(id)
   const cnt = document.getElementById('fotky-count')
-  if (cnt) cnt.textContent = _sitePhotosCache.length ? _sitePhotosCache.length : ''
+  const zbyva = _fotkyPrehled ? _fotkyPrehled.length : _sitePhotosCache.length
+  if (cnt) cnt.textContent = zbyva ? zbyva : ''
   renderSitePhotosAdmin()
   showToast('🗑 Fotka smazána')
 }
@@ -24267,11 +24632,26 @@ async function deleteTeam(teamId, teamName) {
     const { error: stDelErr } = await sb.from('subteams').delete().eq('team_id', teamId)
     if (stDelErr) await sb.from('subteams').update({ is_active: false }).eq('team_id', teamId)
   } catch(e) { console.warn('[deleteTeam] podskupiny:', e?.message) }
-  // 2. Zkus tvrdě smazat řádek
-  const { error: delErr } = await sb.from('teams').delete().eq('id', teamId)
-  if (delErr) {
+  // FOTKY PO FIRMÁCH (4. 11. 2026, majitel: „i kdyby už jsme s ní spolupracovali,
+  // tak ta složka tam zůstane … pod tou firmou to musí být uložený"). Co databáze
+  // udělá s fotkami smazané skupiny (site_photos.team_id), z appky nepoznáme —
+  // kdyby je mazala s ní (on delete cascade), zmizely by i se složkou. Skupina,
+  // která má fotky ze stavby, se proto nesmaže, jen vypne (is_active=false —
+  // stejně jako dosavadní záloha níž): ze Skupin zmizí úplně stejně, fotky
+  // i jejich složka zůstanou. Když se to nedá zjistit (výpadek), taky jen
+  // vypnout — smazat se dá vždycky, smazané fotky vrátit ne.
+  let maFotky = true
+  try {
+    const { data: fotkyTymu, error: chybaFotek } = await sb.from('site_photos').select('id').eq('team_id', teamId).limit(1)
+    if (!chybaFotek) maFotky = !!(fotkyTymu && fotkyTymu.length)
+    else console.warn('[deleteTeam] fotky skupiny se nezjistily, jen vypínám:', chybaFotek.message)
+  } catch (e) { console.warn('[deleteTeam] fotky skupiny se nezjistily, jen vypínám:', e?.message) }
+  // 2. Zkus tvrdě smazat řádek (jen skupinu bez fotek)
+  let delErr = null
+  if (!maFotky) ({ error: delErr } = await sb.from('teams').delete().eq('id', teamId))
+  if (maFotky || delErr) {
     // Fallback: pokud brání FK/oprávnění, použij soft-delete (is_active=false)
-    console.warn('[deleteTeam] hard delete failed, fallback to soft:', delErr.message)
+    if (delErr) console.warn('[deleteTeam] hard delete failed, fallback to soft:', delErr.message)
     const { error: softErr } = await sb.from('teams').update({ is_active: false }).eq('id', teamId)
     if (softErr) { showToast('Chyba: ' + softErr.message); return }
   }
@@ -31576,6 +31956,9 @@ function sv(name, navEl) {
     }
     activeChatWorkerId = null
   }
+  // FOTKY PO FIRMÁCH (4. 11. 2026): „Fotky stavby" z menu začínají vždy u složek
+  // firem. Obnova na pozadí (loadAdminViewData bez sv) otevřenou složku nechává.
+  if (name === 'fotky') zavriSlozkuFotek(true)
   loadAdminViewData(name)
   const titles={dashboard:'Dashboard',tymy:'Skupiny / Týmy',dochazka:'Docházka','cekajici-registrace':'Čekající registrace',kalendar:'Kalendář',pracovnici:'Pracovníci',ubytovani:'Ubytování','historie-uprav':'Historie úprav','denik-chyb':'Deník chyb','plan-mmi':'Plán MMI',dokumenty:'Dokumenty',fotky:'Fotky ze stavby',odkazy:'Odkazy pro odběratele',smlouvy:'Smlouvy',faktury:'Firmy','faktury-archiv':'Faktury od pracovníků',zpravy:'Zprávy',chat:'Chat',oznameni:'Oznámení',pristupy:'Přístupy',provize:'Provize','provize-pristup':'Přístup/provize','zalohove-faktury':'Zálohové faktury'}
   const pt = document.getElementById('pt')
