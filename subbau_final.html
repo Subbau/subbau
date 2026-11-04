@@ -7252,12 +7252,24 @@ if ('serviceWorker' in navigator) {
       if (a && (a.tagName === 'TEXTAREA' || (a.tagName === 'INPUT' && !/^(button|submit|checkbox|radio)$/.test(a.type || '')))) return false
       return true
     }
+    // AUDIT 3. 11. 2026 (C6): pole s fokusem, do kterého už někdo něco napsal.
+    // Prázdné pole s fokusem nic neztratí, rozepsaný text přenačtení smaže.
+    const rozepsanyText = () => {
+      const a = document.activeElement
+      if (!a) return false
+      const jePole = a.tagName === 'TEXTAREA' || (a.tagName === 'INPUT' && !/^(button|submit|checkbox|radio)$/.test(a.type || ''))
+      return jePole && String(a.value == null ? '' : a.value).trim() !== ''
+    }
     const zacatek = Date.now()
     const zkusPrenacist = () => {
       const ceka = Date.now() - zacatek
       // Na obnovu přihlášení se čeká déle (3 min) než na rozepsané pole (60 s):
       // utnutá obnova odhlásí, utnuté psaní jen zdrží.
-      if ((obnovaPrihlaseniBezi() || fakturaVPraci()) ? ceka < 180000 : (!bezpecneNaPrenacteni() && ceka < 60000)) { setTimeout(zkusPrenacist, 2000); return }
+      // Strop 60 s zůstává (23. 10.: karta, která na dlouho zůstane na staré verzi,
+      // nemá opravy) — jen pro pole s fokusem, do kterého je už něco napsáno
+      // (zpráva v chatu, popis práce), se čeká dál, nejdéle 15 min. Prázdné pole
+      // s fokusem se přenačte po 60 s jako dřív.
+      if ((obnovaPrihlaseniBezi() || fakturaVPraci()) ? ceka < 180000 : (!bezpecneNaPrenacteni() && (ceka < 60000 || (ceka < 900000 && rozepsanyText())))) { setTimeout(zkusPrenacist, 2000); return }
       try { zapisDenik('aktualizace appky', 'přenačítám na novou verzi') } catch (e) {}
       try { showToast('🔄 Appka se aktualizovala — chviličku…') } catch (e) {}
       setTimeout(() => {
@@ -8869,9 +8881,12 @@ function showOsvec(profile) {
     checkDocumentAlerts()
     souhlasPredNavodem()   // nový člověk: nejdřív potvrzení (GDPR, poloha, OSVČ), pak návod
     checkInstallNudge()
-    // Po přihlášení skryj badge — badge se zobrazí až přijde NOVÁ zpráva
-    // Označí jako přečtené zprávy které pracovník již viděl
-    _markReadIfChatOpen()  // Zobraz průvodce jen při prvním přihlášení
+    // AUDIT 3. 11. 2026 (C3): tady dřív běželo _markReadIfChatOpen() — při KAŽDÉM
+    // spuštění appky skrylo odznaky a v databázi označilo všechna oznámení
+    // i zprávy od správce za přečtené, ačkoli je člověk nikdy neotevřel
+    // (správci se u zprávy rovnou ukázalo „Přečteno“). Odznaky teď ukazují
+    // loadMobNotifications() a updateChatBadge() výš; za přečtené se zprávy
+    // označí až skutečným otevřením (loadMobChat, záložka Zprávy).
     console.log('[showOsvec] all loaded')
   } catch(e) {
     console.error('[showOsvec] CHYBA:', e)
@@ -18079,7 +18094,7 @@ async function updateAdminChatBadge() {
   if (!currentUser || currentProfile?.role !== 'admin') return
   const { data: unread } = await sb.from('chat_messages')
     .select('worker_id')
-    .eq('sender_role', 'osvec')
+    .neq('sender_role', 'admin')   // C5 (audit 3. 11. 2026): i zprávy parťáka ('partak'), ne jen 'osvec'
     .eq('is_read', false)
   // Nepočítej právě otevřenou konverzaci
   const chatView = document.getElementById('v-chat')
@@ -18213,7 +18228,7 @@ async function loadChatAlerts() {
 
   const { data: unread, error } = await sb.from('chat_messages')
     .select('id, worker_id, message, created_at')
-    .eq('sender_role', 'osvec')
+    .neq('sender_role', 'admin')   // C5 (audit 3. 11. 2026): i zprávy parťáka ('partak'), ne jen 'osvec'
     .eq('is_read', false)
     .order('created_at', { ascending: false })
   if (error) { box.style.display = 'none'; return }
@@ -18347,7 +18362,7 @@ async function loadAdminChatList() {
   // Načti nepřečtené počty
   const { data: unread } = await sb.from('chat_messages')
     .select('worker_id')
-    .eq('sender_role', 'osvec')
+    .neq('sender_role', 'admin')   // C5 (audit 3. 11. 2026): i zprávy parťáka ('partak'), ne jen 'osvec'
     .eq('is_read', false)
 
   const unreadMap = {}
@@ -18505,17 +18520,22 @@ async function openAdminChat(workerId, workerName) {
       }, async payload => {
         const div = document.getElementById('admin-chat-messages')
         if (!div) return
-        const isMine = payload.new.sender_role === 'admin'
-        // Vlastní (admin) zprávy už zobrazujeme hned po odeslání
-        if (isMine) { loadAdminChatList(); return }
+        const odSpravce = payload.new.sender_role === 'admin'
+        // Vlastní zprávy už zobrazujeme hned po odeslání. AUDIT 3. 11. 2026 (C4):
+        // dřív se přeskočila každá zpráva se sender_role 'admin', takže když
+        // pracovníkovi napsal DRUHÝ správce, v otevřeném vlákně se neukázala
+        // (až po znovuotevření). Přeskakuje se jen to, co poslal tento správce.
+        if (odSpravce && payload.new.sender_id === currentUser?.id) { loadAdminChatList(); return }
         // Konverzace už je jiná — zprávu jen započítat do seznamu, nevkládat
         if (activeChatWorkerId !== workerId) { loadAdminChatList(); return }
         if (div.querySelector('[data-msgid="'+payload.new.id+'"]')) return
         const empty = div.querySelector('[data-empty]')
         if (empty) empty.remove()
-        div.insertAdjacentHTML('beforeend', chatBubble(payload.new, false, workerName).replace('<div ', '<div data-msgid="'+payload.new.id+'" '))
+        // Zpráva jiného správce se kreslí stejně jako vlastní (vpravo, jako v openAdminChat)
+        div.insertAdjacentHTML('beforeend', (odSpravce ? chatBubble(payload.new, true, null) : chatBubble(payload.new, false, workerName)).replace('<div ', '<div data-msgid="'+payload.new.id+'" '))
         scrollChatBottom('admin-chat-messages')
-        if (activeChatWorkerId === workerId) {
+        // Přečtení se zapisuje jen u zpráv od pracovníka (zprávy správců se nečtou)
+        if (!odSpravce && activeChatWorkerId === workerId) {
           await sb.from('chat_messages').update({is_read: true}).eq('id', payload.new.id)
         }
         loadAdminChatList()
@@ -18541,11 +18561,18 @@ async function sendAdminChatMessage() {
   if (!await zajistiPrihlaseni()) { showToast('⚠️ Přihlášení vypršelo — načtěte stránku a zkuste to znovu'); return }
   if (!activeChatWorkerId) { showToast('⚠️ Není vybraný pracovník — otevřete konverzaci znovu'); return }
 
+  // AUDIT 3. 11. 2026 (C1): komu zpráva patří, se zapamatuje HNED. Dřív se
+  // activeChatWorkerId četlo znovu až po čekání na databázi — když správce
+  // mezitím klikl na jiného pracovníka (nebo odešel ze sekce), uložila se
+  // zpráva jednomu a oznámení s jejím textem (i soukromým) přišlo druhému,
+  // případně nikomu.
+  const wid = activeChatWorkerId
+
   input.value = ''
   input.style.height = 'auto'
 
   const { data: inserted, error } = await sb.from('chat_messages').insert({
-    worker_id: activeChatWorkerId,
+    worker_id: wid,
     sender_id: currentUser.id,
     sender_role: 'admin',
     message: msg,
@@ -18554,9 +18581,9 @@ async function sendAdminChatMessage() {
 
   if (error) { showToast('❌ Chyba: ' + error.message); input.value = msg; return }
 
-  // Zobraz vlastní zprávu IHNED
+  // Zobraz vlastní zprávu IHNED — jen když je pořád otevřené to samé vlákno
   const div = document.getElementById('admin-chat-messages')
-  if (div && inserted) {
+  if (div && inserted && activeChatWorkerId === wid) {
     const empty = div.querySelector('[data-empty]')
     if (empty) empty.remove()
     div.insertAdjacentHTML('beforeend', chatBubble(inserted, true, null).replace('<div ', '<div data-msgid="'+inserted.id+'" '))
@@ -18566,7 +18593,7 @@ async function sendAdminChatMessage() {
 
   // Notifikace pracovníkovi
   await sb.from('notifications').insert({
-    worker_id: activeChatWorkerId,
+    worker_id: wid,
     title: '💬 Nová zpráva od SubBau',
     message: msg.length > 60 ? msg.slice(0,60)+'...' : msg,
     type: 'chat',
@@ -26345,6 +26372,10 @@ async function loadMobDocs() {
 
 let selectedFile = null
 let selectedFile2 = null
+// AUDIT 3. 11. 2026 (C2, vedlejší cesta): přední strana, která už je uložená,
+// když se zadní strana nepovedla ({ soubor, typ }). Opakování pak nahraje jen
+// zadní — dřív se přední uložila podruhé a v dokladech byla dvakrát.
+let _predniStranaUlozena = null
 // Doklady, u kterých má smysl nahrát i druhou stranu (nebo víc stránek)
 const MULTISIDE_TYPES = DOC_TYPES.filter(t => t.twoSides).map(t => t.id).concat('gewerbeschein')
 
@@ -27631,6 +27662,12 @@ async function uploadDocument() {
   // - PDF na vstupu → nahraje se beze změny
   // - obrázek (fotka/sken, povoleno u OP) → převod na PDF (přední + zadní = stránky)
   let uploadBlob, uploadExt, uploadContentType
+  // AUDIT 3. 11. 2026 (C2): zadní strana sloučená do PDF s přední se jen
+  // zapamatuje; selectedFile2 se tady NEmaže (dřív se nulovalo před nahráním,
+  // takže po chybě úložiště/databáze složil druhý pokus PDF jen z přední strany
+  // a hlásil „Dokument uložen!“). Po úspěchu vynuluje oba soubory
+  // closeUploadForm() → resetUploadForm().
+  let zadniVPdf = false
   const frontIsImage = selectedFile && (selectedFile.type?.startsWith('image/') || /\.(jpe?g|png|heic|webp)$/i.test(selectedFile.name))
   if (frontIsImage) {
     try {
@@ -27642,7 +27679,7 @@ async function uploadDocument() {
       uploadExt = 'pdf'
       uploadContentType = 'application/pdf'
       // Obě strany sloučeny do jednoho PDF → druhý soubor už zvlášť nenahrávat
-      if (imgs.length > 1) selectedFile2 = null
+      zadniVPdf = imgs.length > 1
     } catch(e) {
       showToast('❌ Převod fotky na PDF selhal: ' + e.message)
       btn.disabled = false; btn.textContent = '📤 Nahrát'; progress.style.display = 'none'
@@ -27680,8 +27717,9 @@ async function uploadDocument() {
     }
     return { error: posledniChyba }
   }
+  const predniHotova = !!(_predniStranaUlozena && _predniStranaUlozena.soubor === selectedFile && _predniStranaUlozena.typ === docType)
   const filePath = `${currentUser.id}/${docType}_${Date.now()}.${uploadExt}`
-  const { error: storageErr } = await zkusVicekrat(
+  const { error: storageErr } = predniHotova ? { error: null } : await zkusVicekrat(
     () => withTimeout(sb.storage.from('documents').upload(filePath, uploadBlob, { upsert: true, contentType: uploadContentType }), 20000),
     n => { btn.textContent = '⏳ Slabý signál — zkouším znovu (' + n + '/3)…' }
   )
@@ -27707,7 +27745,7 @@ async function uploadDocument() {
 
   // 4. DB záznam pro přední stranu / dokument
   const frontName = docType + (isMulti ? '_strana1' : '') + '_' + new Date().toISOString().slice(0,10) + '.pdf'
-  const { error: dbErr } = await zkusVicekrat(
+  const { error: dbErr } = predniHotova ? { error: null } : await zkusVicekrat(
     () => withTimeout(sb.from('documents').insert({
       worker_id: currentUser.id,
       doc_type: docType,
@@ -27737,7 +27775,7 @@ async function uploadDocument() {
   // A když se nepovede uložit, NESMÍ padnout zelené „Dokument uložen!“ — pracovník
   // by byl přesvědčený, že nahrál obě strany, a správce by doklad vrátil jako neúplný.
   let zadniStranaChyba = ''
-  if (selectedFile2 && isMulti) {
+  if (selectedFile2 && isMulti && !zadniVPdf) {
     try {
       let blob2 = selectedFile2
       const je2Obrazek = (selectedFile2.type || '').startsWith('image/') || /\.(jpe?g|png|heic|webp)$/i.test(selectedFile2.name || '')
@@ -27776,6 +27814,7 @@ async function uploadDocument() {
   }
 
   if (zadniStranaChyba) {
+    _predniStranaUlozena = { soubor: selectedFile, typ: docType }   // opakování nahraje jen zadní
     showToast('⚠️ Přední strana uložena, zadní ne — zkuste ji prosím nahrát znovu')
     if (status) { status.style.display='block'; status.style.background='var(--red-l)'; status.style.color='var(--red)'; status.textContent='⚠️ Zadní strana se neuložila. Nahrajte ji prosím znovu.' }
     loadMobDocs()
@@ -27785,6 +27824,7 @@ async function uploadDocument() {
     return
   }
 
+  _predniStranaUlozena = null
   showToast(validUntil ? ('✅ Dokument uložen! Platnost do ' + validUntil) : '✅ Dokument uložen!')
   closeUploadForm()
   loadMobDocs()
@@ -40865,31 +40905,6 @@ async function applyInvoiceDueFromProfile(selectId, profile, lock, workerId) {
   note.textContent = known ? 'Splatnost nastavuje SubBau.' : ''
 }
 
-
-function _markReadIfChatOpen() {
-  // Badge zpráv: nezobrazovat pokud má user otevřené zprávy nebo chat
-  // Skryj badge při přihlášení — znovu se ukáže jen při NOVÉ zprávě
-  const notifBadge = document.getElementById('mob-notif-count')
-  if (notifBadge) notifBadge.style.display = 'none'
-  const chatBadge = document.getElementById('mob-chat-count')
-  if (chatBadge) chatBadge.style.display = 'none'
-  // Pak označ jako přečtené v DB
-  if (currentUser) {
-    sb.from('notifications')
-      .update({ is_read: true })
-      .eq('worker_id', currentUser.id)
-      .eq('is_read', false)
-      .then(() => updateChatBadge())
-      .catch(() => {})
-    sb.from('chat_messages')
-      .update({ is_read: true })
-      .eq('worker_id', currentUser.id)
-      .eq('sender_role', 'admin')
-      .eq('is_read', false)
-      .then(() => {})
-      .catch(() => {})
-  }
-}
 
 // ============ PRŮVODCE / TUTORIAL ============
 // ============ SMLOUVY ============
