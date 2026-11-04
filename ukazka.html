@@ -5875,6 +5875,11 @@ async function openAdminSignModal(contractId, title, fileUrl) {
   // Načti PDF - počkaj na pdf.js ak ešte nie je načítaný
   if (fileUrl) {
     const loadEl = document.getElementById('pdf-loading')
+    // Pořadové číslo před čekáním na knihovnu (Codex 4. 11. 2026, kolo 2): okno
+    // zavřené nebo otevřené u jiné smlouvy ještě během prvního načítání knihovny
+    // PDF — pak se dál nenačítá (dřív by dočtená smlouva skončila v zavřeném okně
+    // nebo by přepsala tu novou).
+    const muj = (pdfSignState.nacitani = (pdfSignState.nacitani || 0) + 1)
     if (typeof pdfjsLib === 'undefined') {
       if (loadEl) loadEl.textContent = '⏳ Načítám PDF viewer...'
       try { await ensureLib('pdfjs') } catch(e) {
@@ -5883,6 +5888,7 @@ async function openAdminSignModal(contractId, title, fileUrl) {
         try { if (typeof _dnPanel === 'function') _dnPanel('smlouva-pdf', '❌ PDF viewer se nenačetl', { misto: 'openAdminSignModal', chyba: String((e && e.message) || e).slice(0, 200) }) } catch (x) { console.warn('[deník chyb]', x) } // eslint-disable-line no-undef
       }
     }
+    if (muj !== pdfSignState.nacitani) return   // mezitím zavřeno nebo jiná smlouva
     await loadPDFForSigning(fileUrl)
   } else {
     const el = document.getElementById('pdf-loading')
@@ -5900,6 +5906,7 @@ let wspState = { contractId: null, pdfDoc: null, currentPage: 1, totalPages: 1, 
 async function openWorkerSignPlaceModal(contractId, title, fileUrl) {
   pdfjsUvolni(wspState.pdfDoc)   // předchozí smlouva i s vláknem pdf.js pryč (viz pdfjsUvolni)
   wspState = { contractId, pdfDoc: null, currentPage: 1, totalPages: 1, x: null, y: null, page: 1, scale: 1, texts: [], textMode: false, fileUrl: fileUrl }
+  const st = wspState   // tohle otevření (viz kontrola po ensureLib níž)
   const modal = document.getElementById('worker-sign-place-modal')
   if (!modal) return
   const titleEl = document.getElementById('wsp-title')
@@ -5927,6 +5934,9 @@ async function openWorkerSignPlaceModal(contractId, title, fileUrl) {
         try { if (typeof _dnPanel === 'function') _dnPanel('smlouva-pdf', '❌ PDF viewer se nenačetl', { misto: 'openWorkerSignPlaceModal', chyba: String((e && e.message) || e).slice(0, 200) }) } catch (x) { console.warn('[deník chyb]', x) } // eslint-disable-line no-undef
       }
     }
+    // Okno zavřené nebo otevřené u jiné smlouvy ještě během prvního načítání
+    // knihovny PDF (4. 11. 2026) — dřív by se stará smlouva načetla do nového okna.
+    if (st !== wspState || st.zavreno) return
     await wspLoadPDF(fileUrl)
   }
 }
@@ -44012,6 +44022,10 @@ async function openPdfFillModal(contractId, title, fileUrl) {
   // Pořadové číslo otevření (Codex 4. 11. 2026): okno zavřené nebo otevřené
   // znovu ještě během načítání — dočtený dokument se rovnou zavře (viz níž).
   const otevreni = pdfFillState.otevreni = (pdfFillState.otevreni || 0) + 1
+  // Po každém čekání (databáze, knihovna, stažení PDF) se ověří, že je to pořád
+  // totéž otevření — jinak by opožděné načtení zavřeného okna přepsalo stav
+  // nového okna s jinou smlouvou (režim, pole, bajty PDF) a uložilo se špatně.
+  const jeMoje = () => otevreni === pdfFillState.otevreni
   pdfFillState.contractId = contractId
   pdfFillState.fileUrl = fileUrl
   pdfFillState.fields = []
@@ -44040,6 +44054,7 @@ async function openPdfFillModal(contractId, title, fileUrl) {
       }
       saved = r.data || null
     } catch(e) { console.warn('[smlouva] stav smlouvy se nenačetl:', e?.message) }
+    if (!jeMoje()) return
 
     const ulozenaPole = Array.isArray(saved && saved.fill_fields) ? saved.fill_fields : []
     const maZaklad = !!(saved && saved.fill_base_at)
@@ -44062,6 +44077,7 @@ async function openPdfFillModal(contractId, title, fileUrl) {
     pdfFillState.rezim = (maZaklad && podpisMimoZaklad) ? 'dopis' : 'uprava'
 
     await ensureLib('pdfjs')
+    if (!jeMoje()) return
     if (typeof pdfjsLib === 'undefined') throw new Error('PDF viewer se nenačetl')
     pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js'
 
@@ -44073,6 +44089,7 @@ async function openPdfFillModal(contractId, title, fileUrl) {
         const r = await fetch(contractPublicUrl(fillBasePath(contractId)), { cache:'no-store', mode:'cors', credentials:'omit' })
         if (r.ok) bytes = await r.arrayBuffer()
       } catch(e) { console.warn('[smlouva] podklad se nenačetl:', e?.message) }
+      if (!jeMoje()) return
       if (!bytes) {
         // Bez podkladu bychom text vypálili podruhé přes ten, co v PDF už je.
         pdfFillState.rezim = 'dopis'
@@ -44092,14 +44109,17 @@ async function openPdfFillModal(contractId, title, fileUrl) {
       // První vyplnění (podklad teprve vznikne při uložení) nebo dopisování —
       // v obou případech se vychází z aktuálního PDF i s podpisy, které v něm jsou.
       const resp = await fetch(fileUrl, { mode:'cors', credentials:'omit' })
+      if (!jeMoje()) return
       if (!resp.ok) throw new Error('PDF nelze stáhnout (HTTP '+resp.status+')')
       bytes = await resp.arrayBuffer()
+      if (!jeMoje()) return
 
       // Smlouva vyplněná starší verzí appky má text vypálený v PDF a žádná pole
       // uložená nemá. Zkusíme ho dohledat porovnáním s původní verzí — ať se dá
       // opravit jedno jméno a zbytek nechat, místo psaní všeho odznova.
       if (pdfFillState.rezim === 'uprava') {
         const nalez = await najdiDopsanyText(contractId, bytes, saved, loading)
+        if (!jeMoje()) return
         if (nalez) {
           const varovani = nalez.maPodpis
             ? '\n\nPozor: podpisy se tím z PDF ztratí a bude potřeba podepsat znovu.'
@@ -44134,6 +44154,7 @@ async function openPdfFillModal(contractId, title, fileUrl) {
     if (pdfFillState.fields.length) showToast('✏️ Dřív napsaný text načten — přepište ho nebo posuňte')
     else if (pdfFillState.rezim === 'dopis') showToast('🔒 Smlouva je podepsaná — text v ní jde jen dopsat, ne přepsat')
   } catch(e) {
+    if (!jeMoje()) return   // chyba zavřeného okna — nové okno ani hláška se jí netýkají
     // Závoj je position:absolute přes celý dialog — kdyby zůstal viset,
     // pohltí kliknutí na křížek Zavřít a z okna se nedá dostat ven.
     if (loading) loading.style.display = 'none'
