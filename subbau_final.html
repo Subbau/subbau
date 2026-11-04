@@ -5027,6 +5027,7 @@ async function openAdminSignModal(contractId, title, fileUrl) {
 let wspState = { contractId: null, pdfDoc: null, currentPage: 1, totalPages: 1, x: null, y: null, page: 1, scale: 1, texts: [], textMode: false, fileUrl: null }
 
 async function openWorkerSignPlaceModal(contractId, title, fileUrl) {
+  pdfjsUvolni(wspState.pdfDoc)   // předchozí smlouva i s vláknem pdf.js pryč (viz pdfjsUvolni)
   wspState = { contractId, pdfDoc: null, currentPage: 1, totalPages: 1, x: null, y: null, page: 1, scale: 1, texts: [], textMode: false, fileUrl: fileUrl }
   const modal = document.getElementById('worker-sign-place-modal')
   if (!modal) return
@@ -5064,16 +5065,26 @@ function closeWorkerSignPlaceModal() {
   if (modal) modal.style.display = 'none'
   document.body.style.overflow = ''
   try { if (screen.orientation?.unlock) screen.orientation.unlock() } catch(e) {}
+  // Dokument i s vláknem pdf.js pryč (viz pdfjsUvolni); rozkreslená stránka
+  // potichu skončí (wspRenderPage), plátno zůstane, jak je.
+  const doc = wspState.pdfDoc
+  wspState.pdfDoc = null
+  pdfjsUvolni(doc)
 }
 
 async function wspLoadPDF(url) {
   const loading = document.getElementById('wsp-loading')
   const container = document.getElementById('wsp-canvas-container')
   if (loading) { loading.style.display = 'block'; loading.textContent = '⏳ Načítám PDF...' }
+  const st = wspState
   try {
     const resp = await fetch(url)
     const buf = await resp.arrayBuffer()
-    wspState.pdfDoc = await pdfjsLib.getDocument({ data: buf }).promise
+    const doc = await pdfjsLib.getDocument({ data: buf }).promise
+    // Mezitím se otevřela jiná smlouva — tenhle dokument už nikdo neukáže (a nesmí
+    // přepsat ten novější); zavře se i s vláknem.
+    if (st !== wspState) { pdfjsUvolni(doc); return }
+    wspState.pdfDoc = doc
     wspState.totalPages = wspState.pdfDoc.numPages
     // Skoč rovnou na POSLEDNÍ stranu — tam bývá místo na podpis, ať admin nepřemačkává
     wspState.currentPage = wspState.totalPages
@@ -5089,9 +5100,14 @@ async function wspLoadPDF(url) {
 
 async function wspRenderPage(pageNum) {
   if (!wspState.pdfDoc) return
+  const doc = wspState.pdfDoc
   const canvas = document.getElementById('wsp-render-canvas')
   if (!canvas) return
-  const page = await wspState.pdfDoc.getPage(pageNum)
+  // Okno se mezitím zavřelo nebo se otevřela jiná smlouva (dokument je zavřený,
+  // viz pdfjsUvolni) — pak se potichu skončí; jiná chyba jde dál jako dřív.
+  const jinaChyba = (e) => { if (doc === wspState.pdfDoc) throw e }
+  let page
+  try { page = await doc.getPage(pageNum) } catch (e) { jinaChyba(e); return }
   const container = document.getElementById('wsp-canvas-container')
   const containerWidth = container ? container.clientWidth - 4 : 600
   const viewport = page.getViewport({ scale: 1.0 })
@@ -5105,7 +5121,7 @@ async function wspRenderPage(pageNum) {
   canvas.style.height = scaledViewport.height + 'px'
   const ctx = canvas.getContext('2d')
   ctx.scale(dpr, dpr)
-  await page.render({ canvasContext: ctx, viewport: scaledViewport }).promise
+  try { await page.render({ canvasContext: ctx, viewport: scaledViewport }).promise } catch (e) { jinaChyba(e); return }
 
   const info = document.getElementById('wsp-page-info')
   if (info) info.textContent = `Strana ${pageNum} / ${wspState.totalPages}`
@@ -5319,8 +5335,15 @@ async function loadPDFForSigning(url) {
     // Nastav pdf.js worker
     if (typeof pdfjsLib !== 'undefined') {
       pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js'
+      // Předchozí smlouva i s vláknem pdf.js pryč (viz pdfjsUvolni). Pořadové
+      // číslo pozná, že se mezitím začala načítat jiná smlouva.
+      const muj = (pdfSignState.nacitani = (pdfSignState.nacitani || 0) + 1)
+      pdfjsUvolni(pdfSignState.pdfDoc)
+      pdfSignState.pdfDoc = null
       const loadingTask = pdfjsLib.getDocument(url)
-      pdfSignState.pdfDoc = await loadingTask.promise
+      const doc = await loadingTask.promise
+      if (muj !== pdfSignState.nacitani) { pdfjsUvolni(doc); return }
+      pdfSignState.pdfDoc = doc
       pdfSignState.totalPages = pdfSignState.pdfDoc.numPages
       pdfSignState.currentPage = 1
 
@@ -5343,10 +5366,15 @@ async function loadPDFForSigning(url) {
 
 async function renderPDFPage(pageNum) {
   if (!pdfSignState.pdfDoc) return
+  const doc = pdfSignState.pdfDoc
   const canvas = document.getElementById('pdf-render-canvas')
   if (!canvas) return
+  // Okno se mezitím zavřelo nebo se otevřela jiná smlouva (dokument je zavřený,
+  // viz pdfjsUvolni) — pak se potichu skončí; jiná chyba jde dál jako dřív.
+  const jinaChyba = (e) => { if (doc === pdfSignState.pdfDoc) throw e }
 
-  const page = await pdfSignState.pdfDoc.getPage(pageNum)
+  let page
+  try { page = await doc.getPage(pageNum) } catch (e) { jinaChyba(e); return }
   const container = document.getElementById('pdf-canvas-container')
   const containerWidth = container ? container.clientWidth - 4 : 600
   const viewport = page.getViewport({ scale: 1.0 })
@@ -5363,7 +5391,7 @@ async function renderPDFPage(pageNum) {
 
   const ctx = canvas.getContext('2d')
   ctx.scale(dpr, dpr)  // škáluj kontext pro ostrý render
-  await page.render({ canvasContext: ctx, viewport: scaledViewport }).promise
+  try { await page.render({ canvasContext: ctx, viewport: scaledViewport }).promise } catch (e) { jinaChyba(e); return }
 
   // Aktualizuj info
   const info = document.getElementById('pdf-page-info')
@@ -5615,6 +5643,11 @@ function closeAdminSignModal() {
   adminSignContractId = null
   pdfSignState.sigX = null; pdfSignState.sigY = null
   try { screen.orientation?.unlock?.() } catch(e) {}
+  // Dokument i s vláknem pdf.js pryč (viz pdfjsUvolni); rozkreslená stránka
+  // potichu skončí (renderPDFPage), plátno zůstane, jak je.
+  const doc = pdfSignState.pdfDoc
+  pdfSignState.pdfDoc = null
+  pdfjsUvolni(doc)
 }
 
 async function pdfNextPage() {
@@ -5797,8 +5830,15 @@ function zapisDenik(co, detail) {
     localStorage.setItem(DENIK_KLIC, JSON.stringify(d.slice(-40)))
   } catch (e) {}
 }
+// Kolik kopií appky je v tomhle prohlížeči otevřeno (4. 11. 2026, hlídač
+// pomalosti): na dotaz 'kolik' odpoví každá kopie hned 'tady' se svou verzí.
+// Nic se přitom nezapisuje (na rozdíl od 'kdo' → 'ja', to píše do deníku
+// přihlášení). Kopie starší než tahle verze na 'kolik' neodpoví — ty pozná
+// hlídač podle deníku přihlášení (viz _pomStaraKopie).
+const _kopieAppky = { kanal: null, dotazOd: 0, tady: new Map() }
 try {
   const kanal = new BroadcastChannel('subbau-zalozky')
+  _kopieAppky.kanal = kanal
   kanal.onmessage = e => {
     const m = e.data || {}
     // Zapisuje jen nově otevřená záložka: deník je jeden pro všechny a WebKit
@@ -5806,6 +5846,11 @@ try {
     // přepsaly zápisy té nové při startu. Odpověď proto až po chvíli.
     if (m.typ === 'kdo') setTimeout(() => kanal.postMessage({ typ: 'ja', z: ZALOZKA }), 1500)
     else if (m.typ === 'ja') zapisDenik('appka je otevřená i v jiné záložce', m.z)
+    else if (m.typ === 'kolik') kanal.postMessage({ typ: 'tady', z: ZALOZKA, v: String(SUBBAU_VERZE).split(' — ')[0], u: !SUPABASE_URL })
+    else if (m.typ === 'tady' && typeof m.z === 'string' && m.z !== ZALOZKA) {
+      const k = m.z.slice(0, 8)
+      if (_kopieAppky.tady.has(k) || _kopieAppky.tady.size < 50) _kopieAppky.tady.set(k, { t: Date.now(), v: String(m.v || '').slice(0, 20), u: !!m.u })
+    }
   }
   kanal.postMessage({ typ: 'kdo', z: ZALOZKA })
 } catch (e) {}
@@ -7377,6 +7422,23 @@ async function ensureLib(name) {
 }
 // Pohodlí: načti víc knihoven najednou
 async function ensureLibs(...names) { for (const n of names) await ensureLib(n) }
+
+// UVOLNĚNÍ PDF Z PAMĚTI (4. 11. 2026, Bibiana: ve Smlouvách se appka na
+// sekundy zasekávala). pdfjsLib.getDocument() si pokaždé pustí vlastní vlákno
+// (worker) a vykreslené stránky drží jako obrázky v plné velikosti skenu
+// (A4 300 dpi ≈ 35 MB na stránku). Okna smluv dokument po sobě nezavírala —
+// po každé smlouvě (vyplnit → místo podpisu → podpis) zůstala běžet tři
+// vlákna a v paměti ~150 MB navíc, celé odpoledne se to sčítalo (zkouška
+// ~/sb-zkousky/_smlouvy-rychlost). destroy() vlákno ukončí a obrázky stránek
+// uvolní; na obrazovce se nic nemění — plátno si nakreslenou stránku drží samo.
+// Jméno nezačíná load/render… — hlídač pomalosti by ho obalil.
+function pdfjsUvolni(doc) {
+  const nezavrel = (e) => console.warn('[smlouva] PDF se nepodařilo zavřít:', e && e.message)
+  try {
+    const v = (doc && typeof doc.destroy === 'function') ? doc.destroy() : null
+    if (v && typeof v.catch === 'function') v.catch(nezavrel)
+  } catch (e) { nezavrel(e) }
+}
 
 // ===== ČESKÉ PÍSMO DO PDF =====
 // pdf-lib umí sám od sebe jen Helvetiku a ta české znaky neumí — na prvním „ě"
@@ -10355,7 +10417,12 @@ async function zapisBezpecnostniUdalost(typ) {
 // u správce: které funkce appky trvají, které dotazy jsou pomalé a kdy se
 // stránka zasekne (neodpovídá na klepnutí). Každé 3 minuty, když bylo něco
 // pomalé, pošle souhrn do chyby_appky (kde = 'pomalost').
-const _pom = { fce: {}, dotazy: [], zaseky: [], od: Date.now(), odeslano: 0, poslano: 0 }
+// 4. 11. 2026 (Bibiana: „píše to neustále pomalu písmenka"): hlídač měří i psaní
+// (_pomKlavesa), u zaseknutí zapisuje, jestli mělo okno fokus (Safari nepoužívané
+// okno brzdí na tik za vteřinu — to není zaseknutí appky), a v souhrnu je, kolik
+// kopií appky je v prohlížeči otevřeno a jestli mezi nimi není stará kopie.
+const _pom = { fce: {}, dotazy: [], zaseky: [], psani: [], od: Date.now(), odeslano: 0, poslano: 0,
+  start: new Date().toISOString(), skryti: 0, staraKopie: null, staraHlasena: false, chyba: null }
 function _pomZapisDotaz(cesta, ms, stav) {
   if (ms < 1500) return
   _pom.dotazy.push({ c: cesta.slice(0, 120), ms: Math.round(ms), s: stav, v: _activeAdminView?.() || '' })
@@ -10392,27 +10459,127 @@ function spustHlidacPomalosti() {
     const ted = Date.now(), zpozd = ted - posl - 250
     posl = ted
     if (document.visibilityState !== 'visible' || zpozd < 300) return
-    _pom.zaseky.push({ ms: Math.round(zpozd), v: _activeAdminView?.() || '', t: new Date().toISOString().slice(11, 19) })
+    const fokus = typeof document.hasFocus === 'function' ? document.hasFocus() : null
+    _pom.zaseky.push({ ms: Math.round(zpozd), v: _activeAdminView?.() || '', t: new Date().toISOString().slice(11, 19), fokus })
     if (_pom.zaseky.length > 60) _pom.zaseky.shift()
   }, 250)
-  // 3) souhrn každé 3 minuty, jen když bylo něco pomalé; nejvýš 30× v kartě
-  setInterval(odesliSouhrnPomalosti, 180000)
+  // 3) psaní: od stisku klávesy v poli do dalšího snímku (viz _pomKlavesa)
+  document.addEventListener('keydown', _pomKlavesa, { capture: true, passive: true })
+  document.addEventListener('visibilitychange', () => { _pom.skryti++ })
+  // 4) každé 3 minuty: stará kopie appky, kolik kopií je otevřeno a souhrn —
+  // ten jen když bylo něco pomalé; nejvýš 30× v kartě
+  setInterval(_pomTri, 180000)
 }
+// Které pole — jen id nebo jméno pole (nikdy, co v něm je). Pole vyplňování PDF
+// (smlouvy) id nemají → 'pdf-pole'; jiné bez id → druh pole @ nejbližší předek s id.
+function _pomPole(el) {
+  try {
+    if (el.classList && el.classList.contains('pdf-fill-input')) return 'pdf-pole'
+    const jm = el.id || (el.getAttribute && el.getAttribute('name')) || ''
+    if (jm) return String(jm).slice(0, 40)
+    const druh = el.isContentEditable ? 'upravitelne' : String(el.tagName || '?').toLowerCase()
+    const predek = el.parentElement && el.parentElement.closest ? el.parentElement.closest('[id]') : null
+    return (druh + (predek ? '@' + predek.id : '')).slice(0, 40)
+  } catch (e) { return '?' }
+}
+// Stisk klávesy v poli (input, textarea, upravitelný text): změří se doba od
+// obsluhy stisku do dalšího snímku (requestAnimationFrame + makroúloha). Na ukázce
+// 5–8 ms na klávesu; od 150 ms (i s čekáním) se zapíše, nejvýš 25 posledních.
+// `ceka` = jak dlouho skutečný stisk čekal, než se k němu stránka dostala (čas
+// události) — tak je vidět i psaní za zaseknutou stránkou. Hesla se neměří vůbec.
+// Když se mezitím okno schovalo, snímek se nekreslí a čas by nic neříkal —
+// takový stisk se vynechá.
+function _pomKlavesa(e) {
+  try {
+    const el = e.target
+    if (!el || !(el.isContentEditable || el.tagName === 'TEXTAREA' || (el.tagName === 'INPUT' && el.type !== 'password'))) return
+    const t0 = performance.now()
+    const ceka = (e.isTrusted && e.timeStamp > 0) ? t0 - e.timeStamp : -1
+    const skryti = _pom.skryti
+    requestAnimationFrame(() => setTimeout(() => {
+      try {
+        if (_pom.skryti !== skryti) return
+        const ms = performance.now() - t0
+        const cek = (ceka >= 0 && ceka < 60000) ? Math.round(ceka) : undefined
+        if (ms + (cek || 0) < 150) return
+        const fokus = typeof document.hasFocus === 'function' ? document.hasFocus() : null
+        _pom.psani.push({ ms: Math.round(ms), ceka: cek, pole: _pomPole(el), sekce: _activeAdminView?.() || '', vid: document.visibilityState, fokus, t: new Date().toISOString().slice(11, 19) })
+        if (_pom.psani.length > 25) _pom.psani.shift()
+      } catch (x) { _pomChyba(x) }
+    }, 0))
+  } catch (x) { _pomChyba(x) }
+}
+// Kopie appky starší než 23. 10. 2026 píšou do deníku přihlášení (denik-prihlaseni)
+// bez značky záložky z. Záznam bez z novější než start téhle záložky = stará
+// kopie je v prohlížeči otevřená (běží od té doby, co běží tahle).
+function _pomStaraKopie() {
+  try {
+    const d = JSON.parse(localStorage.getItem(DENIK_KLIC) || '[]')
+    if (!Array.isArray(d)) return null
+    for (let i = d.length - 1; i >= 0; i--) {
+      const x = d[i]
+      if (x && typeof x === 'object' && !x.z && typeof x.t === 'string' && x.t > _pom.start) return { t: x.t.slice(0, 19), co: String(x.co || '').slice(0, 80) }
+    }
+  } catch (e) { return null }   // rozbitý deník přihlášení (nečitelný JSON) — nic se nepozná
+  return null
+}
+// Kolik kopií appky odpovědělo na poslední dotaz 'kolik' (viz _kopieAppky), i s tou
+// vlastní. Bez BroadcastChannel (starý prohlížeč) se to zjistit nedá → null.
+function _pomKopie() {
+  try {
+    if (!_kopieAppky.kanal) return null
+    const od = _kopieAppky.dotazOd || (Date.now() - 200000)
+    const jine = [..._kopieAppky.tady].filter(([, x]) => x.t >= od)
+    return { pocet: 1 + jine.length, jine: jine.slice(0, 10).map(([z, x]) => ({ z, v: x.v, ukazka: x.u || undefined })) }
+  } catch (e) { return null }
+}
+function _pomTri() {
+  try {
+    const s = _pomStaraKopie()
+    if (s) {
+      _pom.staraKopie = s
+      // Jednou za kartu, bez čehokoli na obrazovce.
+      if (!_pom.staraHlasena) {
+        _pom.staraHlasena = true
+        zapisChybuAppky('stara-kopie-appky', 'V prohlížeči je otevřená stará kopie appky (z doby před 23. 10. 2026) — zavřít ji, nebo přenačíst', { posledni: s.co, kdy: s.t, verze: SUBBAU_VERZE.split(' — ')[0] })
+      }
+    }
+  } catch (e) { _pomChyba(e) }
+  // Dotaz na ostatní kopie; odpovědi přijdou hned — souhrn proto až za chvíli.
+  try {
+    if (_kopieAppky.kanal) {
+      const ted = Date.now()
+      for (const [k, x] of _kopieAppky.tady) if (ted - x.t > 600000) _kopieAppky.tady.delete(k)
+      _kopieAppky.dotazOd = ted
+      _kopieAppky.kanal.postMessage({ typ: 'kolik', z: ZALOZKA })
+    }
+  } catch (e) { _pomChyba(e) }
+  setTimeout(() => { try { odesliSouhrnPomalosti() } catch (e) { _pomChyba(e) } }, 1500)
+}
+// Chyba samotného hlídače: appku shodit nesmí, ale nesmí ani potichu zmizet —
+// první se pamatuje a odejde v příštím souhrnu (chybaHlidace).
+function _pomChyba(e) { if (!_pom.chyba) _pom.chyba = String((e && e.message) || e).slice(0, 200) }
 function odesliSouhrnPomalosti() {
     if (_pom.poslano >= 30) return
     const fce = Object.entries(_pom.fce)
       .map(([k, z]) => ({ f: k, n: z.n, syncMax: Math.round(z.syncMax), syncSum: Math.round(z.sync), celMax: Math.round(z.celMax), celSum: Math.round(z.cel) }))
       .filter(x => x.syncMax >= 200 || x.celMax >= 2000)
       .sort((a, b) => (b.syncSum + b.celSum / 10) - (a.syncSum + a.celSum / 10)).slice(0, 15)
-    if (!fce.length && !_pom.dotazy.length && !_pom.zaseky.length) { _pom.fce = {}; return }
+    if (!fce.length && !_pom.dotazy.length && !_pom.zaseky.length && !_pom.psani.length && !_pom.chyba) { _pom.fce = {}; return }
     const zaseku = _pom.zaseky.reduce((s, z) => s + z.ms, 0)
-    zapisChybuAppky('pomalost', 'za ' + Math.round((Date.now() - _pom.od) / 60000) + ' min: zaseknuto ' + Math.round(zaseku / 1000) + ' s (' + _pom.zaseky.length + '×), pomalých dotazů ' + _pom.dotazy.length + ', sekce ' + (_activeAdminView?.() || '?'), {
+    const bezFokusu = _pom.zaseky.filter(z => z.fokus === false).length
+    const kopie = _pomKopie()
+    const stara = _pom.staraKopie
+    zapisChybuAppky('pomalost', 'za ' + Math.round((Date.now() - _pom.od) / 60000) + ' min: zaseknuto ' + Math.round(zaseku / 1000) + ' s (' + _pom.zaseky.length + '×' + (bezFokusu ? ', bez fokusu ' + bezFokusu + '×' : '') + '), pomalých dotazů ' + _pom.dotazy.length + ', pomalé psaní ' + _pom.psani.length + '×, sekce ' + (_activeAdminView?.() || '?')
+      + (kopie && kopie.pocet > 1 ? ', otevřeno kopií appky ' + kopie.pocet : '') + (stara ? ', stará kopie appky otevřená' : ''), {
       verze: SUBBAU_VERZE.split(' — ')[0], prohlizec: navigator.userAgent,
       prvku: document.getElementsByTagName('*').length,
-      fce, dotazy: _pom.dotazy.slice(-25), zaseky: _pom.zaseky.slice(-25)
+      fce, dotazy: _pom.dotazy.slice(-25), zaseky: _pom.zaseky.slice(-25), psani: _pom.psani.slice(-25),
+      kopie: kopie ? kopie.pocet : null, kopieJine: kopie && kopie.jine.length ? kopie.jine : undefined, staraKopie: stara || undefined,
+      chybaHlidace: _pom.chyba || undefined
     })
     _pom.poslano++
-    _pom.fce = {}; _pom.dotazy = []; _pom.zaseky = []; _pom.od = Date.now()
+    _pom.fce = {}; _pom.dotazy = []; _pom.zaseky = []; _pom.psani = []; _pom.chyba = null; _pom.od = Date.now()
 }
 
 // CHYBA SE NEZTRATÍ ANI BEZ SIGNÁLU (1. 11. 2026). Zápis chyby jde stejnou
@@ -31296,7 +31463,10 @@ function loadAdminViewData(name) {
 function _adminEditInProgress() {
   if (_docTypeEditId || _docValidityEditId || _wdTypeEditId || _wdValidityEditId) return true
   const a = document.activeElement
-  return !!(a && (a.tagName === 'INPUT' || a.tagName === 'TEXTAREA' || a.tagName === 'SELECT'))
+  // Upravitelný text = pole, do kterého se píše ve smlouvě (Vyplnit / dopsat do PDF).
+  // Chybělo tu (4. 11. 2026): návrat do okna kliknutím do pole smlouvy spustil
+  // přestavbu seznamu smluv pod oknem a psaní se zaseklo. _tichaObnovaBezi ho bere.
+  return !!(a && (a.tagName === 'INPUT' || a.tagName === 'TEXTAREA' || a.tagName === 'SELECT' || a.isContentEditable))
 }
 
 // Je otevřená karta pracovníka?
@@ -42505,23 +42675,27 @@ function fillBasePath(contractId) { return 'signed/' + contractId + '_fillbase.p
 // Vytáhne z PDF všechna slova i s tím, kde na stránce leží. Souřadnice jsou
 // v bodech PDF, `baseline` je účaří měřené odspodu (tak to PDF počítá).
 async function pdfTextItems(bytes) {
-  const doc = await pdfjsLib.getDocument({ data: bytes.slice(0) }).promise
-  const out = []
-  for (let p = 1; p <= doc.numPages; p++) {
-    const page = await doc.getPage(p)
-    const ph = page.getViewport({ scale: 1 }).height
-    const tc = await page.getTextContent()
-    ;(tc.items || []).forEach(it => {
-      const t = it.transform
-      const text = it.str || ''
-      if (!t || !text.trim()) return
-      // Velikost písma = svislé měřítko textové matice
-      const size = Math.hypot(t[2], t[3]) || Math.hypot(t[0], t[1]) || 12
-      out.push({ page: p, x: t[4], baseline: t[5], size, text, ph })
-    })
-  }
-  try { doc.destroy() } catch (e) {}
-  return out
+  // Úloha se zavře i tehdy, když soubor jako PDF přečíst nejde — dřív po ní
+  // zůstalo běžet vlákno pdf.js (viz pdfjsUvolni).
+  const uloha = pdfjsLib.getDocument({ data: bytes.slice(0) })
+  try {
+    const doc = await uloha.promise
+    const out = []
+    for (let p = 1; p <= doc.numPages; p++) {
+      const page = await doc.getPage(p)
+      const ph = page.getViewport({ scale: 1 }).height
+      const tc = await page.getTextContent()
+      ;(tc.items || []).forEach(it => {
+        const t = it.transform
+        const text = it.str || ''
+        if (!t || !text.trim()) return
+        // Velikost písma = svislé měřítko textové matice
+        const size = Math.hypot(t[2], t[3]) || Math.hypot(t[0], t[1]) || 12
+        out.push({ page: p, x: t[4], baseline: t[5], size, text, ph })
+      })
+    }
+    return out
+  } finally { pdfjsUvolni(uloha) }
 }
 
 // Najde text, který někdo do smlouvy dopsal — porovná ji s původní verzí a vezme,
@@ -42708,7 +42882,10 @@ async function openPdfFillModal(contractId, title, fileUrl) {
     if (loading) loading.textContent = 'Načítám PDF…'
     // pdf.js potřebuje vlastní kopii (arrayBuffer se „spotřebuje")
     const task = pdfjsLib.getDocument({ data: pdfFillState.pdfBytes.slice(0) })
-    pdfFillState.pdfDoc = await task.promise
+    const doc = await task.promise
+    // Předchozí dokument (kdyby okno nezavřel closePdfFillModal) i s vláknem pryč.
+    if (pdfFillState.pdfDoc && pdfFillState.pdfDoc !== doc) pdfjsUvolni(pdfFillState.pdfDoc)
+    pdfFillState.pdfDoc = doc
     pdfFillState.total = pdfFillState.pdfDoc.numPages
     await pdfFillRenderPage(1)
     if (loading) loading.style.display = 'none'
@@ -42726,6 +42903,14 @@ async function openPdfFillModal(contractId, title, fileUrl) {
 function closePdfFillModal() {
   document.getElementById('pdf-fill-modal').style.display = 'none'
   document.body.style.overflow = ''
+  // Dokument se zavře i s vláknem pdf.js a obrázky stránek (viz pdfjsUvolni).
+  // Rozkreslená stránka se nejdřív dokreslí (plátno zůstane jako dřív; další
+  // otevření ji zruší jako dřív přes renderTask), pak teprve pryč. Pole se po
+  // ní už nepřidají — hlídá to pořadové číslo v pdfFillRenderPage.
+  const doc = pdfFillState.pdfDoc, kresli = pdfFillState.renderTask
+  pdfFillState.renderSeq = (pdfFillState.renderSeq || 0) + 1
+  if (kresli && kresli.promise) kresli.promise.then(() => pdfjsUvolni(doc), () => pdfjsUvolni(doc))
+  else pdfjsUvolni(doc)
   pdfFillState.pdfDoc = null
   pdfFillState.fields = []
   // vyčisti textová pole
@@ -42749,7 +42934,9 @@ async function pdfFillRenderPage(pageNum) {
   if (pdfFillState.renderTask) { try { pdfFillState.renderTask.cancel() } catch (e) {} }
   pdfFillState.page = pageNum
   document.getElementById('pdf-fill-pageinfo').textContent = pageNum + ' / ' + pdfFillState.total
-  const page = await pdfFillState.pdfDoc.getPage(pageNum)
+  let page
+  try { page = await pdfFillState.pdfDoc.getPage(pageNum) }
+  catch (e) { if (beh !== pdfFillState.renderSeq) return; throw e }   // okno se mezitím zavřelo (dokument je pryč)
   if (beh !== pdfFillState.renderSeq) return
   // Zvol scale tak, aby se vešlo na šířku (max 1.8)
   const container = document.getElementById('pdf-fill-scroll')
@@ -43061,16 +43248,17 @@ async function loadAdminContracts() {
   if (!div) return
   if (cErr) {
     div.innerHTML=`<div style="color:red;padding:10px;font-size:12px">Chyba: ${cErr.message}</div>`
+    div._smlouvyHtml = null
     // DENÍK CHYB (2. 11. 2026): seznam smluv se nenačetl — panel se dřív nezapsal nikam.
     try { if (typeof _dnPanel === 'function') _dnPanel('smlouvy', 'Smlouvy se nepodařilo načíst: ' + cErr.message, { kod: cErr.code, stav: cErr.status }) } catch (x) { console.warn('[deník chyb]', x) } // eslint-disable-line no-undef
     return
   }
   { const skryti = await skrytiLideIds(); if (data) data = data.filter(c => !skryti.has(c.worker_id)) }   // schované firmy
-  if (!data?.length) { div.innerHTML='<div style="text-align:center;padding:20px;color:var(--text3)">Žádné smlouvy</div>'; return }
+  if (!data?.length) { div.innerHTML='<div style="text-align:center;padding:20px;color:var(--text3)">Žádné smlouvy</div>'; div._smlouvyHtml = null; return }
   const statusLabels = {admin_pending:'⏳ Čeká na podpis admina',pending:'📝 Čeká na podpis OSVČ',signed_electronic:'✅ Podepsána',signed_scan:'✅ Podepsána (sken)',rejected:'❌ Zamítnuta'}
   // Verze smluv v úložišti — jeden dotaz pro celý seznam
   const stIdx = await loadContractStorageIndex()
-  div.innerHTML = data.map(c=>`
+  const html = data.map(c=>`
     <div style="padding:12px 16px;border-bottom:1px solid var(--brd)">
       <div style="display:flex;justify-content:space-between;align-items:flex-start">
         <div>
@@ -43095,6 +43283,24 @@ async function loadAdminContracts() {
       </div>
       ${contractVersionsHtml(c, stIdx, c.worker?.full_name)}
     </div>`).join('')
+  // STEJNÝ SEZNAM SE NEPŘESTAVUJE (4. 11. 2026, Bibiana: ve Smlouvách se appka
+  // na sekundy zasekávala). Po každém uložení smlouvy se seznam načte dvakrát
+  // (hned + ozvěna živé změny z databáze) a znovu i při návratu do okna — pokaždé
+  // se stejnými daty. 200 smluv = ~13 tisíc prvků a 1,8 MB textu; přestavba je na
+  // rychlém Macu ~0,1 s, na pomalém přes vteřinu, a dělá se i pod otevřeným oknem
+  // smlouvy. Když se nic nezměnilo, jen se udělá to, co by přestavba viditelně
+  // udělala: rozbalené „Verze ke stažení" se zavřou, fokus a výběr textu ze
+  // seznamu zmizí. Na obrazovce je pak totéž, co po přestavbě.
+  if (div._smlouvyHtml === html && div.childElementCount === data.length) {
+    div.querySelectorAll('details[open]').forEach(d => { d.open = false })
+    const a = document.activeElement
+    if (a && a !== div && div.contains(a) && typeof a.blur === 'function') a.blur()
+    const vyber = window.getSelection ? window.getSelection() : null
+    if (vyber && vyber.rangeCount && (div.contains(vyber.anchorNode) || div.contains(vyber.focusNode))) vyber.removeAllRanges()
+    return
+  }
+  div.innerHTML = html
+  div._smlouvyHtml = html
 }
 
 // OSVČ — seznam smluv
