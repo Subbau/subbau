@@ -21443,6 +21443,63 @@ function tiskSoupisuFaktur(kw, rok) {
   showPrintPreview(html, 'Rechnungsuebersicht_KW' + kw + '_' + rok + '.html')
 }
 
+// HLEDÁNÍ JMÉNA V TÝDNU. Majitel 4. 11. 2026: „tam, kde je to číslo týdne,
+// KW 45/26, napravo je Vytisknout — tak tam ještě políčko na vyhledávání, aby
+// jsme mohli hledat ty lidi; kolikrát je to fakt složitý to najít, motá se to."
+// Políčko je v hlavičce každého týdne hned za Vytisknout a hledá jen v řádcích
+// TOHO týdne: jméno pracovníka a dodavatele, bez háčků a čárek a bez ohledu na
+// velká písmena („matuszynski" najde Matuszyński), i šedé řádky „faktura
+// nepřišla". Firma, ve které nikdo nezbude, se schová; hlavička týdne zůstane.
+// Platí spolu s horním hledáním a filtry a stejně jako u nich: co je vypsané,
+// to se tiskne a na to platí „Zaplaceno všem".
+// Text se pamatuje pro každý týden zvlášť, dokud je appka otevřená (schválně ne
+// natrvalo v prohlížeči), a přežije překreslení tabulky. Do HTML hlavičky se
+// nepíše — hlavička má pořád stejné HTML, při překreslení jen změněných řádků
+// (_invVlozRadky) zůstává tentýž prvek a psaní neztratí fokus ani kurzor.
+const _invHledaniTydne = new Map()   // 'kw/rok' → text, jak ho správce napsal
+const INV_HLEDAT_TYDEN = 'inv-hledat-tyden'   // name políčka v hlavičce týdne
+function invHledatVTydnu(el, kw, rok) {
+  const k = kw + '/' + rok
+  if (el.value) _invHledaniTydne.set(k, el.value)
+  else _invHledaniTydne.delete(k)
+  renderWorkerInvoices()
+}
+// Esc hledání v týdnu smaže (a dál nejde — nic jiného se tím nezavře).
+function invHledatVTydnuKlavesa(e, el, kw, rok) {
+  if (e.key !== 'Escape') return
+  e.preventDefault(); e.stopPropagation()
+  if (!el.value) return
+  el.value = ''
+  invHledatVTydnu(el, kw, rok)
+}
+// Tvar k porovnání: bez háčků a čárek, malá písmena (textKHledani, jako
+// v Ubytování) a polské „ł" jako „l" — to se na „l" + znaménko nerozkládá.
+function _invHledaciTvar(s) { return textKHledani(s).replace(/ł/g, 'l') }
+// Políčko hledání v týdnu, do kterého se zrovna píše (i s kurzorem), nebo null.
+function _invFokusVTydnu(tbody) {
+  const a = document.activeElement
+  if (!a || a.name !== INV_HLEDAT_TYDEN || !tbody.contains(a)) return null
+  return { el: a, tyden: a.getAttribute('data-inv-tyden'), od: a.selectionStart, do: a.selectionEnd, smer: a.selectionDirection }
+}
+// Po překreslení: každé políčko ukáže text svého týdne (nové hlavičky přijdou
+// prázdné). Políčko, do kterého se píše, se nepřepisuje — kurzor zůstane, kde byl.
+// Kdyby tabulku přece přepsalo celé něco jiného, fokus a kurzor se vrátí do
+// nového políčka téhož týdne.
+function _invVratHledaniTydne(tbody, fokus) {
+  const policka = tbody.querySelectorAll('input[name="' + INV_HLEDAT_TYDEN + '"]')
+  for (const el of policka) {
+    const v = _invHledaniTydne.get(el.getAttribute('data-inv-tyden')) || ''
+    if (el.value !== v) el.value = v
+  }
+  if (fokus && !fokus.el.isConnected) {
+    const nove = [...policka].find(el => el.getAttribute('data-inv-tyden') === fokus.tyden)
+    if (nove) {
+      try { nove.focus({ preventScroll: true }) } catch (e) { nove.focus() }
+      try { nove.setSelectionRange(fokus.od, fokus.do, fokus.smer || 'none') } catch (e) { /* kurzor na konci */ }
+    }
+  }
+}
+
 function renderWorkerInvoices() {
   const tbody = document.getElementById('inv-table')
   if (!tbody || _invTableMissing) return
@@ -21501,10 +21558,26 @@ function renderWorkerInvoices() {
     if (el) el.textContent = _invSortKey === k ? (_invSortDir === 'asc' ? '▲' : '▼') : ''
   })
 
-  renderInvoiceStats(rows.filter(r => !r._sedy))
+  // Hledání jména v týdnu (políčko v hlavičce týdne, viz _invHledaniTydne) —
+  // jen když jsou hlavičky týdnů vidět. Každé slovo musí být ve jménu nebo
+  // u dodavatele. Skryté řádky nejsou vypsané: nepočítají se, netisknou se.
+  const hledatVTydnu = new Map()   // 'kw/rok' → slova
+  if (delitTydny) _invHledaniTydne.forEach((text, k) => {
+    const slova = _invHledaciTvar(text).split(/\s+/).filter(Boolean)
+    if (slova.length) hledatVTydnu.set(k, slova)
+  })
+  const skrytVTydnu = hledatVTydnu.size ? new Set(rows.filter(r => {
+    const slova = r.kw ? hledatVTydnu.get(r.kw + '/' + r.kw_year) : null
+    if (!slova) return false
+    const kdo = _invHledaciTvar((r.worker?.full_name || '') + ' ' + (r.supplier_name || ''))
+    return !slova.every(s => kdo.includes(s))
+  })) : null
+  const vypsane = skrytVTydnu ? rows.filter(r => !skrytVTydnu.has(r)) : rows
+
+  renderInvoiceStats(vypsane.filter(r => !r._sedy))
   // Pro tisk soupisu: přesně to, co je vypsané (hledání a filtry platí) —
   // jen skutečné faktury, šedé řádky do soupisu nepatří.
-  window._invZobrazene = rows.filter(r => !r._sedy)
+  window._invZobrazene = vypsane.filter(r => !r._sedy)
 
   if (!rows.length) {
     // Řádky se odloží stranou — po smazání písmene se vrátí bez nového sestavení.
@@ -21540,9 +21613,10 @@ function renderWorkerInvoices() {
   let _poslKw = null
   let _poslFirma = null
   // Kolik faktur firmy v týdnu ještě není zaplacených (bez odložených) —
-  // podle toho se u firmy nabídne „Zaplaceno všem".
+  // podle toho se u firmy nabídne „Zaplaceno všem". Z vypsaných (i po hledání
+  // v týdnu), protože zaplacenoFirme bere právě ty.
   const _nezaplaceno = new Map(), _odlozeneCekaji = new Map()
-  if (delitTydny) rows.forEach(r => {
+  if (delitTydny) vypsane.forEach(r => {
     if (r._sedy || (r.status || 'new') === 'paid' || !r.kw) return
     const k = r.kw + '/' + r.kw_year + '|' + firmaFaktury(r)
     const m = r.odlozeno_at ? _odlozeneCekaji : _nezaplaceno
@@ -21594,6 +21668,9 @@ function renderWorkerInvoices() {
     </tr>`
   }
 
+  // Týden, ve kterém hledání v týdnu nenašlo nikoho: pod hlavičkou jen tichý řádek.
+  const nikdoVTydnu = kw => `<tr data-inv-nikdo="${escAttr(kw)}"><td colspan="10" style="text-align:center;color:var(--text3);padding:14px 12px;font-size:12.5px">Nikdo takový v tomhle týdnu není</td></tr>`
+  let _vypsanoVTydnu = 0   // kolik řádků týdne zůstalo po hledání v týdnu
   const casti = []   // HTML po jednotlivých řádcích <tr> — viz _invVlozRadky
   rows.forEach(r => {
     // Barva je vlastnost pracovníka, ne dokladu — proto se bere živě z profilu.
@@ -21602,17 +21679,34 @@ function renderWorkerInvoices() {
     const kod = r.crm_code || r.worker?.crm_code || ''
     const kwTeto = r.kw ? (r.kw + '/' + r.kw_year) : 'bez týdne'
     if (delitTydny && kwTeto !== _poslKw) {
-      casti.push(`<tr><td colspan="10" style="padding:10px 12px 6px;border-top:2px solid var(--blue,#211D1A);background:var(--bg,#f4efe7);font-size:12.5px;font-weight:800;color:var(--text2)"><div style="display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap"><span>${r.kw ? 'KW ' + r.kw + ' / ' + r.kw_year : 'Bez týdne'}</span>${r.kw ? `<button onclick="event.stopPropagation();tiskSoupisuFaktur('${jsStr(String(r.kw))}','${jsStr(String(r.kw_year))}')" title="Vytisknout soupis faktur za tenhle týden — tak, jak je tady vypsaný" style="min-height:36px;padding:5px 12px;border:1.5px solid var(--brd);border-radius:8px;background:#fff;color:var(--text);font-size:12.5px;font-weight:700;font-family:inherit;cursor:pointer;white-space:nowrap">🖨 Vytisknout</button>` : ''}</div></td></tr>`)
+      if (_poslKw !== null && !_vypsanoVTydnu && hledatVTydnu.has(_poslKw)) casti.push(nikdoVTydnu(_poslKw))
+      // Za Vytisknout políčko hledání v týdnu (viz _invHledaniTydne). Hodnotu
+      // v HTML nemá schválně — doplní ji _invVratHledaniTydne.
+      casti.push(`<tr><td colspan="10" style="padding:10px 12px 6px;border-top:2px solid var(--blue,#211D1A);background:var(--bg,#f4efe7);font-size:12.5px;font-weight:800;color:var(--text2)"><div style="display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap"><span>${r.kw ? 'KW ' + r.kw + ' / ' + r.kw_year : 'Bez týdne'}</span>${r.kw ? `<span style="display:flex;align-items:center;gap:8px;flex-wrap:wrap"><button onclick="event.stopPropagation();tiskSoupisuFaktur('${jsStr(String(r.kw))}','${jsStr(String(r.kw_year))}')" title="Vytisknout soupis faktur za tenhle týden — tak, jak je tady vypsaný" style="min-height:36px;padding:5px 12px;border:1.5px solid var(--brd);border-radius:8px;background:#fff;color:var(--text);font-size:12.5px;font-weight:700;font-family:inherit;cursor:pointer;white-space:nowrap">🖨 Vytisknout</button><input type="text" name="${INV_HLEDAT_TYDEN}" data-inv-tyden="${escAttr(kwTeto)}" oninput="invHledatVTydnu(this,'${jsStr(String(r.kw))}','${jsStr(String(r.kw_year))}')" onkeydown="invHledatVTydnuKlavesa(event,this,'${jsStr(String(r.kw))}','${jsStr(String(r.kw_year))}')" onclick="event.stopPropagation()" placeholder="Hledat jméno…" title="Najít člověka jen v tomhle týdnu — stačí kus jména, bez háčků a čárek. Esc hledání smaže." aria-label="Hledat jméno v KW ${escAttr(r.kw)}/${escAttr(r.kw_year)}" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" style="width:160px;min-height:36px;padding:5px 10px;border-radius:8px;background:#fff;font-size:13px"></span>` : ''}</div></td></tr>`)
       _poslKw = kwTeto
       _poslFirma = null   // nový týden začíná i novou firmou
+      _vypsanoVTydnu = 0
     }
+    if (skrytVTydnu && skrytVTydnu.has(r)) return   // hledání v týdnu ho nenašlo
+    _vypsanoVTydnu++
     // Firma uvnitř týdne. Odsazený a jemnější než nadpis týdne, ať je poznat,
     // co je čemu nadřazené.
+    // Majitel 4. 11. 2026: „zvětšit přechod mezi jednotlivými firmami — ten
+    // nadpis by měl být víc oddělený, třeba tlustou čárou ze zhora, ze zdola."
+    // Tlustá čára nahoře i dole a víc místa nad názvem. Čára týdne zůstává
+    // tmavší (týden je nadřazený); první firma pod hlavičkou týdne horní čáru
+    // nemá — tu tam dělá čára týdne.
+    // data-inv-firma = týden: bez něj měl nadpis firmy bez tlačítka („✓ vše
+    // zaplaceno") stejné HTML v mnoha týdnech (24 nadpisů ve 129 řádcích) a když
+    // jeden zmizel (hledání v týdnu, horní hledání), _invPrepisJenZmeny se chytil
+    // stejného nadpisu jinde a sestavil znovu celý zbytek tabulky (1 písmeno =
+    // ~1 000 řádků). Každý řádek má teď své HTML.
     if (delitTydny) {
       const firmaTeto = firmaFaktury(r)
       if (firmaTeto !== _poslFirma) {
         const zbyva = r.kw ? (_nezaplaceno.get(r.kw + '/' + r.kw_year + '|' + firmaTeto) || 0) : 0
-        casti.push(`<tr><td colspan="10" style="padding:6px 12px 4px 24px;background:var(--bg,#f4efe7);font-size:12px;font-weight:700;color:var(--text3)"><div class="inv-firma-hlava" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap"><span>${escAttr(firmaTeto)}</span>${r.kw ? souhrnFirmyHtml(r.kw, r.kw_year, firmaTeto) : ''}${zbyva
+        const prvniVTydnu = _poslFirma === null
+        casti.push(`<tr data-inv-firma="${escAttr(kwTeto)}"><td colspan="10" style="padding:${prvniVTydnu ? '6px' : '14px'} 12px 4px 24px;${prvniVTydnu ? '' : 'border-top:2px solid var(--text3);'}border-bottom:2px solid var(--text3);background:var(--bg,#f4efe7);font-size:12px;font-weight:700;color:var(--text3)"><div class="inv-firma-hlava" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap"><span>${escAttr(firmaTeto)}</span>${r.kw ? souhrnFirmyHtml(r.kw, r.kw_year, firmaTeto) : ''}${zbyva
           ? `<button onclick="event.stopPropagation();zaplacenoFirme('${jsStr(r.kw)}','${jsStr(r.kw_year)}','${jsStr(firmaTeto)}', this)" title="Označí jako zaplacené všechny nezaplacené faktury téhle firmy v tomhle týdnu (odložené ne). Propíše se to i do Provizí." style="font-size:11px;padding:3px 9px;border:1px solid var(--amber);border-radius:6px;cursor:pointer;background:var(--amber-l);color:var(--amber);font-family:inherit;font-weight:800">✅ Zaplaceno všem (${zbyva})</button>`
           : ((!r.kw || !(_souhrnFirmy.get(r.kw + '/' + r.kw_year + '|' + firmaTeto)?.faktur)) ? '' : (_odlozeneCekaji.get(r.kw + '/' + r.kw_year + '|' + firmaTeto)
             ? '<span style="font-size:11px;font-weight:700;color:#1d4ed8">⏸ nezaplacené jsou jen odložené</span>'
@@ -21685,6 +21779,7 @@ function renderWorkerInvoices() {
       </td>
     </tr>`)
   })
+  if (delitTydny && _poslKw !== null && !_vypsanoVTydnu && hledatVTydnu.has(_poslKw)) casti.push(nikdoVTydnu(_poslKw))
   const _invHtml = casti.join('')
   // Obnova každou minutu přináší většinou tytéž faktury — stejnou tabulku znovu
   // nevkládat (31 000 prvků, fotky by se načítaly znovu). Pozná se i to, že mezitím
@@ -21693,7 +21788,11 @@ function renderWorkerInvoices() {
   // se musí překreslit i tehdy, když je HTML stejné — jinak by tak zůstal.
   if (tbody._invHtml === _invHtml && tbody.firstElementChild === tbody._invPrvni && tbody.childElementCount === tbody._invPocet
       && !_invNekdoSahal(tbody)) return
-  _invVlozRadky(tbody, casti, _invHtml)
+  // Píše se do hledání v týdnu → tabulka se nepřepíše celá (políčko by zmizelo
+  // i s kurzorem), jen změněné řádky; hlavička týdne zůstane, jak je.
+  const fokus = _invFokusVTydnu(tbody)
+  _invVlozRadky(tbody, casti, _invHtml, !!fokus)
+  _invVratHledaniTydne(tbody, fokus)
 }
 
 // PŘEKRESLIT JEN ZMĚNĚNÉ ŘÁDKY (4. 11. 2026, účetní: „Faktury se zasekávají").
@@ -21706,13 +21805,15 @@ function renderWorkerInvoices() {
 // createContextualFragment v <tbody> = totéž, co dělá innerHTML).
 // Odebrané řádky se drží stranou (_invOdlozene), ať se při mazání písmen
 // v hledání vrátí bez nového sestavení. Když se toho mění hodně (řazení, jiný
-// filtr), přepíše se tabulka celá jako dřív.
-function _invVlozRadky(tbody, casti, html) {
+// filtr), přepíše se tabulka celá jako dřív — kromě chvíle, kdy se píše do
+// hledání v týdnu (drzetPolicko): to políčko je v tabulce a celé přepsání by ho
+// zahodilo i s kurzorem.
+function _invVlozRadky(tbody, casti, html, drzetPolicko) {
   const stare = tbody._invRadky
   _invNekdoSahal(tbody)
   const lzeJenZmeny = stare && tbody._invPozor && !tbody._invCizi
     && tbody.firstElementChild === tbody._invPrvni && tbody.childElementCount === tbody._invPocet
-  if (!lzeJenZmeny || !_invPrepisJenZmeny(tbody, stare, casti)) {
+  if (!lzeJenZmeny || !_invPrepisJenZmeny(tbody, stare, casti, drzetPolicko)) {
     tbody.innerHTML = html
     tbody._invRadky = _invRozdelNaRadky([...tbody.childNodes], casti)
     tbody._invOdlozene = null
@@ -21733,8 +21834,14 @@ function _invSledovat(tbody) {
   tbody._invPozor = new MutationObserver(z => _invZapisZasahy(tbody, z))
   tbody._invPozor.observe(tbody, { attributes: true, childList: true, characterData: true, subtree: true })
 }
+// Pojistka proti opravám slov (vypniOpravyVPoli) políčku hledání v týdnu při
+// dotyku a fokusu znovu nastaví autocorrect, autocapitalize, spellcheck — stejné
+// hodnoty, jaké už má v HTML. Za zásah se to nepočítá: hlavička týdne by šla
+// k přestavbě a s ní by zmizelo políčko, do kterého se právě píše (4. 11. 2026).
+const _INV_ATR_OPRAV = new Set(['autocorrect', 'autocapitalize', 'spellcheck', 'autocomplete'])
 function _invZapisZasahy(tbody, zaznamy) {
   for (const z of zaznamy) {
+    if (z.type === 'attributes' && z.target.name === INV_HLEDAT_TYDEN && _INV_ATR_OPRAV.has(z.attributeName)) continue
     if (z.target === tbody) { tbody._invCizi = true; continue }
     let n = z.target
     while (n && n.parentNode !== tbody) n = n.parentNode
@@ -21778,7 +21885,7 @@ function _invRozdelNaRadky(uzly, casti) {
   }
   return (kus.length || radky.length !== casti.length) ? null : radky
 }
-function _invPrepisJenZmeny(tbody, stare, casti) {
+function _invPrepisJenZmeny(tbody, stare, casti, drzetPolicko) {
   // 1) Které staré řádky zůstanou: stejné HTML a stejné pořadí.
   const potreba = new Map()
   for (const h of casti) potreba.set(h, (potreba.get(h) || 0) + 1)
@@ -21803,7 +21910,8 @@ function _invPrepisJenZmeny(tbody, stare, casti) {
     plan[j] = null; nove.push(j)
   }
   // Mění se většina (řazení, jiný filtr) → jedno innerHTML je rychlejší.
-  if (nove.length > 40 && nove.length > casti.length * 0.3) return false
+  // Ne při psaní do hledání v týdnu — políčko je v tabulce (viz _invVlozRadky).
+  if (!drzetPolicko && nove.length > 40 && nove.length > casti.length * 0.3) return false
   // 2) Nové řádky sestavit naráz, ještě než se na tabulku sáhne.
   if (nove.length) {
     const rozsah = document.createRange()
