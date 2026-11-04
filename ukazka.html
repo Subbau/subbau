@@ -16974,12 +16974,25 @@ function fotkaHtml(url, jmeno, px, obdelnik, workerId) {
 //  - pojistky proti zahlcení úložiště: nejvýš FOTKA_MAX_POKUSU opakování za život
 //    stránky; adresa, u které nedávno selhalo všechno (smazaná fotka), se při dalším
 //    překreslení už neopakuje — jen zmenšenina → velká → iniciály jako dřív
+// KOPIE TÉŽE FOTKY SDÍLÍ POKUS (4. 11. 2026, nezávislá kontrola dávky d). Rozpis
+// Plánu MMI kreslí fotku člověka v každém dni týdne (kartička na stavbě, řádky
+// Nemocní / Dovolená / Nezařazení) — šest lidí s rozbitou fotkou bylo 30 obrázků
+// a každý se opakoval sám za sebe: pojistka 40 pokusů padla na jediné otevření
+// sekce a fotka, která se pak jinde v appce poprvé nenačetla, se už nezkusila
+// znovu (zůstaly iniciály). Pokus se proto počítá podle ADRESY (dataset.zdroj,
+// adresa bez &r=): první kopie, které fotka selže, naplánuje kolo (jeden dotaz
+// na úložiště, jedno započítání), kopie téže adresy, které jsou zrovna ve stránce,
+// se k němu přidají — dostanou tutéž adresu s &r= ve stejné chvíli (prohlížeč je
+// obslouží jedním načtením) a převezmou výsledek. Hlídač zaseknutých fotek přepne
+// visící kopie téže adresy taky naráz. Kde je každá adresa jednou (Pracovníci,
+// Docházka, Faktury…), se počet pokusů ani dotazů nemění.
 const FOTKA_ODKLADY_MS = [1500, 5000]
 const FOTKA_ZASEKNUTI_MS = 10000
 const FOTKA_MAX_POKUSU = 40
 const FOTKA_VZDAT_NA_MS = 5 * 60 * 1000
 const _fotkaNahrada = new Map()     // adresa z appky → adresa, která se opravdu načetla
 const _fotkaVzdano = new Map()      // adresa z appky → kdy se naposled vzdalo
+const _fotkaKola = new Map()        // adresa z appky → běžící kolo { k, adresa, kopie, vystrel }
 let _fotkaPokusu = 0
 
 function fotkaAdresa(src) { return _fotkaNahrada.get(src) || src }
@@ -16993,6 +17006,19 @@ function _fotkaInicialy(img) {
 function _fotkaPamatuj(img) {
   const z = img.dataset.zdroj
   if (z && img.naturalWidth > 0 && img.getAttribute('src') !== z) { _fotkaNahrada.set(z, img.getAttribute('src')); _fotkaVzdano.delete(z) }
+  // Kolo téhle adresy skončilo — mapa nesmí držet obrázky (a s nimi starý rozpis).
+  if (z) _fotkaKola.delete(z)
+}
+// Běžící kolo adresy, jen když je některá jeho kopie pořád ve stránce. Po
+// překreslení (staré obrázky pryč) se nový obrázek k mrtvému kolu nepřidá a jde
+// vlastní cestou jako dřív.
+function _fotkaZiveKolo(zdroj) {
+  const kolo = _fotkaKola.get(zdroj)
+  if (!kolo) return null
+  for (const x of kolo.kopie) if (!x.isConnected) kolo.kopie.delete(x)
+  if (kolo.kopie.size) return kolo
+  _fotkaKola.delete(zdroj)
+  return null
 }
 
 function fotkaChyba(img) {
@@ -17001,13 +17027,27 @@ function fotkaChyba(img) {
   if (!d.p) d.p = _fotkaBezR(src)                           // adresa, jak ji appka vykreslila
   if (!d.zdroj) d.zdroj = d.p
   img.onload = () => { delete img.dataset.cekam; _fotkaPamatuj(img) }
+  // 0) jiná kopie téže fotky se mezitím načetla → její adresu, bez dotazu navíc
+  const nahrada = _fotkaNahrada.get(d.zdroj)
+  if (nahrada && nahrada !== src && !d.n) { d.n = '1'; img.src = nahrada; return }
   // 1) zmenšenina → velká hned (bez čekání a bez započítání do pojistky)
   if (!d.k && src.indexOf('/avatar-mini.jpg') > 0) { img.src = d.p = _fotkaBezR(src).replace('/avatar-mini.jpg', '/avatar.jpg'); return }
   // 2) opakování velké s &r=
   const k = Number(d.k || 0)
   const nedavnoVzdano = Date.now() - (_fotkaVzdano.get(d.zdroj) || 0) < FOTKA_VZDAT_NA_MS
+  // 2a) kopie téže adresy už má naplánované další kolo → přidat se k němu
+  // (bez započítání; načte se tou samou adresou ve stejné chvíli)
+  const kolo = nedavnoVzdano ? null : _fotkaZiveKolo(d.zdroj)
+  if (kolo && kolo.k > k) {
+    d.k = kolo.k
+    kolo.kopie.add(img)
+    if (kolo.vystrel) img.src = kolo.adresa   // dotaz kola už běží — připojí se k němu
+    else d.cekam = '1'
+    return
+  }
   if (k >= FOTKA_ODKLADY_MS.length || nedavnoVzdano || _fotkaPokusu >= FOTKA_MAX_POKUSU) {
     if (!nedavnoVzdano) _fotkaVzdano.set(d.zdroj, Date.now())
+    _fotkaKola.delete(d.zdroj)
     return _fotkaInicialy(img)
   }
   d.k = k + 1
@@ -17017,29 +17057,52 @@ function fotkaChyba(img) {
   // 1. opakování zkusí znovu zmenšeninu (~20 kB místo ~190 kB), 2. velkou — kdyby
   // zmenšenina u fotky chyběla úplně, velká se stejně ještě zkusí
   const dalsi = k === 0 ? d.zdroj : d.p
-  setTimeout(() => { if (img.isConnected) { delete img.dataset.cekam; img.src = _fotkaSR(dalsi) } }, odklad)
+  const zdroj = d.zdroj
+  const nove = { k: k + 1, adresa: '', kopie: new Set([img]), vystrel: false }
+  _fotkaKola.set(zdroj, nove)
+  setTimeout(() => {
+    nove.adresa = _fotkaSR(dalsi)
+    nove.vystrel = true
+    for (const x of nove.kopie) {
+      if (!x.isConnected) { nove.kopie.delete(x); continue }
+      if (x.dataset.cekam && Number(x.dataset.k) === nove.k) { delete x.dataset.cekam; x.src = nove.adresa }
+    }
+    if (!nove.kopie.size && _fotkaKola.get(zdroj) === nove) _fotkaKola.delete(zdroj)
+  }, odklad)
 }
 
 // Hlídač zaseknutých fotek (onerror u nich nepřijde). Visící načítání se musí
 // ZRUŠIT, ne jen zkusit vedle: na HTTP/1.1 visící požadavky drží spojení k úložišti
 // a další požadavky na stejný server (i s &r=) čekají ve frontě za nimi
 // (zkouška: 3 visící fotky → ani jeden nový požadavek za 30 s). Změna src načítání zruší.
+// Kopie téže fotky visí na jednom načítání (4. 11. 2026) — přepnou se spolu na
+// jednu novou adresu a pokus se započítá jednou; kdyby se přepnula jen jedna,
+// zbylé by visící načítání držely dál. Obrázek, který na téže adrese teprve začal,
+// jde se skupinou. Skupina z jednoho obrázku = přesně jako dřív.
 function _fotkaHlidac() {
   if (document.visibilityState !== 'visible') return
   const ted = Date.now()
+  const skupiny = new Map()   // src → obrázky, které ho právě načítají
   for (const img of document.querySelectorAll('img[onerror="fotkaChyba(this)"]')) {
     if (img.complete || img.dataset.cekam || img.style.display === 'none') { delete img.dataset.od; continue }
     const src = img.getAttribute('src')
-    if (!img.dataset.od || img.dataset.odSrc !== src) { img.dataset.od = String(ted); img.dataset.odSrc = src; continue }
-    if (ted - Number(img.dataset.od) < FOTKA_ZASEKNUTI_MS) continue
-    const h = Number(img.dataset.h || 0)
+    if (!img.dataset.od || img.dataset.odSrc !== src) { img.dataset.od = String(ted); img.dataset.odSrc = src }
+    const s = skupiny.get(src)
+    if (s) s.push(img); else skupiny.set(src, [img])
+  }
+  for (const [src, kopie] of skupiny) {
+    if (!kopie.some(img => ted - Number(img.dataset.od) >= FOTKA_ZASEKNUTI_MS)) continue
+    const h = Math.max(...kopie.map(img => Number(img.dataset.h || 0)))
     if (h >= 2 || _fotkaPokusu >= FOTKA_MAX_POKUSU) continue   // dál už jen čekat (může to být jen pomalá síť)
-    img.dataset.h = String(h + 1)
     _fotkaPokusu++
-    if (!img.dataset.p) img.dataset.p = _fotkaBezR(src)
-    if (!img.dataset.zdroj) img.dataset.zdroj = img.dataset.p
-    img.onload = () => { delete img.dataset.cekam; _fotkaPamatuj(img) }
-    img.src = _fotkaSR(src)
+    const nova = _fotkaSR(src)
+    for (const img of kopie) {
+      img.dataset.h = String(h + 1)
+      if (!img.dataset.p) img.dataset.p = _fotkaBezR(src)
+      if (!img.dataset.zdroj) img.dataset.zdroj = img.dataset.p
+      img.onload = () => { delete img.dataset.cekam; _fotkaPamatuj(img) }
+      img.src = nova
+    }
   }
 }
 setInterval(_fotkaHlidac, 2000)
