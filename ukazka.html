@@ -18977,18 +18977,24 @@ async function _fotkyDotahni(ids) {
     if (r.error) throw r.error
     return r.data || []
   }
+  // Mez kol = počet žádaných + 1 (Codex 4. 11. 2026): každé kolo, které něco
+  // přineslo, ubere aspoň jednu, takže i server se stropem 1 řádek na dotaz
+  // dotáhne celý kus. Dřív se po 50 kolech zbytek (u 60 karet deset) zapsal
+  // jako smazaný. Za smazané platí jen to, co nepřišlo v kole, které nepřineslo
+  // nic nového; kdyby kola došla jinak, zbytek se nezapíše a dožádá se příště.
   await Promise.all(kusy.map(async kus => {
     let zbyva = kus.map(String)
-    for (let kolo = 0; zbyva.length && kolo < 50; kolo++) {
+    let smazane = false
+    for (let kolo = 0; zbyva.length && kolo <= kus.length; kolo++) {
       const prisly = new Set()
       for (const row of await nacti(zbyva)) {
         const k = String(row.id)
         if (zbyva.includes(k) && !prisly.has(k)) { _fotkyPlne.set(k, row); prisly.add(k) }
       }
-      if (!prisly.size) break   // nic nového → zbylé fotky opravdu nejsou
+      if (!prisly.size) { smazane = true; break }   // nic nového → zbylé fotky opravdu nejsou
       zbyva = zbyva.filter(id => !prisly.has(id))
     }
-    for (const id of zbyva) _fotkyPlne.set(id, null)
+    if (smazane) for (const id of zbyva) _fotkyPlne.set(id, null)
   }))
 }
 
