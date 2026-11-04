@@ -18839,19 +18839,34 @@ async function _fotkyStahniVse() {
 async function _fotkyDotahni(ids) {
   const kusy = []
   for (let i = 0; i < ids.length; i += FOTKY_NA_STRANKU) kusy.push(ids.slice(i, i + FOTKY_NA_STRANKU))
-  await Promise.all(kusy.map(async kus => {
+  // Server může vrátit méně řádků, než se žádá (strop řádků na dotaz) — Codex
+  // 4. 11. 2026: chybějící id se dřív rovnou braly jako smazané a karty se už
+  // nikdy nedotáhly. Teď se chybějící žádají znovu; za smazané platí až ta,
+  // která nepřišla ani v dotazu, kde server nevrátil vůbec nic nového.
+  const nacti = async (ids2) => {
     let r = await sb.from('site_photos')
-      .select('*, worker:profiles!worker_id(full_name, profession)').in('id', kus)
+      .select('*, worker:profiles!worker_id(full_name, profession)').in('id', ids2)
     // supabase-js chybu nevyhazuje, vrací ji v objektu — bez joinu to zkusíme
     // znovu, ať se karty ukážou aspoň se jménem uloženým u fotky.
     if (r.error) {
       console.warn('[admin fotky] load s joinem selhal, zkouším bez:', r.error?.message)
-      r = await sb.from('site_photos').select('*').in('id', kus)
+      r = await sb.from('site_photos').select('*').in('id', ids2)
     }
     if (r.error) throw r.error
-    const prisly = new Set()
-    for (const row of r.data || []) { _fotkyPlne.set(String(row.id), row); prisly.add(String(row.id)) }
-    for (const id of kus) if (!prisly.has(String(id))) _fotkyPlne.set(String(id), null)
+    return r.data || []
+  }
+  await Promise.all(kusy.map(async kus => {
+    let zbyva = kus.map(String)
+    for (let kolo = 0; zbyva.length && kolo < 50; kolo++) {
+      const prisly = new Set()
+      for (const row of await nacti(zbyva)) {
+        const k = String(row.id)
+        if (zbyva.includes(k) && !prisly.has(k)) { _fotkyPlne.set(k, row); prisly.add(k) }
+      }
+      if (!prisly.size) break   // nic nového → zbylé fotky opravdu nejsou
+      zbyva = zbyva.filter(id => !prisly.has(id))
+    }
+    for (const id of zbyva) _fotkyPlne.set(id, null)
   }))
 }
 
