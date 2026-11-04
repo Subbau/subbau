@@ -5452,7 +5452,7 @@ async function submitAdminSignatureWithPlacement() {
 // Po nahrání nové verze se snadno pozná, jestli se opravdu nasadila: otevřete
 // appku, zmáčkněte F12 (na Macu ⌥⌘I) a v konzoli je vypsané tohle datum. Když
 // tam svítí starší, prohlížeč nebo GitHub drží starou verzi.
-const SUBBAU_VERZE = '2026-11-04 b — Nástěnka: nulové sazby, deník bez falešných obrázků'
+const SUBBAU_VERZE = '2026-11-04 c — Faktury od pracovníků: překreslí se jen změněné řádky'
 console.log('SubBau docházka — verze ' + SUBBAU_VERZE)
 // Verze i dole v menu správce. Když někdo novinku „nevidí", podle ní se hned
 // pozná, jestli nemá otevřenou starou kopii appky — bez hledání v konzoli.
@@ -20639,8 +20639,13 @@ function renderWorkerInvoices() {
   window._invZobrazene = rows.filter(r => !r._sedy)
 
   if (!rows.length) {
+    // Řádky se odloží stranou — po smazání písmene se vrátí bez nového sestavení.
+    _invOdlozVse(tbody)
     tbody.innerHTML = '<tr><td colspan="10" style="text-align:center;color:var(--text3);padding:20px">'
       + (_invCache.length ? 'Nic neodpovídá hledání' : 'Zatím žádné faktury') + '</td></tr>'
+    tbody._invRadky = []; tbody._invHtml = null
+    tbody._invPrvni = tbody.firstElementChild; tbody._invPocet = tbody.childElementCount
+    _invHotovo(tbody)
     return
   }
 
@@ -20721,15 +20726,15 @@ function renderWorkerInvoices() {
     </tr>`
   }
 
-  const _invHtml = rows.map(r => {
+  const casti = []   // HTML po jednotlivých řádcích <tr> — viz _invVlozRadky
+  rows.forEach(r => {
     // Barva je vlastnost pracovníka, ne dokladu — proto se bere živě z profilu.
     // Kód naopak z řádku faktury, ten je zmrazený k okamžiku vystavení.
     const barva = invoiceColor(r.worker?.invoice_color)
     const kod = r.crm_code || r.worker?.crm_code || ''
     const kwTeto = r.kw ? (r.kw + '/' + r.kw_year) : 'bez týdne'
-    let oddelovac = ''
     if (delitTydny && kwTeto !== _poslKw) {
-      oddelovac = `<tr><td colspan="10" style="padding:10px 12px 6px;border-top:2px solid var(--blue,#211D1A);background:var(--bg,#f4efe7);font-size:12.5px;font-weight:800;color:var(--text2)"><div style="display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap"><span>${r.kw ? 'KW ' + r.kw + ' / ' + r.kw_year : 'Bez týdne'}</span>${r.kw ? `<button onclick="event.stopPropagation();tiskSoupisuFaktur('${jsStr(String(r.kw))}','${jsStr(String(r.kw_year))}')" title="Vytisknout soupis faktur za tenhle týden — tak, jak je tady vypsaný" style="min-height:36px;padding:5px 12px;border:1.5px solid var(--brd);border-radius:8px;background:#fff;color:var(--text);font-size:12.5px;font-weight:700;font-family:inherit;cursor:pointer;white-space:nowrap">🖨 Vytisknout</button>` : ''}</div></td></tr>`
+      casti.push(`<tr><td colspan="10" style="padding:10px 12px 6px;border-top:2px solid var(--blue,#211D1A);background:var(--bg,#f4efe7);font-size:12.5px;font-weight:800;color:var(--text2)"><div style="display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap"><span>${r.kw ? 'KW ' + r.kw + ' / ' + r.kw_year : 'Bez týdne'}</span>${r.kw ? `<button onclick="event.stopPropagation();tiskSoupisuFaktur('${jsStr(String(r.kw))}','${jsStr(String(r.kw_year))}')" title="Vytisknout soupis faktur za tenhle týden — tak, jak je tady vypsaný" style="min-height:36px;padding:5px 12px;border:1.5px solid var(--brd);border-radius:8px;background:#fff;color:var(--text);font-size:12.5px;font-weight:700;font-family:inherit;cursor:pointer;white-space:nowrap">🖨 Vytisknout</button>` : ''}</div></td></tr>`)
       _poslKw = kwTeto
       _poslFirma = null   // nový týden začíná i novou firmou
     }
@@ -20739,16 +20744,16 @@ function renderWorkerInvoices() {
       const firmaTeto = firmaFaktury(r)
       if (firmaTeto !== _poslFirma) {
         const zbyva = r.kw ? (_nezaplaceno.get(r.kw + '/' + r.kw_year + '|' + firmaTeto) || 0) : 0
-        oddelovac += `<tr><td colspan="10" style="padding:6px 12px 4px 24px;background:var(--bg,#f4efe7);font-size:12px;font-weight:700;color:var(--text3)"><div class="inv-firma-hlava" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap"><span>${escAttr(firmaTeto)}</span>${r.kw ? souhrnFirmyHtml(r.kw, r.kw_year, firmaTeto) : ''}${zbyva
+        casti.push(`<tr><td colspan="10" style="padding:6px 12px 4px 24px;background:var(--bg,#f4efe7);font-size:12px;font-weight:700;color:var(--text3)"><div class="inv-firma-hlava" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap"><span>${escAttr(firmaTeto)}</span>${r.kw ? souhrnFirmyHtml(r.kw, r.kw_year, firmaTeto) : ''}${zbyva
           ? `<button onclick="event.stopPropagation();zaplacenoFirme('${jsStr(r.kw)}','${jsStr(r.kw_year)}','${jsStr(firmaTeto)}', this)" title="Označí jako zaplacené všechny nezaplacené faktury téhle firmy v tomhle týdnu (odložené ne). Propíše se to i do Provizí." style="font-size:11px;padding:3px 9px;border:1px solid var(--amber);border-radius:6px;cursor:pointer;background:var(--amber-l);color:var(--amber);font-family:inherit;font-weight:800">✅ Zaplaceno všem (${zbyva})</button>`
           : ((!r.kw || !(_souhrnFirmy.get(r.kw + '/' + r.kw_year + '|' + firmaTeto)?.faktur)) ? '' : (_odlozeneCekaji.get(r.kw + '/' + r.kw_year + '|' + firmaTeto)
             ? '<span style="font-size:11px;font-weight:700;color:#1d4ed8">⏸ nezaplacené jsou jen odložené</span>'
-            : '<span style="font-size:11px;font-weight:700;color:var(--green)">✓ vše zaplaceno</span>'))}</div></td></tr>`
+            : '<span style="font-size:11px;font-weight:700;color:var(--green)">✓ vše zaplaceno</span>'))}</div></td></tr>`)
         _poslFirma = firmaTeto
       }
     }
-    if (r._sedy) return oddelovac + radekSedy(r)
-    return oddelovac + `
+    if (r._sedy) { casti.push(radekSedy(r)); return }
+    casti.push(`
     <tr${r.odlozeno_at ? ' data-odlozeno="1" style="background:#dbeafe" title="Odložená faktura"' : ''}>
       <!-- Fotka je tu 28 px, ne 40 jako v denním přehledu. Tahle tabulka má
            deset sloupců a při okně 1280 jí zbývá asi 1005 px, zatímco potřebuje
@@ -20810,16 +20815,158 @@ function renderWorkerInvoices() {
           <button onclick="deleteWorkerInvoice('${jsStr(r.id)}')" title="Smazat" style="font-size:11px;padding:3px 8px;border:1px solid var(--red);border-radius:6px;cursor:pointer;background:none;color:var(--red);font-family:inherit"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:1em;height:1em;flex-shrink:0;vertical-align:-2px"><path d="M3 6h18M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6M14 11v6"/></svg></button>
         </div>
       </td>
-    </tr>`
-  }).join('')
+    </tr>`)
+  })
+  const _invHtml = casti.join('')
   // Obnova každou minutu přináší většinou tytéž faktury — stejnou tabulku znovu
   // nevkládat (31 000 prvků, fotky by se načítaly znovu). Pozná se i to, že mezitím
   // tabulku přepsalo něco jiného (hláška „Nic neodpovídá…" apod.).
-  if (tbody._invHtml === _invHtml && tbody.firstElementChild === tbody._invPrvni && tbody.childElementCount === tbody._invPocet) return
-  tbody.innerHTML = _invHtml
-  tbody._invHtml = _invHtml
+  // Řádek, na který mezitím sáhlo něco jiného (tlačítko „⏳ Ukládám…" po chybě),
+  // se musí překreslit i tehdy, když je HTML stejné — jinak by tak zůstal.
+  if (tbody._invHtml === _invHtml && tbody.firstElementChild === tbody._invPrvni && tbody.childElementCount === tbody._invPocet
+      && !_invNekdoSahal(tbody)) return
+  _invVlozRadky(tbody, casti, _invHtml)
+}
+
+// PŘEKRESLIT JEN ZMĚNĚNÉ ŘÁDKY (4. 11. 2026, účetní: „Faktury se zasekávají").
+// Tabulka má ~1 400 řádků a ~60 000 prvků. Její celé přepsání stálo při každém
+// kliknutí na Zaplaceno, Vyřídit, Odložit, „poslal jinak", po uložení úpravy
+// i po každé nové faktuře stovky ms (na pomalejším Macu přes sekundu) — změnil
+// se přitom jeden řádek a souhrn jeho firmy. Teď řádky se stejným HTML zůstanou
+// v tabulce, jak jsou, a vloží se jen nové a změněné. Výsledek je znak po znaku
+// stejný jako po tbody.innerHTML = celé HTML (stejné řetězce, stejný parser —
+// createContextualFragment v <tbody> = totéž, co dělá innerHTML).
+// Odebrané řádky se drží stranou (_invOdlozene), ať se při mazání písmen
+// v hledání vrátí bez nového sestavení. Když se toho mění hodně (řazení, jiný
+// filtr), přepíše se tabulka celá jako dřív.
+function _invVlozRadky(tbody, casti, html) {
+  const stare = tbody._invRadky
+  _invNekdoSahal(tbody)
+  const lzeJenZmeny = stare && tbody._invPozor && !tbody._invCizi
+    && tbody.firstElementChild === tbody._invPrvni && tbody.childElementCount === tbody._invPocet
+  if (!lzeJenZmeny || !_invPrepisJenZmeny(tbody, stare, casti)) {
+    tbody.innerHTML = html
+    tbody._invRadky = _invRozdelNaRadky([...tbody.childNodes], casti)
+    tbody._invOdlozene = null
+  }
+  tbody._invHtml = html
   tbody._invPrvni = tbody.firstElementChild
   tbody._invPocet = tbody.childElementCount
+  _invSledovat(tbody)
+  _invHotovo(tbody)
+}
+// HLÍDÁNÍ ZÁSAHŮ DO ŘÁDKŮ. Znovu se smí použít jen řádek, na který od posledního
+// překreslení nikdo nesáhl. Jinak by zůstal, jak ho někdo změnil — např. tlačítko
+// „⏳ Ukládám…" u Zaplaceno všem po chybě nebo fotka přepnutá na iniciály —
+// a vypadal by jinak než po celém přepsání. Vlastní vkládání se ze záznamu maže.
+function _invSledovat(tbody) {
+  if (tbody._invPozor || typeof MutationObserver === 'undefined') return
+  tbody._invSpinave = new Set(); tbody._invCizi = false
+  tbody._invPozor = new MutationObserver(z => _invZapisZasahy(tbody, z))
+  tbody._invPozor.observe(tbody, { attributes: true, childList: true, characterData: true, subtree: true })
+}
+function _invZapisZasahy(tbody, zaznamy) {
+  for (const z of zaznamy) {
+    if (z.target === tbody) { tbody._invCizi = true; continue }
+    let n = z.target
+    while (n && n.parentNode !== tbody) n = n.parentNode
+    if (n) tbody._invSpinave.add(n)
+  }
+}
+function _invNekdoSahal(tbody) {
+  if (!tbody._invPozor) return false
+  _invZapisZasahy(tbody, tbody._invPozor.takeRecords())
+  return tbody._invCizi || tbody._invSpinave.size > 0
+}
+function _invHotovo(tbody) {
+  if (!tbody._invPozor) return
+  tbody._invPozor.takeRecords()
+  tbody._invSpinave = new Set(); tbody._invCizi = false
+}
+const _invRadekCisty = (tbody, r) => !r.uzly.some(n => tbody._invSpinave && tbody._invSpinave.has(n))
+// Odložený řádek byl mimo tabulku, kde se zásahy nehlídají — fotka, která mezitím
+// selhala (fotkaChyba), by v něm zůstala přepnutá. Takový se znovu nepoužije.
+const _invOdlozenyCisty = r => !r.uzly.some(n => n.querySelector && n.querySelector('img[data-p], img[data-cekam], img[data-od]'))
+function _invOdlozVse(tbody) {
+  _invNekdoSahal(tbody)
+  if (!tbody._invRadky || !tbody._invPozor || tbody._invCizi
+      || tbody.firstElementChild !== tbody._invPrvni || tbody.childElementCount !== tbody._invPocet) { tbody._invOdlozene = null; return }
+  const odlozene = tbody._invOdlozene || new Map()
+  for (const r of tbody._invRadky) {
+    if (!_invRadekCisty(tbody, r)) continue
+    for (const n of r.uzly) n.remove()
+    const a = odlozene.get(r.html); if (a) a.push(r); else odlozene.set(r.html, [r])
+  }
+  tbody._invOdlozene = odlozene
+}
+// Uzly rozdělené po řádcích: každý <tr> a mezery před ním. Když to nesedí na
+// počet částí (neobvyklé HTML), vrátí null a příště se přepíše celá tabulka.
+function _invRozdelNaRadky(uzly, casti) {
+  const radky = []
+  let kus = []
+  for (const n of uzly) {
+    kus.push(n)
+    if (n.nodeType === 1) { radky.push({ html: casti[radky.length], uzly: kus }); kus = [] }
+  }
+  return (kus.length || radky.length !== casti.length) ? null : radky
+}
+function _invPrepisJenZmeny(tbody, stare, casti) {
+  // 1) Které staré řádky zůstanou: stejné HTML a stejné pořadí.
+  const potreba = new Map()
+  for (const h of casti) potreba.set(h, (potreba.get(h) || 0) + 1)
+  const kandidati = []
+  for (const r of stare) {
+    if (!_invRadekCisty(tbody, r)) continue
+    const k = potreba.get(r.html); if (k) { potreba.set(r.html, k - 1); kandidati.push(r) }
+  }
+  const odlozene = tbody._invOdlozene || new Map()
+  const plan = new Array(casti.length)
+  const zustava = new Set()
+  const nove = []
+  let k = 0
+  for (let j = 0; j < casti.length; j++) {
+    const h = casti[j]
+    if (k < kandidati.length && kandidati[k].html === h) { plan[j] = kandidati[k]; zustava.add(kandidati[k++]); continue }
+    const o = odlozene.get(h)
+    if (o && o.length) {
+      const r = o.pop(); if (!o.length) odlozene.delete(h)
+      if (_invOdlozenyCisty(r)) { plan[j] = r; continue }
+    }
+    plan[j] = null; nove.push(j)
+  }
+  // Mění se většina (řazení, jiný filtr) → jedno innerHTML je rychlejší.
+  if (nove.length > 40 && nove.length > casti.length * 0.3) return false
+  // 2) Nové řádky sestavit naráz, ještě než se na tabulku sáhne.
+  if (nove.length) {
+    const rozsah = document.createRange()
+    rozsah.selectNodeContents(tbody)
+    const frag = rozsah.createContextualFragment(nove.map(j => casti[j]).join(''))
+    const radky = _invRozdelNaRadky([...frag.childNodes], nove.map(j => casti[j]))
+    if (!radky) return false
+    nove.forEach((j, i) => { plan[j] = radky[i] })
+  }
+  // 3) Pryč, co v novém pořadí není (drží se stranou pro návrat).
+  if (!stare.length) tbody.textContent = ''   // hláška „Nic neodpovídá hledání"
+  for (const r of stare) {
+    if (zustava.has(r)) continue
+    for (const n of r.uzly) n.remove()
+    if (!_invRadekCisty(tbody, r)) continue   // na který někdo sáhl, ten se nevrací
+    const a = odlozene.get(r.html); if (a) a.push(r); else odlozene.set(r.html, [r])
+  }
+  // 4) Vložit nové a vrácené na jejich místo (zůstávající jsou už ve správném pořadí).
+  let dalsi = 0
+  const drzene = kandidati.filter(r => zustava.has(r))
+  for (const r of plan) {
+    if (dalsi < drzene.length && drzene[dalsi] === r) { dalsi++; continue }
+    const pred = dalsi < drzene.length ? drzene[dalsi].uzly[0] : null
+    for (const n of r.uzly) tbody.insertBefore(n, pred)
+  }
+  // Odložených řádků nejvýš 2 000 (nebo dvakrát tolik, co má tabulka) — ať se paměť nehromadí.
+  let pocet = 0
+  for (const a of odlozene.values()) pocet += a.length
+  tbody._invOdlozene = pocet > Math.max(2000, casti.length * 2) ? null : odlozene
+  tbody._invRadky = plan
+  return true
 }
 
 // Hodnota, která jde dovnitř onclick="fn('…')". escAttr apostrof neřeší, a řádek
