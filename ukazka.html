@@ -99,11 +99,31 @@
   // Porovnávání hodnot ve filtrech.
   // PostgREST porovnává i čísla zapsaná jako text, proto se to zkouší
   // obojím způsobem — jinak by `.eq('kw', 36)` nenašlo řádek s "36".
+  // Sloupec jsonb (v ukázce pole nebo objekt, např. teams.smeny
+  // a teams.prac_doby_dalsi) proti textu z filtru: PostgREST text převede
+  // na jsonb a porovná obsah — pořadí klíčů ani mezery nehrají roli
+  // (5. 11. 2026, zápis směn nad načteným stavem). String(objekt) je
+  // '[object Object]', takže by se dřív nikdy neshodl. Všechno, co se
+  // shodovalo dřív, se shoduje dál.
   // ------------------------------------------------------------------
+  function kanon(v) {
+    if (Array.isArray(v)) return '[' + v.map(kanon).join(',') + ']';
+    if (v && typeof v === 'object') {
+      return '{' + Object.keys(v).filter(k => v[k] !== undefined).sort()
+        .map(k => JSON.stringify(k) + ':' + kanon(v[k])).join(',') + '}';
+    }
+    return v === undefined ? 'null' : JSON.stringify(v);
+  }
   function stejne(a, b) {
     if (a === b) return true;
     if (a == null || b == null) return false;
-    return String(a) === String(b);
+    if (String(a) === String(b)) return true;
+    if (typeof a === 'object' && typeof b === 'string') {
+      let v;
+      try { v = JSON.parse(b); } catch (e) { return false; }
+      return kanon(a) === kanon(v);
+    }
+    return false;
   }
   function porovnej(a, b) {
     if (a == null && b == null) return 0;
@@ -25081,6 +25101,73 @@ function smenyBezOd(smeny, od) {
   return zmena ? nove : null
 }
 
+// ZÁPIS SMĚN NAD NAČTENÝM STAVEM (kontrola 5. 11. 2026). Čerstvé načtení před
+// zápisem nestačilo: dva správci (dvě záložky, dva telefony) načetli stejný
+// stav a pozdější zápis tiše vrátil změnu prvního (jeden opravil směnu 3,
+// druhý směnu 4 — směna 3 byla zpátky postaru a oba viděli ✅); a ukládání
+// směny 3, které se načetlo ještě se směnou 2, ji po zrušení směny 2 zapsalo
+// zpátky. Teď zápis projde, jen když jsou jsonb sloupce `stejne` (sloupec →
+// hodnota přesně, jak se načetla) pořád stejné a sloupce `vyplnene` pořád
+// vyplněné. Nezapíše-li se nic (0 řádků), skupina se načte znovu: je jinak →
+// vrátí { cizi: čerstvý stav } (změnil to někdo jiný); je stejně → nezapsalo
+// se kvůli oprávnění, nebo server jsonb neporovnal — zkusí se jednou bez
+// porovnání jsonb jako dřív (bez oprávnění to zase nic nezapíše a hláška je
+// jako dřív). Bez porovnání se zapíše i tehdy, když server porovnání odmítne
+// jako chybný filtr. Horší než dřív to být nesmí. Jinak vrací { data, error }.
+// Jen po migraci dalších směn (sloupec prac_doby_dalsi) — bez ní jako dřív.
+const SLOUPCE_SMEN = 'id, prac_doba_od, prac_doba_do, prac_doba2_od, prac_doba2_do, smeny, prac_doby_dalsi'
+const CASY_SMEN_1_2 = ['prac_doba_od', 'prac_doba_do', 'prac_doba2_od', 'prac_doba2_do']
+// Hodnota jsonb jako text se seřazenými klíči (dvě načtení se tak dají porovnat).
+function jsonKanon(v) {
+  if (Array.isArray(v)) return '[' + v.map(jsonKanon).join(',') + ']'
+  if (v && typeof v === 'object') return '{' + Object.keys(v).filter(k => v[k] !== undefined).sort()
+    .map(k => JSON.stringify(k) + ':' + jsonKanon(v[k])).join(',') + '}'
+  return v === undefined ? 'null' : JSON.stringify(v)
+}
+// Server porovnání jsonb ve filtru odmítl (neumí ho, nebo je adresa s výběrem
+// lidí velké skupiny moc dlouhá — 414).
+function chybaPorovnaniJsonb(r) {
+  const e = r && r.error
+  return !!e && (r.status === 414 || ['PGRST100', '22P02', '42883', '42804'].includes(String(e.code || ''))
+    || /failed to parse|operator does not exist|equality operator|invalid input syntax for type json|URI Too (Long|Large)/i.test(String(e.message || '')))
+}
+async function zapisSmenNadStavem(teamId, zapis, vratit, stejne, vyplnene) {
+  const zapsat = (porovnat) => {
+    let q = sb.from('teams').update(zapis).eq('id', teamId)
+    vyplnene.forEach(s => { q = q.not(s, 'is', null) })
+    if (porovnat) Object.keys(stejne).forEach(s => { q = stejne[s] == null ? q.is(s, null) : q.eq(s, JSON.stringify(stejne[s])) })
+    return q.select(vratit)
+  }
+  const r = await zapsat(true)
+  if (chybaPorovnaniJsonb(r)) {
+    denikChybZapis('db-porovnani|rest/teams', 'Server stav směn neporovnal (' + (r.error.code || r.status || '') + ' ' + String(r.error.message || '').slice(0, 120) + ') — zapsáno bez porovnání',
+      { kod: r.error.code || undefined, stav: r.status || undefined }, { trida: 'varovani', jednou: true })
+    return zapsat(false)
+  }
+  if (r.error || (r.data && r.data.length)) return r
+  const { data: c, error } = await sb.from('teams').select(SLOUPCE_SMEN).eq('id', teamId).maybeSingle()
+  if (error || !c) return r
+  if (Object.keys(stejne).some(s => jsonKanon(c[s]) !== jsonKanon(stejne[s])) || vyplnene.some(s => c[s] == null)) return { cizi: c }
+  const r2 = await zapsat(false)
+  if (!r2.error && r2.data && r2.data.length) {
+    denikChybZapis('db-porovnani|rest/teams', 'Zápis směn nad načteným stavem nic nezapsal, i když se stav nezměnil — zapsáno bez porovnání',
+      null, { trida: 'varovani', jednou: true })
+  }
+  return r2
+}
+// Směny skupiny mezitím změnil někdo jiný: ukáže se čerstvý stav, rozepsaná
+// směna se zavře a čekající uložení z téhle záložky se nezapíší (vznikla nad
+// starým stavem).
+function smenyZmenilJiny(teamId, c) {
+  const klic = String(teamId)
+  _smenyKolo.set(klic, (_smenyKolo.get(klic) || 0) + 1)
+  const t = (_teamsCache || []).find(x => String(x.id) === klic)
+  if (t && c) Object.assign(t, c)
+  _smenyRozepsane.delete(klic)
+  showToast('⚠️ Směny skupiny mezitím změnil někdo jiný — zkontrolujte je a zkuste to znovu')
+  renderTeams()
+}
+
 // Uloží nebo zruší směnu 3 a dál. Před zápisem načte čerstvý stav skupiny
 // (jako nastavSmenuClena), ať si dva správci nepřepíšou směny ani výběr lidí;
 // když se mezitím počet směn změnil, neukládá naslepo a ukáže, jak to je.
@@ -25095,8 +25182,21 @@ function smenyBezOd(smeny, od) {
 // někdo jiný, čekající změny se nezapíší — vznikly nad starým stavem (jinak
 // by třeba rozepsaná směna 4 přepsala směnu 4, kterou mezitím přidal jiný
 // správce). Pojistka: na zaseknuté uložení se čeká nejvýš 20 s.
-const _smenyUklada = new Map()   // skupina → poslední rozběhnuté uložení dalších směn
+// Do stejné fronty jde i zápis směny 1 a 2 (čas i zrušení) a výběr směny
+// u člověka (kontrola 5. 11. 2026: ukládání směny 3, které se načetlo ještě
+// se směnou 2, ji po zrušení směny 2 zapsalo zpátky) — po migraci dalších směn.
+const _smenyUklada = new Map()   // skupina → poslední rozběhnutý zápis směn
 const _smenyKolo = new Map()     // skupina → kolikrát uložení zjistilo cizí změnu
+function doFrontySmen(teamId, fn) {
+  const klic = String(teamId)
+  const pred = _smenyUklada.get(klic)
+  const ted = (pred ? Promise.race([pred.catch(() => {}), new Promise(r => setTimeout(r, 20000))]) : Promise.resolve())
+    .then(fn)
+  _smenyUklada.set(klic, ted)
+  const uklid = () => { if (_smenyUklada.get(klic) === ted) _smenyUklada.delete(klic) }
+  ted.then(uklid, uklid)
+  return ted
+}
 function nastavDalsiSmenuTymu(teamId, zrusit, k) {
   if (!Number.isInteger(k) || k < 3 || k > NEJVIC_SMEN) return
   const od = zrusit ? '' : (document.getElementById('tym-od' + k + '-' + teamId)?.value || '')
@@ -25106,15 +25206,8 @@ function nastavDalsiSmenuTymu(teamId, zrusit, k) {
     return
   }
   if (!zrusit && od >= doo) { showToast('⏰ Začátek musí být dřív než konec'); return }
-  const klic = String(teamId)
-  const kolo = _smenyKolo.get(klic) || 0
-  const pred = _smenyUklada.get(klic)
-  const ted = (pred ? Promise.race([pred.catch(() => {}), new Promise(r => setTimeout(r, 20000))]) : Promise.resolve())
-    .then(() => ulozDalsiSmenuTymu(teamId, zrusit, k, od, doo, kolo))
-  _smenyUklada.set(klic, ted)
-  const uklid = () => { if (_smenyUklada.get(klic) === ted) _smenyUklada.delete(klic) }
-  ted.then(uklid, uklid)
-  return ted
+  const kolo = _smenyKolo.get(String(teamId)) || 0
+  return doFrontySmen(teamId, () => ulozDalsiSmenuTymu(teamId, zrusit, k, od, doo, kolo))
 }
 async function ulozDalsiSmenuTymu(teamId, zrusit, k, od, doo, kolo) {
   const klic = String(teamId)
@@ -25124,8 +25217,7 @@ async function ulozDalsiSmenuTymu(teamId, zrusit, k, od, doo, kolo) {
   }
   const t = (_teamsCache || []).find(x => String(x.id) === String(teamId))
   const meli = Array.isArray(t && t.prac_doby_dalsi) ? t.prac_doby_dalsi.slice(0, NEJVIC_SMEN - 2).length : 0
-  const { data: c, error: e1 } = await sb.from('teams')
-    .select('id, prac_doba_od, prac_doba_do, prac_doba2_od, prac_doba2_do, smeny, prac_doby_dalsi').eq('id', teamId).maybeSingle()
+  const { data: c, error: e1 } = await sb.from('teams').select(SLOUPCE_SMEN).eq('id', teamId).maybeSingle()
   if (e1 || !c) {
     showToast(e1 && /prac_doby_dalsi|column|schema cache/i.test(e1.message || '')
       ? '❌ Chybí sloupec — spusťte migraci supabase-migrace-dalsi-smeny.sql'
@@ -25134,11 +25226,7 @@ async function ulozDalsiSmenuTymu(teamId, zrusit, k, od, doo, kolo) {
   }
   const pole = Array.isArray(c.prac_doby_dalsi) ? c.prac_doby_dalsi.slice(0, NEJVIC_SMEN - 2) : []
   if (pole.length !== meli || (!zrusit && (!dvaSmenyTymu(c) || k - 3 > pole.length))) {
-    _smenyKolo.set(klic, (_smenyKolo.get(klic) || 0) + 1)
-    if (t) Object.assign(t, c)
-    _smenyRozepsane.delete(String(teamId))
-    showToast('⚠️ Směny skupiny mezitím změnil někdo jiný — zkontrolujte je a zkuste to znovu')
-    renderTeams(); return
+    smenyZmenilJiny(teamId, c); return
   }
   // Ukládá se nová směna za poslední uloženou (prázdná směna 3 nebo ta
   // z „+ Přidat směnu")? Jen pak rozepsaná směna končí — kontrola 4. 11. 2026:
@@ -25155,7 +25243,14 @@ async function ulozDalsiSmenuTymu(teamId, zrusit, k, od, doo, kolo) {
     pole[k - 3] = { od, do: doo }
     zapis.prac_doby_dalsi = pole
   }
-  const { data, error } = await sb.from('teams').update(zapis).eq('id', teamId).select('id, ' + Object.keys(zapis).join(', '))
+  // Jen nad tím, co se načetlo (zapisSmenNadStavem): další směny stejné; při
+  // zrušení i stejný výběr lidí (komu jiný správce mezitím rušenou směnu
+  // vybral, by u ní jinak zůstal); nová nebo upravená směna jen se směnou 1 a 2.
+  const r = await zapisSmenNadStavem(teamId, zapis, 'id, ' + Object.keys(zapis).join(', '),
+    zrusit ? { prac_doby_dalsi: c.prac_doby_dalsi, smeny: c.smeny } : { prac_doby_dalsi: c.prac_doby_dalsi },
+    zrusit ? [] : CASY_SMEN_1_2)
+  if (r.cizi) { smenyZmenilJiny(teamId, r.cizi); return }
+  const { data, error } = r
   if (error || !data || !data.length) {
     showToast(error && /prac_doby_dalsi|column|schema cache/i.test(error.message || '')
       ? '❌ Chybí sloupec — spusťte migraci supabase-migrace-dalsi-smeny.sql'
@@ -25170,24 +25265,36 @@ async function ulozDalsiSmenuTymu(teamId, zrusit, k, od, doo, kolo) {
 
 // Zrušením směny 1 nebo 2 zmizí i směny 3 a dál (jdou po sobě) a lidem, kteří
 // je měli, se výběr vymaže. Výběr směny 1 a 2 zůstává jako dřív. Vrací
-// { zapis, pryc } k přidání do zápisu, nebo null, když se stav nenačetl.
+// { zapis, pryc, stejne } k přidání do zápisu (stejne = výběr lidí, jak se
+// načetl — zapíše se jen nad ním), nebo null, když se stav nenačetl.
 // Bez migrace (sloupec v načtené skupině není) nic navíc — jako dřív.
 async function zapisBezDalsichSmen(teamId) {
   const t0 = (_teamsCache || []).find(x => String(x.id) === String(teamId))
   if (!t0 || !('prac_doby_dalsi' in t0)) return { zapis: {}, pryc: 0 }
   const { data: c, error } = await sb.from('teams').select('id, smeny, prac_doby_dalsi').eq('id', teamId).maybeSingle()
   if (error || !c) return null
-  const zapis = {}
+  // Prázdné pole VŽDY (kontrola 5. 11. 2026): směna 3, kterou jiný zápis
+  // uložil mezi tímhle načtením a zrušením, by jinak zůstala viset a po novém
+  // vyplnění směny 2 se vrátila.
+  const zapis = { prac_doby_dalsi: [] }
   const pryc = Array.isArray(c.prac_doby_dalsi) ? c.prac_doby_dalsi.length : 0
-  if (pryc) zapis.prac_doby_dalsi = []
   const smeny = smenyBezOd(c.smeny, 3)
   if (smeny) zapis.smeny = smeny
-  return { zapis, pryc }
+  return { zapis, pryc, stejne: { smeny: c.smeny } }
 }
 
 // Směna jednoho člověka (1, 2, … nebo nic). Uloží se do teams.smeny; před
-// zápisem se načte čerstvý stav, ať si dva správci nepřepíšou změny.
+// zápisem se načte čerstvý stav, ať si dva správci nepřepíšou změny. Po
+// migraci dalších směn (sloupec prac_doby_dalsi ve skupině) jde výběr do
+// fronty zápisů směn skupiny a zapíše se jen nad načteným stavem (kontrola
+// 5. 11. 2026: dva správci, kteří naráz vybírali směnu dvěma lidem, si výběr
+// tiše přepsali — viz zapisSmenNadStavem); bez migrace jako dřív.
 async function nastavSmenuClena(teamId, workerId, hodnota, el) {
+  const t0 = (_teamsCache || []).find(x => String(x.id) === String(teamId))
+  if (t0 && ('prac_doby_dalsi' in t0)) return doFrontySmen(teamId, () => ulozSmenuClena(teamId, workerId, hodnota, true))
+  return ulozSmenuClena(teamId, workerId, hodnota, false)
+}
+async function ulozSmenuClena(teamId, workerId, hodnota, nadStavem) {
   const n = Number(hodnota)
   // Směna 3 a dál (4. 11. 2026) se uloží, jen když ji skupina v čerstvém stavu
   // opravdu má — jinak by člověk „měl" směnu, která není.
@@ -25211,7 +25318,16 @@ async function nastavSmenuClena(teamId, workerId, hodnota, el) {
   const smeny = Object.assign({}, (cerstve.smeny && typeof cerstve.smeny === 'object') ? cerstve.smeny : {})
   if (n === 1 || n === 2 || dalsi) smeny[String(workerId)] = n
   else delete smeny[String(workerId)]
-  const { data, error } = await sb.from('teams').update({ smeny }).eq('id', teamId).select('id, smeny')
+  let r
+  if (nadStavem) {
+    // Výběr lidí stejný jako při načtení; u směny 3 a dál i stejné další
+    // směny se směnou 1 a 2 — jinak by člověk dostal směnu, která mezitím zmizela.
+    r = await zapisSmenNadStavem(teamId, { smeny }, 'id, smeny',
+      dalsi ? { smeny: cerstve.smeny, prac_doby_dalsi: cerstve.prac_doby_dalsi } : { smeny: cerstve.smeny },
+      dalsi ? CASY_SMEN_1_2 : [])
+    if (r.cizi) { smenyZmenilJiny(teamId, r.cizi); return }
+  } else r = await sb.from('teams').update({ smeny }).eq('id', teamId).select('id, smeny')
+  const { data, error } = r
   if (error || !data || !data.length) {
     showToast('❌ Směna se neuložila' + (error ? ': ' + error.message : ' — zkontrolujte oprávnění'))
     renderTeams(); return
@@ -25336,25 +25452,38 @@ async function nastavPracDobuTymu(teamId, zrusit, smena) {
   // Zrušit směnu 1 a nechat jen směnu 2 nedává smysl — zruší se obě.
   if (!dva && zrusit) { const t0 = (_teamsCache || []).find(x => x.id === teamId); if (t0 && ('prac_doba2_od' in t0)) { zapis.prac_doba2_od = null; zapis.prac_doba2_do = null } }
   // Se směnou 1 nebo 2 zmizí i směny 3 a dál (majitel 4. 11. 2026 — jdou po sobě).
-  let pryc = 0
-  if (zrusit) {
-    const z = await zapisBezDalsichSmen(teamId)
-    if (!z) { showToast('❌ Pracovní doba se neuložila — zkuste to znovu'); return }
-    Object.assign(zapis, z.zapis); pryc = z.pryc
+  // Po migraci dalších směn jde zápis směny 1 a 2 do fronty zápisů směn skupiny
+  // (kontrola 5. 11. 2026): zrušení počká na rozběhnuté uložení směny 3 a dál
+  // a další uložení počkají na ně; čas zapsaný hned po zrušení se zapíše až po
+  // něm (pořadí jako na obrazovce). Zrušení se zapíše jen nad načteným výběrem
+  // lidí. Bez migrace jako dřív.
+  const uloz = async () => {
+    let pryc = 0, stejne = null
+    if (zrusit) {
+      const z = await zapisBezDalsichSmen(teamId)
+      if (!z) { showToast('❌ Pracovní doba se neuložila — zkuste to znovu'); return }
+      Object.assign(zapis, z.zapis); pryc = z.pryc; stejne = z.stejne || null
+    }
+    const vratit = 'id, ' + Object.keys(zapis).join(', ')
+    const r = stejne ? await zapisSmenNadStavem(teamId, zapis, vratit, stejne, [])
+      : await sb.from('teams').update(zapis).eq('id', teamId).select(vratit)
+    if (r.cizi) { smenyZmenilJiny(teamId, r.cizi); return }
+    const { data, error } = r
+    if (error || !data || !data.length) {
+      showToast(error && /prac_doba|column|schema cache/i.test(error.message || '')
+        ? '❌ Chybí sloupce — spusťte migraci ' + (dva ? 'supabase-migrace-dve-smeny.sql' : 'supabase-migrace-tymy-oznameni-puntiky.sql')
+        : '❌ Pracovní doba se neuložila' + (error ? ': ' + error.message : ' — zkontrolujte oprávnění'))
+      return
+    }
+    const t = (_teamsCache || []).find(x => x.id === teamId)
+    if (t) Object.keys(zapis).forEach(k => { t[k] = data[0][k] })
+    const co = dva ? 'Směna 2' : (t && dvaSmenyTymu(t) ? 'Směna 1' : 'Běžná pracovní doba')
+    if (zrusit) _smenyRozepsane.delete(String(teamId))
+    showToast(zrusit ? '✅ ' + co + ' zrušena' + (pryc ? ' i se ' + (pryc === 1 ? 'směnou 3' : 'směnami 3–' + (pryc + 2)) : '') : '✅ ' + co + ' ' + od + '–' + doo)
+    renderTeams()
   }
-  const { data, error } = await sb.from('teams').update(zapis).eq('id', teamId).select('id, ' + Object.keys(zapis).join(', '))
-  if (error || !data || !data.length) {
-    showToast(error && /prac_doba|column|schema cache/i.test(error.message || '')
-      ? '❌ Chybí sloupce — spusťte migraci ' + (dva ? 'supabase-migrace-dve-smeny.sql' : 'supabase-migrace-tymy-oznameni-puntiky.sql')
-      : '❌ Pracovní doba se neuložila' + (error ? ': ' + error.message : ' — zkontrolujte oprávnění'))
-    return
-  }
-  const t = (_teamsCache || []).find(x => x.id === teamId)
-  if (t) Object.keys(zapis).forEach(k => { t[k] = data[0][k] })
-  const co = dva ? 'Směna 2' : (t && dvaSmenyTymu(t) ? 'Směna 1' : 'Běžná pracovní doba')
-  if (zrusit) _smenyRozepsane.delete(String(teamId))
-  showToast(zrusit ? '✅ ' + co + ' zrušena' + (pryc ? ' i se ' + (pryc === 1 ? 'směnou 3' : 'směnami 3–' + (pryc + 2)) : '') : '✅ ' + co + ' ' + od + '–' + doo)
-  renderTeams()
+  const tf = (_teamsCache || []).find(x => String(x.id) === String(teamId))
+  return tf && ('prac_doby_dalsi' in tf) ? doFrontySmen(teamId, uloz) : uloz()
 }
 
 function renderTeams() {

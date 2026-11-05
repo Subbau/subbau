@@ -44,11 +44,31 @@
   // Porovnávání hodnot ve filtrech.
   // PostgREST porovnává i čísla zapsaná jako text, proto se to zkouší
   // obojím způsobem — jinak by `.eq('kw', 36)` nenašlo řádek s "36".
+  // Sloupec jsonb (v ukázce pole nebo objekt, např. teams.smeny
+  // a teams.prac_doby_dalsi) proti textu z filtru: PostgREST text převede
+  // na jsonb a porovná obsah — pořadí klíčů ani mezery nehrají roli
+  // (5. 11. 2026, zápis směn nad načteným stavem). String(objekt) je
+  // '[object Object]', takže by se dřív nikdy neshodl. Všechno, co se
+  // shodovalo dřív, se shoduje dál.
   // ------------------------------------------------------------------
+  function kanon(v) {
+    if (Array.isArray(v)) return '[' + v.map(kanon).join(',') + ']';
+    if (v && typeof v === 'object') {
+      return '{' + Object.keys(v).filter(k => v[k] !== undefined).sort()
+        .map(k => JSON.stringify(k) + ':' + kanon(v[k])).join(',') + '}';
+    }
+    return v === undefined ? 'null' : JSON.stringify(v);
+  }
   function stejne(a, b) {
     if (a === b) return true;
     if (a == null || b == null) return false;
-    return String(a) === String(b);
+    if (String(a) === String(b)) return true;
+    if (typeof a === 'object' && typeof b === 'string') {
+      let v;
+      try { v = JSON.parse(b); } catch (e) { return false; }
+      return kanon(a) === kanon(v);
+    }
+    return false;
   }
   function porovnej(a, b) {
     if (a == null && b == null) return 0;
