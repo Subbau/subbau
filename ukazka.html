@@ -6732,7 +6732,7 @@ async function submitAdminSignatureWithPlacement() {
 // Po nahrání nové verze se snadno pozná, jestli se opravdu nasadila: otevřete
 // appku, zmáčkněte F12 (na Macu ⌥⌘I) a v konzoli je vypsané tohle datum. Když
 // tam svítí starší, prohlížeč nebo GitHub drží starou verzi.
-const SUBBAU_VERZE = '2026-11-05 a — Směna 3 v Týmech, hledání jména ve Fakturách, opravy Plánu MMI'
+const SUBBAU_VERZE = '2026-11-05 b — Fotky se dočtou i po dlouhém otevření, správce zaškrtne „nemá řidičák“'
 console.log('StavKo docházka — verze ' + SUBBAU_VERZE)
 // Verze i dole v menu správce. Když někdo novinku „nevidí", podle ní se hned
 // pozná, jestli nemá otevřenou starou kopii appky — bez hledání v konzoli.
@@ -49804,6 +49804,27 @@ async function uploadDocumentForWorker() {
   setTimeout(() => { closeUploadForWorker(); loadWdDocs(uploadingForWorkerId || currentWorkerId) }, 1200)
 }
 
+// Správce nastaví za pracovníka „nemá řidičské oprávnění“ (stejný sloupec jako
+// zaškrtnutí v appce pracovníka — Nástěnka i serverová upomínka ho už respektují).
+async function adminNastavBezRidicaku(wid, el) {
+  const nema = !!(el && el.checked)
+  if (el) el.disabled = true
+  const { data, error } = await sb.from('profiles').update({ bez_ridicaku: nema }).eq('id', wid).select('id, bez_ridicaku')
+  if (el) el.disabled = false
+  if (error || !data || !data.length || data[0].bez_ridicaku !== nema) {
+    if (el) el.checked = !nema
+    showToast(error && /bez_ridicaku|column|schema cache/i.test(error.message || '')
+      ? '❌ Chybí sloupec bez_ridicaku — spusťte migraci supabase-migrace-ridicak.sql'
+      : '❌ Změna se neuložila' + (error ? ': ' + error.message : ' — zkontrolujte oprávnění'))
+    return
+  }
+  const w = (_workersCache || []).find(x => String(x.id) === String(wid))
+  if (w) w.bez_ridicaku = nema
+  showToast(nema ? '✅ Řidičský průkaz po něm chtít nebudeme' : '✅ Řidičský průkaz se po něm zase chce')
+  loadWdDocs(wid)
+  try { loadDashboard() } catch (e) { console.warn('[řidičák] nástěnka', e) }
+}
+
 async function loadWdDocs(id) {
   const { data } = await sb.from('documents').select('*').eq('worker_id', id||currentWorkerId)
   const div = document.getElementById('wd-docs-list')
@@ -49818,11 +49839,16 @@ async function loadWdDocs(id) {
   const wid = id || currentWorkerId
   // Jméno do názvu stahovaného souboru. Z karty, kterou má správce otevřenou.
   const jmenoProSoubor = (document.getElementById('wd-name')?.textContent || '').trim()
-  const uploadBtnHtml = '<div style="display:flex;gap:8px;justify-content:flex-end;margin-bottom:12px;flex-wrap:wrap">' +
+  const bezRid = ((_workersCache || []).find(x => String(x.id) === String(wid)) || {}).bez_ridicaku === true
+  // Správce zaškrtne za pracovníka, že nemá řidičák (majitel 5. 11. 2026: lidé
+  // nepochopí, že to mají zaškrtnout sami) — pak se po něm nechce ani na Nástěnce.
+  const ridicakBtnHtml = '<label style="font-size:13px;padding:9px 14px;background:' + (bezRid ? '#e6f0e9' : '#fff') + ';color:#211D1A;border:1.5px solid ' + (bezRid ? '#3f7d54' : 'var(--brd)') + ';border-radius:11px;cursor:pointer;font-family:inherit;font-weight:800;display:inline-flex;align-items:center;gap:7px" title="Po tomhle člověku se řidičský průkaz nebude chtít a nebude hlášen jako chybějící">' +
+    '<input type="checkbox" ' + (bezRid ? 'checked ' : '') + 'onchange="adminNastavBezRidicaku(\'' + wid + '\', this)" style="width:18px;height:18px;margin:0">Nemá řidičské oprávnění</label>'
+  const uploadBtnHtml = '<div style="display:flex;gap:8px;justify-content:flex-end;margin-bottom:12px;flex-wrap:wrap">' + ridicakBtnHtml +
     '<button onclick="downloadAllDocs(\'' + wid + '\')" id="wd-dl-all-btn" style="font-size:13px;padding:9px 16px;background:#fff;color:#211D1A;border:1.5px solid #211D1A;border-radius:11px;cursor:pointer;font-family:inherit;font-weight:800;display:inline-flex;align-items:center;gap:7px"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:16px;height:16px"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="M7 10l5 5 5-5"/><path d="M12 15V3"/></svg>Stáhnout vše (ZIP)</button>' +
     '<button onclick="openUploadForWorker()" style="font-size:13px;padding:9px 16px;background:#9c3b22;color:#fff;border:none;border-radius:11px;cursor:pointer;font-family:inherit;font-weight:800;display:inline-flex;align-items:center;gap:7px"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:16px;height:16px"><path d="M12 5v14M5 12h14"/></svg>Nahrát dokument</button>' +
     '</div>'
-  const uploadOnlyHtml = '<div style="text-align:right;margin-bottom:12px"><button onclick="openUploadForWorker()" style="font-size:13px;padding:9px 16px;background:#9c3b22;color:#fff;border:none;border-radius:11px;cursor:pointer;font-family:inherit;font-weight:800;display:inline-flex;align-items:center;gap:7px"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:16px;height:16px"><path d="M12 5v14M5 12h14"/></svg>Nahrát dokument</button></div>'
+  const uploadOnlyHtml = '<div style="display:flex;gap:8px;justify-content:flex-end;margin-bottom:12px;flex-wrap:wrap">' + ridicakBtnHtml + '<span><button onclick="openUploadForWorker()" style="font-size:13px;padding:9px 16px;background:#9c3b22;color:#fff;border:none;border-radius:11px;cursor:pointer;font-family:inherit;font-weight:800;display:inline-flex;align-items:center;gap:7px"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:16px;height:16px"><path d="M12 5v14M5 12h14"/></svg>Nahrát dokument</button></span></div>'
   if(!data?.length){div.innerHTML = uploadOnlyHtml + '<div style="color:var(--text3);text-align:center;padding:20px">Žádné dokumenty — můžete nahrát první za pracovníka</div>';return}
   const todayD = new Date(); todayD.setHours(0,0,0,0)
   const stColor = { pg:{c:'#2f6b45',b:'#3f7d54',bg:'#e6f0e9'}, pa:{c:'#9a6b15',b:'#e8a13a',bg:'#faf0dc'}, pr:{c:'#9c3b22',b:'#9c3b22',bg:'#f7e9e5'} }
