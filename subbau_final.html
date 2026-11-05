@@ -5930,12 +5930,20 @@ try {
     // Zapisuje jen nově otevřená záložka: deník je jeden pro všechny a WebKit
     // sdílí localStorage mezi záložkami se zpožděním — zápis staré záložky by
     // přepsaly zápisy té nové při startu. Odpověď proto až po chvíli.
-    if (m.typ === 'kdo') setTimeout(() => kanal.postMessage({ typ: 'ja', z: ZALOZKA }), 1500)
+    // Nová záložka se ohlásila ('kdo'): hlídač pomalosti se jí hned zeptá 'kolik'
+    // (tichý dotaz, viz _pomZeptejSe) — kdyby se zavřela nebo přenačetla před
+    // prvním kolem hlídače, nevzal by ji pak za starou kopii (5. 11. 2026).
+    if (m.typ === 'kdo') { setTimeout(() => kanal.postMessage({ typ: 'ja', z: ZALOZKA }), 1500); if (window._pomBezi) kanal.postMessage({ typ: 'kolik', z: ZALOZKA }) }
     else if (m.typ === 'ja') zapisDenik('appka je otevřená i v jiné záložce', m.z)
     else if (m.typ === 'kolik') kanal.postMessage({ typ: 'tady', z: ZALOZKA, v: String(SUBBAU_VERZE).split(' — ')[0], u: _kopieAppky.ukazka })
     else if (m.typ === 'tady' && typeof m.z === 'string' && m.z !== ZALOZKA) {
+      // Kdo jednou odpověděl, má novou verzi (kopie bez ní 'kolik' nezná) — pamatuje
+      // se proto po celou dobu karty, ne 10 min; nejvýš 50 záložek, pryč jde ta,
+      // která se ozvala nejdávno (5. 11. 2026, viz _pomStaraKopie).
       const k = m.z.slice(0, 8)
-      if (_kopieAppky.tady.has(k) || _kopieAppky.tady.size < 50) _kopieAppky.tady.set(k, { t: Date.now(), v: String(m.v || '').slice(0, 20), u: !!m.u })
+      _kopieAppky.tady.delete(k)
+      _kopieAppky.tady.set(k, { t: Date.now(), v: String(m.v || '').slice(0, 20), u: !!m.u })
+      if (_kopieAppky.tady.size > 50) _kopieAppky.tady.delete(_kopieAppky.tady.keys().next().value)
     }
   }
   kanal.postMessage({ typ: 'kdo', z: ZALOZKA })
@@ -10555,6 +10563,18 @@ function spustHlidacPomalosti() {
   // 4) každé 3 minuty: stará kopie appky, kolik kopií je otevřeno a souhrn —
   // ten jen když bylo něco pomalé; nejvýš 30× v kartě
   setInterval(_pomTri, 180000)
+  // 5) hned tichý dotaz na kopie, které už jsou otevřené (5. 11. 2026, viz _pomZeptejSe)
+  _pomZeptejSe()
+}
+// TICHÝ DOTAZ 'kolik' (5. 11. 2026, nezávislá kontrola opravy-f): první kolo hlídače je
+// až 3 min po startu. Záložka verze d / e, která do deníku přihlášení zapsala a pak se
+// do té doby přenačetla na novou verzi (čekala na bezpečnou chvíli), zavřela nebo
+// usnula, se nestihla ozvat — a hlídač ji vzal za starou kopii (v den nasazení přesně
+// ty, kvůli kterým se v deníku kontroluje, jestli staré kopie zmizely). Proto se ptá
+// hned při startu a když se ohlásí nová záložka ('kdo'). Odpovědi jdou jen do mapy
+// tady; dotazOd kola se neposouvá — počet kopií v souhrnu je dál z dotazu kola.
+function _pomZeptejSe() {
+  try { if (_kopieAppky.kanal) _kopieAppky.kanal.postMessage({ typ: 'kolik', z: ZALOZKA }) } catch (e) { _pomChyba(e) }
 }
 // Které pole — jen id nebo jméno pole (nikdy, co v něm je). Pole vyplňování PDF
 // (smlouvy) id nemají → 'pdf-pole'; jiné bez id → druh pole @ nejbližší předek s id.
@@ -10601,13 +10621,19 @@ function _pomKlavesa(e) {
 //    (4. 11. 2026, nezávislá kontrola dávky d: takovou kopii hlídač neviděl vůbec —
 //    a právě ta, Bibianina 3. 11. d, točila klíč). Záznam se z jiné záložky, která
 //    se neozvala (na žádný dotaz 'kolik' ani při svém zápisu do deníku — 'tady' se
-//    drží 10 min), je tedy stará kopie; uspaná záložka nové verze se ohlásila už
+//    drží po celou dobu karty), je tedy stará kopie; uspaná záložka nové verze se ohlásila už
 //    při zápisu. Jen záznam zapsaný PŘED posledním dotazem — záložka otevřená až po
 //    něm se zeptat nestihla a ozve se v dalším kole. Ukázka odpovídá (u: true),
 //    takže její záznamy starou kopií nejsou.
 // Bere se jen čerstvý stav: záznamy z posledních POM_STARA_OKNO_MS a od startu téhle
 // záložky — stará kopie, která se zavřela, z dalších souhrnů zmizí (dřív v nich
 // visela až do zavření karty). Čas je ISO s „Z" (dřív bez zóny → četl se jako místní).
+// 5. 11. 2026 (nezávislá kontrola opravy-f): kdo se ozval, se pamatuje po celou dobu
+// karty (ne 10 min) a hlídač se ptá i hned při startu a po ohlášení nové záložky
+// (_pomZeptejSe) — verze d / e, které na 'tady' při zápisu neznají, se tak za starou
+// kopii neberou, ani když se před prvním kolem přenačetly, zavřely nebo usnuly.
+// Záznam 'aktualizace appky' starou kopii neukazuje nikdy: zapisuje ho záložka těsně
+// před tím, než se přenačte na novou verzi.
 const POM_STARA_OKNO_MS = 10 * 60 * 1000
 function _pomStaraKopie() {
   try {
@@ -10617,7 +10643,7 @@ function _pomStaraKopie() {
     const dotaz = _kopieAppky.kanal && _kopieAppky.dotazOd ? new Date(_kopieAppky.dotazOd).toISOString() : ''
     for (let i = d.length - 1; i >= 0; i--) {
       const x = d[i]
-      if (!x || typeof x !== 'object' || typeof x.t !== 'string' || !(x.t > od)) continue
+      if (!x || typeof x !== 'object' || typeof x.t !== 'string' || !(x.t > od) || x.co === 'aktualizace appky') continue
       if (x.z) {
         const z = String(x.z).slice(0, 8)
         if (z === ZALOZKA || !dotaz || x.t > dotaz || _kopieAppky.tady.has(z)) continue
@@ -10642,11 +10668,11 @@ function _pomKopie() {
 function _pomTri() {
   // Dotaz na ostatní kopie; odpovědi přijdou hned — stará kopie (pozná se i podle
   // toho, kdo neodpověděl) a souhrn proto až za chvíli.
+  // Mapa tady se tu už nečistí (5. 11. 2026): kdo odpověděl, stará kopie není nikdy;
+  // počet kopií bere jen odpovědi od dotazOd.
   try {
     if (_kopieAppky.kanal) {
-      const ted = Date.now()
-      for (const [k, x] of _kopieAppky.tady) if (ted - x.t > 600000) _kopieAppky.tady.delete(k)
-      _kopieAppky.dotazOd = ted
+      _kopieAppky.dotazOd = Date.now()
       _kopieAppky.kanal.postMessage({ typ: 'kolik', z: ZALOZKA })
     }
   } catch (e) { _pomChyba(e) }
@@ -10688,6 +10714,25 @@ function _pomPsaniDoSouhrnu() {
 // Chyba samotného hlídače: appku shodit nesmí, ale nesmí ani potichu zmizet —
 // první se pamatuje a odejde v příštím souhrnu (chybaHlidace).
 function _pomChyba(e) { if (!_pom.chyba) _pom.chyba = String((e && e.message) || e).slice(0, 200) }
+// STROP VELIKOSTI SOUHRNU (5. 11. 2026, nezávislá kontrola opravy-f): se skutečnými
+// delšími dotazy appky (Faktury, Docházka — attendance?worker_id,kw,kw_year,team_id,
+// 45–61 znaků) měl plný souhrn i po zkrácení psaní až 8 285 znaků a v telefonu se
+// uložil useknutý. U dotazů a zaseknutí se proto sekce (v) píše jen, když není sekcí
+// souhrnu (jako u psaní; sekce souhrnu je ve větě), a když by řádek i s tím, co k němu
+// přidá jádro deníku (kontext s ua do 300 znaků a posledni = 8 posledních dotazů),
+// přesáhl POM_SOUHRN_STROP, jde do souhrnu méně nejstarších záznamů (25 dotazů
+// a zaseknutí, 15 stisků a funkcí → 20 → 15 a 12 → 10 → 5) — ne useknutý text.
+// Počty ve větě jsou dál z paměti.
+const POM_SOUHRN_STROP = 7000
+const POM_SOUHRN_STUPNE = [[25, 15], [20, 15], [15, 12], [10, 10], [5, 5]]
+function _pomDoStropu(detail, plne) {
+  let navic = 1500
+  try { navic = 300 + Math.min(300, String(navigator.userAgent || '').length) + JSON.stringify(_dnPosledniDotazy(60000)).length } catch (e) { _pomChyba(e) }
+  for (const [n, m] of POM_SOUHRN_STUPNE) {
+    detail.fce = plne.fce.slice(0, m); detail.dotazy = plne.dotazy.slice(-n); detail.zaseky = plne.zaseky.slice(-n); detail.psani = plne.psani.slice(-m)
+    try { if (JSON.stringify(detail).length + navic <= POM_SOUHRN_STROP) return } catch (e) { return }
+  }
+}
 function odesliSouhrnPomalosti() {
     if (_pom.poslano >= 30) return
     const fce = Object.entries(_pom.fce)
@@ -10700,15 +10745,23 @@ function odesliSouhrnPomalosti() {
     const kopie = _pomKopie()
     // Čerstvý stav, ne co se kdy našlo (zavřená stará kopie se už nehlásí).
     const stara = _pom.staraKopie = _pomStaraKopie()
-    zapisChybuAppky('pomalost', 'za ' + Math.round((Date.now() - _pom.od) / 60000) + ' min: zaseknuto ' + Math.round(zaseku / 1000) + ' s (' + _pom.zaseky.length + '×' + (bezFokusu ? ', bez fokusu ' + bezFokusu + '×' : '') + '), pomalých dotazů ' + _pom.dotazy.length + ', pomalé psaní ' + _pom.psani.length + '×, sekce ' + (_activeAdminView?.() || '?')
-      + (kopie && kopie.pocet > 1 ? ', otevřeno kopií appky ' + kopie.pocet : '') + (stara ? ', stará kopie appky otevřená' : ''), {
+    let ted = ''
+    try { ted = _activeAdminView?.() || '' } catch (e) { _pomChyba(e) }
+    const dotazy = _pom.dotazy.slice(-25).map(x => x.v === ted ? { c: x.c, ms: x.ms, s: x.s } : x)
+    const zaseky = _pom.zaseky.slice(-25).map(x => x.v === ted ? { ms: x.ms, t: x.t, fokus: x.fokus } : x)
+    const psani = _pomPsaniDoSouhrnu()
+    const detail = {
       verze: SUBBAU_VERZE.split(' — ')[0], prohlizec: navigator.userAgent,
       prvku: document.getElementsByTagName('*').length,
-      fce, dotazy: _pom.dotazy.slice(-25), zaseky: _pom.zaseky.slice(-25), psani: _pomPsaniDoSouhrnu(),
+      fce, dotazy, zaseky, psani,
       // u ostatních kopií verze jen, když je jiná než tahle (zkrácení 4. 11. 2026, viz _pomPsaniDoSouhrnu)
       kopie: kopie ? kopie.pocet : null, kopieJine: kopie && kopie.jine.length ? kopie.jine.map(x => x.v === SUBBAU_VERZE.split(' — ')[0] ? { z: x.z } : x) : undefined, staraKopie: stara || undefined,
       chybaHlidace: _pom.chyba || undefined
-    })
+    }
+    _pomDoStropu(detail, { fce, dotazy, zaseky, psani })
+    detail.chybaHlidace = _pom.chyba || undefined
+    zapisChybuAppky('pomalost', 'za ' + Math.round((Date.now() - _pom.od) / 60000) + ' min: zaseknuto ' + Math.round(zaseku / 1000) + ' s (' + _pom.zaseky.length + '×' + (bezFokusu ? ', bez fokusu ' + bezFokusu + '×' : '') + '), pomalých dotazů ' + _pom.dotazy.length + ', pomalé psaní ' + _pom.psani.length + '×, sekce ' + (_activeAdminView?.() || '?')
+      + (kopie && kopie.pocet > 1 ? ', otevřeno kopií appky ' + kopie.pocet : '') + (stara ? ', stará kopie appky otevřená' : ''), detail)
     _pom.poslano++
     _pom.fce = {}; _pom.dotazy = []; _pom.zaseky = []; _pom.psani = []; _pom.chyba = null; _pom.od = Date.now()
 }
