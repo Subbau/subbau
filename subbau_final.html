@@ -24253,6 +24253,16 @@ function smenyBezOd(smeny, od) {
 // jako dřív). Bez porovnání se zapíše i tehdy, když server porovnání odmítne
 // jako chybný filtr. Horší než dřív to být nesmí. Jinak vrací { data, error }.
 // Jen po migraci dalších směn (sloupec prac_doby_dalsi) — bez ní jako dřív.
+// DÉLKA ADRESY (kontrola 5. 11. 2026): podmínky jdou do adresy zápisu a výběr
+// lidí v ní zabere asi 49 znaků na člověka. U velké skupiny by adresa
+// přerostla limit brány před databází a prohlížeč by zápis vůbec neodeslal:
+// předletový dotaz OPTIONS na stejnou adresu dostane 414 bez CORS hlaviček,
+// appka vidí jen „TypeError: Load failed" (stav 0) a pojistka na 414 se
+// nechytí — výběr směny ani zrušení směny by se neuložily nikdy. Sloupec,
+// jehož porovnání se do DELKA_POROVNANI_SMEN znaků nevejde (porovnává se od
+// nejkratšího), se proto neporovnává a zapíše se jako dřív (bez ochrany před
+// souběhem); ostatní podmínky zůstávají a do deníku chyb jde jednou varování.
+const DELKA_POROVNANI_SMEN = 3000
 const SLOUPCE_SMEN = 'id, prac_doba_od, prac_doba_do, prac_doba2_od, prac_doba2_do, smeny, prac_doby_dalsi'
 const CASY_SMEN_1_2 = ['prac_doba_od', 'prac_doba_do', 'prac_doba2_od', 'prac_doba2_do']
 // Hodnota jsonb jako text se seřazenými klíči (dvě načtení se tak dají porovnat).
@@ -24262,30 +24272,50 @@ function jsonKanon(v) {
     .map(k => JSON.stringify(k) + ':' + jsonKanon(v[k])).join(',') + '}'
   return v === undefined ? 'null' : JSON.stringify(v)
 }
-// Server porovnání jsonb ve filtru odmítl (neumí ho, nebo je adresa s výběrem
-// lidí velké skupiny moc dlouhá — 414).
+// Server porovnání jsonb ve filtru odmítl (neumí ho, nebo je adresa moc
+// dlouhá — 414, když ho brána vrátí i s CORS hlavičkami).
 function chybaPorovnaniJsonb(r) {
   const e = r && r.error
   return !!e && (r.status === 414 || ['PGRST100', '22P02', '42883', '42804'].includes(String(e.code || ''))
     || /failed to parse|operator does not exist|equality operator|invalid input syntax for type json|URI Too (Long|Large)/i.test(String(e.message || '')))
 }
+// Sloupce ze `stejne`, které se porovnají: od nejkratšího porovnání, dokud se
+// vejdou do DELKA_POROVNANI_SMEN (délka v adrese, jak ji zakóduje knihovna).
+// Vrací je v pořadí ze `stejne` (stejná adresa jako dřív).
+function smenyKPorovnani(stejne) {
+  const delky = Object.keys(stejne).map(s => [s, stejne[s] == null ? 0
+    : new URLSearchParams([[s, 'eq.' + JSON.stringify(stejne[s])]]).toString().length])
+  delky.sort((a, b) => a[1] - b[1])
+  const vejde = new Set()
+  let delka = 0
+  delky.forEach(([s, d]) => { if (delka + d <= DELKA_POROVNANI_SMEN) { vejde.add(s); delka += d } })
+  return Object.keys(stejne).filter(s => vejde.has(s))
+}
 async function zapisSmenNadStavem(teamId, zapis, vratit, stejne, vyplnene) {
-  const zapsat = (porovnat) => {
+  const porovnat = smenyKPorovnani(stejne)
+  const dlouhe = Object.keys(stejne).filter(s => !porovnat.includes(s))
+  if (dlouhe.length) {
+    denikChybZapis('db-porovnani-dlouhe|rest/teams', 'Velká skupina: ' + dlouhe.join(', ') + ' se při zápisu směn neporovnává (adresa by byla moc dlouhá) — zápis bez ochrany před souběhem jako dřív',
+      { delka: dlouhe.map(s => JSON.stringify(stejne[s]).length).join(', ') }, { trida: 'varovani', jednou: true })
+  }
+  const zapsat = (sPorovnanim) => {
     let q = sb.from('teams').update(zapis).eq('id', teamId)
     vyplnene.forEach(s => { q = q.not(s, 'is', null) })
-    if (porovnat) Object.keys(stejne).forEach(s => { q = stejne[s] == null ? q.is(s, null) : q.eq(s, JSON.stringify(stejne[s])) })
+    if (sPorovnanim) porovnat.forEach(s => { q = stejne[s] == null ? q.is(s, null) : q.eq(s, JSON.stringify(stejne[s])) })
     return q.select(vratit)
   }
   const r = await zapsat(true)
-  if (chybaPorovnaniJsonb(r)) {
+  if (porovnat.length && chybaPorovnaniJsonb(r)) {
     denikChybZapis('db-porovnani|rest/teams', 'Server stav směn neporovnal (' + (r.error.code || r.status || '') + ' ' + String(r.error.message || '').slice(0, 120) + ') — zapsáno bez porovnání',
       { kod: r.error.code || undefined, stav: r.status || undefined }, { trida: 'varovani', jednou: true })
     return zapsat(false)
   }
-  if (r.error || (r.data && r.data.length)) return r
+  // Nic se neporovnávalo (jen výběr lidí a ten je moc dlouhý) — jako dřív.
+  if (r.error || (r.data && r.data.length) || (!porovnat.length && !vyplnene.length)) return r
   const { data: c, error } = await sb.from('teams').select(SLOUPCE_SMEN).eq('id', teamId).maybeSingle()
   if (error || !c) return r
-  if (Object.keys(stejne).some(s => jsonKanon(c[s]) !== jsonKanon(stejne[s])) || vyplnene.some(s => c[s] == null)) return { cizi: c }
+  if (porovnat.some(s => jsonKanon(c[s]) !== jsonKanon(stejne[s])) || vyplnene.some(s => c[s] == null)) return { cizi: c }
+  if (!porovnat.length) return r   // bez porovnání jsonb by šel znovu stejný zápis
   const r2 = await zapsat(false)
   if (!r2.error && r2.data && r2.data.length) {
     denikChybZapis('db-porovnani|rest/teams', 'Zápis směn nad načteným stavem nic nezapsal, i když se stav nezměnil — zapsáno bez porovnání',
@@ -24325,6 +24355,7 @@ function smenyZmenilJiny(teamId, c) {
 // se směnou 2, ji po zrušení směny 2 zapsalo zpátky) — po migraci dalších směn.
 const _smenyUklada = new Map()   // skupina → poslední rozběhnutý zápis směn
 const _smenyKolo = new Map()     // skupina → kolikrát uložení zjistilo cizí změnu
+const _smenyRusi = new WeakMap() // rozběhnutý zápis → kterou směnu (1, 2) ruší (dvojklik, nastavPracDobuTymu)
 function doFrontySmen(teamId, fn) {
   const klic = String(teamId)
   const pred = _smenyUklada.get(klic)
@@ -24621,7 +24652,17 @@ async function nastavPracDobuTymu(teamId, zrusit, smena) {
     renderTeams()
   }
   const tf = (_teamsCache || []).find(x => String(x.id) === String(teamId))
-  return tf && ('prac_doby_dalsi' in tf) ? doFrontySmen(teamId, uloz) : uloz()
+  if (!tf || !('prac_doby_dalsi' in tf)) return uloz()
+  // Dvojklik na „zrušit" (kontrola 5. 11. 2026): druhé kliknutí, zatímco se
+  // totéž zrušení ještě ukládá a nic dalšího se za ně nezařadilo, se znovu
+  // nezapisuje. Ve frontě by po zrušení i se směnou 3 už nebylo co rušit a na
+  // obrazovce by zůstala hláška „✅ Směna 2 zrušena" místo „… i se směnou 3"
+  // jako dřív.
+  const posledni = _smenyUklada.get(String(teamId))
+  if (zrusit && posledni && _smenyRusi.get(posledni) === (dva ? 2 : 1)) return posledni
+  const ted = doFrontySmen(teamId, uloz)
+  if (zrusit) _smenyRusi.set(ted, dva ? 2 : 1)
+  return ted
 }
 
 function renderTeams() {
