@@ -16292,6 +16292,22 @@ function fotkaHtml(url, jmeno, px, obdelnik, workerId) {
 const FOTKA_ODKLADY_MS = [1500, 5000]
 const FOTKA_ZASEKNUTI_MS = 10000
 const FOTKA_MAX_POKUSU = 40
+// POJISTKA PLATÍ ZA POSLEDNÍCH 10 MINUT, NE ZA CELÝ ŽIVOT STRÁNKY (5. 11. 2026,
+// admin: „jednou pro vždycky prosím vyřeš, aby se toto s těmi fotkami nedělo“ —
+// v Pracovnících prázdné béžové čtverce místo fotek). Správce má appku v Safari
+// otevřenou i několik dní a tichá obnova seznamy pořád překresluje: na slabé síti
+// se 40 opakování za život stránky časem vyčerpalo a od té chvíle se žádná
+// zaseknutá fotka už nezkusila znovu — zůstala prázdná až do ručního přenačtení.
+// Teď se počítá jen posledních 10 minut, takže úložiště dál nezahltí a fotky se
+// po chvíli zase zkoušejí.
+const FOTKA_OKNO_MS = 10 * 60 * 1000
+const _fotkaPokusyCasy = []          // kdy proběhla opakování v posledních FOTKA_OKNO_MS
+function _fotkaSmimeZkusit() {
+  const ted = Date.now()
+  while (_fotkaPokusyCasy.length && ted - _fotkaPokusyCasy[0] > FOTKA_OKNO_MS) _fotkaPokusyCasy.shift()
+  return _fotkaPokusyCasy.length < FOTKA_MAX_POKUSU
+}
+function _fotkaZapocti() { _fotkaPokusu++; _fotkaPokusyCasy.push(Date.now()) }
 const FOTKA_VZDAT_NA_MS = 5 * 60 * 1000
 const _fotkaNahrada = new Map()     // adresa z appky → adresa, která se opravdu načetla
 const _fotkaVzdano = new Map()      // adresa z appky → kdy se naposled vzdalo
@@ -16348,14 +16364,14 @@ function fotkaChyba(img) {
     else d.cekam = '1'
     return
   }
-  if (k >= FOTKA_ODKLADY_MS.length || nedavnoVzdano || _fotkaPokusu >= FOTKA_MAX_POKUSU) {
+  if (k >= FOTKA_ODKLADY_MS.length || nedavnoVzdano || !_fotkaSmimeZkusit()) {
     if (!nedavnoVzdano) _fotkaVzdano.set(d.zdroj, Date.now())
     _fotkaKola.delete(d.zdroj)
     return _fotkaInicialy(img)
   }
   d.k = k + 1
   d.cekam = '1'
-  _fotkaPokusu++
+  _fotkaZapocti()
   const odklad = FOTKA_ODKLADY_MS[k] * (1 + Math.random() * 0.3)   // ať 30 fotek nezkouší ve stejnou chvíli
   // 1. opakování zkusí znovu zmenšeninu (~20 kB místo ~190 kB), 2. velkou — kdyby
   // zmenšenina u fotky chyběla úplně, velká se stejně ještě zkusí
@@ -16394,10 +16410,15 @@ function _fotkaHlidac() {
     if (s) s.push(img); else skupiny.set(src, [img])
   }
   for (const [src, kopie] of skupiny) {
-    if (!kopie.some(img => ted - Number(img.dataset.od) >= FOTKA_ZASEKNUTI_MS)) continue
     const h = Math.max(...kopie.map(img => Number(img.dataset.h || 0)))
-    if (h >= 2 || _fotkaPokusu >= FOTKA_MAX_POKUSU) continue   // dál už jen čekat (může to být jen pomalá síť)
-    _fotkaPokusu++
+    // První dvě přepnutí po 10 s jako dřív. Dál se fotka NEVZDÁVÁ (5. 11. 2026 —
+    // dřív zůstala po dvou pokusech prázdná, dokud se seznam nepřekreslil, a ten
+    // se u Pracovníků bez změny dat nepřekreslí), jen čeká čím dál déle: 40 s,
+    // 80 s, 160 s, pak každých 5 min — pomalé síti tak dá čas dočíst.
+    const cekat = h < 2 ? FOTKA_ZASEKNUTI_MS : Math.min(FOTKA_ZASEKNUTI_MS * Math.pow(2, h), FOTKA_VZDAT_NA_MS)
+    if (!kopie.some(img => ted - Number(img.dataset.od) >= cekat)) continue
+    if (!_fotkaSmimeZkusit()) continue   // pojistka úložiště — zkusí se, až se okno uvolní
+    _fotkaZapocti()
     const nova = _fotkaSR(src)
     for (const img of kopie) {
       img.dataset.h = String(h + 1)
