@@ -5879,7 +5879,7 @@ async function submitAdminSignatureWithPlacement() {
 // Po nahrání nové verze se snadno pozná, jestli se opravdu nasadila: otevřete
 // appku, zmáčkněte F12 (na Macu ⌥⌘I) a v konzoli je vypsané tohle datum. Když
 // tam svítí starší, prohlížeč nebo GitHub drží starou verzi.
-const SUBBAU_VERZE = '2026-11-06 i — Zprávy a chat se neodešlou dvakrát'
+const SUBBAU_VERZE = '2026-11-06 i — Zprávy a chat se neodešlou dvakrát, odhlášení uklidí spojení'
 console.log('SubBau docházka — verze ' + SUBBAU_VERZE)
 // Verze i dole v menu správce. Když někdo novinku „nevidí", podle ní se hned
 // pozná, jestli nemá otevřenou starou kopii appky — bez hledání v konzoli.
@@ -8219,6 +8219,7 @@ sb.auth.onAuthStateChange(async (event, session) => {
     currentUser = null
     currentProfile = null
     todayAttId = null
+    try { uklidRelace() } catch (e) { console.warn('[úklid relace]', e && e.message) }
     showLogin(Date.now() - (window._vlastniOdhlaseni || 0) < 15000 ? 'tlačítko Odhlásit' : 'prohlížeč přišel o přihlášení (SIGNED_OUT)')
     return
     }, 0)
@@ -9927,23 +9928,12 @@ function closeAdminDrawer() {
   document.body.style.overflow = ''
 }
 
-async function doLogout() {
-  console.log('[doLogout] called')
-  // Měření polohy, pozdní poloha a návod k poloze patří odhlašovanému — hned pryč,
-  // ještě než se currentUser vynuluje (2. 11. 2026, viz ukonciPovinnouPolohu).
-  ukonciPovinnouPolohu()
-  // Okno s chybějícími doklady patří přihlášenému — po odhlášení pryč.
-  { const d = document.getElementById('docs-alert-overlay'); if (d) d.style.display = 'none' }
-  window._dokladyPoSouhlasu = false
-  stopHeartbeat()
-  appInitialized = false
-  authHandling = false
-  loginInProgress = false
-  checkinInProgress = false
-  currentUser = null
-  currentProfile = null
-  todayAttId = null
-  stopClock()
+// Společný úklid živých spojení a časovačů — volá ho odhlášení tlačítkem i odhlášení, které přišlo samo
+// (vypršelo přihlášení, SIGNED_OUT): dřív se kanály, heartbeat a intervaly zastavovaly jen u tlačítka
+// a po samovolném odhlášení tikaly dál (Codex 6. 11. 2026).
+function uklidRelace() {
+  try { stopHeartbeat() } catch (e) { console.warn('[úklid relace] heartbeat:', e && e.message) }
+  try { stopClock() } catch (e) { console.warn('[úklid relace] hodiny:', e && e.message) }
   // Odpoj živou aktualizaci admin dat
   // Nejdřív odpojit, pak zavřít — zavření pak nespustí přepojení (3. 11. 2026).
   { const s = adminRealtimeSub; adminRealtimeSub = null; if (s) { try { sb.removeChannel(s) } catch(e) {} } }
@@ -9962,6 +9952,23 @@ async function doLogout() {
   if (window._osvecChatBadgeInt) { clearInterval(window._osvecChatBadgeInt); window._osvecChatBadgeInt = null }
   if (window._audioKeepAliveInt) { clearInterval(window._audioKeepAliveInt); window._audioKeepAliveInt = null }
   if (typeof _rtFallbackInt !== 'undefined' && _rtFallbackInt) { clearInterval(_rtFallbackInt); _rtFallbackInt = null }
+}
+async function doLogout() {
+  console.log('[doLogout] called')
+  // Měření polohy, pozdní poloha a návod k poloze patří odhlašovanému — hned pryč,
+  // ještě než se currentUser vynuluje (2. 11. 2026, viz ukonciPovinnouPolohu).
+  ukonciPovinnouPolohu()
+  // Okno s chybějícími doklady patří přihlášenému — po odhlášení pryč.
+  { const d = document.getElementById('docs-alert-overlay'); if (d) d.style.display = 'none' }
+  window._dokladyPoSouhlasu = false
+  appInitialized = false
+  authHandling = false
+  loginInProgress = false
+  checkinInProgress = false
+  currentUser = null
+  currentProfile = null
+  todayAttId = null
+  uklidRelace()
   // Odemčené Provize platí jen pro toho, kdo heslo zadal. Bez tohohle by se
   // na stejném počítači dostal k sazbám a odměnám i další přihlášený správce.
   try { sessionStorage.removeItem('provizeUnlocked') } catch(e) {}
