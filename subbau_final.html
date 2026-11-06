@@ -5583,6 +5583,15 @@ function clearAdminSignCanvas() {
 // Lokální záloha podpisu patří ÚČTU (Codex 6. 11. 2026): se společným klíčem by další správce na stejném
 // počítači dostal podpis předchozího (a odhlášení ho nemaže).
 const ADMIN_SIG_KEY_ZAKLAD = 'adminSavedSignature'
+// Podpis uložený starší verzí appky (společný klíč) se nezahodí: když účet svůj podpis ještě nemá (ani lokálně,
+// ani v cloudu), nabídne se jako poslední možnost a pracovník ho hned vidí na plátně před umístěním do PDF
+// (Codex 6. 11. 2026). Do cloudu ani pod účet se sám nepřiřazuje.
+function adminSigNactiLokalni() {
+  const vlastni = lsGet(adminSigKlic())
+  if (vlastni) return { data: vlastni, starsi: false }
+  const starsi = lsGet(ADMIN_SIG_KEY_ZAKLAD)
+  return starsi ? { data: starsi, starsi: true } : { data: null, starsi: false }
+}
 function adminSigKlic() { return ADMIN_SIG_KEY_ZAKLAD + ':' + ((typeof currentUser !== 'undefined' && currentUser?.id) ? currentUser.id : 'anon') }
 function adminSigStoragePath() {
   const uid = (typeof currentUser !== 'undefined' && currentUser?.id) ? currentUser.id : 'anon'
@@ -5681,7 +5690,8 @@ async function useAdminSignatureMemory() {
     } catch(e) { console.warn('[admin sig] cloud fetch selhal:', e?.message) }
   }
   // Cloud nedostupný (offline) nebo tam zatím nic není → zkus alespoň lokální zálohu
-  if (!saved) saved = lsGet(adminSigKlic())
+  let podpisZeStarsi = false
+  if (!saved) { const l = adminSigNactiLokalni(); saved = l.data; podpisZeStarsi = l.starsi }
   if (!saved) { showToast('⚠️ Žádný uložený podpis — nejprve ho nakreslete a uložte tlačítkem výše'); refreshAdminSavedSigBtn(); return }
   const canvas = document.getElementById('admin-sign-canvas')
   if (!canvas) return
@@ -5696,7 +5706,7 @@ async function useAdminSignatureMemory() {
     const w = img.width * ratio, h = img.height * ratio
     ctx.drawImage(img, (cw - w)/2, (ch - h)/2, w, h)
     if (canvas._sigPad && canvas._sigPad.markInk) canvas._sigPad.markInk()
-    showToast('📎 Uložený podpis vložen — teď klikněte do PDF, kam se má umístit')
+    showToast(podpisZeStarsi ? '📎 Vložen podpis uložený dříve v tomhle prohlížeči — zkontrolujte, že je váš, a klikněte do PDF, kam se má umístit' : '📎 Uložený podpis vložen — teď klikněte do PDF, kam se má umístit')
   }
   img.onerror = () => { showToast('❌ Uložený podpis se nepodařilo načíst — podepište prosím znovu a uložte') }
   img.src = saved
@@ -5705,7 +5715,7 @@ async function useAdminSignatureMemory() {
 async function refreshAdminSavedSigBtn() {
   const btn = document.getElementById('admin-use-saved-sig-btn')
   if (!btn) return
-  if (lsGet(adminSigKlic())) { btn.style.display = 'inline-block'; return }
+  if (adminSigNactiLokalni().data) { btn.style.display = 'inline-block'; return }
   btn.style.display = 'none'
   // Lokálně nic není — zkus zjistit, jestli existuje v cloudu (jiné zařízení)
   if (typeof currentUser === 'undefined' || !currentUser?.id) return
