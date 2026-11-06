@@ -6734,7 +6734,7 @@ async function submitAdminSignatureWithPlacement() {
 // Po nahrání nové verze se snadno pozná, jestli se opravdu nasadila: otevřete
 // appku, zmáčkněte F12 (na Macu ⌥⌘I) a v konzoli je vypsané tohle datum. Když
 // tam svítí starší, prohlížeč nebo GitHub drží starou verzi.
-const SUBBAU_VERZE = '2026-11-06 e — Zprávy, hledání v týdnu a poloha: nic se nepřepíše ani neztratí'
+const SUBBAU_VERZE = '2026-11-06 f — Mazání fotek a smluv a nahrávání dokladů bez ztráty souboru'
 console.log('StavKo docházka — verze ' + SUBBAU_VERZE)
 // Verze i dole v menu správce. Když někdo novinku „nevidí", podle ní se hned
 // pozná, jestli nemá otevřenou starou kopii appky — bez hledání v konzoli.
@@ -19445,16 +19445,9 @@ async function deleteSitePhoto(id, url) {
   if (!id) return
   if (!confirm('Opravdu smazat tuto fotku?\n\nSmaže se z galerie i z úložiště. Akce je nevratná.')) return
   showToast('⏳ Mažu fotku…')
-  // Cestu k souboru v bucketu vytáhneme z jeho veřejné adresy
-  try {
-    const m = String(url || '').match(/\/storage\/v1\/object\/public\/site-photos\/(.+)$/)
-    if (m) {
-      const path = decodeURIComponent(m[1].split('?')[0])
-      const { error: sErr } = await sb.storage.from('site-photos').remove([path])
-      // Když se soubor nesmaže, záznam v galerii přesto smažeme — fotka zmizí z přehledu
-      if (sErr) console.warn('[fotky] soubor z úložiště se nesmazal:', sErr.message)
-    }
-  } catch (e) { console.warn('[fotky] mazání souboru:', e?.message) }
+  // Nejdřív záznam v databázi, teprve pak soubor (Codex 6. 11. 2026). Opačné pořadí nechalo
+  // v galerii fotku, jejíž soubor je pryč, když zápis do databáze selhal. Soubor, který zůstane
+  // bez záznamu, nikomu neškodí.
   const { error } = await sb.from('site_photos').delete().eq('id', id)
   if (error) {
     showToast(/row-level security|policy|permission|42501/i.test(error.message || '')
@@ -19462,6 +19455,15 @@ async function deleteSitePhoto(id, url) {
       : '❌ Chyba: ' + error.message)
     return
   }
+  // Cestu k souboru v bucketu vytáhneme z jeho veřejné adresy
+  try {
+    const m = String(url || '').match(/\/storage\/v1\/object\/public\/site-photos\/(.+)$/)
+    if (m) {
+      const path = decodeURIComponent(m[1].split('?')[0])
+      const { error: sErr } = await sb.storage.from('site-photos').remove([path])
+      if (sErr) console.warn('[fotky] soubor z úložiště se nesmazal:', sErr.message)
+    }
+  } catch (e) { console.warn('[fotky] mazání souboru:', e?.message) }
   _sitePhotosCache = _sitePhotosCache.filter(x => String(x.id) !== String(id))
   _fotkyOdeber(id)
   const cnt = document.getElementById('fotky-count')
@@ -30537,8 +30539,19 @@ async function uploadDocument() {
 
   // 4. DB záznam pro přední stranu / dokument
   const frontName = docType + (isMulti ? '_strana1' : '') + '_' + new Date().toISOString().slice(0,10) + '.pdf'
+  // Opakování po vypršení limitu: první pokus mohl na serveru projít (jen se ztratila odpověď).
+  // Před dalším pokusem se proto zjistí, jestli řádek k souboru už není — jinak by vznikly 2–3 shodné
+  // doklady a smazání duplicity správcem by smazalo i soubor, na který ukazují (Codex 6. 11. 2026).
+  let pokusuInsert = 0
   const { error: dbErr } = predniHotova ? { error: null } : await zkusVicekrat(
-    () => withTimeout(sb.from('documents').insert({
+    async () => {
+      if (pokusuInsert++ > 0) {
+        try {
+          const { data: uz } = await sb.from('documents').select('id').eq('file_path', filePath).limit(1)
+          if (uz && uz.length) return { error: null }
+        } catch (e) { console.warn('[dokument] kontrola před opakováním selhala:', (e && e.message) || e) }
+      }
+      return withTimeout(sb.from('documents').insert({
       worker_id: currentUser.id,
       doc_type: docType,
       file_name: frontName,
@@ -30548,13 +30561,18 @@ async function uploadDocument() {
       status: 'pending',
       uploaded_by: currentUser.id,
       uploaded_at: new Date().toISOString()
-    }), 15000),
+    }), 15000)
+    },
     n => { btn.textContent = '⏳ Slabý signál — zkouším znovu (' + n + '/3)…' }
   )
 
   if (dbErr) {
-    // Soubor v úložišti, ke kterému není řádek v databázi, by nikdo nenašel — ukliď ho
-    try { await sb.storage.from('documents').remove([filePath]) } catch(e) {}
+    // Soubor v úložišti, ke kterému není řádek v databázi, by nikdo nenašel — ukliď ho.
+    // Jen když řádek opravdu není: poslední pokus mohl na serveru projít a smazáním souboru
+    // by se zničil uložený doklad (Codex 6. 11. 2026).
+    let radekJe = false
+    try { const { data: uz } = await sb.from('documents').select('id').eq('file_path', filePath).limit(1); radekJe = !!(uz && uz.length) } catch (e) { radekJe = true }   // nejde ověřit = nemazat
+    if (!radekJe) { try { await sb.storage.from('documents').remove([filePath]) } catch(e) { console.warn('[dokument] úklid souboru:', (e && e.message) || e) } }
     showToast('❌ ' + docSaveErrorText(dbErr))
     btn.disabled = false; btn.textContent = '📤 Nahrát'; progress.style.display = 'none'
     zapisChybuAppky('nahravani-dokumentu', dbErr?.message, { docType, velikostMB: Math.round((uploadBlob?.size || 0) / 1024 / 1024 * 10) / 10 })
@@ -44614,7 +44632,7 @@ async function openHourSheet(url) {
 async function deleteContract(contractId, title, fileUrl, adminSigUrl, workerSigUrl) {
   if (!confirm('Smazat smlouvu "' + title + '"?\nTato akce je nevratná.')) return
 
-  // Smaž soubory ze storage (ignoruj chyby - soubory možná neexistují)
+  // Cesty k souborům ve storage (soubory se mažou až po záznamu; ignoruj chyby - soubory možná neexistují)
   const paths = [fileUrl, adminSigUrl, workerSigUrl]
     .filter(Boolean)
     .map(url => {
@@ -44624,15 +44642,16 @@ async function deleteContract(contractId, title, fileUrl, adminSigUrl, workerSig
     })
     .filter(Boolean)
 
+  // Nejdřív záznam v databázi, teprve pak soubory (Codex 6. 11. 2026): opačné pořadí nechalo
+  // v seznamu smlouvu, jejíž soubory jsou pryč, když smazání záznamu selhalo.
+  const { error } = await sb.from('contracts').delete().eq('id', contractId)
+  if (error) { showToast('❌ Chyba: ' + error.message); return }
+
   for (const path of paths) {
     try {
       await sb.storage.from('contracts').remove([path])
     } catch(e) { console.warn('Storage delete:', e) }
   }
-
-  // Smaž záznam z DB
-  const { error } = await sb.from('contracts').delete().eq('id', contractId)
-  if (error) { showToast('❌ Chyba: ' + error.message); return }
 
   showToast('🗑 Smlouva smazána: ' + title)
   loadAdminContracts()
