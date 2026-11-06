@@ -5863,7 +5863,7 @@ async function submitAdminSignatureWithPlacement() {
 // Po nahrání nové verze se snadno pozná, jestli se opravdu nasadila: otevřete
 // appku, zmáčkněte F12 (na Macu ⌥⌘I) a v konzoli je vypsané tohle datum. Když
 // tam svítí starší, prohlížeč nebo GitHub drží starou verzi.
-const SUBBAU_VERZE = '2026-11-06 b — Start appky na slabém signálu, aktualizace bez ztráty textu'
+const SUBBAU_VERZE = '2026-11-06 c — Peníze: výpadek historie sazeb a stavu faktury se neschová'
 console.log('SubBau docházka — verze ' + SUBBAU_VERZE)
 // Verze i dole v menu správce. Když někdo novinku „nevidí", podle ní se hned
 // pozná, jestli nemá otevřenou starou kopii appky — bez hledání v konzoli.
@@ -12072,15 +12072,23 @@ async function generateProvizeFirmReport(firmName, mode) {
     // Jinak by vyúčtování pro firmu nesedělo s Provizemi, kde se to tak počítá.
     const histFirma = {}
     try {
-      const { data: hh } = await sb.from('worker_rate_history')
+      const { data: hh, error: hhErr } = await sb.from('worker_rate_history')
         .select('worker_id, hodnota, valid_from').eq('druh', 'provize')
         .order('valid_from', { ascending: true })
+      if (hhErr) throw hhErr
       ;(hh || []).forEach(h => {
         ;(histFirma[h.worker_id] = histFirma[h.worker_id] || []).push({
           od: String(h.valid_from).slice(0, 10), hodnota: Number(h.hodnota) || 0
         })
       })
-    } catch (e) { console.warn('[report firmy] historie sazeb:', e?.message) }
+    } catch (e) {
+      // Bez historie by report spočítal minulá období dnešní provizí (Codex 6. 11. 2026) —
+      // chybějící tabulka (migrace) se toleruje jako dřív, jiná chyba report zastaví.
+      if (!/PGRST205|42P01|does not exist|schema cache/i.test((e?.code || '') + ' ' + (e?.message || ''))) {
+        showToast('❌ Historii sazeb se nepodařilo načíst — report by měl špatné částky. Zkuste to prosím znovu.'); return
+      }
+      console.warn('[report firmy] historie sazeb (tabulka chybí):', e?.message)
+    }
     const provKDni = (workerId, den) => {
       // „Bez provize" musí přebít i historii — jinak by se u člověka, kterému
       // se sazba někdy měnila, provize účtovala dál, protože se do vychozí
@@ -12285,10 +12293,14 @@ async function renderProvizeContent() {
     if (!r2.error) {
       bezProvizeColumnMissing = true
       provRows = r2.data
+    } else if (!/42703|PGRST204|column|schema cache/i.test((r2.error.code || '') + ' ' + (r2.error.message || ''))) {
+      // Jiná chyba než chybějící sloupec (síť, práva) se nebere jako „sloupec chybí" (Codex 6. 11. 2026).
+      provizeNejdou('Sazby provizí', r2.error); return
     } else {
       paymentTermsColumnMissing = true
       bezProvizeColumnMissing = true
       const r3 = await sb.from('worker_commissions').select('worker_id, provize')
+      if (r3.error) { provizeNejdou('Sazby provizí', r3.error); return }
       provRows = r3.data
     }
   }
@@ -12310,7 +12322,12 @@ async function renderProvizeContent() {
       })
     })
   } catch (e) {
-    console.warn('[provize] historie sazeb se nenačetla:', e?.message)
+    // Chybějící tabulka (nespuštěná migrace) = počítá se dnešními sazbami jako dřív. Jiná chyba
+    // (síť, práva) NE — provize za minulá období by se tiše spočítaly dnešní sazbou (Codex 6. 11. 2026).
+    if (!/PGRST205|42P01|does not exist|schema cache/i.test((e?.code || '') + ' ' + (e?.message || ''))) {
+      provizeNejdou('Historii sazeb', e); return
+    }
+    console.warn('[provize] historie sazeb se nenačetla (tabulka chybí):', e?.message)
   }
 
   const vlastniVysledek = await nactiVlastniProvizeZamestnancu()
@@ -42236,9 +42253,15 @@ async function storeInvoiceRow(row) {
   // položky…) se dál normálně přepíše.
   if (row.worker_id && row.invoice_number) {
     try {
-      const { data: existujici } = await sb.from('worker_invoices')
+      const { data: existujici, error: chybaExist } = await sb.from('worker_invoices')
         .select('status, cash_paid, cash_paid_note, cash_paid_typ')
         .eq('worker_id', row.worker_id).eq('invoice_number', String(row.invoice_number)).maybeSingle()
+      // Když se nepodaří zjistit, jestli faktura už není vyřízená nebo zaplacená, nepřepisuje se
+      // (zápis by vrátil status „nová" a smazal úhrady — Codex 6. 11. 2026). Chyba jde volajícímu jako chyba uložení.
+      if (chybaExist) {
+        console.warn('[faktura] stav existující faktury se nepodařilo zjistit:', chybaExist.message)
+        return { message: 'Stav faktury se nepodařilo ověřit — zkuste to prosím znovu. (' + (chybaExist.message || '') + ')', code: chybaExist.code || 'overeni' }
+      }
       if (existujici && (existujici.status === 'paid' || existujici.status === 'seen')) {
         row = { ...row, status: existujici.status, cash_paid: existujici.cash_paid,
                 cash_paid_note: existujici.cash_paid_note, cash_paid_typ: existujici.cash_paid_typ }
