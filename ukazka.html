@@ -27099,6 +27099,8 @@ async function getTodayRecord() {
       if (vc && vc[0]) vceraOtevrena = vc[0]
     } catch(e) { /* bez dohledání se chová jako dřív */ }
   }
+  // Příchod uložený během dohledávání včerejška je novější než obě odpovědi.
+  if ((window._mobZapisKdy || 0) > _ctuOd) return
   if (vceraOtevrena) {
     todayAttId = vceraOtevrena.id
     todayRecord = { ...vceraOtevrena }
@@ -27696,7 +27698,7 @@ async function mobUpdateRadek(dotaz, id, jeZapsano) {
   } catch (e) {
     if (!/timeout/i.test(String((e && e.message) || e))) throw e
     try {
-      const { data } = await Promise.race([sb.from('attendance').select('*').eq('id', id).maybeSingle(), limit(8000)])
+      const { data } = await Promise.race([sb.from('attendance').select('*').eq('id', id).maybeSingle(), limit(4000)])
       if (data && jeZapsano(data)) return { data: [{ id }], error: null, overeno: true }
     } catch (e2) { console.warn('[zápis docházky] po limitu se výsledek nepodařilo ověřit:', (e2 && e2.message) || e2) }
     return { data: null, error: { message: 'timeout', code: 'timeout' } }
@@ -27705,14 +27707,15 @@ async function mobUpdateRadek(dotaz, id, jeZapsano) {
 // Pauzy a konec dne z databáze těsně před zápisem pauzy: telefon přepisuje celé
 // pole `breaks`, a kdyby měl starou kopii (správce mezitím opravil pauzu, druhé
 // zařízení, starší odpověď), starší pauzy by se ztratily. Když čtení nevyjde do
-// 5 s, zůstane lokální kopie jako dřív.
+// 3 s, zůstane lokální kopie jako dřív.
 async function mobCerstvePauzy(id, current) {
   try {
     const { data } = await Promise.race([
       sb.from('attendance').select('check_out,break_start,break_end,break2_start,break2_end,breaks').eq('id', id).maybeSingle(),
-      new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), 5000))])
-    if (data) { Object.assign(current, data); if (todayRecord && todayRecord.id === id) Object.assign(todayRecord, data) }
+      new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), 3000))])
+    if (data) { Object.assign(current, data); if (todayRecord && todayRecord.id === id) Object.assign(todayRecord, data); return true }
   } catch (e) { console.warn('[pauzy] čerstvé pauzy se nenačetly, platí lokální kopie:', (e && e.message) || e) }
+  return false
 }
 
 // Zápis docházky, který se NESMÍ nepovést. Když databáze o sloupci team_id ještě
@@ -27838,8 +27841,11 @@ async function mobCheckin(type) {
 
   checkinInProgress = true
   window.zapisProbiha = true
+  const _mojeKolo = window._zamekKolo = (window._zamekKolo || 0) + 1   // kdo zámek drží — finally a pojistka pouští jen svůj
   // Bezpečnostní pojistka: kdyby cokoliv zůstalo viset (slabý signál na stavbě),
-  // po 20 s flag tvrdě uvolni, ať tlačítka nezamrznou napořád.
+  // po 20 s flag tvrdě uvolni, ať tlačítka nezamrznou napořád. Nová čekání u pauzy
+  // (3 s čerstvá data + 12 s zápis + 4 s ověření = 19 s) se do 20 s vejdou a zámek
+  // pustí jen to klepnutí, kterému patří (_zamekKolo) — Codex 6. 11. 2026.
   // `let` a funkce na znovunastavení: u firmy „jen s polohou" se pojistka na
   // dobu měření vypne (měření trvá až 10 s + dohledání adresy a pojistka by jinak
   // hlásila slabé připojení, i když appka jen čeká na GPS) a pak se nastaví znovu.
@@ -27847,7 +27853,7 @@ async function mobCheckin(type) {
   const zapniPojistku = () => {
     clearTimeout(_stuckGuard)
     _stuckGuard = setTimeout(() => {
-      if (checkinInProgress) {
+      if (checkinInProgress && window._zamekKolo === _mojeKolo) {
         checkinInProgress = false
         showToast('⚠️ Slabé připojení — zkuste to prosím znovu')
         // DENÍK CHYB: zápis visel 20 s — pojistka uvolnila tlačítka (výsledek zápisu nevíme).
@@ -28074,8 +28080,9 @@ async function mobCheckin(type) {
         todayRecord = { ...fetched }
       }
 
+      let _cerstvePauzy = false
       if (type === 'break-start' || type === 'break-end' || type === 'break-fix') {
-        await _attMerFaze(_mer, 'kontrola', mobCerstvePauzy(todayAttId, current))
+        _cerstvePauzy = await _attMerFaze(_mer, 'kontrola', mobCerstvePauzy(todayAttId, current))
         if (current.check_out) {
           showToast('ℹ️ Tahle směna už je uzavřená')
           todayAttId = null; todayRecord = null
@@ -28204,6 +28211,15 @@ async function mobCheckin(type) {
         askAddressIfNeeded(todayAttId, 'Přestávka')
 
       } else if (type === 'break-end') {
+        // Z čerstvých dat je pauza už ukončená (první pokus prošel, odpověď se ztratila):
+        // nic se nepřidává podruhé — jinak by se tatáž pauza odečetla dvakrát.
+        if (_cerstvePauzy && current.break_start && current.break_end) {
+          showToast('ℹ️ Pauza už je ukončená')
+          todayRecord = { ...current }
+          updateMobStav(current, [current], true)
+          checkinInProgress = false
+          return
+        }
         if (!current.break_start) {
           showToast('⚠️ Přestávka nebyla zahájena')
           updateMobStav(current, [current], true)
@@ -28527,7 +28543,7 @@ async function mobCheckin(type) {
     try { if (typeof _dnDochazka === 'function') _dnDochazka(type, 'vyjimka', 'Docházka se nezapsala — výjimka: ' + String((e && e.message) || e).slice(0, 200), { nazev: e && e.name, stack: e && e.stack ? String(e.stack).slice(0, 1500) : undefined }, 'chyba') } catch (x) { console.warn('[deník chyb]', x) } // eslint-disable-line no-undef
   } finally {
     clearTimeout(_stuckGuard)
-    if (!_zamekUvolnen) { checkinInProgress = false; window.zapisProbiha = false }
+    if (!_zamekUvolnen && window._zamekKolo === _mojeKolo) { checkinInProgress = false; window.zapisProbiha = false }
     // 2. 11. 2026: docházka se po tomhle klepnutí přepnula → tlačítka 2 s klid
     // (attZamkniPoZapisu). Pomalý zápis, který prošel → řádek do deníku.
     // Zápis, který prošel, zamyká vždy — i když tlačítka vypadají stejně jako
