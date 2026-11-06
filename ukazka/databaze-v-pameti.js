@@ -316,6 +316,8 @@
           if (op === 'is') return v === 'null' ? r[s] == null : stejne(r[s], v);
           if (op === 'gte') return porovnej(r[s], v) >= 0;
           if (op === 'lte') return porovnej(r[s], v) <= 0;
+          if (op === 'gt') return porovnej(r[s], v) > 0;
+          if (op === 'lt') return porovnej(r[s], v) < 0;
           return false;
         }));
         return api;
