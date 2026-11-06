@@ -18023,7 +18023,18 @@ async function deleteDocument(docId) {
   if (error) { showToast('❌ ' + docSaveErrorText(error)); return }
   if (!smazanoD || !smazanoD.length) { showToast('❌ Dokument se nesmazal — databáze to nepovolila'); return }
 
-  for (const path of toRemove) {
+  // Soubor, na který ukazuje ještě jiný řádek (duplicitní záznam po opakovaném nahrání na slabém
+  // signálu), se nemaže — jinak by druhý doklad zůstal bez souboru (Codex 6. 11. 2026). Když se
+  // to nepodaří zjistit, nemaže se nic: osiřelý soubor je menší škoda než ztracený doklad.
+  let kSmazaniSouboru = toRemove
+  if (toRemove.length) {
+    try {
+      const { data: jineRadky, error: jineErr } = await sb.from('documents').select('file_path').in('file_path', toRemove)
+      if (jineErr) kSmazaniSouboru = []
+      else { const pouzite = new Set((jineRadky || []).map(r => r.file_path)); kSmazaniSouboru = toRemove.filter(x => !pouzite.has(x)) }
+    } catch (e) { kSmazaniSouboru = [] }
+  }
+  for (const path of kSmazaniSouboru) {
     try { await sb.storage.from('documents').remove([path]) }
     catch(e) { console.warn('Doc storage delete:', e) }
   }
