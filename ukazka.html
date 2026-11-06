@@ -2581,7 +2581,7 @@ setTimeout(function brzda() {
                 <span style="color:var(--text3)">· klik na jméno = profil, klik na den = úprava hodin</span>
               </div>
               <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-left:auto">
-                <input type="text" id="kw-search" oninput="loadKWData()" placeholder="🔍 Hledat jméno nebo firmu…" style="padding:6px 10px;border:1px solid var(--brd);border-radius:8px;font-size:13px;font-family:inherit;width:200px" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false">
+                <input type="text" id="kw-search" oninput="kwHledat()" placeholder="🔍 Hledat jméno nebo firmu…" style="padding:6px 10px;border:1px solid var(--brd);border-radius:8px;font-size:13px;font-family:inherit;width:200px" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false">
                 <select id="kw-select" onchange="loadKWData()" style="width:auto;padding:6px 10px;font-size:13px;border:1px solid var(--brd);border-radius:8px;font-family:inherit"></select>
               </div>
             </div>
@@ -6734,7 +6734,7 @@ async function submitAdminSignatureWithPlacement() {
 // Po nahrání nové verze se snadno pozná, jestli se opravdu nasadila: otevřete
 // appku, zmáčkněte F12 (na Macu ⌥⌘I) a v konzoli je vypsané tohle datum. Když
 // tam svítí starší, prohlížeč nebo GitHub drží starou verzi.
-const SUBBAU_VERZE = '2026-11-06 d — Zabezpečení: text z databáze se do stránky vkládá bezpečně'
+const SUBBAU_VERZE = '2026-11-06 e — Zprávy, hledání v týdnu a poloha: nic se nepřepíše ani neztratí'
 console.log('StavKo docházka — verze ' + SUBBAU_VERZE)
 // Verze i dole v menu správce. Když někdo novinku „nevidí", podle ní se hned
 // pozná, jestli nemá otevřenou starou kopii appky — bez hledání v konzoli.
@@ -17494,6 +17494,12 @@ function fotkaBarva(jmeno) {
 // Pořadí volání přehledu týdne. Odpověď na starší volání (jiný týden, starší
 // hledání) dorazí i po novější — nesmí pak přepsat tabulku (audit 3. 11. 2026).
 let _kwBeh = 0
+// Hledání v týdenní docházce: loadKWData dělá pět dotazů — při každém písmenu to na slabším
+// spojení zasekávalo psaní (Codex 6. 11. 2026). Spustí se až po krátké pauze v psaní.
+function kwHledat() {
+  clearTimeout(window._kwHledatT)
+  window._kwHledatT = setTimeout(() => { try { loadKWData() } catch (e) { console.warn('[hledání v týdnu]', e && e.message) } }, 250)
+}
 async function loadKWData() {
   const val = document.getElementById('kw-select')?.value
   if (!val) return
@@ -34842,7 +34848,7 @@ async function adresaZeSouradnic(lat, lng) {
 // Když dotaz selže, platí poslední známá odpověď, a když žádná není,
 // zapisuje se jako dřív: výpadek nesmí nikomu zablokovat příchod.
 const GPS_PRAVIDLO_PLATI_MS = 10 * 60 * 1000
-let _gpsPravidlo = { hodnota: null, kdy: 0 }
+let _gpsPravidlo = { hodnota: null, kdy: 0, u: null }   // u = komu odpověď patří (sdílený telefon, Codex 6. 11. 2026)
 // Zápis pauzy netrefil dnešní záznam (správce ho mezitím přepsal nebo smazal).
 // Audit 30. 9. 2026: dřív appka hlásila „Přestávka zapsaná" a pracovník celý
 // den viděl stav, který v databázi nebyl. Teď to řekne a načte den znovu.
@@ -34890,7 +34896,10 @@ function gpsPravidloNactiUlozene() {
 // window._gpsPravidloZdroj = 'pamet' | 'rpc' | 'rpc-chyba …' | 'rpc-vyjimka …',
 // window._gpsPravidloVekMs = stáří použité odpovědi (null = žádná nebyla).
 async function mojeFirmaChcePolohu(obnovit) {
-  if (!obnovit && _gpsPravidlo.hodnota !== null && Date.now() - _gpsPravidlo.kdy < GPS_PRAVIDLO_PLATI_MS) {
+  const ucet0 = currentUser && currentUser.id
+  // Odpověď v paměti patří tomu, kdo se ptal — po přihlášení jiného člověka neplatí.
+  const pametMoje = _gpsPravidlo.u == null || _gpsPravidlo.u === ucet0   // bez vlastníka (nulování) platí jako dřív
+  if (!obnovit && pametMoje && _gpsPravidlo.hodnota !== null && Date.now() - _gpsPravidlo.kdy < GPS_PRAVIDLO_PLATI_MS) {
     window._gpsPravidloZdroj = 'pamet'
     window._gpsPravidloVekMs = Date.now() - _gpsPravidlo.kdy
     return _gpsPravidlo.hodnota
@@ -34898,7 +34907,7 @@ async function mojeFirmaChcePolohu(obnovit) {
   // Při selhání platí poslední známá odpověď — z paměti stránky, a když tu žádná
   // není (čerstvě načtená stránka), ta uložená v telefonu. Jak je stará, se zapíše.
   const posledni = () => {
-    if (_gpsPravidlo.hodnota !== null) {
+    if (pametMoje && _gpsPravidlo.hodnota !== null) {
       return { ano: _gpsPravidlo.hodnota === true, vek: _gpsPravidlo.kdy ? Date.now() - _gpsPravidlo.kdy : null, zTelefonu: false }
     }
     const u = gpsPravidloNactiUlozene()
@@ -34916,11 +34925,18 @@ async function mojeFirmaChcePolohu(obnovit) {
       window._gpsPravidloVekMs = pos.vek
       return pos.ano
     }
-    _gpsPravidlo = { hodnota: r?.data === true, kdy: Date.now() }
-    gpsPravidloUloz(_gpsPravidlo.hodnota, _gpsPravidlo.kdy)
-    window._gpsPravidloZdroj = 'rpc'
+    // Mezitím se mohl přihlásit někdo jiný — odpověď patří původnímu účtu a do paměti ani do telefonu
+    // se pod cizím účtem nezapisuje.
+    if ((currentUser && currentUser.id) === ucet0) {
+      _gpsPravidlo = { hodnota: r?.data === true, kdy: Date.now(), u: ucet0 }
+      gpsPravidloUloz(_gpsPravidlo.hodnota, _gpsPravidlo.kdy)
+      window._gpsPravidloZdroj = 'rpc'
+      window._gpsPravidloVekMs = 0
+      return _gpsPravidlo.hodnota
+    }
+    window._gpsPravidloZdroj = 'rpc-jiny-ucet'
     window._gpsPravidloVekMs = 0
-    return _gpsPravidlo.hodnota
+    return r?.data === true
   } catch (e) {
     const pos = posledni()
     window._gpsPravidloZdroj = 'rpc-vyjimka ' + (pos.zTelefonu ? '[z telefonu] ' : '') + String((e && e.message) || e || '').slice(0, 80)
@@ -35320,9 +35336,11 @@ async function prohlasBezRidicaku(el) {
   if (typeof checkMissingDocsAlert === 'function') checkMissingDocsAlert()
 }
 
-async function ulozAdresuDne(attId, adresa, zdroj, lat, lng) {
+async function ulozAdresuDne(attId, adresa, zdroj, lat, lng, jenGps) {
   if (!attId || !adresa) return { ok: false, duvod: 'chybí den nebo adresa' }
-  const zaklad = { location_address: adresa, address_source: zdroj || 'gps' }
+  // jenGps: den už má ruční adresu (pracovníkovu) — dobíhající GPS ji nesmí přepsat, uloží se jen GPS pole
+  // (Codex 6. 11. 2026: telefon ukazoval ruční adresu, správce dostal GPS).
+  const zaklad = jenGps ? { gps_address: adresa } : { location_address: adresa, address_source: zdroj || 'gps' }
   const plne = { ...zaklad, gps_address: adresa }
   if (lat && lng) { plne.location_lat = lat; plne.location_lng = lng }
 
@@ -35515,6 +35533,9 @@ function getGPS(force) {
     // (a uložení) doběhne i bez zapnuté GPS, takže telefon nic dalšího nežere.
     stopGPS()
 
+    // Směna a účet, ke kterým měření patří — po dohledání adresy (sekundy) už to může být někdo jiný
+    // nebo jiná směna a stará poloha by se připsala novému záznamu (Codex 6. 11. 2026).
+    const attZacatek = todayAttId, ucetZacatek = currentUser && currentUser.id
     gpsAddr = `${gpsLat.toFixed(5)}, ${gpsLng.toFixed(5)}`
     if (!_manualAddressLocked) {
       if (g) g.textContent = '📍 Načítám adresu…'
@@ -35560,8 +35581,10 @@ function getGPS(force) {
 
     gpsAddr = resolved || `${gpsLat.toFixed(5)}, ${gpsLng.toFixed(5)}`
     // Ulož GPS adresu do svého pole (ať ji admin vidí i když pracovník zadal i ruční)
-    if (todayRecord) todayRecord.gps_address = gpsAddr
-    if (todayAttId) {
+    const jinyUcet = !currentUser || currentUser.id !== ucetZacatek
+    const jinaSmena = !!attZacatek && todayAttId !== attZacatek
+    if (todayRecord && !jinyUcet && !jinaSmena) todayRecord.gps_address = gpsAddr
+    if (todayAttId && !jinyUcet && !jinaSmena && !adminEditedAtt(todayRecord)) {
       const gpsUpd = { gps_address: gpsAddr }
       if (gpsLat && gpsLng) { gpsUpd.location_lat = gpsLat; gpsUpd.location_lng = gpsLng }
       // pokud ještě není žádná hlavní adresa, dosaď GPS i do location_address
@@ -35573,7 +35596,8 @@ function getGPS(force) {
       // Pozor: todayAttId se mohl mezitím vynulovat (odchod) — proto si ho
       // podržíme a výsledek zápisu si ověříme.
       const denProZapis = todayAttId
-      ulozAdresuDne(denProZapis, gpsAddr, gpsUpd.address_source || 'gps', gpsLat, gpsLng).then(v => {
+      const maRucni = !!(todayRecord && (todayRecord.manual_address || todayRecord.address_source === 'manual')) || _manualAddressLocked
+      ulozAdresuDne(denProZapis, gpsAddr, gpsUpd.address_source || 'gps', gpsLat, gpsLng, maRucni).then(v => {
         if (!v.ok) showToast('⚠️ Poloha se nepodařila uložit — zadejte prosím adresu ručně')
       })
     }
@@ -35642,6 +35666,11 @@ async function applyManualAddress() {
   const hidden = document.getElementById('mob-manual-addr-input'); if (hidden) hidden.value = val
   // Má pracovník i GPS adresu? (povolil GPS) Pokud ne, uloží se jen ruční.
   const haveGps = !!(todayRecord && todayRecord.gps_address)
+  // Původní hodnoty — když se uložení nepovede, vrátí se (jinak by kontrola chybějící adresy
+  // dál prošla, přestože v databázi adresa není; Codex 6. 11. 2026).
+  const puvodniAdresa = todayRecord ? { manual_address: todayRecord.manual_address, address_source: todayRecord.address_source,
+    location_address: todayRecord.location_address, gps_address: todayRecord.gps_address } : null
+  const vratAdresu = () => { if (todayRecord && puvodniAdresa) Object.assign(todayRecord, puvodniAdresa) }
   if (todayRecord) {
     todayRecord.manual_address = val
     todayRecord.address_source = 'manual'
@@ -35676,6 +35705,7 @@ async function applyManualAddress() {
       error = r2.error || ((!r2.data || !r2.data.length) ? { message: 'zápis nezměnil žádný řádek' } : null)
     }
     if (error) {
+      vratAdresu()
       showToast(chybaText(error, 'Adresa se neuložila'))
       return   // panel zůstane otevřený i s vyplněnou adresou
     }
@@ -46483,6 +46513,7 @@ async function loadNotifWorkers() {
   vidt.forEach(w => { if (w.team_id != null) pocty[w.team_id] = (pocty[w.team_id] || 0) + 1 })
   const firmy = (tymy || []).filter(t => pocty[t.id] && tymJeVidet(t.id))
 
+  const vybrane = sel.value   // obnova seznamu (živá změna) nesmí zrušit komu správce zrovna píše (Codex 6. 11. 2026)
   sel.innerHTML = '<option value="">— Vyberte komu —</option>'
     + '<option value="__all__">📢 VŠEM pracovníkům (' + data.length + ')</option>'
     + (firmy.length ? '<optgroup label="Celá firma">'
@@ -46491,6 +46522,7 @@ async function loadNotifWorkers() {
     + '<optgroup label="Jeden pracovník">'
     + vidt.map(w => `<option value="${w.id}">${escAttr(w.full_name)}</option>`).join('')
     + '</optgroup>'
+  if (vybrane && [...sel.options].some(o => o.value === vybrane)) sel.value = vybrane
 }
 async function sendNotification() {
   const workerId = document.getElementById('notif-worker').value
