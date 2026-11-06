@@ -6,19 +6,32 @@
 // staré (viz 'activate' níže). Zvedněte ho pokaždé, když je podezření, že si
 // někdo drží poškozenou kopii appky — je to jediný způsob, jak mu ji zahodit
 // na dálku, aniž by sám mazal data v prohlížeči.
-const CACHE = 'subbau-v204';
+const CACHE = 'subbau-v205';
 const LIMIT_SITE = 3500;   // ms — jak dlouho se při otevření appky čeká na síť, než se ukáže uložená verze
 
 self.addEventListener('install', (event) => {
   // Nová verze se má aktivovat hned, nečekat na zavření všech karet
   self.skipWaiting();
+  // Hlavní stránka a knihovna se uloží HNED do nové paměti (audit Codexem 6. 11. 2026):
+  // dřív byla nová paměť při aktivaci prázdná a stará se smazala, takže telefon, který
+  // se na slabém signálu neměl odkud dočíst, zůstal bez jediné funkční kopie appky.
+  // Neuložení instalaci nezablokuje (bez sítě se nová verze jen nepřipraví).
+  event.waitUntil((async () => {
+    try {
+      const cache = await caches.open(CACHE);
+      await Promise.all(['/', '/supabase.js'].map((u) => cache.add(u).catch(() => {})));
+    } catch (e) { /* kopie se doplní při prvním načtení */ }
+  })());
 });
 
 self.addEventListener('activate', (event) => {
   event.waitUntil((async () => {
-    // Smaž všechny staré cache kromě aktuální
+    // Smaž staré cache kromě aktuální — ale JEN když už nová má hlavní stránku.
+    // Jinak se stará (jediná funkční) kopie nechá do příští aktualizace.
     const keys = await caches.keys();
-    await Promise.all(keys.filter(k => k !== CACHE).map(k => caches.delete(k)));
+    let novaMaStranku = false;
+    try { novaMaStranku = !!(await (await caches.open(CACHE)).match('/')); } catch (e) { /* stará zůstane */ }
+    if (novaMaStranku) await Promise.all(keys.filter(k => k !== CACHE).map(k => caches.delete(k)));
     await self.clients.claim();
   })());
 });
@@ -129,7 +142,10 @@ self.addEventListener('fetch', (event) => {
       }
       return fresh
     })
-    if (req.mode === 'navigate') {
+    // Knihovna /supabase.js se načítá blokujícím <script> ještě před spuštěním appky —
+    // na slabém signálu visela bez limitu, i když ji telefon měl v paměti (Codex 6. 11. 2026).
+    // Dostává stejný limit jako otevření appky.
+    if (req.mode === 'navigate' || url.pathname === '/supabase.js') {
       const kopie = await caches.match(req)
       if (kopie) {
         const limit = new Promise(ok => setTimeout(() => ok(null), LIMIT_SITE))

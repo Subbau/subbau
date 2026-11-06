@@ -5863,7 +5863,7 @@ async function submitAdminSignatureWithPlacement() {
 // Po nahrání nové verze se snadno pozná, jestli se opravdu nasadila: otevřete
 // appku, zmáčkněte F12 (na Macu ⌥⌘I) a v konzoli je vypsané tohle datum. Když
 // tam svítí starší, prohlížeč nebo GitHub drží starou verzi.
-const SUBBAU_VERZE = '2026-11-06 a — Příchod, pauza a odchod se nezasekávají a neztrácejí'
+const SUBBAU_VERZE = '2026-11-06 b — Start appky na slabém signálu, aktualizace bez ztráty textu'
 console.log('SubBau docházka — verze ' + SUBBAU_VERZE)
 // Verze i dole v menu správce. Když někdo novinku „nevidí", podle ní se hned
 // pozná, jestli nemá otevřenou starou kopii appky — bez hledání v konzoli.
@@ -7709,6 +7709,7 @@ if ('serviceWorker' in navigator) {
     }
     const bezpecneNaPrenacteni = () => {
       if (window.zapisProbiha || window.checkinInProgress) return false
+      if (rozepsanyText()) return false   // i pole, které právě nemá fokus (člověk klikl vedle)
       if (fakturaVPraci()) return false
       if (obnovaPrihlaseniBezi()) return false
       const a = document.activeElement
@@ -7719,9 +7720,18 @@ if ('serviceWorker' in navigator) {
     // Prázdné pole s fokusem nic neztratí, rozepsaný text přenačtení smaže.
     const rozepsanyText = () => {
       const a = document.activeElement
-      if (!a) return false
-      const jePole = a.tagName === 'TEXTAREA' || (a.tagName === 'INPUT' && !/^(button|submit|checkbox|radio)$/.test(a.type || ''))
-      return jePole && String(a.value == null ? '' : a.value).trim() !== ''
+      if (a) {
+        const jePole = a.tagName === 'TEXTAREA' || (a.tagName === 'INPUT' && !/^(button|submit|checkbox|radio)$/.test(a.type || ''))
+        if (jePole && String(a.value == null ? '' : a.value).trim() !== '') return true
+      }
+      // Rozepsaný text zůstane i po kliknutí mimo pole (oznámení, zpráva, popis práce) —
+      // přenačtení by ho smazalo (Codex 6. 11. 2026). Hledá se ve viditelných textových oblastech.
+      try {
+        for (const t of document.querySelectorAll('textarea')) {
+          if (t.getClientRects().length > 0 && String(t.value || '').trim() !== '') return true
+        }
+      } catch (e) { console.warn('[aktualizace] kontrola rozepsaného textu selhala:', (e && e.message) || e) }
+      return false
     }
     const zacatek = Date.now()
     const zkusPrenacist = () => {
@@ -7738,6 +7748,8 @@ if ('serviceWorker' in navigator) {
       setTimeout(() => {
         // Obnova mohla začít v těch 400 ms (typicky hned po probuzení appky).
         if (obnovaPrihlaseniBezi() && Date.now() - zacatek < 180000) { setTimeout(zkusPrenacist, 1000); return }
+        // Během těch 400 ms mohl začít zápis nebo psaní — přenačtení by je přerušilo.
+        if ((window.zapisProbiha || window.checkinInProgress || rozepsanyText()) && Date.now() - zacatek < 900000) { setTimeout(zkusPrenacist, 1000); return }
         // Deník chyb: rozeslané zápisy odejdou s keepalive, souhrny se uloží — nic se neztratí.
         try { denikUloz() } catch (e) {}
         location.reload()
@@ -8172,6 +8184,10 @@ sb.auth.onAuthStateChange(async (event, session) => {
   if (session && (event === 'TOKEN_REFRESHED' || event === 'SIGNED_IN')) setTimeout(() => { try { denikVypust() } catch (e) {} }, 1500)
 
   if (event === 'SIGNED_OUT') {
+    // Uvnitř obsluhy se na přihlášení čekat nesmí (supabase-js drží zámek přihlášení, než obsluha
+    // skončí — getSession() uvnitř čekal sám na sebe a zasekl další dotazy; Codex 6. 11. 2026).
+    // Kontrola proto běží až po návratu z obsluhy.
+    setTimeout(async () => {
     // Chrome občas pošle SIGNED_OUT i když session pořád platí (falešný poplach
     // při obnově tokenu / dočasné ztrátě storage). Ověř, že opravdu není session.
     try {
@@ -8189,8 +8205,9 @@ sb.auth.onAuthStateChange(async (event, session) => {
     todayAttId = null
     showLogin(Date.now() - (window._vlastniOdhlaseni || 0) < 15000 ? 'tlačítko Odhlásit' : 'prohlížeč přišel o přihlášení (SIGNED_OUT)')
     return
+    }, 0)
+    return
   }
-
   // Uživatel klikl na reset hesla v emailu
   if (event === 'PASSWORD_RECOVERY') {
     isRecoveryMode = false  // Teď jsme v správném recovery stavu
@@ -8297,6 +8314,13 @@ async function _initAppInner(user) {
     } catch(e) { console.warn('[initApp] tým se nenačetl:', e) }
   }
 
+  // Během čekání na síť se člověk mohl odhlásit nebo přihlásit jiným účtem — pozdní odpověď
+  // původního přihlášení nesmí otevřít jeho obrazovku (Codex 6. 11. 2026).
+  if (!currentUser || currentUser.id !== user.id) {
+    console.warn('[initApp] mezitím se změnilo přihlášení — původní start se zahazuje')
+    initAppDone = true
+    return
+  }
   currentProfile = profile
 
   if (!profile) {
@@ -9795,6 +9819,7 @@ async function doRegister() {
       try { if (typeof denikChybZapis === 'function') denikChybZapis('registrace-profil', 'Profil po registraci nevznikl (' + (profileErr.code || ('HTTP ' + (profileErr.status || '?'))) + ')', { stav: profileErr.status, kod: profileErr.code || undefined, ucet: userId, email: typeof _dnMaskujEmail === 'function' ? _dnMaskujEmail(email) : undefined, sRelaci: true }, { pohltit: true }) } catch (x) { console.warn('[deník chyb]', x) } // eslint-disable-line no-undef
       btn.textContent = 'Odeslat registraci →'
       btn.disabled = false
+      registrationInProgress = false   // jinak by další přihlášení v téže stránce obsluha ignorovala (Codex 6. 11. 2026)
       return
     }
   } else {
