@@ -26,11 +26,15 @@ self.addEventListener('install', (event) => {
 
 self.addEventListener('activate', (event) => {
   event.waitUntil((async () => {
-    // Smaž staré cache kromě aktuální — ale JEN když už nová má hlavní stránku.
+    // Smaž staré cache kromě aktuální — ale JEN když už nová má hlavní stránku i knihovnu.
     // Jinak se stará (jediná funkční) kopie nechá do příští aktualizace.
     const keys = await caches.keys();
     let novaMaStranku = false;
-    try { novaMaStranku = !!(await (await caches.open(CACHE)).match('/')); } catch (e) { /* stará zůstane */ }
+    try {
+      const nova = await caches.open(CACHE);
+      // Stránka I knihovna — jinak by se smazala jediná funkční kopie knihovny (Codex 6. 11. 2026).
+      novaMaStranku = !!(await nova.match('/')) && !!(await nova.match('/supabase.js'));
+    } catch (e) { /* stará zůstane */ }
     if (novaMaStranku) await Promise.all(keys.filter(k => k !== CACHE).map(k => caches.delete(k)));
     await self.clients.claim();
   })());
