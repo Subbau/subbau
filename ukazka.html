@@ -18883,8 +18883,9 @@ async function deleteDocument(docId) {
 
   // Nejdřív řádek v databázi, teprve pak soubor. Opačné pořadí umělo nechat
   // v seznamu doklad, jehož „Zobrazit“ končí chybou 404.
-  const { error } = await sb.from('documents').delete().eq('id', docId)
+  const { data: smazanoD, error } = await sb.from('documents').delete().eq('id', docId).select('id')
   if (error) { showToast('❌ ' + docSaveErrorText(error)); return }
+  if (!smazanoD || !smazanoD.length) { showToast('❌ Dokument se nesmazal — databáze to nepovolila'); return }
 
   for (const path of toRemove) {
     try { await sb.storage.from('documents').remove([path]) }
@@ -19448,13 +19449,15 @@ async function deleteSitePhoto(id, url) {
   // Nejdřív záznam v databázi, teprve pak soubor (Codex 6. 11. 2026). Opačné pořadí nechalo
   // v galerii fotku, jejíž soubor je pryč, když zápis do databáze selhal. Soubor, který zůstane
   // bez záznamu, nikomu neškodí.
-  const { error } = await sb.from('site_photos').delete().eq('id', id)
+  const { data: smazanoF, error } = await sb.from('site_photos').delete().eq('id', id).select('id')
   if (error) {
     showToast(/row-level security|policy|permission|42501/i.test(error.message || '')
       ? '❌ Databáze mazání nepovolila — chybí oprávnění pro admina'
       : '❌ Chyba: ' + error.message)
     return
   }
+  // DELETE odfiltrovaný právy projde bez chyby, ale nesmaže nic — pak se nesmí mazat ani soubor (Codex 6. 11. 2026).
+  if (!smazanoF || !smazanoF.length) { showToast('❌ Fotka se nesmazala — databáze to nepovolila'); return }
   // Cestu k souboru v bucketu vytáhneme z jeho veřejné adresy
   try {
     const m = String(url || '').match(/\/storage\/v1\/object\/public\/site-photos\/(.+)$/)
@@ -30342,6 +30345,19 @@ async function imagesToPdfBlob(files) {
 }
 
 
+
+// Existuje v databázi řádek dokladu k tomuto souboru? true / false / null = nejde zjistit.
+// Kontrola má vlastní limit 5 s a chybu dotazu NEbere jako „řádek není" — jinak by se po ztracené odpovědi
+// smazal soubor uloženého dokladu (Codex 6. 11. 2026).
+async function radekDokladuExistuje(filePath) {
+  try {
+    const r = await Promise.race([
+      sb.from('documents').select('id').eq('file_path', filePath).limit(1),
+      new Promise((_, ne) => setTimeout(() => ne(new Error('timeout')), 5000))])
+    if (!r || r.error) return null
+    return !!(r.data && r.data.length)
+  } catch (e) { return null }
+}
 async function uploadDocument() {
   if (!currentUser) return
 
@@ -30545,12 +30561,7 @@ async function uploadDocument() {
   let pokusuInsert = 0
   const { error: dbErr } = predniHotova ? { error: null } : await zkusVicekrat(
     async () => {
-      if (pokusuInsert++ > 0) {
-        try {
-          const { data: uz } = await sb.from('documents').select('id').eq('file_path', filePath).limit(1)
-          if (uz && uz.length) return { error: null }
-        } catch (e) { console.warn('[dokument] kontrola před opakováním selhala:', (e && e.message) || e) }
-      }
+      if (pokusuInsert++ > 0 && (await radekDokladuExistuje(filePath)) === true) return { error: null }
       return withTimeout(sb.from('documents').insert({
       worker_id: currentUser.id,
       doc_type: docType,
@@ -30570,9 +30581,8 @@ async function uploadDocument() {
     // Soubor v úložišti, ke kterému není řádek v databázi, by nikdo nenašel — ukliď ho.
     // Jen když řádek opravdu není: poslední pokus mohl na serveru projít a smazáním souboru
     // by se zničil uložený doklad (Codex 6. 11. 2026).
-    let radekJe = false
-    try { const { data: uz } = await sb.from('documents').select('id').eq('file_path', filePath).limit(1); radekJe = !!(uz && uz.length) } catch (e) { radekJe = true }   // nejde ověřit = nemazat
-    if (!radekJe) { try { await sb.storage.from('documents').remove([filePath]) } catch(e) { console.warn('[dokument] úklid souboru:', (e && e.message) || e) } }
+    const radekJe = await radekDokladuExistuje(filePath)   // true / false / null (nejde ověřit = nemazat)
+    if (radekJe === false) { try { await sb.storage.from('documents').remove([filePath]) } catch(e) { console.warn('[dokument] úklid souboru:', (e && e.message) || e) } }
     showToast('❌ ' + docSaveErrorText(dbErr))
     btn.disabled = false; btn.textContent = '📤 Nahrát'; progress.style.display = 'none'
     zapisChybuAppky('nahravani-dokumentu', dbErr?.message, { docType, velikostMB: Math.round((uploadBlob?.size || 0) / 1024 / 1024 * 10) / 10 })
@@ -30597,8 +30607,10 @@ async function uploadDocument() {
       )
       if (stErr2) throw stErr2
       const { data: u2 } = sb.storage.from('documents').getPublicUrl(filePath2)
+      let pokusuInsert2 = 0
       const { error: dbErr2 } = await zkusVicekrat(
-        () => withTimeout(sb.from('documents').insert({
+        async () => { if (pokusuInsert2++ > 0 && (await radekDokladuExistuje(filePath2)) === true) return { error: null }
+        return withTimeout(sb.from('documents').insert({
           worker_id: currentUser.id,
           doc_type: docType,
           file_name: docType + '_strana2_' + new Date().toISOString().slice(0,10) + '.pdf',
@@ -30608,12 +30620,13 @@ async function uploadDocument() {
           status: 'pending',
           uploaded_by: currentUser.id,
           uploaded_at: new Date().toISOString()
-        }), 15000),
+        }), 15000) },
         n => { btn.textContent = '⏳ Slabý signál — zkouším znovu (' + n + '/3)…' }
       )
       if (dbErr2) {
-        // Soubor v úložišti bez řádku v databázi by nikdo nenašel — ukliď ho
-        await sb.storage.from('documents').remove([filePath2]).catch(() => {})
+        // Soubor v úložišti bez řádku v databázi by nikdo nenašel — ukliď ho, ale jen když řádek opravdu není
+        // (poslední pokus mohl na serveru projít; nejde ověřit = nemazat; Codex 6. 11. 2026)
+        if ((await radekDokladuExistuje(filePath2)) === false) await sb.storage.from('documents').remove([filePath2]).catch(() => {})
         throw dbErr2
       }
     } catch (e) {
@@ -44644,8 +44657,9 @@ async function deleteContract(contractId, title, fileUrl, adminSigUrl, workerSig
 
   // Nejdřív záznam v databázi, teprve pak soubory (Codex 6. 11. 2026): opačné pořadí nechalo
   // v seznamu smlouvu, jejíž soubory jsou pryč, když smazání záznamu selhalo.
-  const { error } = await sb.from('contracts').delete().eq('id', contractId)
+  const { data: smazanoS, error } = await sb.from('contracts').delete().eq('id', contractId).select('id')
   if (error) { showToast('❌ Chyba: ' + error.message); return }
+  if (!smazanoS || !smazanoS.length) { showToast('❌ Smlouva se nesmazala — databáze to nepovolila'); return }
 
   for (const path of paths) {
     try {
