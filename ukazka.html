@@ -27710,9 +27710,14 @@ async function mobUpdateRadek(dotaz, id, jeZapsano) {
 // 3 s, zůstane lokální kopie jako dřív.
 async function mobCerstvePauzy(id, current) {
   try {
-    const { data } = await Promise.race([
-      sb.from('attendance').select('check_out,break_start,break_end,break2_start,break2_end,breaks').eq('id', id).maybeSingle(),
-      new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), 3000))])
+    const limit = new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), 3000))
+    let { data, error } = await Promise.race([
+      sb.from('attendance').select('check_out,break_start,break_end,break2_start,break2_end,breaks').eq('id', id).maybeSingle(), limit])
+    // Starší databáze nemá sloupec `breaks` — čte se bez něj (Codex 6. 11. 2026).
+    if (error && /breaks|column|schema cache/i.test(error.message || '')) {
+      ;({ data, error } = await Promise.race([
+        sb.from('attendance').select('check_out,break_start,break_end,break2_start,break2_end').eq('id', id).maybeSingle(), limit]))
+    }
     if (data) { Object.assign(current, data); if (todayRecord && todayRecord.id === id) Object.assign(todayRecord, data); return true }
   } catch (e) { console.warn('[pauzy] čerstvé pauzy se nenačetly, platí lokální kopie:', (e && e.message) || e) }
   return false
@@ -28163,7 +28168,7 @@ async function mobCheckin(type) {
         const zapisT = { breaks: poleT }
         if (poleT.length === 1) { zapisT.break_start = bsT + ':00'; zapisT.break_end = beT + ':00' }
         else if (poleT.length === 2) { zapisT.break2_start = bsT + ':00'; zapisT.break2_end = beT + ':00' }
-        let { data: radkyT, error: chybaT } = await _attMerFaze(_mer, 'zapis', mobUpdateRadek(sb.from('attendance').update(zapisT).eq('id', todayAttId).select('id'), todayAttId,
+        let { data: radkyT, error: chybaT } = await _attMerFaze(_mer, 'zapis', mobUpdateRadek(sb.from('attendance').update(zapisT).eq('id', todayAttId).is('check_out', null).select('id'), todayAttId,
           (r) => Array.isArray(r.breaks) && r.breaks.length >= poleT.length && r.breaks.some(b => b && String(b.bs).slice(0, 5) === bsT)))
         if (chybaT && chybiSloupec(chybaT)) {
           // Starší databáze nemusí mít sloupec `breaks` — pauzu ulož aspoň do časů.
@@ -28171,7 +28176,8 @@ async function mobCheckin(type) {
           // sítě — pak pole `breaks` chybělo a pauza se z hodin neodečetla); jiná chyba se hlásí níž.
           console.warn('[pauza] zápis s polem breaks selhal, zkouším bez něj:', chybaT.message)
           const bezPole = { ...zapisT }; delete bezPole.breaks
-          const r2 = await _attMerFaze(_mer, 'zapis', withTimeout(sb.from('attendance').update(bezPole).eq('id', todayAttId).select('id'), 12000))
+          const r2 = await _attMerFaze(_mer, 'zapis', mobUpdateRadek(sb.from('attendance').update(bezPole).eq('id', todayAttId).is('check_out', null).select('id'), todayAttId,
+            (r) => r.break_start && String(r.break_start).slice(0, 5) === bsT))
           chybaT = r2.error; radkyT = r2.data
         }
         if (chybaT) {
@@ -28196,7 +28202,7 @@ async function mobCheckin(type) {
           try { if (typeof _dnDochazka === 'function') _dnDochazka(type, 'pauza-probiha', 'Začátek pauzy — přestávka už probíhá', {}, 'varovani') } catch (x) { console.warn('[deník chyb]', x) } // eslint-disable-line no-undef
           return
         }
-        const { data: radkyZ, error } = await _attMerFaze(_mer, 'zapis', mobUpdateRadek(sb.from('attendance').update({ break_start: timeStr, break_end: null }).eq('id', todayAttId).select('id'), todayAttId,
+        const { data: radkyZ, error } = await _attMerFaze(_mer, 'zapis', mobUpdateRadek(sb.from('attendance').update({ break_start: timeStr, break_end: null }).eq('id', todayAttId).is('check_out', null).select('id'), todayAttId,
           (r) => r.break_start && String(r.break_start).slice(0, 5) === timeStr.slice(0, 5) && !r.break_end))
         if (error) {
           showToast(chybaText(error, 'Začátek pauzy se nezapsal')); _pustZamek()
@@ -28232,7 +28238,7 @@ async function mobCheckin(type) {
         // Přidej dokončenou pauzu do pole breaks (kvůli více pauzám za směnu)
         const existingBreaks = Array.isArray(current.breaks) ? current.breaks.slice() : []
         existingBreaks.push({ bs: current.break_start.slice(0,5), be: timeStr.slice(0,5) })
-        let { data: radkyK, error } = await _attMerFaze(_mer, 'zapis', mobUpdateRadek(sb.from('attendance').update({ break_end: timeStr, breaks: existingBreaks }).eq('id', todayAttId).select('id'), todayAttId,
+        let { data: radkyK, error } = await _attMerFaze(_mer, 'zapis', mobUpdateRadek(sb.from('attendance').update({ break_end: timeStr, breaks: existingBreaks }).eq('id', todayAttId).is('check_out', null).is('break_end', null).select('id'), todayAttId,
           (r) => r.break_end && String(r.break_end).slice(0, 5) === timeStr.slice(0, 5)))
         if (error) {
           // Kdyby sloupec breaks neexistoval, ulož aspoň break_end (zpětná kompatibilita).
@@ -28240,7 +28246,8 @@ async function mobCheckin(type) {
           // bez pole `breaks` pauzu z hodin neodečetl; tehdy se zápis nezdaří celý.
           if (chybiSloupec(error)) console.warn('[break-end] update s breaks selhal, zkouším bez:', error.message)
           const r2 = chybiSloupec(error)
-            ? await _attMerFaze(_mer, 'zapis', withTimeout(sb.from('attendance').update({ break_end: timeStr }).eq('id', todayAttId).select('id'), 12000))
+            ? await _attMerFaze(_mer, 'zapis', mobUpdateRadek(sb.from('attendance').update({ break_end: timeStr }).eq('id', todayAttId).is('check_out', null).is('break_end', null).select('id'), todayAttId,
+              (r) => r.break_end && String(r.break_end).slice(0, 5) === timeStr.slice(0, 5)))
             : { error, data: null }
           if (r2.error) {
             showToast(chybaText(r2.error, 'Konec pauzy se nezapsal')); _pustZamek()
