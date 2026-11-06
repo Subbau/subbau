@@ -20100,9 +20100,6 @@ async function zajistiPrihlaseni() {
 }
 
 async function sendChatMessage() { return _jednouNaraz('mobchat', _sendChatMessageVnitrni) }
-// Po chybě (hlavně po vypršení limitu na slabém signálu) zpráva mohla na serveru projít. Při dalším
-// odeslání téhož textu se proto nejdřív zjistí, jestli už není uložená — jinak by odešla dvakrát.
-let _chatPoslednePokus = null
 async function _sendChatMessageVnitrni() {
   const input = document.getElementById('mob-chat-input')
   const msg = input?.value?.trim()
@@ -20120,21 +20117,6 @@ async function _sendChatMessageVnitrni() {
     p, new Promise((_, rej) => setTimeout(() => rej(new Error('Vypršel čas — zkuste to prosím znovu')), ms))
   ])
   let inserted, error
-  const pokus = _chatPoslednePokus && _chatPoslednePokus.msg === msg && Date.now() - _chatPoslednePokus.kdy < 5 * 60000 ? _chatPoslednePokus : null
-  if (pokus) {
-    try {
-      const { data: uz } = await withTimeout(sb.from('chat_messages').select('id')
-        .eq('worker_id', currentUser.id).eq('sender_id', currentUser.id).eq('message', msg)
-        .gte('created_at', new Date(pokus.kdy - 10000).toISOString()).limit(1), 8000)
-      if (uz && uz.length) {
-        _chatPoslednePokus = null
-        if (btn) btn.disabled = false
-        showToast('✅ Zpráva už odešla')
-        loadMobChat()
-        return
-      }
-    } catch (e) { console.warn('[chat] kontrola před opakovaným odesláním selhala:', (e && e.message) || e) }
-  }
   try {
     ;({ data: inserted, error } = await withTimeout(sb.from('chat_messages').insert({
       worker_id: currentUser.id,
@@ -20146,11 +20128,12 @@ async function _sendChatMessageVnitrni() {
   } catch (e) { error = e }
 
   if (btn) btn.disabled = false
-  if (error) _chatPoslednePokus = { msg, kdy: pokus ? pokus.kdy : Date.now() }
-  else _chatPoslednePokus = null
 
   if (error) {
-    showToast('❌ Chyba odeslání: ' + error.message)
+    // Na slabém signálu mohla zpráva na serveru projít, jen se ztratila odpověď — konverzace se za chvíli
+    // načte znovu, ať ji pracovník vidí, než ji pošle podruhé (Codex 6. 11. 2026).
+    showToast('❌ Chyba odeslání: ' + error.message + ' — zkontrolujte konverzaci, než zprávu pošlete znovu')
+    setTimeout(() => { try { loadMobChat() } catch (e) { console.warn('[chat] obnova po chybě:', e && e.message) } }, 2500)
     input.value = msg
     console.error('[sendChatMessage]', error)
     zapisChybuAppky('chat-odeslani', error?.message)
@@ -46631,10 +46614,12 @@ async function loadNotifWorkers() {
 }
 // Odeslání zprávy se nesmí spustit dvakrát naráz (dvojklik, Enter + klik, pomalá síť) — hromadná zpráva
 // by odešla všem dvakrát a lidem dvakrát zapípala (Codex 6. 11. 2026).
+// Zámek se po 60 s sám pustí — nedokončený požadavek by jinak zablokoval odesílání až do obnovení stránky.
 async function _jednouNaraz(klic, fn) {
-  if (window['_naraz_' + klic]) return
-  window['_naraz_' + klic] = true
-  try { return await fn() } finally { window['_naraz_' + klic] = false }
+  const k = '_naraz_' + klic
+  if (window[k] && Date.now() - window[k] < 60000) return
+  const znacka = window[k] = Date.now()
+  try { return await fn() } finally { if (window[k] === znacka) window[k] = 0 }
 }
 async function sendNotification() { return _jednouNaraz('notif', _sendNotificationVnitrni) }
 async function _sendNotificationVnitrni() {
