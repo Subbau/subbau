@@ -26202,13 +26202,23 @@ function resetCheckoutDialogToDefault() {
 async function getTodayRecord() {
   if (!currentUser) return
   const today = localDateStr()
+  const _ctuOd = Date.now()
   // Načti VŠECHNY záznamy pro dnešek (může být více směn)
   const { data, error } = await sb.from('attendance').select('*')
     .eq('worker_id', currentUser.id)
     .eq('work_date', today)
     .order('check_in', {ascending: false})
 
-  if (error) { console.error('[getTodayRecord]', error); updateMobStav(null, []); return }
+  // Zápis, který doběhl, zatímco čtení čekalo, je novější než tahle odpověď —
+  // ta ukazuje stav před ním (např. před pauzou) a nesmí ho přepsat (audit
+  // Codexem 5. 11. 2026). Další čtení po zápisu stav srovná.
+  if ((window._mobZapisKdy || 0) > _ctuOd) return
+  if (error) {
+    console.error('[getTodayRecord]', error)
+    // Chyba čtení není „nejsi v práci": běžící směna zůstává, jak ji telefon zná.
+    if (todayRecord && todayRecord.check_in && !todayRecord.check_out) return
+    updateMobStav(null, []); return
+  }
 
   // Směna přes půlnoc: kdo nastoupil včera večer a ještě neodešel, má záznam
   // pod VČEREJŠÍM datem. Bez tohohle dohledání by mu karta po půlnoci spadla
@@ -26811,6 +26821,38 @@ async function skupinaPracovnikaVDen(workerId, den) {
   return skupinaPracovnika(workerId)
 }
 
+// ZÁPIS ŘÁDKU DOCHÁZKY S OVĚŘENÍM PO ČASOVÉM LIMITU (audit Codexem 5. 11. 2026,
+// „pauza se nezapsala, příchod nejde"). Limit jen přestane čekat — požadavek ale
+// mohl na serveru doběhnout. Dřív se ukázala chyba, zámek se uvolnil a telefon
+// dál ukazoval běžící pauzu; po opakování se mohl správný konec pauzy posunout.
+// Po limitu se proto zeptáme, jestli je zápis v databázi (jeZapsano(řádek)) —
+// když ano, bere se jako uložený; když ne, vrací se chyba jako dřív.
+async function mobUpdateRadek(dotaz, id, jeZapsano) {
+  const limit = (ms) => new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), ms))
+  try {
+    return await Promise.race([dotaz, limit(12000)])
+  } catch (e) {
+    if (!/timeout/i.test(String((e && e.message) || e))) throw e
+    try {
+      const { data } = await Promise.race([sb.from('attendance').select('*').eq('id', id).maybeSingle(), limit(8000)])
+      if (data && jeZapsano(data)) return { data: [{ id }], error: null, overeno: true }
+    } catch (e2) { /* výsledek neznáme — hlásí se jako nezapsáno, jako dřív */ }
+    return { data: null, error: { message: 'timeout', code: 'timeout' } }
+  }
+}
+// Pauzy a konec dne z databáze těsně před zápisem pauzy: telefon přepisuje celé
+// pole `breaks`, a kdyby měl starou kopii (správce mezitím opravil pauzu, druhé
+// zařízení, starší odpověď), starší pauzy by se ztratily. Když čtení nevyjde do
+// 5 s, zůstane lokální kopie jako dřív.
+async function mobCerstvePauzy(id, current) {
+  try {
+    const { data } = await Promise.race([
+      sb.from('attendance').select('check_out,break_start,break_end,break2_start,break2_end,breaks').eq('id', id).maybeSingle(),
+      new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), 5000))])
+    if (data) { Object.assign(current, data); if (todayRecord && todayRecord.id === id) Object.assign(todayRecord, data) }
+  } catch (e) { /* lokální kopie */ }
+}
+
 // Zápis docházky, který se NESMÍ nepovést. Když databáze o sloupci team_id ještě
 // neví (neproběhla migrace), zapíše se záznam bez něj. Zapsaný příchod je
 // důležitější než evidence firmy.
@@ -26885,6 +26927,7 @@ async function mobCheckin(type) {
   const _mer = _attNoveMereni()
   const _stavPred = attPodpisStavu()
   let _zapsano = false
+  let _zamekUvolnen = false   // příchod uvolnil zámek dřív než finally — to pak cizí zámek nepouští
   // Panel s ruční adresou ukážeme až po zápisu (viz níž), ať nic nezdržuje.
   // DOCHÁZKA SE MUSÍ ZAPSAT VŽDYCKY. Dřív tady stálo `return`, když appka
   // neznala adresu stavby — pauza ani odchod se tím vůbec nezapsaly a lidem
@@ -27095,7 +27138,7 @@ async function mobCheckin(type) {
         try { if (typeof _dnDochazka === 'function') _dnDochazka('in', 'zapis', 'Příchod se nezapsal — chyba zápisu (' + kodChybyProDenik(error) + ')', { kod: error.code, stav: error.status }, 'chyba') } catch (x) { console.warn('[deník chyb]', x) } // eslint-disable-line no-undef
         return
       }
-      _zapsano = true; _attMerHotovo(_mer)
+      _zapsano = true; window._mobZapisKdy = Date.now(); _attMerHotovo(_mer)
       todayAttId = data.id
       todayRecord = { ...data }  // Ulož lokálně okamžitě
       // Aktualizuj UI ihned z čerstvých dat — nezávisle na serveru
@@ -27113,14 +27156,22 @@ async function mobCheckin(type) {
         // Zeptej se na adresu pracoviště (jen pokud ještě není potvrzená)
         askAddressIfNeeded(data.id, 'Příchod')
       }
-      // Přehled dnešních směn dotáhneme JEDNÍM awaitovaným dotazem (bez závodu s okamžitým renderem).
-      // Aktivní směnu držíme z právě vloženého záznamu — nesmí ji přepsat pomalejší čtení.
+      // Příchod je zapsaný a vidět — zámek se uvolní HNED. Dřív se tu čekalo na
+      // dotažení přehledu bez limitu a na slabém signálu pauza hlásila „Počkejte…"
+      // a pak „slabé připojení", i když příchod už byl uložený (audit Codexem
+      // 5. 11. 2026). Přehled se dotahuje s limitem 8 s a jen když se mezitím
+      // nezapsalo nic novějšího (pauza) — pozdní odpověď nesmí vrátit starší stav.
+      clearTimeout(_stuckGuard)
+      _zamekUvolnen = true
+      checkinInProgress = false
+      window.zapisProbiha = false
+      const _zapisKdyPred = window._mobZapisKdy || 0
       try {
-        const { data: allToday } = await sb.from('attendance').select('*')
+        const { data: allToday } = await withTimeout(sb.from('attendance').select('*')
           .eq('worker_id', currentUser.id)
           .eq('work_date', today)
-          .order('check_in', { ascending: false })
-        if (allToday && allToday.length) {
+          .order('check_in', { ascending: false }), 8000)
+        if (allToday && allToday.length && (window._mobZapisKdy || 0) === _zapisKdyPred) {
           // Jistota: aktivní = náš právě vytvořený záznam (má příchod, nemá odchod)
           const activeNow = allToday.find(r => r.id === data.id) ||
                             allToday.find(r => r.check_in && !r.check_out)
@@ -27161,6 +27212,16 @@ async function mobCheckin(type) {
         todayRecord = { ...fetched }
       }
 
+      if (type === 'break-start' || type === 'break-end' || type === 'break-fix') {
+        await _attMerFaze(_mer, 'kontrola', mobCerstvePauzy(todayAttId, current))
+        if (current.check_out) {
+          showToast('ℹ️ Tahle směna už je uzavřená')
+          todayAttId = null; todayRecord = null
+          checkinInProgress = false
+          getTodayRecord(); loadMobWeek()
+          return
+        }
+      }
       // Pracovní kopie pro aktualizace
       const updated = { ...current }
 
@@ -27231,7 +27292,8 @@ async function mobCheckin(type) {
         const zapisT = { breaks: poleT }
         if (poleT.length === 1) { zapisT.break_start = bsT + ':00'; zapisT.break_end = beT + ':00' }
         else if (poleT.length === 2) { zapisT.break2_start = bsT + ':00'; zapisT.break2_end = beT + ':00' }
-        let { data: radkyT, error: chybaT } = await _attMerFaze(_mer, 'zapis', withTimeout(sb.from('attendance').update(zapisT).eq('id', todayAttId).select('id'), 12000))
+        let { data: radkyT, error: chybaT } = await _attMerFaze(_mer, 'zapis', mobUpdateRadek(sb.from('attendance').update(zapisT).eq('id', todayAttId).select('id'), todayAttId,
+          (r) => Array.isArray(r.breaks) && r.breaks.length >= poleT.length && r.breaks.some(b => b && String(b.bs).slice(0, 5) === bsT)))
         if (chybaT && chybiSloupec(chybaT)) {
           // Starší databáze nemusí mít sloupec `breaks` — pauzu ulož aspoň do časů.
           // Jen při chybějícím sloupci (chybiSloupec, D3: dřív při jakékoli chybě, i při výpadku
@@ -27247,7 +27309,7 @@ async function mobCheckin(type) {
           return
         }
         if (!radkyT || !radkyT.length) { pauzaNetrefila(type); return }
-        _zapsano = true; _attMerHotovo(_mer)
+        _zapsano = true; window._mobZapisKdy = Date.now(); _attMerHotovo(_mer)
         Object.assign(updated, zapisT)
         todayRecord = { ...updated }
         showToast('☕ Přestávka ' + nastT.minut + ' min zapsaná — ' + bsT + '–' + beT)
@@ -27263,14 +27325,15 @@ async function mobCheckin(type) {
           try { if (typeof _dnDochazka === 'function') _dnDochazka(type, 'pauza-probiha', 'Začátek pauzy — přestávka už probíhá', {}, 'varovani') } catch (x) { console.warn('[deník chyb]', x) } // eslint-disable-line no-undef
           return
         }
-        const { data: radkyZ, error } = await _attMerFaze(_mer, 'zapis', withTimeout(sb.from('attendance').update({ break_start: timeStr, break_end: null }).eq('id', todayAttId).select('id'), 12000))
+        const { data: radkyZ, error } = await _attMerFaze(_mer, 'zapis', mobUpdateRadek(sb.from('attendance').update({ break_start: timeStr, break_end: null }).eq('id', todayAttId).select('id'), todayAttId,
+          (r) => r.break_start && String(r.break_start).slice(0, 5) === timeStr.slice(0, 5) && !r.break_end))
         if (error) {
           showToast(chybaText(error, 'Začátek pauzy se nezapsal')); checkinInProgress = false
           try { if (typeof _dnDochazka === 'function') _dnDochazka(type, 'zapis', 'Začátek pauzy se nezapsal — chyba zápisu (' + kodChybyProDenik(error) + ')', { kod: error.code, stav: error.status }, 'chyba') } catch (x) { console.warn('[deník chyb]', x) } // eslint-disable-line no-undef
           return
         }
         if (!radkyZ || !radkyZ.length) { pauzaNetrefila(type); return }
-        _zapsano = true; _attMerHotovo(_mer)
+        _zapsano = true; window._mobZapisKdy = Date.now(); _attMerHotovo(_mer)
         updated.break_start = timeStr
         updated.break_end = null
         todayRecord = { ...updated }  // Aktualizuj lokální kopii
@@ -27289,7 +27352,8 @@ async function mobCheckin(type) {
         // Přidej dokončenou pauzu do pole breaks (kvůli více pauzám za směnu)
         const existingBreaks = Array.isArray(current.breaks) ? current.breaks.slice() : []
         existingBreaks.push({ bs: current.break_start.slice(0,5), be: timeStr.slice(0,5) })
-        let { data: radkyK, error } = await _attMerFaze(_mer, 'zapis', withTimeout(sb.from('attendance').update({ break_end: timeStr, breaks: existingBreaks }).eq('id', todayAttId).select('id'), 12000))
+        let { data: radkyK, error } = await _attMerFaze(_mer, 'zapis', mobUpdateRadek(sb.from('attendance').update({ break_end: timeStr, breaks: existingBreaks }).eq('id', todayAttId).select('id'), todayAttId,
+          (r) => r.break_end && String(r.break_end).slice(0, 5) === timeStr.slice(0, 5)))
         if (error) {
           // Kdyby sloupec breaks neexistoval, ulož aspoň break_end (zpětná kompatibilita).
           // Jen při chybějícím sloupci (chybiSloupec) — při výpadku sítě by break_end
@@ -27306,7 +27370,7 @@ async function mobCheckin(type) {
           radkyK = r2.data
         }
         if (!radkyK || !radkyK.length) { pauzaNetrefila(type); return }
-        _zapsano = true; _attMerHotovo(_mer)
+        _zapsano = true; window._mobZapisKdy = Date.now(); _attMerHotovo(_mer)
         updated.break_end = timeStr
         updated.breaks = existingBreaks
         todayRecord = { ...updated }  // Aktualizuj lokální kopii
@@ -27517,9 +27581,9 @@ async function mobCheckin(type) {
           // `.is('check_out', null)`: zápis projde jen u směny, která je pořád otevřená.
           // Kdyby ji mezi čtením a zápisem uzavřel SubBau, nezmění se ani řádek
           // a platí níž existující hláška „Odchod se neuložil“ (D2).
-          const { data: outRows, error: outErr } = await _attMerFaze(_mer, 'zapis', withTimeout(sb.from('attendance').update({
+          const { data: outRows, error: outErr } = await _attMerFaze(_mer, 'zapis', mobUpdateRadek(sb.from('attendance').update({
             check_out: timeStr, total_hours: h
-          }).eq('id', todayAttId).is('check_out', null).select('id'), 12000))
+          }).eq('id', todayAttId).is('check_out', null).select('id'), todayAttId, (r) => !!r.check_out))
           if (outErr) {
             showToast(chybaText(outErr, 'Odchod se nezapsal')); checkinInProgress = false
             try { if (typeof _dnDochazka === 'function') _dnDochazka('out', 'zapis', 'Odchod se nezapsal — chyba zápisu (' + kodChybyProDenik(outErr) + ')', { kod: outErr.code, stav: outErr.status }, 'chyba') } catch (x) { console.warn('[deník chyb]', x) } // eslint-disable-line no-undef
@@ -27531,7 +27595,7 @@ async function mobCheckin(type) {
             try { if (typeof _dnDochazka === 'function') _dnDochazka('out', 'neulozil-radek', 'Odchod se neuložil — zápis nezměnil žádný řádek', {}, 'chyba') } catch (x) { console.warn('[deník chyb]', x) } // eslint-disable-line no-undef
             checkinInProgress = false; return
           }
-          _zapsano = true; _attMerHotovo(_mer)
+          _zapsano = true; window._mobZapisKdy = Date.now(); _attMerHotovo(_mer)
           updated.check_out = timeStr
           updated.total_hours = h
           // Poloha při odchodu — na pozadí, nic se tím nezdržuje. Vidí ji
@@ -27601,8 +27665,7 @@ async function mobCheckin(type) {
     try { if (typeof _dnDochazka === 'function') _dnDochazka(type, 'vyjimka', 'Docházka se nezapsala — výjimka: ' + String((e && e.message) || e).slice(0, 200), { nazev: e && e.name, stack: e && e.stack ? String(e.stack).slice(0, 1500) : undefined }, 'chyba') } catch (x) { console.warn('[deník chyb]', x) } // eslint-disable-line no-undef
   } finally {
     clearTimeout(_stuckGuard)
-    checkinInProgress = false
-    window.zapisProbiha = false
+    if (!_zamekUvolnen) { checkinInProgress = false; window.zapisProbiha = false }
     // 2. 11. 2026: docházka se po tomhle klepnutí přepnula → tlačítka 2 s klid
     // (attZamkniPoZapisu). Pomalý zápis, který prošel → řádek do deníku.
     // Zápis, který prošel, zamyká vždy — i když tlačítka vypadají stejně jako
