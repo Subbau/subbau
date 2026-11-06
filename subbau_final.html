@@ -4792,6 +4792,9 @@ async function workerPdfPrevPage() {
 function setupWorkerSignCanvas() {
   const c = workerSignCanvas; if (!c) return
   initSignaturePad(c, { width: 2.4 })
+  // Nová smlouva = čisté plátno: initSignaturePad existující pixely zachovává a kontrola před uložením
+  // ověřuje právě pixely, takže by se uložil předchozí nakreslený podpis (Codex 6. 11. 2026).
+  if (c._sigPad && c._sigPad.clear) c._sigPad.clear()
   workerSignCtx = c.getContext('2d')
   const hint = document.getElementById('sign-canvas-hint')
   if (hint) {
@@ -5577,7 +5580,10 @@ function clearAdminSignCanvas() {
 //  1) localStorage — rychlá lokální kopie, funguje i offline
 //  2) Supabase Storage (bucket "contracts", složka signatures/) — stejný podpis
 //     je pak dostupný i z jiného zařízení (počítač i tablet stejného admina).
-const ADMIN_SIG_KEY = 'adminSavedSignature'
+// Lokální záloha podpisu patří ÚČTU (Codex 6. 11. 2026): se společným klíčem by další správce na stejném
+// počítači dostal podpis předchozího (a odhlášení ho nemaže).
+const ADMIN_SIG_KEY_ZAKLAD = 'adminSavedSignature'
+function adminSigKlic() { return ADMIN_SIG_KEY_ZAKLAD + ':' + ((typeof currentUser !== 'undefined' && currentUser?.id) ? currentUser.id : 'anon') }
 function adminSigStoragePath() {
   const uid = (typeof currentUser !== 'undefined' && currentUser?.id) ? currentUser.id : 'anon'
   return 'signatures/admin_' + uid + '.png'
@@ -5624,7 +5630,7 @@ async function saveAdminSignatureMemory() {
     dataUrl = canvas.toDataURL('image/png')
     blob = await new Promise(r => canvas.toBlob(r, 'image/png'))
   }
-  const okLocal = lsSet(ADMIN_SIG_KEY, dataUrl)
+  const okLocal = lsSet(adminSigKlic(), dataUrl)
   let okCloud = false
   let cloudErrMsg = ''
   const cloudAttempted = !!(blob && typeof currentUser !== 'undefined' && currentUser?.id)
@@ -5669,13 +5675,13 @@ async function useAdminSignatureMemory() {
             r.onerror = () => res(null)
             r.readAsDataURL(blob)
           })
-          if (saved) lsSet(ADMIN_SIG_KEY, saved)
+          if (saved) lsSet(adminSigKlic(), saved)
         }
       }
     } catch(e) { console.warn('[admin sig] cloud fetch selhal:', e?.message) }
   }
   // Cloud nedostupný (offline) nebo tam zatím nic není → zkus alespoň lokální zálohu
-  if (!saved) saved = lsGet(ADMIN_SIG_KEY)
+  if (!saved) saved = lsGet(adminSigKlic())
   if (!saved) { showToast('⚠️ Žádný uložený podpis — nejprve ho nakreslete a uložte tlačítkem výše'); refreshAdminSavedSigBtn(); return }
   const canvas = document.getElementById('admin-sign-canvas')
   if (!canvas) return
@@ -5699,7 +5705,7 @@ async function useAdminSignatureMemory() {
 async function refreshAdminSavedSigBtn() {
   const btn = document.getElementById('admin-use-saved-sig-btn')
   if (!btn) return
-  if (lsGet(ADMIN_SIG_KEY)) { btn.style.display = 'inline-block'; return }
+  if (lsGet(adminSigKlic())) { btn.style.display = 'inline-block'; return }
   btn.style.display = 'none'
   // Lokálně nic není — zkus zjistit, jestli existuje v cloudu (jiné zařízení)
   if (typeof currentUser === 'undefined' || !currentUser?.id) return
@@ -5863,7 +5869,7 @@ async function submitAdminSignatureWithPlacement() {
 // Po nahrání nové verze se snadno pozná, jestli se opravdu nasadila: otevřete
 // appku, zmáčkněte F12 (na Macu ⌥⌘I) a v konzoli je vypsané tohle datum. Když
 // tam svítí starší, prohlížeč nebo GitHub drží starou verzi.
-const SUBBAU_VERZE = '2026-11-06 f — Mazání fotek a smluv a nahrávání dokladů bez ztráty souboru'
+const SUBBAU_VERZE = '2026-11-06 g — Podpisy a smlouvy: nic se nepřepíše ani neuloží naprázdno'
 console.log('SubBau docházka — verze ' + SUBBAU_VERZE)
 // Verze i dole v menu správce. Když někdo novinku „nevidí", podle ní se hned
 // pozná, jestli nemá otevřenou starou kopii appky — bez hledání v konzoli.
@@ -43547,7 +43553,11 @@ async function ensureContractOriginal(contractId) {
 // Jediná cesta, kterou se mění file_url smlouvy — vždy nejdřív zazálohuje původní verzi.
 async function updateContractFile(contractId, updateData) {
   if (updateData && updateData.file_url) await ensureContractOriginal(contractId)
-  return sb.from('contracts').update(updateData).eq('id', contractId)
+  // .select('id'): update, který nezměnil ani jeden řádek (smlouva mezitím zmizela, chybí oprávnění), se
+  // dřív tvářil jako úspěch (Codex 6. 11. 2026).
+  const r = await sb.from('contracts').update(updateData).eq('id', contractId).select('id')
+  if (!r.error && (!r.data || !r.data.length)) return { error: { message: 'Zápis smlouvy nezměnil žádný řádek — smlouva se mezitím změnila, nebo chybí oprávnění. Načtěte smlouvy znovu.' } }
+  return r
 }
 
 // Stáhne PDF rovnou do počítače (ne jen otevře v záložce).
