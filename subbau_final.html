@@ -5879,7 +5879,7 @@ async function submitAdminSignatureWithPlacement() {
 // Po nahrání nové verze se snadno pozná, jestli se opravdu nasadila: otevřete
 // appku, zmáčkněte F12 (na Macu ⌥⌘I) a v konzoli je vypsané tohle datum. Když
 // tam svítí starší, prohlížeč nebo GitHub drží starou verzi.
-const SUBBAU_VERZE = '2026-11-06 h — Živé spojení pracovníka se samo obnoví'
+const SUBBAU_VERZE = '2026-11-06 i — Zprávy a chat se neodešlou dvakrát'
 console.log('SubBau docházka — verze ' + SUBBAU_VERZE)
 // Verze i dole v menu správce. Když někdo novinku „nevidí", podle ní se hned
 // pozná, jestli nemá otevřenou starou kopii appky — bez hledání v konzoli.
@@ -19235,7 +19235,11 @@ async function zajistiPrihlaseni() {
   return !!currentUser
 }
 
-async function sendChatMessage() {
+async function sendChatMessage() { return _jednouNaraz('mobchat', _sendChatMessageVnitrni) }
+// Po chybě (hlavně po vypršení limitu na slabém signálu) zpráva mohla na serveru projít. Při dalším
+// odeslání téhož textu se proto nejdřív zjistí, jestli už není uložená — jinak by odešla dvakrát.
+let _chatPoslednePokus = null
+async function _sendChatMessageVnitrni() {
   const input = document.getElementById('mob-chat-input')
   const msg = input?.value?.trim()
   if (!msg) return
@@ -19252,6 +19256,21 @@ async function sendChatMessage() {
     p, new Promise((_, rej) => setTimeout(() => rej(new Error('Vypršel čas — zkuste to prosím znovu')), ms))
   ])
   let inserted, error
+  const pokus = _chatPoslednePokus && _chatPoslednePokus.msg === msg && Date.now() - _chatPoslednePokus.kdy < 5 * 60000 ? _chatPoslednePokus : null
+  if (pokus) {
+    try {
+      const { data: uz } = await withTimeout(sb.from('chat_messages').select('id')
+        .eq('worker_id', currentUser.id).eq('sender_id', currentUser.id).eq('message', msg)
+        .gte('created_at', new Date(pokus.kdy - 10000).toISOString()).limit(1), 8000)
+      if (uz && uz.length) {
+        _chatPoslednePokus = null
+        if (btn) btn.disabled = false
+        showToast('✅ Zpráva už odešla')
+        loadMobChat()
+        return
+      }
+    } catch (e) { console.warn('[chat] kontrola před opakovaným odesláním selhala:', (e && e.message) || e) }
+  }
   try {
     ;({ data: inserted, error } = await withTimeout(sb.from('chat_messages').insert({
       worker_id: currentUser.id,
@@ -19263,6 +19282,8 @@ async function sendChatMessage() {
   } catch (e) { error = e }
 
   if (btn) btn.disabled = false
+  if (error) _chatPoslednePokus = { msg, kdy: pokus ? pokus.kdy : Date.now() }
+  else _chatPoslednePokus = null
 
   if (error) {
     showToast('❌ Chyba odeslání: ' + error.message)
@@ -19763,7 +19784,8 @@ async function openAdminChat(workerId, workerName) {
   })().catch(e => console.warn('[openAdminChat] pozadí:', e?.message))
 }
 
-async function sendAdminChatMessage() {
+async function sendAdminChatMessage() { return _jednouNaraz('adminchat', _sendAdminChatMessageVnitrni) }
+async function _sendAdminChatMessageVnitrni() {
   const input = document.getElementById('admin-chat-input')
   const msg = input?.value?.trim()
   if (!msg) return
@@ -45743,7 +45765,15 @@ async function loadNotifWorkers() {
     + '</optgroup>'
   if (vybrane && [...sel.options].some(o => o.value === vybrane)) sel.value = vybrane
 }
-async function sendNotification() {
+// Odeslání zprávy se nesmí spustit dvakrát naráz (dvojklik, Enter + klik, pomalá síť) — hromadná zpráva
+// by odešla všem dvakrát a lidem dvakrát zapípala (Codex 6. 11. 2026).
+async function _jednouNaraz(klic, fn) {
+  if (window['_naraz_' + klic]) return
+  window['_naraz_' + klic] = true
+  try { return await fn() } finally { window['_naraz_' + klic] = false }
+}
+async function sendNotification() { return _jednouNaraz('notif', _sendNotificationVnitrni) }
+async function _sendNotificationVnitrni() {
   const workerId = document.getElementById('notif-worker').value
   const type = document.getElementById('notif-type').value
   const message = document.getElementById('notif-message').value.trim()
