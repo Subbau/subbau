@@ -6734,7 +6734,7 @@ async function submitAdminSignatureWithPlacement() {
 // Po nahrání nové verze se snadno pozná, jestli se opravdu nasadila: otevřete
 // appku, zmáčkněte F12 (na Macu ⌥⌘I) a v konzoli je vypsané tohle datum. Když
 // tam svítí starší, prohlížeč nebo GitHub drží starou verzi.
-const SUBBAU_VERZE = '2026-11-06 c — Peníze: výpadek historie sazeb a stavu faktury se neschová'
+const SUBBAU_VERZE = '2026-11-06 d — Zabezpečení: text z databáze se do stránky vkládá bezpečně'
 console.log('StavKo docházka — verze ' + SUBBAU_VERZE)
 // Verze i dole v menu správce. Když někdo novinku „nevidí", podle ní se hned
 // pozná, jestli nemá otevřenou starou kopii appky — bez hledání v konzoli.
@@ -13790,7 +13790,7 @@ async function renderProvizeContent() {
                    style="width:17px;height:17px;cursor:pointer;accent-color:var(--blue)">
             <span style="font-size:10.5px;font-weight:700;color:var(--text3);margin-left:5px;letter-spacing:.02em">počítat</span>
           </label>
-          <span>🏢 ${firm}</span>
+          <span>🏢 ${escAttr(firm)}</span>
           ${isNoFirm ? '' : `<button onclick="event.stopPropagation();schovejFirmuZProvizi(${firmIdx})"
             title="Schovat tuhle firmu všude v appce — v Provizích, Docházce, Kalendáři, Fakturách… Hodí se, když ukazujete appku zákazníkovi. Vrátí se tlačítkem vlevo dole."
             style="margin-left:4px;padding:3px 9px;font-size:11.5px;font-weight:700;border:1px solid var(--brd);border-radius:7px;cursor:pointer;background:#fff;color:var(--text2);font-family:inherit">🙈 Schovat</button>`}
@@ -14929,16 +14929,19 @@ function hlavickaFirmyHtml(firma, sloupcu, popis) {
   return `<tr class="tbl-group"><td colspan="${sloupcu}" style="padding:9px 12px;background:${gc.bg};border-top:4px solid ${gc.border};border-bottom:1.5px solid ${gc.border}"><span style="font-size:14px;font-weight:800;color:${gc.text}">🏢 ${escAttr(f)}</span>${popis ? `<span style="font-size:12px;color:var(--text3);margin-left:10px">${escAttr(popis)}</span>` : ''}</td></tr>`
 }
 
+// Čas pauzy z databáze se vkládá do HTML přehledů — pracovník může do `breaks` zapsat cokoli
+// (Codex 6. 11. 2026), proto jen číslice a dvojtečka, nejvýš 8 znaků.
+function _casPauzy(v) { return String(v == null ? '' : v).replace(/[^0-9:]/g, '').slice(0, 8) }
 function groupCellHtml(teamName, subName) {
   if (!teamName && !subName) return '<span style="color:var(--text3)">—</span>'
   let html = '<div class="skupina-pilulky" style="display:flex;flex-direction:column;gap:4px;align-items:flex-start">'
   if (teamName) {
     const c = groupColor(teamName, 'company')
-    html += `<span class="pill" style="background:${c.bg};color:${c.text};border:1px solid ${c.border};white-space:nowrap">🏢 ${teamName}</span>`
+    html += `<span class="pill" style="background:${c.bg};color:${c.text};border:1px solid ${c.border};white-space:nowrap">🏢 ${escAttr(teamName)}</span>`
   }
   if (subName) {
     const c = groupColor(subName, 'sub')
-    html += `<span class="pill" style="background:#fff;color:${c.text};border:1.5px solid ${c.border};white-space:nowrap">👥 ${subName}</span>`
+    html += `<span class="pill" style="background:#fff;color:${c.text};border:1.5px solid ${c.border};white-space:nowrap">👥 ${escAttr(subName)}</span>`
   }
   html += '</div>'
   return html
@@ -16682,7 +16685,7 @@ async function loadTodayTimeline() {
           const b = perFirm.get(f)
           const c = groupColor(f, 'company')
           if (!jeDnes) b.running = 0
-          return `<div class="sc today-bub" style="border-top:3px solid ${c.border};background:${c.bg}" title="${f.replace(/"/g,'&quot;')} — ${b.total} v práci${jeDnes ? ', ' + b.running + ' právě pracuje' : ''}"><div class="sc-lbl" style="color:${c.text};font-weight:800">🏢 ${f}</div><div class="today-bub-num" style="display:flex;align-items:baseline;gap:6px"><span class="sc-val" style="color:${c.text}">${b.total}</span>${b.running ? `<span style="font-size:11px;color:var(--text2);white-space:nowrap">▶ ${b.running}</span>` : ''}</div></div>`
+          return `<div class="sc today-bub" style="border-top:3px solid ${c.border};background:${c.bg}" title="${f.replace(/"/g,'&quot;')} — ${b.total} v práci${jeDnes ? ', ' + b.running + ' právě pracuje' : ''}"><div class="sc-lbl" style="color:${c.text};font-weight:800">🏢 ${escAttr(f)}</div><div class="today-bub-num" style="display:flex;align-items:baseline;gap:6px"><span class="sc-val" style="color:${c.text}">${b.total}</span>${b.running ? `<span style="font-size:11px;color:var(--text2);white-space:nowrap">▶ ${b.running}</span>` : ''}</div></div>`
         }).join('')}
       </div>`
   }
@@ -16745,7 +16748,7 @@ async function loadTodayTimeline() {
     if (!g.avatar && r.worker?.avatar_url) g.avatar = r.worker.avatar_url
     // Pauzy: primárně z pole breaks (víc pauz za směnu), fallback na break_start/break_end (+ break2)
     if (Array.isArray(r.breaks) && r.breaks.length) {
-      r.breaks.forEach(b => { if (b && b.bs) g.breaks.push({ bs: b.bs, be: b.be || null }) })
+      r.breaks.forEach(b => { if (b && b.bs) g.breaks.push({ bs: _casPauzy(b.bs), be: b.be ? _casPauzy(b.be) : null }) })
     } else {
       if (r.break_start) g.breaks.push({ bs: r.break_start.slice(0,5), be: r.break_end ? r.break_end.slice(0,5) : null })
       if (r.break2_start) g.breaks.push({ bs: r.break2_start.slice(0,5), be: r.break2_end ? r.break2_end.slice(0,5) : null })
@@ -16809,7 +16812,7 @@ async function loadTodayTimeline() {
           // Podskupina drobným písmem pod jménem — např. „Hoffmann · 👥 Parta A"
           const subC = g.sub ? groupColor(g.sub, 'sub') : null
           const groupLine = (g.firm || g.sub)
-            ? `<div style="font-size:10.5px;line-height:1.35;margin-top:2px;color:var(--text3)">${g.firm ? '🏢 ' + g.firm : ''}${(g.firm && g.sub) ? ' · ' : ''}${g.sub ? `<span style="color:${subC.text};font-weight:700">👥 ${g.sub}</span>` : ''}</div>`
+            ? `<div style="font-size:10.5px;line-height:1.35;margin-top:2px;color:var(--text3)">${g.firm ? '🏢 ' + escAttr(g.firm) : ''}${(g.firm && g.sub) ? ' · ' : ''}${g.sub ? `<span style="color:${subC.text};font-weight:700">👥 ${escAttr(g.sub)}</span>` : ''}</div>`
             : ''
           // Pauzy vedle sebe (nesčítají se), každá jako samostatný odznak
           const breaksHtml = g.breaks.length
@@ -17647,7 +17650,7 @@ async function loadKWData() {
     if (co && (!di.co || co > di.co)) di.co = co
     // pauzy z tohoto záznamu: primárně pole breaks (víc pauz), fallback break_start/break_end (+ break2)
     if (Array.isArray(r.breaks) && r.breaks.length) {
-      r.breaks.forEach(b => { if (b && b.bs) di.breaks.push({ bs: b.bs, be: b.be || null }) })
+      r.breaks.forEach(b => { if (b && b.bs) di.breaks.push({ bs: _casPauzy(b.bs), be: b.be ? _casPauzy(b.be) : null }) })
     } else {
       if (r.break_start) di.breaks.push({ bs: r.break_start.slice(0,5), be: r.break_end ? r.break_end.slice(0,5) : null })
       if (r.break2_start) di.breaks.push({ bs: r.break2_start.slice(0,5), be: r.break2_end ? r.break2_end.slice(0,5) : null })
@@ -24233,7 +24236,7 @@ async function showCompanyWorkers(companyName) {
   }
   dlg.innerHTML = `<div style="background:#fff;border-radius:16px;padding:28px;width:100%;max-width:720px;max-height:88vh;overflow-y:auto;box-shadow:0 8px 32px rgba(0,0,0,.3)">
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:18px">
-      <div style="font-size:20px;font-weight:800;color:#211D1A">🏢 ${companyName}</div>
+      <div style="font-size:20px;font-weight:800;color:#211D1A">🏢 ${escAttr(companyName)}</div>
       <button class="x-close" onclick="document.getElementById('company-workers-dialog').style.display='none'" style="background:none;border:none;cursor:pointer;color:#888;display:inline-flex;align-items:center;justify-content:center"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:20px;height:20px;display:block"><path d="M18 6L6 18M6 6l12 12"/></svg></button>
     </div>
     <div style="font-size:13px;font-weight:700;color:var(--green);text-transform:uppercase;letter-spacing:1px;margin-bottom:6px">👷 Pracují zde teď (${current.length})</div>
@@ -25661,7 +25664,7 @@ function renderTeams() {
         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;background:${gc.bg};margin:-14px -14px 10px -14px;padding:12px 14px;border-radius:10px 10px 0 0">
           <div>
             <div style="font-size:15px;font-weight:800;color:${gc.text}">🏢 ${escAttr(cleanTeamName(t.name))}</div>
-            ${t.location ? `<div style="font-size:12px;color:var(--text2)">📍 ${t.location}</div>` : ''}
+            ${t.location ? `<div style="font-size:12px;color:var(--text2)">📍 ${escAttr(t.location)}</div>` : ''}
             <div style="margin-top:6px;display:flex;align-items:center;gap:6px">
               <span style="font-size:11px;color:var(--text3)">🏢 Firma:</span>
               <select onchange="setTeamCompany('${t.id}', this.value)" style="font-size:11px;padding:3px 6px;border:1px solid var(--brd);border-radius:6px;font-family:inherit;max-width:200px">
@@ -29145,7 +29148,7 @@ async function loadMobDocs() {
             ${!isRejected ? validityBadgeHtml(d.valid_until, undefined, d.no_expiry) : ''}
           </div>
         </div>
-        ${d.file_url ? `<a href="${d.file_url}" target="_blank" style="flex-shrink:0;display:flex;align-items:center;justify-content:center;width:36px;height:36px;border:1.5px solid #211D1A;border-radius:10px;color:#211D1A;text-decoration:none" title="Zobrazit"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:17px;height:17px"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg></a>` : ''}
+        ${d.file_url ? `<a href="${escAttr(d.file_url)}" target="_blank" style="flex-shrink:0;display:flex;align-items:center;justify-content:center;width:36px;height:36px;border:1.5px solid #211D1A;border-radius:10px;color:#211D1A;text-decoration:none" title="Zobrazit"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:17px;height:17px"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg></a>` : ''}
       </div>
       ${isRejected && d.reject_reason ? `<div style="font-size:11.5px;color:#9c3b22;margin-top:10px;padding:8px 11px;background:#f7e9e5;border-radius:9px">Důvod: ${escAttr(d.reject_reason)}</div>` : ''}
       ${isRejected ? `<button onclick="openUploadForm('${jsStr(d.doc_type)}')" style="margin-top:10px;width:100%;padding:12px;background:#9c3b22;color:#fff;border:none;border-radius:11px;font-size:13px;font-weight:800;cursor:pointer;font-family:'Archivo',-apple-system,sans-serif;display:flex;align-items:center;justify-content:center;gap:8px"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:16px;height:16px"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="M17 8l-5-5-5 5"/><path d="M12 3v12"/></svg><span>Nahrát znovu</span></button>` : ''}
@@ -30710,7 +30713,7 @@ function loadMobProfil(profile) {
         <button onclick="document.getElementById('mob-car-edit').style.display='none'" style="width:100%;margin-top:8px;padding:8px;background:var(--bg);border:1px solid var(--brd);border-radius:8px;font-size:12px;cursor:pointer;font-family:inherit">Zrušit</button>
       </div>
       ${[['Tým',profile.team?.name||'—'],['Lokace',profile.team?.location||'—']].map(([l,v])=>`
-      <div style="display:flex;justify-content:space-between;padding:9px 0;border-bottom:1px solid var(--brd)"><span style="font-size:12px;color:var(--text3)">${l}</span><span style="font-size:13px;font-weight:600;color:#211D1A">${v}</span></div>`).join('')}
+      <div style="display:flex;justify-content:space-between;padding:9px 0;border-bottom:1px solid var(--brd)"><span style="font-size:12px;color:var(--text3)">${l}</span><span style="font-size:13px;font-weight:600;color:#211D1A">${escAttr(v)}</span></div>`).join('')}
       <div id="mob-puntiky"></div>
       ${zadostOSmazaniHtml(profile)}
       ${(isMobile() && !isAppInstalled()) ? `
@@ -47040,7 +47043,7 @@ async function loadMobVacations() {
         <div style="min-width:0">
           <div style="display:inline-flex;align-items:center;gap:5px;background:#fff;border:1px solid ${info.color};color:${info.color};font-size:11px;font-weight:800;padding:3px 9px;border-radius:20px;margin-bottom:6px">${info.icon}${info.label}</div>
           <div style="font-size:13px;font-weight:700">${czd(v.date_from)} → ${czd(v.date_to)}</div>
-          <div style="font-size:12px;color:var(--text2);margin-top:2px">${days} ${days===1?'den':'dní'}${absNote(v)?' · '+absNote(v):''}</div>
+          <div style="font-size:12px;color:var(--text2);margin-top:2px">${days} ${days===1?'den':'dní'}${absNote(v)?' · '+escAttr(absNote(v)):''}</div>
           <div style="font-size:11px;color:${color};margin-top:3px">${stav}</div>
         </div>
         ${!isPast ? `<button onclick="deleteVacation('${v.id}','${jsStr(t)}')" style="flex-shrink:0;padding:4px 10px;background:none;border:1px solid var(--red);border-radius:6px;color:var(--red);font-size:11px;cursor:pointer;font-family:inherit">Smazat</button>` : ''}
@@ -47178,7 +47181,7 @@ async function loadWdVacations() {
           <div style="min-width:0;flex:1 1 auto">
             <div style="display:inline-flex;align-items:center;gap:5px;background:${info.bg};border:1px solid ${info.color};color:${info.color};font-size:10.5px;font-weight:800;padding:2px 8px;border-radius:20px;margin-bottom:4px">${info.icon}${info.label}</div>
             <div style="font-weight:600;font-size:13px">${cz(v.date_from)} → ${cz(v.date_to)}</div>
-            <div style="font-size:12px;color:var(--text2)">${days} ${days===1?'den':'dní'}${absNote(v)?' · '+absNote(v):''}</div>
+            <div style="font-size:12px;color:var(--text2)">${days} ${days===1?'den':'dní'}${absNote(v)?' · '+escAttr(absNote(v)):''}</div>
           </div>
           <div style="display:flex;align-items:center;gap:8px;flex-shrink:0;margin-left:auto">
             <span class="pill ${isNow?'pb':isPast?'pq':'pg'}">${isNow?'Probíhá':isPast?'Proběhla':'Naplánována'}</span>
@@ -50261,7 +50264,7 @@ async function loadWdFinance() {
       <div style="display:flex;justify-content:space-between;padding:9px 14px;border-bottom:1px solid var(--brd);background:var(--amber-l)"><span style="font-size:13px;font-weight:600">Hrubá marže</span><span style="font-weight:700;color:var(--amber)">€${grossMargin.toFixed(2)}</span></div>
       <div style="display:flex;justify-content:space-between;padding:12px 14px;background:${netProfit>=0?'var(--green-l)':'var(--red-l)'}"><span style="font-size:14px;font-weight:700">Čistý zisk</span><span style="font-size:18px;font-weight:700;color:${netProfit>=0?'var(--green)':'var(--red)'}">€${netProfit.toFixed(2)}</span></div>
     </div>
-    ${f.notes?`<div style="margin-top:10px;font-size:12px;color:var(--text2);padding:8px 12px;background:var(--bg);border-radius:8px">📝 ${f.notes}</div>`:''}
+    ${f.notes?`<div style="margin-top:10px;font-size:12px;color:var(--text2);padding:8px 12px;background:var(--bg);border-radius:8px">📝 ${escAttr(f.notes)}</div>`:''}
   `
 }
 
