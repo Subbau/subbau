@@ -27842,6 +27842,8 @@ async function mobCheckin(type) {
   checkinInProgress = true
   window.zapisProbiha = true
   const _mojeKolo = window._zamekKolo = (window._zamekKolo || 0) + 1   // kdo zámek drží — finally a pojistka pouští jen svůj
+  const _pustZamek = () => { if (window._zamekKolo === _mojeKolo) checkinInProgress = false }   // zámek pouští jen jeho držitel
+  const _pustZapis = () => { if (window._zamekKolo === _mojeKolo) window.zapisProbiha = false }
   // Bezpečnostní pojistka: kdyby cokoliv zůstalo viset (slabý signál na stavbě),
   // po 20 s flag tvrdě uvolni, ať tlačítka nezamrznou napořád. Nová čekání u pauzy
   // (3 s čerstvá data + 12 s zápis + 4 s ověření = 19 s) se do 20 s vejdou a zámek
@@ -27854,7 +27856,7 @@ async function mobCheckin(type) {
     clearTimeout(_stuckGuard)
     _stuckGuard = setTimeout(() => {
       if (checkinInProgress && window._zamekKolo === _mojeKolo) {
-        checkinInProgress = false
+        _pustZamek()
         showToast('⚠️ Slabé připojení — zkuste to prosím znovu')
         // DENÍK CHYB: zápis visel 20 s — pojistka uvolnila tlačítka (výsledek zápisu nevíme).
         try { if (typeof _dnDochazka === 'function') _dnDochazka(type, 'pojistka-20s', 'Docházka visela 20 s — pojistka uvolnila tlačítka', {}, 'chyba') } catch (x) { console.warn('[deník chyb]', x) } // eslint-disable-line no-undef
@@ -27889,7 +27891,7 @@ async function mobCheckin(type) {
     if (await _attMerFaze(_mer, 'pravidlo', mojeFirmaChcePolohu())) {
       clearTimeout(_stuckGuard)
       // Odhlášení během zjišťování pravidla — měřit už není pro koho.
-      if (odhlasilSe()) { checkinInProgress = false; window.zapisProbiha = false; return }
+      if (odhlasilSe()) { _pustZamek(); _pustZapis(); return }
       // Jiné povinné měření ještě běží (sem se dostane jen souběhem, když zámek
       // uvolnil doběhlý dřívější zápis) — dvě měření naráz by si přepisovala panel,
       // Zrušit i záznam do deníku. Zámky patří běžícímu, ten je na konci uvolní.
@@ -27913,14 +27915,14 @@ async function mobCheckin(type) {
       // přihlášeného, takže řádek počká v telefonu a odejde s nejbližším
       // přihlášením (pred, ucetSedi; spojení s deníkem chyb 2. 11. 2026).
       if (odhlasilSe()) {
-        checkinInProgress = false
-        window.zapisProbiha = false
+        _pustZamek()
+        _pustZapis()
         if (!povinnaPoloha) zapisNezapsanePolohy(type, now, kdoTukl)
         return
       }
       if (!povinnaPoloha) {
-        checkinInProgress = false
-        window.zapisProbiha = false
+        _pustZamek()
+        _pustZapis()
         // 2. 11. 2026, Petr Fuks: šest dní nezapsal docházku a v appce po tom
         // nezůstalo nic. Teď každé nepovedené měření nechá stopu v deníku chyb.
         // Bez await — deník nesmí návod zdržet ani nic shodit.
@@ -27959,8 +27961,8 @@ async function mobCheckin(type) {
       } catch (e) { activeErr = e }
       if (activeErr) {
         clearTimeout(_stuckGuard)
-        checkinInProgress = false
-        window.zapisProbiha = false
+        _pustZamek()
+        _pustZapis()
         showToast('⚠️ Slabý signál — příchod se nezapsal, zkuste to prosím znovu')
         try { if (typeof _dnDochazka === 'function') _dnDochazka('in', 'signal', 'Příchod se nezapsal — kontrola běžící směny selhala (' + kodChybyProDenik(activeErr) + ')', { kod: activeErr.code, stav: activeErr.status, chyba: activeErr.message }, 'chyba') } catch (x) { console.warn('[deník chyb]', x) } // eslint-disable-line no-undef
         return
@@ -27970,7 +27972,7 @@ async function mobCheckin(type) {
       if (active) {
         todayAttId = active.id
         showToast('ℹ️ Příchod dnes již zaznamenán (' + active.check_in?.slice(0,5) + ')')
-        checkinInProgress = false
+        _pustZamek()
         await getTodayRecord()
         return
       }
@@ -28001,7 +28003,7 @@ async function mobCheckin(type) {
       }, { vratit: true, timeout: 12000 }))
 
       if (error) {
-        showToast(chybaText(error, 'Příchod se nezapsal')); checkinInProgress = false
+        showToast(chybaText(error, 'Příchod se nezapsal')); _pustZamek()
         // Původní chybu (kód, stav) přiloží jádro deníku z chybaText (surova).
         try { if (typeof _dnDochazka === 'function') _dnDochazka('in', 'zapis', 'Příchod se nezapsal — chyba zápisu (' + kodChybyProDenik(error) + ')', { kod: error.code, stav: error.status }, 'chyba') } catch (x) { console.warn('[deník chyb]', x) } // eslint-disable-line no-undef
         return
@@ -28031,8 +28033,8 @@ async function mobCheckin(type) {
       // nezapsalo nic novějšího (pauza) — pozdní odpověď nesmí vrátit starší stav.
       clearTimeout(_stuckGuard)
       _zamekUvolnen = true
-      checkinInProgress = false
-      window.zapisProbiha = false
+      _pustZamek()
+      _pustZapis()
       const _zapisKdyPred = window._mobZapisKdy || 0
       try {
         const { data: allToday } = await withTimeout(sb.from('attendance').select('*')
@@ -28059,7 +28061,7 @@ async function mobCheckin(type) {
         await _attMerFaze(_mer, 'kontrola', getTodayRecord())
         if (!todayAttId) {
           showToast('⚠️ Nejprve zaznamenejte příchod')
-          checkinInProgress = false
+          _pustZamek()
           // Stavový rozpor (tlačítko ukazuje směnu, databáze ne) → varování.
           try { if (typeof _dnDochazka === 'function') _dnDochazka(type, 'bez-prichodu', 'Pauza nebo odchod bez příchodu — dnešní příchod se nenašel', {}, 'varovani') } catch (x) { console.warn('[deník chyb]', x) } // eslint-disable-line no-undef
           return
@@ -28072,7 +28074,7 @@ async function mobCheckin(type) {
         // Fallback: načti ze serveru pokud lokální kopie chybí
         const { data: fetched } = await _attMerFaze(_mer, 'kontrola', withTimeout(sb.from('attendance').select('*').eq('id', todayAttId).single(), 12000))
         if (!fetched) {
-          showToast('❌ Záznam nenalezen'); checkinInProgress = false
+          showToast('❌ Záznam nenalezen'); _pustZamek()
           try { if (typeof _dnDochazka === 'function') _dnDochazka(type, 'nenalezen', 'Docházka se nezapsala — dnešní záznam nenalezen', {}, 'chyba') } catch (x) { console.warn('[deník chyb]', x) } // eslint-disable-line no-undef
           return
         }
@@ -28086,7 +28088,7 @@ async function mobCheckin(type) {
         if (current.check_out) {
           showToast('ℹ️ Tahle směna už je uzavřená')
           todayAttId = null; todayRecord = null
-          checkinInProgress = false
+          _pustZamek()
           getTodayRecord(); loadMobWeek()
           return
         }
@@ -28119,7 +28121,7 @@ async function mobCheckin(type) {
         const nastT = PRESTAVKA_REZIMY[rezT] || PRESTAVKA_REZIMY['od-do']
         if (!nastT.minut) {
           showToast('⚠️ Tenhle způsob přestávky u vás není nastavený')
-          checkinInProgress = false
+          _pustZamek()
           try { if (typeof _dnDochazka === 'function') _dnDochazka(type, 'rezim', 'Přestávka se nezapsala — pevná přestávka není nastavená', { rezim: rezT }, 'varovani') } catch (x) { console.warn('[deník chyb]', x) } // eslint-disable-line no-undef
           return
         }
@@ -28127,14 +28129,14 @@ async function mobCheckin(type) {
         if (dosavadni.length && !nastT.vicKrat) {
           showToast('⚠️ Přestávku už máte dnes zapsanou')
           updateMobStav(current, [current], true)
-          checkinInProgress = false
+          _pustZamek()
           try { if (typeof _dnDochazka === 'function') _dnDochazka(type, 'pauza-uz-je', 'Přestávka už je dnes zapsaná', {}, 'varovani') } catch (x) { console.warn('[deník chyb]', x) } // eslint-disable-line no-undef
           return
         }
         if (current.break_start && !current.break_end) {
           showToast('⚠️ Máte rozdělanou přestávku — nejdřív ji ukončete')
           updateMobStav(current, [current], true)
-          checkinInProgress = false
+          _pustZamek()
           try { if (typeof _dnDochazka === 'function') _dnDochazka(type, 'pauza-rozdelana', 'Rozdělaná přestávka — pevná pauza se nezapsala', {}, 'varovani') } catch (x) { console.warn('[deník chyb]', x) } // eslint-disable-line no-undef
           return
         }
@@ -28147,7 +28149,7 @@ async function mobCheckin(type) {
         // rovnou řekneme, než abychom uložili nesmysl.
         if (zacMin + nastT.minut > 23 * 60 + 59) {
           showToast('⚠️ Přestávka by přesáhla půlnoc — zapište ji prosím ručně nebo se ozvěte do kanceláře')
-          checkinInProgress = false
+          _pustZamek()
           try { if (typeof _dnDochazka === 'function') _dnDochazka(type, 'pres-pulnoc', 'Přestávka se nezapsala — přesáhla by půlnoc', {}, 'varovani') } catch (x) { console.warn('[deník chyb]', x) } // eslint-disable-line no-undef
           return
         }
@@ -28173,7 +28175,7 @@ async function mobCheckin(type) {
           chybaT = r2.error; radkyT = r2.data
         }
         if (chybaT) {
-          showToast(chybaText(chybaT, 'Přestávka se nezapsala')); checkinInProgress = false
+          showToast(chybaText(chybaT, 'Přestávka se nezapsala')); _pustZamek()
           try { if (typeof _dnDochazka === 'function') _dnDochazka(type, 'zapis', 'Přestávka se nezapsala — chyba zápisu (' + kodChybyProDenik(chybaT) + ')', { kod: chybaT.code, stav: chybaT.status }, 'chyba') } catch (x) { console.warn('[deník chyb]', x) } // eslint-disable-line no-undef
           return
         }
@@ -28190,14 +28192,14 @@ async function mobCheckin(type) {
         if (current.break_start && !current.break_end) {
           showToast('⚠️ Přestávka již probíhá')
           updateMobStav(current, [current], true)
-          checkinInProgress = false
+          _pustZamek()
           try { if (typeof _dnDochazka === 'function') _dnDochazka(type, 'pauza-probiha', 'Začátek pauzy — přestávka už probíhá', {}, 'varovani') } catch (x) { console.warn('[deník chyb]', x) } // eslint-disable-line no-undef
           return
         }
         const { data: radkyZ, error } = await _attMerFaze(_mer, 'zapis', mobUpdateRadek(sb.from('attendance').update({ break_start: timeStr, break_end: null }).eq('id', todayAttId).select('id'), todayAttId,
           (r) => r.break_start && String(r.break_start).slice(0, 5) === timeStr.slice(0, 5) && !r.break_end))
         if (error) {
-          showToast(chybaText(error, 'Začátek pauzy se nezapsal')); checkinInProgress = false
+          showToast(chybaText(error, 'Začátek pauzy se nezapsal')); _pustZamek()
           try { if (typeof _dnDochazka === 'function') _dnDochazka(type, 'zapis', 'Začátek pauzy se nezapsal — chyba zápisu (' + kodChybyProDenik(error) + ')', { kod: error.code, stav: error.status }, 'chyba') } catch (x) { console.warn('[deník chyb]', x) } // eslint-disable-line no-undef
           return
         }
@@ -28217,13 +28219,13 @@ async function mobCheckin(type) {
           showToast('ℹ️ Pauza už je ukončená')
           todayRecord = { ...current }
           updateMobStav(current, [current], true)
-          checkinInProgress = false
+          _pustZamek()
           return
         }
         if (!current.break_start) {
           showToast('⚠️ Přestávka nebyla zahájena')
           updateMobStav(current, [current], true)
-          checkinInProgress = false
+          _pustZamek()
           try { if (typeof _dnDochazka === 'function') _dnDochazka(type, 'pauza-nezacala', 'Konec pauzy — přestávka nebyla zahájena', {}, 'varovani') } catch (x) { console.warn('[deník chyb]', x) } // eslint-disable-line no-undef
           return
         }
@@ -28241,7 +28243,7 @@ async function mobCheckin(type) {
             ? await _attMerFaze(_mer, 'zapis', withTimeout(sb.from('attendance').update({ break_end: timeStr }).eq('id', todayAttId).select('id'), 12000))
             : { error, data: null }
           if (r2.error) {
-            showToast(chybaText(r2.error, 'Konec pauzy se nezapsal')); checkinInProgress = false
+            showToast(chybaText(r2.error, 'Konec pauzy se nezapsal')); _pustZamek()
             try { if (typeof _dnDochazka === 'function') _dnDochazka(type, 'zapis', 'Konec pauzy se nezapsal — chyba zápisu (' + kodChybyProDenik(r2.error) + ')', { kod: r2.error.code, stav: r2.error.status }, 'chyba') } catch (x) { console.warn('[deník chyb]', x) } // eslint-disable-line no-undef
             return
           }
@@ -28260,7 +28262,7 @@ async function mobCheckin(type) {
         if (current.check_out) {
           showToast('⚠️ Odchod již byl zaznamenán')
           updateMobStav(current, [current], true)
-          checkinInProgress = false
+          _pustZamek()
           try { if (typeof _dnDochazka === 'function') _dnDochazka(type, 'odchod-uz-je', 'Odchod už byl zaznamenán', {}, 'varovani') } catch (x) { console.warn('[deník chyb]', x) } // eslint-disable-line no-undef
           return
         }
@@ -28276,7 +28278,7 @@ async function mobCheckin(type) {
             _mer.dotaz += _attTed() - tDotaz
             if (!ukoncit) {
               updateMobStav(current, [current], true)
-              checkinInProgress = false
+              _pustZamek()
               return
             }
           }
@@ -28286,7 +28288,7 @@ async function mobCheckin(type) {
         if (povinnaPoloha && !(await _attMerFaze(_mer, 'zapis', ulozPovinnouPolohuOdchodu(todayAttId, povinnaPoloha)))) {
           showToast('📍 Odchod se NEZAPSAL — polohu se nepodařilo uložit. Zkuste to prosím znovu.')
           updateMobStav(current, [current], true)
-          checkinInProgress = false
+          _pustZamek()
           // DENÍK CHYB (kritika bod 15): vlastní chybu uložení zapsala už ulozPovinnouPolohuOdchodu (poloha-odchodu); tady, že odchod kvůli ní neprošel.
           try { if (typeof _dnDochazka === 'function') _dnDochazka('out', 'poloha-ulozeni', 'Odchod se nezapsal — poloha odchodu se neuložila', {}, 'chyba') } catch (x) { console.warn('[deník chyb]', x) } // eslint-disable-line no-undef
           return
@@ -28363,8 +28365,8 @@ async function mobCheckin(type) {
           _mer.dotaz += _attTed() - tDotaz
           if (!goOut) {
             updateMobStav(current, [current], true)
-            checkinInProgress = false
-            window.zapisProbiha = false
+            _pustZamek()
+            _pustZapis()
             return
           }
           // Pokud jde ven s otevřenou pauzou, uzavři pauzu na čas odchodu, ať se správně odečte.
@@ -28409,8 +28411,8 @@ async function mobCheckin(type) {
             try { if (typeof _dnDochazka === 'function') _dnDochazka('out', 'uzavreni-pauzy', 'Odchod se nezapsal — rozdělanou pauzu se nepodařilo uzavřít', {}, 'chyba') } catch (x) { console.warn('[deník chyb]', x) } // eslint-disable-line no-undef
             zapisChybuAppky('odchod-uzavreni-pauzy', 'nepodařilo se uzavřít rozdělanou pauzu při odchodu')
             updateMobStav(current, [current], true)
-            checkinInProgress = false
-            window.zapisProbiha = false
+            _pustZamek()
+            _pustZapis()
             return
           }
         }
@@ -28431,7 +28433,7 @@ async function mobCheckin(type) {
           // StavKo směnu mezitím uzavřel sám — jeho časy mají přednost před našimi
           // (stejný postup i hláška jako v confirmCheckout).
           pendingCheckout = null; zapomenRozdelanyOdchod(); todayAttId = null; todayRecord = null
-          checkinInProgress = false
+          _pustZamek()
           showToast('ℹ️ Tuto směnu už uzavřel StavKo — platí jeho zápis')
           getTodayRecord(); loadMobWeek()
           return
@@ -28463,7 +28465,7 @@ async function mobCheckin(type) {
             check_out: timeStr, total_hours: h
           }).eq('id', todayAttId).is('check_out', null).select('id'), todayAttId, (r) => !!r.check_out))
           if (outErr) {
-            showToast(chybaText(outErr, 'Odchod se nezapsal')); checkinInProgress = false
+            showToast(chybaText(outErr, 'Odchod se nezapsal')); _pustZamek()
             try { if (typeof _dnDochazka === 'function') _dnDochazka('out', 'zapis', 'Odchod se nezapsal — chyba zápisu (' + kodChybyProDenik(outErr) + ')', { kod: outErr.code, stav: outErr.status }, 'chyba') } catch (x) { console.warn('[deník chyb]', x) } // eslint-disable-line no-undef
             return
           }
@@ -28471,7 +28473,7 @@ async function mobCheckin(type) {
             console.error('[odchod] update neuložil žádný řádek, id:', todayAttId)
             showToast('❌ Odchod se neuložil — zkuste to prosím znovu')
             try { if (typeof _dnDochazka === 'function') _dnDochazka('out', 'neulozil-radek', 'Odchod se neuložil — zápis nezměnil žádný řádek', {}, 'chyba') } catch (x) { console.warn('[deník chyb]', x) } // eslint-disable-line no-undef
-            checkinInProgress = false; return
+            _pustZamek(); return
           }
           _zapsano = true; window._mobZapisKdy = Date.now(); _attMerHotovo(_mer)
           updated.check_out = timeStr
@@ -28487,7 +28489,7 @@ async function mobCheckin(type) {
           updateMobStav(null, [updated], true)
           getTodayRecord()
           loadMobWeek()
-          checkinInProgress = false
+          _pustZamek()
           return
         }
 
@@ -28517,7 +28519,7 @@ async function mobCheckin(type) {
           else showManualAddress('📍 Adresa stavby chybí — doplňte ji prosím ručně, ať víme, kde se pracovalo', true)
         }
         showCheckoutDialog()
-        checkinInProgress = false
+        _pustZamek()
         return
       }
 
@@ -28543,7 +28545,7 @@ async function mobCheckin(type) {
     try { if (typeof _dnDochazka === 'function') _dnDochazka(type, 'vyjimka', 'Docházka se nezapsala — výjimka: ' + String((e && e.message) || e).slice(0, 200), { nazev: e && e.name, stack: e && e.stack ? String(e.stack).slice(0, 1500) : undefined }, 'chyba') } catch (x) { console.warn('[deník chyb]', x) } // eslint-disable-line no-undef
   } finally {
     clearTimeout(_stuckGuard)
-    if (!_zamekUvolnen && window._zamekKolo === _mojeKolo) { checkinInProgress = false; window.zapisProbiha = false }
+    if (!_zamekUvolnen && window._zamekKolo === _mojeKolo) { _pustZamek(); _pustZapis() }
     // 2. 11. 2026: docházka se po tomhle klepnutí přepnula → tlačítka 2 s klid
     // (attZamkniPoZapisu). Pomalý zápis, který prošel → řádek do deníku.
     // Zápis, který prošel, zamyká vždy — i když tlačítka vypadají stejně jako
