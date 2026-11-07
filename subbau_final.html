@@ -5880,7 +5880,7 @@ async function submitAdminSignatureWithPlacement() {
 // Po nahrání nové verze se snadno pozná, jestli se opravdu nasadila: otevřete
 // appku, zmáčkněte F12 (na Macu ⌥⌘I) a v konzoli je vypsané tohle datum. Když
 // tam svítí starší, prohlížeč nebo GitHub drží starou verzi.
-const SUBBAU_VERZE = '2026-11-07 a — Fialově to, co upravil správce (karta pracovníka)'
+const SUBBAU_VERZE = '2026-11-07 b — Fialově to, co upravil správce, i v Docházce (příchod, pauza, odchod, stavba, co dělal)'
 console.log('SubBau docházka — verze ' + SUBBAU_VERZE)
 // Verze i dole v menu správce. Když někdo novinku „nevidí", podle ní se hned
 // pozná, jestli nemá otevřenou starou kopii appky — bez hledání v konzoli.
@@ -15901,9 +15901,10 @@ async function loadTodayTimeline() {
     if (r.odchylka_ok !== true) g.okVse = false
     const ci = r.check_in ? r.check_in.slice(0,5) : null
     const co = r.check_out ? r.check_out.slice(0,5) : null
-    if (ci && (!g.check_in || ci < g.check_in)) g.check_in = ci
+    if (ci && (!g.check_in || ci < g.check_in)) { g.check_in = ci; g.idPrichodu = r.id }
     if (co && (!g.check_out || co > g.check_out)) {
       g.check_out = co
+      g.idOdchodu = r.id
       // Adresa odchodu patří k TOMU záznamu, ve kterém odchod je. Kdo má za
       // den dvě stavby, má dva záznamy — a platí ten pozdější.
       g.zaznamOdchodu = r
@@ -16013,7 +16014,7 @@ async function loadTodayTimeline() {
           // Do hledání patří i firma a podskupina, ať jde vypsat celá parta najednou
           const searchKey = [g.name, g.firm, g.sub].filter(Boolean).join(' ')
           return groupHead + `
-            <tr class="today-row" data-id="${g.worker_id||''}" data-attids="${escAttr(g.ids.join(','))}" data-name="${searchKey.replace(/"/g,'&quot;')}" data-worker="${(g.name||'').replace(/"/g,'&quot;')}" style="border-top:0.5px solid var(--brd);border-left:4px solid ${zar.prouzek}" title="Klikněte na časy pro úpravu hodin">
+            <tr class="today-row" data-id="${g.worker_id||''}" data-attids="${escAttr(g.ids.join(','))}" data-id-in="${escAttr(g.idPrichodu||'')}" data-id-out="${escAttr(g.idOdchodu||'')}" data-name="${searchKey.replace(/"/g,'&quot;')}" data-worker="${(g.name||'').replace(/"/g,'&quot;')}" style="border-top:0.5px solid var(--brd);border-left:4px solid ${zar.prouzek}" title="Klikněte na časy pro úpravu hodin">
               <td class="td-open today-name" title="Klikněte pro otevření profilu pracovníka" style="padding:0 10px 0 0;cursor:pointer;height:1px${zar.jmeno ? ';background:' + zar.jmeno : ''}">
                 <!-- Fotka vlevo přes celou výšku řádku, VŠECHEN text vedle ní.
                      Dřív bylo jméno vedle a profese s firmou pod fotkou, takže
@@ -48709,7 +48710,7 @@ function attOriginBadge(r) {
 // nebarví. Chybí-li historie (migrace) nebo se nenačte, tabulka zůstane jako dřív.
 const FIALOVA_BUNKY = {
   check_in: ['.wa-prichod > span:first-child'], check_out: ['.wa-odchod > span:first-child'],
-  break_start: ['.wa-pod'], break_end: ['.wa-pdo'],
+  break_start: ['.wa-pod'], break_end: ['.wa-pdo'], break2_start: [], break2_end: [],   // další pauzy se barví jen v Docházce (FIALOVA_DEN)
   construction_site: ['.wa-stavba'], location_address: ['.wa-stavba'], manual_address: ['.wa-stavba'],
   work_description: ['.wa-popis']
 }
@@ -48734,9 +48735,15 @@ async function fialovaPoleZHistorie(ids) {
         // obarví se proto jen ten čas, který se v první pauze opravdu změnil (Codex 7. 11. 2026). Bez dřívější
         // první pauzy v poli (starší den má pauzu jen ve sloupcích) se pole neporovnává — časy nesou sloupce.
         if (h.akce === 'UPDATE' && Array.isArray(z.breaks) && z.breaks.length === 2) {
-          const stare = Array.isArray(z.breaks[0]) ? z.breaks[0][0] : null, nove = Array.isArray(z.breaks[1]) ? z.breaks[1][0] : null
-          if (stare && nove && String(stare.bs).slice(0, 5) !== String(nove.bs).slice(0, 5)) mnozina.add('break_start')
-          if (stare && nove && String(stare.be || '').slice(0, 5) !== String(nove.be || '').slice(0, 5)) mnozina.add('break_end')
+          const stareP = Array.isArray(z.breaks[0]) ? z.breaks[0] : null, noveP = Array.isArray(z.breaks[1]) ? z.breaks[1] : null
+          if (stareP && noveP) for (let k = 0; k < Math.min(stareP.length, noveP.length); k++) {
+            const st = stareP[k], no = noveP[k]
+            if (!st || !no) continue
+            // První pauza = break_start/end, další pauzy = break2_start/end (v tabulce dne jsou všechny v buňce Pauzy)
+            const pre = k === 0 ? 'break' : 'break2'
+            if (String(st.bs).slice(0, 5) !== String(no.bs).slice(0, 5)) mnozina.add(pre + '_start')
+            if (String(st.be || '').slice(0, 5) !== String(no.be || '').slice(0, 5)) mnozina.add(pre + '_end')
+          }
         }
         Object.keys(z).forEach(sl => {
           if (!FIALOVA_BUNKY[sl]) return
@@ -48781,7 +48788,7 @@ async function fialovaUpravySpravce(data) {
 // Totéž v Docházce (Dnešní docházka / vybraný den): časy příchodu, pauzy, odchodu, adresa a popis práce, které
 // správce upravil, jsou fialově. Sloupce tabulky jsou pořadím (2 příchod, 3 pauzy, 4 odchod, 6 adresa, 7 popis).
 const FIALOVA_DEN = {
-  check_in: ['td:nth-child(2)'], break_start: ['td:nth-child(3)'], break_end: ['td:nth-child(3)'], check_out: ['td:nth-child(4)'],
+  check_in: ['td:nth-child(2)'], break_start: ['td:nth-child(3)'], break_end: ['td:nth-child(3)'], break2_start: ['td:nth-child(3)'], break2_end: ['td:nth-child(3)'], check_out: ['td:nth-child(4)'],
   construction_site: ['td:nth-child(6)'], location_address: ['td:nth-child(6)'], manual_address: ['td:nth-child(6)'],
   work_description: ['td:nth-child(7)']
 }
@@ -48794,7 +48801,14 @@ async function fialovaUpravyDen(div, dnesBeh) {
     if (!poZaznamu || dnesBeh !== _denDochazkyBeh) return
     radky.forEach(tr => {
       const spolecne = new Set()
-      String(tr.getAttribute('data-attids') || '').split(',').forEach(id => (poZaznamu[id] || []).forEach(sl => spolecne.add(sl)))
+      // Řádek dne sloučí víc záznamů: příchod a odchod se barví jen podle záznamu, ze kterého se zobrazují
+      // (nejdřívější příchod, nejpozdější odchod); ostatní údaje podle všech záznamů dne (Codex 7. 11. 2026).
+      const idIn = tr.getAttribute('data-id-in'), idOut = tr.getAttribute('data-id-out')
+      String(tr.getAttribute('data-attids') || '').split(',').forEach(id => (poZaznamu[id] || []).forEach(sl => {
+        if (sl === 'check_in' && id !== idIn) return
+        if (sl === 'check_out' && id !== idOut) return
+        spolecne.add(sl)
+      }))
       if (spolecne.size) fialovaObarviBunky(tr, spolecne, FIALOVA_DEN)
     })
   } catch (e) { console.warn('[fialová] obarvení dne selhalo:', (e && e.message) || e) }
