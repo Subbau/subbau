@@ -1922,6 +1922,7 @@ body.ubyt-tahne,body.ubyt-tahne *{cursor:grabbing!important;user-select:none!imp
   body.tisk-faktury #inv-email-box,
   body.tisk-faktury .no-print { display:none !important }
 }
+.wd-fialova{color:#7c3aed !important;font-weight:800 !important}
 </style>
 </head>
 <body>
@@ -6750,7 +6751,7 @@ async function submitAdminSignatureWithPlacement() {
 // Po nahrání nové verze se snadno pozná, jestli se opravdu nasadila: otevřete
 // appku, zmáčkněte F12 (na Macu ⌥⌘I) a v konzoli je vypsané tohle datum. Když
 // tam svítí starší, prohlížeč nebo GitHub drží starou verzi.
-const SUBBAU_VERZE = '2026-11-06 i — Zprávy a chat se neodešlou dvakrát, odhlášení uklidí spojení'
+const SUBBAU_VERZE = '2026-11-07 a — Fialově to, co upravil správce (karta pracovníka)'
 console.log('StavKo docházka — verze ' + SUBBAU_VERZE)
 // Verze i dole v menu správce. Když někdo novinku „nevidí", podle ní se hned
 // pozná, jestli nemá otevřenou starou kopii appky — bez hledání v konzoli.
@@ -49564,6 +49565,55 @@ function attOriginBadge(r) {
   return ''
 }
 
+// FIALOVĚ = TO, CO UPRAVIL SPRÁVCE (majitel 7. 11. 2026): v kartě pracovníka (jen správce ji vidí) se obarví
+// jen ty údaje dne, které správce změnil — příchod, začátek a konec pauzy, odchod, stavba/adresa, popis práce.
+// Bere se z Historie úprav (historie_uprav: kdo, co, komu, {sloupec: [bylo, je]}), takže jde zpětně tak daleko,
+// jak sahá historie (60 dní). Změny, které si pracovník udělal sám, a změny ze serveru (kdo prázdné) se
+// nebarví. Chybí-li historie (migrace) nebo se nenačte, tabulka zůstane jako dřív.
+const FIALOVA_BUNKY = {
+  check_in: ['.wa-prichod > span:first-child'], check_out: ['.wa-odchod > span:first-child'],
+  break_start: ['.wa-pod'], break_end: ['.wa-pdo'], break2_start: ['.wa-pod'], break2_end: ['.wa-pdo'], breaks: ['.wa-pod', '.wa-pdo'],
+  construction_site: ['.wa-stavba'], location_address: ['.wa-stavba'], manual_address: ['.wa-stavba'],
+  work_description: ['.wa-popis']
+}
+async function fialovaUpravySpravce(data) {
+  try {
+    const wid = currentWorkerId
+    if (!wid || !data || !data.length) return
+    const ids = data.map(r => String(r.id))
+    const { data: radky, error } = await sb.from('historie_uprav').select('zaznam_id, kdo, akce, zmeny')
+      .eq('tabulka', 'attendance').in('zaznam_id', ids).in('akce', ['INSERT', 'UPDATE'])
+    if (error || !radky) { if (error) console.warn('[fialová] historie se nenačetla:', error.message); return }
+    // Aktuální pracovník se mezitím mohl přepnout — obarvuje se jen karta, ke které data patří.
+    if (currentWorkerId !== wid) return
+    const poZaznamu = {}
+    radky.forEach(h => {
+      if (!h.kdo || String(h.kdo) === String(wid)) return   // sám pracovník nebo server — nebarví se
+      const z = h.zmeny && typeof h.zmeny === 'object' ? h.zmeny : {}
+      const mnozina = (poZaznamu[h.zaznam_id] = poZaznamu[h.zaznam_id] || new Set())
+      Object.keys(z).forEach(sl => {
+        if (!FIALOVA_BUNKY[sl]) return
+        // U přidání (INSERT) se bere jen to, co je vyplněné; u změny cokoli, co se změnilo.
+        if (h.akce === 'INSERT' && (z[sl] == null || z[sl] === '' || (Array.isArray(z[sl]) && !z[sl].length))) return
+        mnozina.add(sl)
+      })
+    })
+    const tbody = document.getElementById('wd-att-table')
+    if (!tbody) return
+    let neco = false
+    tbody.querySelectorAll('tr.wd-att-radek').forEach(tr => {
+      const m = poZaznamu[tr.getAttribute('data-attid')]
+      if (!m || !m.size) return
+      m.forEach(sl => FIALOVA_BUNKY[sl].forEach(sel => {
+        tr.querySelectorAll(sel).forEach(el => { el.classList.add('wd-fialova'); el.title = (el.title ? el.title + ' · ' : '') + 'Upravil správce'; neco = true })
+      }))
+    })
+    const souhrn = tbody.querySelector('tr.wd-att-souhrn td')
+    if (neco && souhrn && !souhrn.querySelector('.wd-fialova-popis')) {
+      souhrn.insertAdjacentHTML('beforeend', '<div class="wd-fialova-popis" style="margin-top:6px;font-size:10.5px;color:#7c3aed;font-weight:700">■ fialově: upravil správce (podle Historie úprav, 60 dní zpětně)</div>')
+    }
+  } catch (e) { console.warn('[fialová] obarvení selhalo:', (e && e.message) || e) }
+}
 async function loadWdAttendance() {
   if(!currentWorkerId) return
   nactiPuntikyKarta()
@@ -49661,7 +49711,7 @@ async function loadWdAttendance() {
           : '')))
     // Třídy wa-* a data-l: na telefonu se z řádku stane kartička dne (viz
     // .wd-att-tabulka v CSS). Na počítači se tabulka nemění.
-    return `<tr class="wd-att-radek"${nezaplaceno ? ' style="background:var(--red-l);text-decoration:line-through;text-decoration-color:var(--red);text-decoration-thickness:2px"' : ''}>
+    return `<tr class="wd-att-radek" data-attid="${escAttr(r.id)}"${nezaplaceno ? ' style="background:var(--red-l);text-decoration:line-through;text-decoration-color:var(--red);text-decoration-thickness:2px"' : ''}>
       <td class="wa-datum" style="font-size:12px;white-space:nowrap">${r.work_date ? new Date(r.work_date).toLocaleDateString('cs-CZ', { weekday: 'short', day: 'numeric', month: 'numeric', year: 'numeric' }).replace(/^(\S+)\s/, '<span class="wa-den">$1</span> ') : '—'}${vyjimkaOdznak}</td>
       <td class="wa-prichod" data-l="Příchod">
         <span style="font-weight:700;color:${odch.prichod ? '#1d4ed8' : 'var(--green)'}">${adj.checkIn || (r.check_in ? r.check_in.slice(0,5) : '—')}</span>
@@ -49686,6 +49736,7 @@ async function loadWdAttendance() {
         <button onclick="deleteWorkerDay('${r.id}','${r.work_date}',this,${parseInt(r.kw)||0},${parseInt(r.kw_year)||0},'${r.worker_id||''}')" title="Smazat tento den" style="padding:3px 8px;font-size:11px;border:1px solid var(--red);border-radius:6px;cursor:pointer;background:none;color:var(--red);font-family:inherit;margin-left:4px"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:1em;height:1em;flex-shrink:0;vertical-align:-2px"><path d="M3 6h18M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6M14 11v6"/></svg> </button></td>
     </tr>`
   }).join('')
+  fialovaUpravySpravce(data)   // co v těchto dnech upravil správce, se obarví (jen v kartě pracovníka u správce)
   const nowStr2 = new Date().toTimeString().slice(0,8)
   const todayDateStr = localDateStr()
   const total = data.reduce((s,r) => {
