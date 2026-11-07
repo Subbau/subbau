@@ -1925,6 +1925,7 @@ body.ubyt-tahne,body.ubyt-tahne *{cursor:grabbing!important;user-select:none!imp
 /* Co upravil správce: jen oranžový rámeček kolem údaje, písmo ani barva se nemění (majitel 7. 11. 2026) */
 .wd-fialova{outline:2px solid #f97316;outline-offset:1px;border-radius:5px}
 .wd-fialova-obal{display:inline-block}
+.wd-puv{color:#f97316;font-weight:700;text-decoration:line-through;margin-right:5px}
 </style>
 </head>
 <body>
@@ -6753,7 +6754,7 @@ async function submitAdminSignatureWithPlacement() {
 // Po nahrání nové verze se snadno pozná, jestli se opravdu nasadila: otevřete
 // appku, zmáčkněte F12 (na Macu ⌥⌘I) a v konzoli je vypsané tohle datum. Když
 // tam svítí starší, prohlížeč nebo GitHub drží starou verzi.
-const SUBBAU_VERZE = '2026-11-07 c — Co upravil správce: oranžový rámeček kolem údaje (karta pracovníka i Docházka), písmo beze změny'
+const SUBBAU_VERZE = '2026-11-07 d — Co upravil správce: oranžový rámeček + oranžově původní hodnota (karta pracovníka i Docházka)'
 console.log('StavKo docházka — verze ' + SUBBAU_VERZE)
 // Verze i dole v menu správce. Když někdo novinku „nevidí", podle ní se hned
 // pozná, jestli nemá otevřenou starou kopii appky — bez hledání v konzoli.
@@ -49590,13 +49591,16 @@ async function fialovaPoleZHistorie(ids) {
     const poZaznamu = {}
     // po dávkách — dlouhý seznam id by přetekl délku adresy dotazu
     for (let i = 0; i < seznam.length; i += 80) {
-      const { data: radky, error } = await sb.from('historie_uprav').select('zaznam_id, kdo, komu, akce, zmeny')
+      const { data: radky, error } = await sb.from('historie_uprav').select('zaznam_id, kdo, komu, akce, zmeny, kdy')
         .eq('tabulka', 'attendance').in('zaznam_id', seznam.slice(i, i + 80)).in('akce', ['INSERT', 'UPDATE'])
       if (error || !radky) { if (error) console.warn('[fialová] historie se nenačetla:', error.message); return null }
-      radky.forEach(h => {
+      // od nejstarší úpravy — z té se bere, co tam bylo PŮVODNĚ (před prvním zásahem správce)
+      radky.slice().sort((a, b) => String(a.kdy || '').localeCompare(String(b.kdy || ''))).forEach(h => {
         if (!h.kdo || String(h.kdo) === String(h.komu)) return   // sám pracovník nebo server — nebarví se
         const z = h.zmeny && typeof h.zmeny === 'object' ? h.zmeny : {}
         const mnozina = (poZaznamu[h.zaznam_id] = poZaznamu[h.zaznam_id] || new Set())
+        mnozina.puvodni = mnozina.puvodni || {}   // sloupec → hodnota před prvním zásahem správce (null = nebylo nic / správce to sám přidal)
+        const pamatuj = (sl, bylo) => { if (!(sl in mnozina.puvodni)) mnozina.puvodni[sl] = (bylo == null || bylo === '') ? null : String(bylo) }
         // Pole breaks (všechny pauzy dne) se mění i při úpravě jednoho času — v tabulce je vidět jen první pauza,
         // obarví se proto jen ten čas, který se v první pauze opravdu změnil (Codex 7. 11. 2026). Bez dřívější
         // první pauzy v poli (starší den má pauzu jen ve sloupcích) se pole neporovnává — časy nesou sloupce.
@@ -49607,8 +49611,8 @@ async function fialovaPoleZHistorie(ids) {
             if (!st || !no) continue
             // První pauza = break_start/end, další pauzy = break2_start/end (v tabulce dne jsou všechny v buňce Pauzy)
             const pre = k === 0 ? 'break' : 'break' + (k + 1)
-            if (String(st.bs).slice(0, 5) !== String(no.bs).slice(0, 5)) mnozina.add(pre + '_start')
-            if (String(st.be || '').slice(0, 5) !== String(no.be || '').slice(0, 5)) mnozina.add(pre + '_end')
+            if (String(st.bs).slice(0, 5) !== String(no.bs).slice(0, 5)) { mnozina.add(pre + '_start'); pamatuj(pre + '_start', st.bs) }
+            if (String(st.be || '').slice(0, 5) !== String(no.be || '').slice(0, 5)) { mnozina.add(pre + '_end'); pamatuj(pre + '_end', st.be) }
           }
         }
         Object.keys(z).forEach(sl => {
@@ -49616,11 +49620,24 @@ async function fialovaPoleZHistorie(ids) {
           // U přidání (INSERT) se bere jen to, co je vyplněné; u změny cokoli, co se změnilo.
           if (h.akce === 'INSERT' && (z[sl] == null || z[sl] === '' || (Array.isArray(z[sl]) && !z[sl].length))) return
           mnozina.add(sl)
+          if (h.akce === 'INSERT') pamatuj(sl, null)                                       // správce to sám přidal — původní hodnota není
+          else if (Array.isArray(z[sl]) && z[sl].length === 2 && sl !== 'breaks') pamatuj(sl, z[sl][0])
         })
       })
     }
     return poZaznamu
   } catch (e) { console.warn('[fialová] čtení historie selhalo:', (e && e.message) || e); return null }
+}
+// Do oranžového rámečku přidá, co tam bylo PŮVODNĚ (před zásahem správce): přeškrtnutě oranžově před novou hodnotou.
+const FIALOVA_CASY = { check_in: 1, check_out: 1, break_start: 1, break_end: 1, break2_start: 1, break2_end: 1 }
+function fialovaPuvodne(el, sl, mnozina) {
+  const bylo = mnozina && mnozina.puvodni ? mnozina.puvodni[sl] : null
+  if (bylo == null || el.querySelector(':scope > .wd-puv')) return
+  let txt = String(bylo)
+  if (FIALOVA_CASY[sl] || /^break\d+_(start|end)$/.test(sl)) txt = txt.slice(0, 5)
+  else if (txt.length > 40) txt = txt.slice(0, 40) + '…'
+  const sp = document.createElement('span'); sp.className = 'wd-puv'; sp.title = 'Původně'; sp.textContent = txt
+  el.insertBefore(sp, el.firstChild)
 }
 // Obarví buňky řádku podle množiny sloupců. `kamHledat` = prvek, ve kterém se hledají buňky (selektory z FIALOVA_BUNKY).
 function fialovaObarviBunky(kontejner, mnozina, selektory) {
@@ -49637,6 +49654,7 @@ function fialovaObarviBunky(kontejner, mnozina, selektory) {
         else while (el0.firstChild) obal.appendChild(el0.firstChild)
         el0.insertBefore(obal, el0.firstChild); el = obal
       }
+      fialovaPuvodne(el, sl, mnozina)
       el.classList.add('wd-fialova'); if (!/Upravil správce/.test(el.title || '')) el.title = (el.title ? el.title + ' · ' : '') + 'Upravil správce'; neco = true })
   }))
   return neco
@@ -49682,6 +49700,7 @@ async function fialovaUpravyDen(div, dnesBeh) {
         const m = /^break(\d*)_(start|end)$/.exec(sl); if (!m) return
         const k = m[1] === '' ? 0 : Number(m[1]) - 1
         tr.querySelectorAll('.pauza-chip[data-rid="' + id + '"][data-k="' + k + '"] > .pauza-' + (m[2] === 'start' ? 'bs' : 'be')).forEach(el => {
+          fialovaPuvodne(el, sl, poZaznamu[id])
           el.classList.add('wd-fialova'); el.title = 'Upravil správce'
         })
       }))
@@ -49693,6 +49712,9 @@ async function fialovaUpravyDen(div, dnesBeh) {
         if (sl === 'check_in' && id !== idIn) return
         if (sl === 'check_out' && id !== idOut) return
         spolecne.add(sl)
+        spolecne.puvodni = spolecne.puvodni || {}
+        const pv = poZaznamu[id].puvodni
+        if (pv && pv[sl] != null && spolecne.puvodni[sl] == null) spolecne.puvodni[sl] = pv[sl]
       }))
       if (spolecne.size) fialovaObarviBunky(tr, spolecne, FIALOVA_DEN)
     })
