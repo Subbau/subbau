@@ -16778,10 +16778,10 @@ async function loadTodayTimeline() {
     if (!g.avatar && r.worker?.avatar_url) g.avatar = r.worker.avatar_url
     // Pauzy: primárně z pole breaks (víc pauz za směnu), fallback na break_start/break_end (+ break2)
     if (Array.isArray(r.breaks) && r.breaks.length) {
-      r.breaks.forEach(b => { if (b && b.bs) g.breaks.push({ bs: _casPauzy(b.bs), be: b.be ? _casPauzy(b.be) : null }) })
+      r.breaks.forEach((b, ki) => { if (b && b.bs) g.breaks.push({ bs: _casPauzy(b.bs), be: b.be ? _casPauzy(b.be) : null, rid: r.id, k: ki }) })
     } else {
-      if (r.break_start) g.breaks.push({ bs: r.break_start.slice(0,5), be: r.break_end ? r.break_end.slice(0,5) : null })
-      if (r.break2_start) g.breaks.push({ bs: r.break2_start.slice(0,5), be: r.break2_end ? r.break2_end.slice(0,5) : null })
+      if (r.break_start) g.breaks.push({ bs: r.break_start.slice(0,5), be: r.break_end ? r.break_end.slice(0,5) : null, rid: r.id, k: 0 })
+      if (r.break2_start) g.breaks.push({ bs: r.break2_start.slice(0,5), be: r.break2_end ? r.break2_end.slice(0,5) : null, rid: r.id, k: 1 })
     }
     // adresy: GPS a ruční zvlášť — primárně z nových polí gps_address/manual_address
     const cs = (r.construction_site || '').trim()
@@ -16854,7 +16854,7 @@ async function loadTodayTimeline() {
                   ? 'background:var(--red-l,#f6e9e4);color:var(--red,#9c3b22);font-weight:800'
                   : 'background:var(--amber-l,#faf0dc);color:#9a6b15'
                 const popis = min != null ? ' title="Pauza ' + min + ' min' + (dlouha ? ' — víc než ' + PAUZA_LIMIT_MIN + ' min' : '') + '"' : ''
-                return '<span class="pauza-chip"' + popis + ' style="display:inline-block;' + styl + ';border-radius:6px;padding:2px 7px;margin:1px 3px 1px 0;font-size:12px;white-space:nowrap">' + b.bs + '–' + beTxt + '</span>'
+                return '<span class="pauza-chip" data-rid="' + escAttr(b.rid == null ? '' : b.rid) + '" data-k="' + (b.k == null ? '' : b.k) + '"' + popis + ' style="display:inline-block;' + styl + ';border-radius:6px;padding:2px 7px;margin:1px 3px 1px 0;font-size:12px;white-space:nowrap"><span class="pauza-bs">' + b.bs + '</span>–<span class="pauza-be">' + beTxt + '</span></span>'
               }).join('')
             : '<span style="color:var(--text3)">—</span>'
           // Adresa: GPS i ruční, oba pokud jsou
@@ -49665,7 +49665,7 @@ async function fialovaUpravySpravce(data) {
 // Totéž v Docházce (Dnešní docházka / vybraný den): časy příchodu, pauzy, odchodu, adresa a popis práce, které
 // správce upravil, jsou fialově. Sloupce tabulky jsou pořadím (2 příchod, 3 pauzy, 4 odchod, 6 adresa, 7 popis).
 const FIALOVA_DEN = {
-  check_in: ['td:nth-child(2)'], break_start: ['td:nth-child(3) > .pauza-chip:nth-of-type(1)'], break_end: ['td:nth-child(3) > .pauza-chip:nth-of-type(1)'], break2_start: ['td:nth-child(3) > .pauza-chip:nth-of-type(2)'], break2_end: ['td:nth-child(3) > .pauza-chip:nth-of-type(2)'], break3_start: ['td:nth-child(3) > .pauza-chip:nth-of-type(3)'], break3_end: ['td:nth-child(3) > .pauza-chip:nth-of-type(3)'], break4_start: ['td:nth-child(3) > .pauza-chip:nth-of-type(4)'], break4_end: ['td:nth-child(3) > .pauza-chip:nth-of-type(4)'], check_out: ['td:nth-child(4)'],
+  check_in: ['td:nth-child(2)'],  check_out: ['td:nth-child(4)'],
   construction_site: ['td:nth-child(6)'], location_address: ['td:nth-child(6)'], manual_address: ['td:nth-child(6)'],
   work_description: ['td:nth-child(7)']
 }
@@ -49677,6 +49677,14 @@ async function fialovaUpravyDen(div, dnesBeh) {
     const poZaznamu = await fialovaPoleZHistorie(ids)
     if (!poZaznamu || dnesBeh !== _denDochazkyBeh) return
     radky.forEach(tr => {
+      // Pauzy: rámeček jen kolem změněného času té pauzy, kterou správce opravdu změnil (záznam + pořadí v něm)
+      ids.forEach(id => (poZaznamu[id] || new Set()).forEach(sl => {
+        const m = /^break(\d*)_(start|end)$/.exec(sl); if (!m) return
+        const k = m[1] === '' ? 0 : Number(m[1]) - 1
+        tr.querySelectorAll('.pauza-chip[data-rid="' + id + '"][data-k="' + k + '"] > .pauza-' + (m[2] === 'start' ? 'bs' : 'be')).forEach(el => {
+          el.classList.add('wd-fialova'); el.title = 'Upravil správce'
+        })
+      }))
       const spolecne = new Set()
       // Řádek dne sloučí víc záznamů: příchod a odchod se barví jen podle záznamu, ze kterého se zobrazují
       // (nejdřívější příchod, nejpozdější odchod); ostatní údaje podle všech záznamů dne (Codex 7. 11. 2026).
