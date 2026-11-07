@@ -16013,7 +16013,7 @@ async function loadTodayTimeline() {
           // Do hledání patří i firma a podskupina, ať jde vypsat celá parta najednou
           const searchKey = [g.name, g.firm, g.sub].filter(Boolean).join(' ')
           return groupHead + `
-            <tr class="today-row" data-id="${g.worker_id||''}" data-name="${searchKey.replace(/"/g,'&quot;')}" data-worker="${(g.name||'').replace(/"/g,'&quot;')}" style="border-top:0.5px solid var(--brd);border-left:4px solid ${zar.prouzek}" title="Klikněte na časy pro úpravu hodin">
+            <tr class="today-row" data-id="${g.worker_id||''}" data-attids="${escAttr(g.ids.join(','))}" data-name="${searchKey.replace(/"/g,'&quot;')}" data-worker="${(g.name||'').replace(/"/g,'&quot;')}" style="border-top:0.5px solid var(--brd);border-left:4px solid ${zar.prouzek}" title="Klikněte na časy pro úpravu hodin">
               <td class="td-open today-name" title="Klikněte pro otevření profilu pracovníka" style="padding:0 10px 0 0;cursor:pointer;height:1px${zar.jmeno ? ';background:' + zar.jmeno : ''}">
                 <!-- Fotka vlevo přes celou výšku řádku, VŠECHEN text vedle ní.
                      Dřív bylo jméno vedle a profese s firmou pod fotkou, takže
@@ -16069,6 +16069,7 @@ async function loadTodayTimeline() {
     div.innerHTML = dnesHtml
     div._posledniHtml = dnesHtml
   }
+  fialovaUpravyDen(div, beh)   // fialově to, co upravil správce (podle Historie úprav)
 
   // Klik na jméno → profil pracovníka, klik na časy (mimo tlačítko smazat) → úprava hodin pro dnešek
   div.querySelector('tbody').onclick = function(e) {
@@ -48712,52 +48713,91 @@ const FIALOVA_BUNKY = {
   construction_site: ['.wa-stavba'], location_address: ['.wa-stavba'], manual_address: ['.wa-stavba'],
   work_description: ['.wa-popis']
 }
+// Z Historie úprav: pro dané záznamy docházky vrátí { id záznamu: Set sloupců, které změnil SPRÁVCE }.
+// Změny, které si udělal pracovník sám (kdo = komu), a změny ze serveru (kdo prázdné) se nepočítají.
+// Vrací null, když se historie nepodařilo načíst (tabulka chybí, výpadek) — obarvování se pak přeskočí.
+async function fialovaPoleZHistorie(ids) {
+  try {
+    if (!ids || !ids.length) return {}
+    const seznam = ids.map(String)
+    const poZaznamu = {}
+    // po dávkách — dlouhý seznam id by přetekl délku adresy dotazu
+    for (let i = 0; i < seznam.length; i += 80) {
+      const { data: radky, error } = await sb.from('historie_uprav').select('zaznam_id, kdo, komu, akce, zmeny')
+        .eq('tabulka', 'attendance').in('zaznam_id', seznam.slice(i, i + 80)).in('akce', ['INSERT', 'UPDATE'])
+      if (error || !radky) { if (error) console.warn('[fialová] historie se nenačetla:', error.message); return null }
+      radky.forEach(h => {
+        if (!h.kdo || String(h.kdo) === String(h.komu)) return   // sám pracovník nebo server — nebarví se
+        const z = h.zmeny && typeof h.zmeny === 'object' ? h.zmeny : {}
+        const mnozina = (poZaznamu[h.zaznam_id] = poZaznamu[h.zaznam_id] || new Set())
+        // Pole breaks (všechny pauzy dne) se mění i při úpravě jednoho času — v tabulce je vidět jen první pauza,
+        // obarví se proto jen ten čas, který se v první pauze opravdu změnil (Codex 7. 11. 2026). Bez dřívější
+        // první pauzy v poli (starší den má pauzu jen ve sloupcích) se pole neporovnává — časy nesou sloupce.
+        if (h.akce === 'UPDATE' && Array.isArray(z.breaks) && z.breaks.length === 2) {
+          const stare = Array.isArray(z.breaks[0]) ? z.breaks[0][0] : null, nove = Array.isArray(z.breaks[1]) ? z.breaks[1][0] : null
+          if (stare && nove && String(stare.bs).slice(0, 5) !== String(nove.bs).slice(0, 5)) mnozina.add('break_start')
+          if (stare && nove && String(stare.be || '').slice(0, 5) !== String(nove.be || '').slice(0, 5)) mnozina.add('break_end')
+        }
+        Object.keys(z).forEach(sl => {
+          if (!FIALOVA_BUNKY[sl]) return
+          // U přidání (INSERT) se bere jen to, co je vyplněné; u změny cokoli, co se změnilo.
+          if (h.akce === 'INSERT' && (z[sl] == null || z[sl] === '' || (Array.isArray(z[sl]) && !z[sl].length))) return
+          mnozina.add(sl)
+        })
+      })
+    }
+    return poZaznamu
+  } catch (e) { console.warn('[fialová] čtení historie selhalo:', (e && e.message) || e); return null }
+}
+// Obarví buňky řádku podle množiny sloupců. `kamHledat` = prvek, ve kterém se hledají buňky (selektory z FIALOVA_BUNKY).
+function fialovaObarviBunky(kontejner, mnozina, selektory) {
+  let neco = false
+  mnozina.forEach(sl => (selektory[sl] || []).forEach(sel => {
+    kontejner.querySelectorAll(sel).forEach(el => { el.classList.add('wd-fialova'); if (!/Upravil správce/.test(el.title || '')) el.title = (el.title ? el.title + ' · ' : '') + 'Upravil správce'; neco = true })
+  }))
+  return neco
+}
 async function fialovaUpravySpravce(data) {
   try {
     const wid = currentWorkerId
     if (!wid || !data || !data.length) return
-    const ids = data.map(r => String(r.id))
-    const { data: radky, error } = await sb.from('historie_uprav').select('zaznam_id, kdo, akce, zmeny')
-      .eq('tabulka', 'attendance').in('zaznam_id', ids).in('akce', ['INSERT', 'UPDATE'])
-    if (error || !radky) { if (error) console.warn('[fialová] historie se nenačetla:', error.message); return }
+    const poZaznamu = await fialovaPoleZHistorie(data.map(r => r.id))
+    if (!poZaznamu) return
     // Aktuální pracovník se mezitím mohl přepnout — obarvuje se jen karta, ke které data patří.
     if (currentWorkerId !== wid) return
-    const poZaznamu = {}
-    radky.forEach(h => {
-      if (!h.kdo || String(h.kdo) === String(wid)) return   // sám pracovník nebo server — nebarví se
-      const z = h.zmeny && typeof h.zmeny === 'object' ? h.zmeny : {}
-      const mnozina = (poZaznamu[h.zaznam_id] = poZaznamu[h.zaznam_id] || new Set())
-      // Pole breaks (všechny pauzy dne) se mění i při úpravě jednoho času — v tabulce je vidět jen první pauza,
-      // obarví se proto jen ta buňka, jejíž čas se v první pauze opravdu změnil (Codex 7. 11. 2026).
-      if (h.akce === 'UPDATE' && Array.isArray(z.breaks) && z.breaks.length === 2) {
-        const stare = Array.isArray(z.breaks[0]) ? z.breaks[0][0] : null, nove = Array.isArray(z.breaks[1]) ? z.breaks[1][0] : null
-        // Bez dřívější první pauzy v poli breaks (starší den má pauzu jen v break_start/break_end) se pole
-        // neporovnává — změněné časy nesou sloupce break_start/break_end přímo (Codex 7. 11. 2026).
-        if (stare && nove && String(stare.bs).slice(0, 5) !== String(nove.bs).slice(0, 5)) mnozina.add('break_start')
-        if (stare && nove && String(stare.be || '').slice(0, 5) !== String(nove.be || '').slice(0, 5)) mnozina.add('break_end')
-      }
-      Object.keys(z).forEach(sl => {
-        if (!FIALOVA_BUNKY[sl]) return
-        // U přidání (INSERT) se bere jen to, co je vyplněné; u změny cokoli, co se změnilo.
-        if (h.akce === 'INSERT' && (z[sl] == null || z[sl] === '' || (Array.isArray(z[sl]) && !z[sl].length))) return
-        mnozina.add(sl)
-      })
-    })
     const tbody = document.getElementById('wd-att-table')
     if (!tbody) return
     let neco = false
     tbody.querySelectorAll('tr.wd-att-radek').forEach(tr => {
       const m = poZaznamu[tr.getAttribute('data-attid')]
-      if (!m || !m.size) return
-      m.forEach(sl => FIALOVA_BUNKY[sl].forEach(sel => {
-        tr.querySelectorAll(sel).forEach(el => { el.classList.add('wd-fialova'); el.title = (el.title ? el.title + ' · ' : '') + 'Upravil správce'; neco = true })
-      }))
+      if (m && m.size && fialovaObarviBunky(tr, m, FIALOVA_BUNKY)) neco = true
     })
     const souhrn = tbody.querySelector('tr.wd-att-souhrn td')
     if (neco && souhrn && !souhrn.querySelector('.wd-fialova-popis')) {
       souhrn.insertAdjacentHTML('beforeend', '<div class="wd-fialova-popis" style="margin-top:6px;font-size:10.5px;color:#7c3aed;font-weight:700">■ fialově: upravil správce (podle Historie úprav, 60 dní zpětně)</div>')
     }
   } catch (e) { console.warn('[fialová] obarvení selhalo:', (e && e.message) || e) }
+}
+// Totéž v Docházce (Dnešní docházka / vybraný den): časy příchodu, pauzy, odchodu, adresa a popis práce, které
+// správce upravil, jsou fialově. Sloupce tabulky jsou pořadím (2 příchod, 3 pauzy, 4 odchod, 6 adresa, 7 popis).
+const FIALOVA_DEN = {
+  check_in: ['td:nth-child(2)'], break_start: ['td:nth-child(3)'], break_end: ['td:nth-child(3)'], check_out: ['td:nth-child(4)'],
+  construction_site: ['td:nth-child(6)'], location_address: ['td:nth-child(6)'], manual_address: ['td:nth-child(6)'],
+  work_description: ['td:nth-child(7)']
+}
+async function fialovaUpravyDen(div, dnesBeh) {
+  try {
+    const radky = [...div.querySelectorAll('tr.today-row[data-attids]')]
+    if (!radky.length) return
+    const ids = radky.flatMap(tr => String(tr.getAttribute('data-attids') || '').split(',').filter(Boolean))
+    const poZaznamu = await fialovaPoleZHistorie(ids)
+    if (!poZaznamu || dnesBeh !== _denDochazkyBeh) return
+    radky.forEach(tr => {
+      const spolecne = new Set()
+      String(tr.getAttribute('data-attids') || '').split(',').forEach(id => (poZaznamu[id] || []).forEach(sl => spolecne.add(sl)))
+      if (spolecne.size) fialovaObarviBunky(tr, spolecne, FIALOVA_DEN)
+    })
+  } catch (e) { console.warn('[fialová] obarvení dne selhalo:', (e && e.message) || e) }
 }
 async function loadWdAttendance() {
   if(!currentWorkerId) return
