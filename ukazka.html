@@ -793,6 +793,16 @@
     });
   });
 
+  // Noví lidé mají i řidičský průkaz v pořádku — jinak by Dashboard hlásil „Chybí: Řidičský průkaz“ u každého ze 120 lidí.
+  lideId.forEach((w, i) => {
+    if (i < 12) return;
+    D.documents.push({
+      id: uuid(), worker_id: w, doc_type: 'ridicak', file_name: 'Řidičský průkaz.pdf',
+      file_url: '', status: 'ok', valid_until: dnes(400 + (i % 40) * 11),
+      no_expiry: false, uploaded_at: new Date().toISOString(), created_at: new Date().toISOString(),
+    });
+  });
+
   // ---- Faktury ----
   // Zálohové faktury — v ukázce prázdné, ať si je jde zkusit vystavit.
   D.zalohove_faktury = [];
@@ -53013,40 +53023,37 @@ window.__hlavniSkriptDobehl = true
     let role = 'sef';
     try { role = localStorage.getItem('demo-role') || 'sef' } catch (e) {}
 
-    const pruh = document.createElement('div');
-    pruh.id = 'demo-pruh';
-    pruh.innerHTML =
-      '<span class="demo-stitek">UKÁZKA</span>' +
-      '<span class="demo-text">Vymyšlená data · nic se neukládá</span>' +
-      '<span class="demo-mezera"></span>' +
+    // Přepínač pohledů (majitel 9. 11. 2026): spodní černý pruh s nápisem „UKÁZKA — Vymyšlená data“ je pryč,
+    // tlačítka jsou na Dashboardu (pohled vedení). V pohledu pracovníka žádný dashboard není, tam je malé
+    // tlačítko vpravo nahoře, ať se jde vrátit.
+    const TLACITKA =
       '<button id="demo-sef">Pohled vedení</button>' +
       '<button id="demo-prac">Pohled pracovníka</button>' +
       '<button id="demo-reset" title="Vrátit ukázku do původního stavu">Začít znovu</button>';
-    document.body.appendChild(pruh);
-
     const styl = document.createElement('style');
     styl.textContent =
-      '#demo-pruh{position:fixed;left:0;right:0;bottom:0;z-index:99999;background:#211D1A;color:#fff;' +
-      'display:flex;align-items:center;gap:8px;padding:8px 12px;font-size:13px;' +
-      'font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Arial,sans-serif;' +
-      'box-shadow:0 -2px 14px rgba(0,0,0,.3);flex-wrap:wrap}' +
-      '#demo-pruh .demo-stitek{background:#E8A13A;color:#211D1A;font-weight:800;padding:2px 9px;' +
-      'border-radius:6px;font-size:11px;letter-spacing:.5px}' +
-      '#demo-pruh .demo-text{color:#cfc7bd;font-size:12px}' +
-      '#demo-pruh .demo-mezera{flex:1}' +
-      '#demo-pruh button{font-family:inherit;font-size:12.5px;font-weight:700;padding:7px 13px;' +
-      'border-radius:9px;border:1px solid #4a443e;background:#2c2722;color:#fff;cursor:pointer}' +
-      '#demo-pruh button.aktivni{background:#E8A13A;color:#211D1A;border-color:#E8A13A}' +
-      'body{padding-bottom:56px!important}' +
-      // Spodní menu pracovníka je samo o sobě fixed na bottom:0 — padding na
-      // body ho nehne, takže by zůstalo schované pod ukázkovým pruhem.
-      '.mob-nav{bottom:56px!important}' +
-      '@media print{#demo-pruh{display:none}body{padding-bottom:0!important}.mob-nav{bottom:0!important}}';
+      '#demo-prepinac{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:0 0 16px;' +
+      'font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Arial,sans-serif}' +
+      '#demo-prepinac button,#demo-zpet{font-family:inherit;font-size:12.5px;font-weight:700;padding:7px 13px;' +
+      'border-radius:9px;border:1px solid #d9d2c8;background:#fff;color:#211D1A;cursor:pointer}' +
+      '#demo-prepinac button.aktivni{background:#E8A13A;color:#211D1A;border-color:#E8A13A}' +
+      '#demo-zpet{position:fixed;top:8px;right:8px;z-index:99999;background:#211D1A;color:#fff;border-color:#4a443e;' +
+      'box-shadow:0 2px 10px rgba(0,0,0,.3)}' +
+      '@media print{#demo-prepinac,#demo-zpet{display:none}}';
     document.head.appendChild(styl);
-
+    function vlozPrepinac() {
+      const dash = document.getElementById('v-dashboard');
+      if (!dash || document.getElementById('demo-prepinac')) return;
+      const blok = document.createElement('div');
+      blok.id = 'demo-prepinac';
+      blok.innerHTML = TLACITKA;
+      dash.insertBefore(blok, dash.firstChild);
+      pripoj();
+    }
     function oznac() {
-      document.getElementById('demo-sef').classList.toggle('aktivni', role === 'sef');
-      document.getElementById('demo-prac').classList.toggle('aktivni', role === 'pracovnik');
+      const sef = document.getElementById('demo-sef'), prac = document.getElementById('demo-prac');
+      if (sef) sef.classList.toggle('aktivni', role === 'sef');
+      if (prac) prac.classList.toggle('aktivni', role === 'pracovnik');
     }
     function prepni(nova) {
       if (nova === role) return;
@@ -53056,13 +53063,27 @@ window.__hlavniSkriptDobehl = true
       // to je přesně ta cesta, kterou se rozbíjí ostrá verze.
       location.reload();
     }
-    document.getElementById('demo-sef').onclick = () => prepni('sef');
-    document.getElementById('demo-prac').onclick = () => prepni('pracovnik');
-    document.getElementById('demo-reset').onclick = () => {
-      try { localStorage.removeItem('demo-role') } catch (e) {}
-      location.reload();
-    };
-    oznac();
+    function pripoj() {
+      const sef = document.getElementById('demo-sef'), prac = document.getElementById('demo-prac'), reset = document.getElementById('demo-reset');
+      if (sef) sef.onclick = () => prepni('sef');
+      if (prac) prac.onclick = () => prepni('pracovnik');
+      if (reset) reset.onclick = () => {
+        try { localStorage.removeItem('demo-role') } catch (e) {}
+        location.reload();
+      };
+      oznac();
+    }
+    if (role === 'pracovnik') {
+      const zpet = document.createElement('button');
+      zpet.id = 'demo-zpet';
+      zpet.textContent = 'Pohled vedení';
+      zpet.onclick = () => prepni('sef');
+      document.body.appendChild(zpet);
+    } else {
+      // Dashboard se do stránky vykreslí až po přihlášení — vložit, jakmile existuje, a hlídat, kdyby ho appka přepsala.
+      vlozPrepinac();
+      setInterval(vlozPrepinac, 1000);
+    }
   }
 
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', start);

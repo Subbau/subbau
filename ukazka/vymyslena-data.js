@@ -246,6 +246,16 @@
     });
   });
 
+  // Noví lidé mají i řidičský průkaz v pořádku — jinak by Dashboard hlásil „Chybí: Řidičský průkaz“ u každého ze 120 lidí.
+  lideId.forEach((w, i) => {
+    if (i < 12) return;
+    D.documents.push({
+      id: uuid(), worker_id: w, doc_type: 'ridicak', file_name: 'Řidičský průkaz.pdf',
+      file_url: '', status: 'ok', valid_until: dnes(400 + (i % 40) * 11),
+      no_expiry: false, uploaded_at: new Date().toISOString(), created_at: new Date().toISOString(),
+    });
+  });
+
   // ---- Faktury ----
   // Zálohové faktury — v ukázce prázdné, ať si je jde zkusit vystavit.
   D.zalohove_faktury = [];
