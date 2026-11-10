@@ -6851,7 +6851,7 @@ async function submitAdminSignatureWithPlacement() {
 // Po nahrání nové verze se snadno pozná, jestli se opravdu nasadila: otevřete
 // appku, zmáčkněte F12 (na Macu ⌥⌘I) a v konzoli je vypsané tohle datum. Když
 // tam svítí starší, prohlížeč nebo GitHub drží starou verzi.
-const SUBBAU_VERZE = '2026-11-07 f — Rámeček světlejší, původní čas pod novým; otazník u řádku dne v Docházce'
+const SUBBAU_VERZE = '2026-11-10 a — Krátké výpadky živého spojení se nezapisují do deníku (jen ty, co trvají přes minutu)'
 console.log('StavKo docházka — verze ' + SUBBAU_VERZE)
 // Verze i dole v menu správce. Když někdo novinku „nevidí", podle ní se hned
 // pozná, jestli nemá otevřenou starou kopii appky — bez hledání v konzoli.
@@ -9817,12 +9817,41 @@ function _debouncedRefresh(key, fn, delay = 400, maxWait = 0) {
 // nebylo vidět, že správci nechodí živé změny nebo že se spojení dokola
 // přepojuje. Zapisuje se jako varování, automaticky (stejný stav kanálu se
 // slučuje do počtu) — po uspání počítače jich bývá víc a nejsou to chyby appky.
-function realtimeDoDeniku(kanal, stav, err) {
+// KRÁTKÉ VÝPADKY SE NEZAPISUJÍ (majitel 10. 11. 2026: „nesmí tam být žádné chyby“; Codex: vlastní doba výpadku musí
+// zůstat vidět): chyba kanálu se do deníku zapíše až tehdy, když se kanál do 60 s nepřipojí zpátky (SUBSCRIBED).
+// Krátké přerušení signálu na stavbě, které se samo spraví, v deníku není. Začátek výpadku se drží přes opakované
+// chyby i přes nový kanál od hlídače, takže dlouhý výpadek se zapíše vždy. Když telefon mezitím spal nebo je
+// záložka schovaná (časovač se zpozdil), nezapisuje se nic — není to výpadek, jen uspání.
+const _rtVypadky = {}
+function _rtZapis(kanal, stav, err, trvaloS) {
   try {
     if (typeof denikChybZapis !== 'function') return
     const m = err && err.message ? String(err.message).slice(0, 200) : ''
-    denikChybZapis('realtime|' + kanal, 'Živé spojení ' + kanal + ': ' + stav + (m ? ' — ' + m : ''), { stavKanalu: String(stav).slice(0, 60), chyba: m || undefined }, { trida: 'varovani', zdroj: 'auto' }) // eslint-disable-line no-undef
+    denikChybZapis('realtime|' + kanal, 'Živé spojení ' + kanal + ': ' + stav + (m ? ' — ' + m : ''), { stavKanalu: String(stav).slice(0, 60), chyba: m || undefined, trvaloS: trvaloS || undefined }, { trida: 'varovani', zdroj: 'auto' }) // eslint-disable-line no-undef
   } catch (x) { console.warn('[deník chyb]', x) }
+}
+function realtimeDoDeniku(kanal, stav, err) {
+  try {
+    if (!/^(CHANNEL_ERROR|TIMED_OUT|CLOSED)$/.test(String(stav))) { _rtZapis(kanal, stav, err); return }   // „nepřipojeno přes 5 min“ apod. — hned
+    const v = _rtVypadky[kanal] || (_rtVypadky[kanal] = { od: Date.now(), stav, err, t: null })
+    v.stav = stav; v.err = err
+    if (v.t) return
+    v.t = setTimeout(() => {
+      const w = _rtVypadky[kanal]; delete _rtVypadky[kanal]
+      if (!w) return
+      const uplynulo = Date.now() - w.od
+      if (document.visibilityState !== 'visible' || uplynulo > 150000) return   // uspání / schovaná záložka, ne výpadek
+      if (typeof currentUser === 'undefined' || !currentUser) return           // odhlášen
+      _rtZapis(kanal, w.stav, w.err, Math.round(uplynulo / 1000))
+    }, 60000)
+  } catch (x) { console.warn('[deník chyb]', x) }
+}
+// Kanál se připojil zpátky — krátký výpadek se nezapisuje.
+function realtimeObnoveno(kanal) {
+  const v = _rtVypadky[kanal]
+  if (!v) return
+  if (v.t) clearTimeout(v.t)
+  delete _rtVypadky[kanal]
 }
 let invoiceRealtimeSub = null
 function startInvoiceRealtime() {
@@ -9835,8 +9864,8 @@ function startInvoiceRealtime() {
       _debouncedRefresh('invoices', loadWorkerInvoices)
     })
     .subscribe((status, err) => {
-      if (status === 'SUBSCRIBED') console.log('[faktury realtime] aktivní')
-      else if (status === 'CHANNEL_ERROR') console.warn('[faktury realtime] spojení přerušeno:', status, (err && err.message) || '')
+      if (status === 'SUBSCRIBED') { console.log('[faktury realtime] aktivní'); realtimeObnoveno('admin-faktury') }
+      else if (status === 'CHANNEL_ERROR') console.log('[faktury realtime] spojení přerušeno:', status, (err && err.message) || '')
       // DENÍK CHYB: faktury od lidí pak správci živě nechodí (CLOSED je vlastní
       // odpojení při novém kanálu nebo odhlášení — to se nezapisuje).
       if ((status === 'CHANNEL_ERROR' || status === 'TIMED_OUT') && currentUser) realtimeDoDeniku('admin-faktury', status, err)
@@ -10229,7 +10258,7 @@ function _startAdminRealtimeWatchdog() {
     if (!navigator.onLine) return          // bez internetu nemá cenu se pokoušet
     const st = adminRealtimeSub?.state
     if (st === 'joined' || st === 'joining') return   // v pořádku / právě se připojuje
-    console.warn('[admin realtime] spojení není aktivní (stav: ' + st + ') — obnovuji')
+    console.log('[admin realtime] spojení není aktivní (stav: ' + st + ') — obnovuji')
     startAdminRealtime()
   }, 30000)
 }
@@ -10262,8 +10291,9 @@ function startAdminRealtime() {
     if (status === 'SUBSCRIBED') {
       _rtRetryDelay = 2000                 // spojení drží → reset čekací doby
       console.log('[admin realtime] živá aktualizace aktivní')
+      realtimeObnoveno('admin-live')
     } else if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT' || status === 'CLOSED') {
-      console.warn('[admin realtime] spojení přerušeno:', status, err?.message || '')
+      console.log('[admin realtime] spojení přerušeno:', status, err?.message || '')
       // DENÍK CHYB: i CLOSED — slučování to udrží v mezích a počet odhalí,
       // kdyby se spojení přepojovalo dokola (zavření starého kanálu výš
       // spouští další přepojení). Po odhlášení se nezapisuje.
@@ -20051,7 +20081,7 @@ function startOsvecRealtime() {
       // loadMobProfil překreslí i sekci Faktury — sazba a splatnost tak sedí hned
     })
     .subscribe((status, err) => {
-      if (status === 'SUBSCRIBED') console.log('[osvec realtime] živá aktualizace aktivní')
+      if (status === 'SUBSCRIBED') { console.log('[osvec realtime] živá aktualizace aktivní'); realtimeObnoveno('osvec-live') }
       // DENÍK CHYB (2. 11. 2026): kanál pracovníka se sám znovu nepřipojí —
       // po chybě mu nechodí úpravy docházky ani zprávy od kanceláře.
       // CLOSED je vlastní odpojení (nový kanál, odhlášení), to se nezapisuje.
@@ -20072,7 +20102,7 @@ function _startOsvecWatchdog() {
     if (document.visibilityState !== 'visible' || navigator.onLine === false) return
     const st = osvecRealtimeSub.state
     if (!st || st === 'joined' || st === 'joining') return
-    console.warn('[osvec realtime] spojení není aktivní (stav: ' + st + ') — obnovuji')
+    console.log('[osvec realtime] spojení není aktivní (stav: ' + st + ') — obnovuji')
     try { startOsvecRealtime() } catch (e) { console.warn('[osvec realtime] obnova selhala:', (e && e.message) || e) }
   }, 60000)
 }
@@ -20168,6 +20198,7 @@ async function loadMobChat() {
     // vůbec — po chybě zprávy od kanceláře živě nechodí. CLOSED je vlastní
     // odpojení při novém otevření chatu, to se nezapisuje.
     .subscribe((status, err) => {
+      if (status === 'SUBSCRIBED') realtimeObnoveno('mob-chat')
       if ((status === 'CHANNEL_ERROR' || status === 'TIMED_OUT') && currentUser) realtimeDoDeniku('mob-chat', status, err)
     })
 }
@@ -20741,6 +20772,7 @@ async function openAdminChat(workerId, workerName) {
       // DENÍK CHYB (2. 11. 2026, kritika bod 17): stav kanálu chatu správce
       // dřív nikdo nehlídal. CLOSED = přepnutí na jiného pracovníka, nezapisuje se.
       .subscribe((status, err) => {
+        if (status === 'SUBSCRIBED') realtimeObnoveno('admin-chat')
         if ((status === 'CHANNEL_ERROR' || status === 'TIMED_OUT') && currentUser) realtimeDoDeniku('admin-chat', status, err)
       })
   })().catch(e => console.warn('[openAdminChat] pozadí:', e?.message))
