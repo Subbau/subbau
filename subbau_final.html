@@ -8864,6 +8864,7 @@ function _debouncedRefresh(key, fn, delay = 400, maxWait = 0) {
 // chyby i přes nový kanál od hlídače, takže dlouhý výpadek se zapíše vždy. Když telefon mezitím spal nebo je
 // záložka schovaná (časovač se zpozdil), nezapisuje se nic — není to výpadek, jen uspání.
 const _rtVypadky = {}
+const RT_OKNO_MS = 60000
 function _rtZapis(kanal, stav, err, trvaloS) {
   try {
     if (typeof denikChybZapis !== 'function') return
@@ -8871,20 +8872,49 @@ function _rtZapis(kanal, stav, err, trvaloS) {
     denikChybZapis('realtime|' + kanal, 'Živé spojení ' + kanal + ': ' + stav + (m ? ' — ' + m : ''), { stavKanalu: String(stav).slice(0, 60), chyba: m || undefined, trvaloS: trvaloS || undefined }, { trida: 'varovani', zdroj: 'auto' }) // eslint-disable-line no-undef
   } catch (x) { console.warn('[deník chyb]', x) }
 }
+// Spustí (nebo znovu spustí) okno 60 s pro jeden kanál. Po uspání nebo schování záložky se okno začne počítat
+// znovu od chvíle, kdy je appka zase vidět — probuzený telefon dostane minutu na připojení (Codex 10. 11. 2026).
+function _rtNaplanuj(kanal) {
+  const v = _rtVypadky[kanal]
+  if (!v) return
+  if (v.t) clearTimeout(v.t)
+  v.od = Date.now()
+  v.t = setTimeout(() => {
+    const w = _rtVypadky[kanal]
+    if (!w) return
+    w.t = null
+    const uplynulo = Date.now() - w.od
+    if (document.visibilityState !== 'visible' || uplynulo > 150000 || w.skryto) {
+      w.skryto = false
+      if (document.visibilityState === 'visible') _rtNaplanuj(kanal)       // zpožděný časovač po uspání: nové okno
+      return                                                                // schovaná záložka: čeká se na visibilitychange
+    }
+    if (typeof currentUser === 'undefined' || !currentUser || String(currentUser.id) !== String(w.kdo)) { delete _rtVypadky[kanal]; return }   // jiná relace
+    delete _rtVypadky[kanal]
+    _rtZapis(kanal, w.stav, w.err, Math.round(uplynulo / 1000))
+  }, RT_OKNO_MS)
+}
+let _rtVidetelnostPripojena = false
+function _rtPripojVidetelnost() {
+  if (_rtVidetelnostPripojena || typeof document === 'undefined') return
+  _rtVidetelnostPripojena = true
+  document.addEventListener('visibilitychange', () => {
+    Object.keys(_rtVypadky).forEach(k => {
+      const v = _rtVypadky[k]
+      if (!v) return
+      if (document.visibilityState === 'visible') _rtNaplanuj(k)      // zase vidět → minuta od teď
+      else { v.skryto = true }                                         // schováno → po cestě se nezapisuje
+    })
+  })
+}
 function realtimeDoDeniku(kanal, stav, err) {
   try {
     if (!/^(CHANNEL_ERROR|TIMED_OUT|CLOSED)$/.test(String(stav))) { _rtZapis(kanal, stav, err); return }   // „nepřipojeno přes 5 min“ apod. — hned
-    const v = _rtVypadky[kanal] || (_rtVypadky[kanal] = { od: Date.now(), stav, err, t: null })
+    _rtPripojVidetelnost()
+    const jeNovy = !_rtVypadky[kanal]
+    const v = _rtVypadky[kanal] || (_rtVypadky[kanal] = { od: Date.now(), stav, err, t: null, skryto: false, kdo: (typeof currentUser !== 'undefined' && currentUser) ? currentUser.id : null })
     v.stav = stav; v.err = err
-    if (v.t) return
-    v.t = setTimeout(() => {
-      const w = _rtVypadky[kanal]; delete _rtVypadky[kanal]
-      if (!w) return
-      const uplynulo = Date.now() - w.od
-      if (document.visibilityState !== 'visible' || uplynulo > 150000) return   // uspání / schovaná záložka, ne výpadek
-      if (typeof currentUser === 'undefined' || !currentUser) return           // odhlášen
-      _rtZapis(kanal, w.stav, w.err, Math.round(uplynulo / 1000))
-    }, 60000)
+    if (jeNovy) _rtNaplanuj(kanal)
   } catch (x) { console.warn('[deník chyb]', x) }
 }
 // Kanál se připojil zpátky — krátký výpadek se nezapisuje.
@@ -8893,6 +8923,10 @@ function realtimeObnoveno(kanal) {
   if (!v) return
   if (v.t) clearTimeout(v.t)
   delete _rtVypadky[kanal]
+}
+// Odhlášení: čekající výpadky zrušit (nepatří další relaci).
+function realtimeUklid() {
+  Object.keys(_rtVypadky).forEach(k => { const v = _rtVypadky[k]; if (v && v.t) clearTimeout(v.t); delete _rtVypadky[k] })
 }
 let invoiceRealtimeSub = null
 function startInvoiceRealtime() {
@@ -9972,6 +10006,7 @@ function closeAdminDrawer() {
 function uklidRelace() {
   try { stopHeartbeat() } catch (e) { console.warn('[úklid relace] heartbeat:', e && e.message) }
   try { stopClock() } catch (e) { console.warn('[úklid relace] hodiny:', e && e.message) }
+  try { realtimeUklid() } catch (e) { console.warn('[úklid relace] realtime výpadky:', e && e.message) }
   // Odpoj živou aktualizaci admin dat
   // Nejdřív odpojit, pak zavřít — zavření pak nespustí přepojení (3. 11. 2026).
   { const s = adminRealtimeSub; adminRealtimeSub = null; if (s) { try { sb.removeChannel(s) } catch(e) {} } }
