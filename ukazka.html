@@ -6851,7 +6851,7 @@ async function submitAdminSignatureWithPlacement() {
 // Po nahrání nové verze se snadno pozná, jestli se opravdu nasadila: otevřete
 // appku, zmáčkněte F12 (na Macu ⌥⌘I) a v konzoli je vypsané tohle datum. Když
 // tam svítí starší, prohlížeč nebo GitHub drží starou verzi.
-const SUBBAU_VERZE = '2026-11-10 a — Krátké výpadky živého spojení se nezapisují do deníku (jen ty, co trvají přes minutu)'
+const SUBBAU_VERZE = '2026-11-10 a — Krátké výpadky živého spojení se nezapisují do deníku (jen ty, co trvají přes minutu); přepojení správce si předem obnoví prošlý klíč'
 console.log('StavKo docházka — verze ' + SUBBAU_VERZE)
 // Verze i dole v menu správce. Když někdo novinku „nevidí", podle ní se hned
 // pozná, jestli nemá otevřenou starou kopii appky — bez hledání v konzoli.
@@ -10251,6 +10251,17 @@ function _jeAdminPrihlasen() {
 // když ho server odpojí kvůli nečinnosti. Kanál pak zůstane mrtvý a admin
 // nedostane ani jedno upozornění, i když má appku otevřenou. Proto ho po
 // výpadku znovu připojíme (postupně prodlužujeme čekání, ať server nezahltíme).
+// Deník 10. 11. 2026: „InvalidJWTToken: Token has expired 3374 seconds ago" — živé spojení
+// správce se přepojovalo se starým, prošlým klíčem a padalo dokola. Před přepojením se
+// proto klíč obnoví (getSession ho obnoví, když vypršel) a předá živému spojení.
+// Nic se nezobrazuje, jen se vybere čerstvý klíč; při chybě se přepojí jako dřív.
+async function _rtTokenCerstvy() {
+  try {
+    const r = await Promise.race([sb.auth.getSession(), new Promise(res => setTimeout(() => res(null), 8000))])
+    const t = r && r.data && r.data.session && r.data.session.access_token
+    if (t && sb.realtime && typeof sb.realtime.setAuth === 'function') sb.realtime.setAuth(t)
+  } catch (e) { /* přepojí se i bez toho */ }
+}
 function _scheduleAdminRealtimeReconnect() {
   if (_rtRetryTimer) return
   if (!_jeAdminPrihlasen()) return
@@ -10258,7 +10269,7 @@ function _scheduleAdminRealtimeReconnect() {
     _rtRetryTimer = null
     if (!_jeAdminPrihlasen()) return
     console.log('[admin realtime] obnovuji spojení…')
-    startAdminRealtime()
+    _rtTokenCerstvy().then(() => { if (_jeAdminPrihlasen()) startAdminRealtime() })
   }, _rtRetryDelay)
   _rtRetryDelay = Math.min(_rtRetryDelay * 2, 30000)
 }
@@ -10295,7 +10306,7 @@ function _startAdminRealtimeWatchdog() {
     const st = adminRealtimeSub?.state
     if (st === 'joined' || st === 'joining') return   // v pořádku / právě se připojuje
     console.log('[admin realtime] spojení není aktivní (stav: ' + st + ') — obnovuji')
-    startAdminRealtime()
+    _rtTokenCerstvy().then(() => { if (_jeAdminPrihlasen()) startAdminRealtime() })
   }, 30000)
 }
 
@@ -14433,7 +14444,9 @@ async function loadPendingRegDismissals() {
   } catch (e) {
     // Databáze nedostupná (nebo chybí oprávnění) → jedeme na lokální paměť prohlížeče
     window._pregSharedOk = false
-    console.warn('[registrace] odložené se nenačetly ze společné databáze:', e?.message)
+    // Výpadek sítě není chyba (jedeme na paměť prohlížeče) — do deníku jen jiné příčiny
+    if (/failed to fetch|networkerror|load failed/i.test(String(e?.message || ''))) console.log('[registrace] odložené se nenačetly (síť), jedu z paměti prohlížeče')
+    else console.warn('[registrace] odložené se nenačetly ze společné databáze:', e?.message)
     return false
   }
 }
