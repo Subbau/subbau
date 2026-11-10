@@ -6851,7 +6851,7 @@ async function submitAdminSignatureWithPlacement() {
 // Po nahrání nové verze se snadno pozná, jestli se opravdu nasadila: otevřete
 // appku, zmáčkněte F12 (na Macu ⌥⌘I) a v konzoli je vypsané tohle datum. Když
 // tam svítí starší, prohlížeč nebo GitHub drží starou verzi.
-const SUBBAU_VERZE = '2026-11-10 a — Krátké výpadky živého spojení se nezapisují do deníku (jen ty, co trvají přes minutu); přepojení správce si předem obnoví prošlý klíč'
+const SUBBAU_VERZE = '2026-11-10 a — Krátké výpadky živého spojení se nezapisují do deníku (jen ty, co trvají přes minutu); přepojení správce si předem obnoví prošlý klíč, bez zavírání už obnoveného spojení'
 console.log('StavKo docházka — verze ' + SUBBAU_VERZE)
 // Verze i dole v menu správce. Když někdo novinku „nevidí", podle ní se hned
 // pozná, jestli nemá otevřenou starou kopii appky — bez hledání v konzoli.
@@ -10255,6 +10255,8 @@ function _jeAdminPrihlasen() {
 // správce se přepojovalo se starým, prošlým klíčem a padalo dokola. Před přepojením se
 // proto klíč obnoví (getSession ho obnoví, když vypršel) a předá živému spojení.
 // Nic se nezobrazuje, jen se vybere čerstvý klíč; při chybě se přepojí jako dřív.
+// Mezitím mohlo spojení obnovit samo (online, návrat na záložku) — pak ho nezavírat znovu.
+function _rtJizBezi() { const st = adminRealtimeSub?.state; return st === 'joined' || st === 'joining' }
 async function _rtTokenCerstvy() {
   try {
     const r = await Promise.race([sb.auth.getSession(), new Promise(res => setTimeout(() => res(null), 8000))])
@@ -10269,7 +10271,7 @@ function _scheduleAdminRealtimeReconnect() {
     _rtRetryTimer = null
     if (!_jeAdminPrihlasen()) return
     console.log('[admin realtime] obnovuji spojení…')
-    _rtTokenCerstvy().then(() => { if (_jeAdminPrihlasen()) startAdminRealtime() })
+    _rtTokenCerstvy().then(() => { if (_jeAdminPrihlasen() && !_rtJizBezi()) startAdminRealtime() })
   }, _rtRetryDelay)
   _rtRetryDelay = Math.min(_rtRetryDelay * 2, 30000)
 }
@@ -10306,7 +10308,7 @@ function _startAdminRealtimeWatchdog() {
     const st = adminRealtimeSub?.state
     if (st === 'joined' || st === 'joining') return   // v pořádku / právě se připojuje
     console.log('[admin realtime] spojení není aktivní (stav: ' + st + ') — obnovuji')
-    _rtTokenCerstvy().then(() => { if (_jeAdminPrihlasen()) startAdminRealtime() })
+    _rtTokenCerstvy().then(() => { if (_jeAdminPrihlasen() && !_rtJizBezi()) startAdminRealtime() })
   }, 30000)
 }
 
