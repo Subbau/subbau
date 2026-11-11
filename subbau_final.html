@@ -2188,7 +2188,7 @@ setTimeout(function brzda() {
           <div class="card" style="margin-top:16px" id="podpisy-ze-smluv-karta">
             <div class="card-h"><h4>✍️ Podpisy pracovníků ze smluv</h4></div>
             <div style="padding:16px">
-              <p style="font-size:13px;color:var(--text2);margin:0 0 10px;line-height:1.5">Vytáhne z podepsaných smluv podpis, který pracovník sám nakreslil, a uloží ho jako jeho „poslední podpis“. U dalšího dokumentu mu ho appka nabídne tlačítkem — podepsat musí sám. Nejdřív se podpisy jen ukážou, ty odškrtneš ty, které nevypadají dobře, a teprve potom se uloží.</p>
+              <p style="font-size:13px;color:var(--text2);margin:0 0 10px;line-height:1.5">Vytáhne z podepsaných smluv podpis, který pracovník sám nakreslil, a uloží ho jako jeho „poslední podpis“. U dalšího dokumentu mu ho appka nabídne tlačítkem — podepsat musí sám. Nejdřív se podpisy jen ukážou a NIC není předem zaškrtnuto. <b>Zaškrtni jen ty, o kterých víš, že je pracovník nakreslil sám</b> — ne ty smlouvy, které jsi za něj podepsal ty přes „Podpis za pracovníka“ (z dat se to rozlišit nedá, proto rozhoduješ ty podle náhledu a data). Uloží se jen zaškrtnuté.</p>
               <button class="btn-pri" id="pzs-najdi" onclick="podpisyZeSmluvNajdi()" style="padding:10px 16px">🔍 Najít podpisy ve smlouvách</button>
               <div id="podpisy-ze-smluv" style="margin-top:14px"></div>
             </div>
@@ -5634,6 +5634,12 @@ function adminSigStoragePath() {
 // tlačítkem „Použít můj poslední podpis“ — PODEPSAT MUSÍ SÁM (klik do PDF + Náhled a uložit).
 // Správce tu nic za pracovníka nepodepisuje: nástroj níže jen vytáhne podpisy, které lidé
 // dali na smlouvy dřív, a uloží je až po odsouhlasení správcem.
+// Žádný požadavek nesmí zablokovat celý nástroj: každý má svůj limit.
+const _pzsCas = (promise, ms, co) => Promise.race([promise, new Promise((_, rej) => setTimeout(() => rej(new Error(co + ': vypršel limit')), ms))])
+const _pzsExistuje = async (id) => {
+  const ac = new AbortController(), t = setTimeout(() => ac.abort(), 8000)
+  try { return (await fetch(_podpisUrl(id), { method: 'HEAD', cache: 'no-store', signal: ac.signal })).ok } catch (e) { return false } finally { clearTimeout(t) }
+}
 const workerSigStoragePath = (id) => 'signatures/worker_' + id + '.png'
 const _podpisUrl = (id) => sb.storage.from('contracts').getPublicUrl(workerSigStoragePath(id)).data?.publicUrl || ''
 // Ořízne plátno na nakreslené čáry (průhledné pozadí, nejvýš 500 px na šířku) → { dataUrl, blob, w, h, tmavych }.
@@ -5703,7 +5709,9 @@ let _pzs = []
 async function _podpisZPdf(url, strana) {
   await ensureLib('pdfjs')
   pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js'
-  const doc = await pdfjsLib.getDocument(url).promise
+  const uloha = pdfjsLib.getDocument(url)
+  let doc
+  try { doc = await _pzsCas(uloha.promise, 30000, 'PDF') } catch (e) { try { uloha.destroy() } catch (x) { /* nic */ } throw e }
   try {
     const strany = []
     if (strana >= 1 && strana <= doc.numPages) strany.push(strana)
@@ -5739,21 +5747,25 @@ async function podpisyZeSmluvNajdi() {
   _pzs = []
   try {
     box.innerHTML = '<div style="color:var(--text3);font-size:13px">Načítám smlouvy…</div>'
-    const { data, error } = await sb.from('contracts').select('id, worker_id, signature_url, signed_at, title, worker_sign_page, status, worker:profiles!worker_id(full_name, is_active)').eq('status', 'signed_electronic').not('signature_url', 'is', null).order('signed_at', { ascending: false }).limit(2000)
-    if (error) throw new Error(error.message)
+    // Po stránkách (server vrací nejvýš ~1000 řádků naráz), od nejnovější — poslední smlouva každého pracovníka je první, na kterou narazíme.
     const posledni = new Map()
-    for (const c of data || []) if (c.worker_id && !posledni.has(c.worker_id)) posledni.set(c.worker_id, c)
+    for (let od = 0; od < 50000; od += 1000) {
+      const { data, error } = await sb.from('contracts').select('id, worker_id, signature_url, signed_at, title, worker_sign_page, status, worker:profiles!worker_id(full_name, is_active)').eq('status', 'signed_electronic').not('signature_url', 'is', null).order('signed_at', { ascending: false }).order('id', { ascending: true }).range(od, od + 999)
+      if (error) throw new Error(error.message)
+      for (const c of data || []) if (c.worker_id && !posledni.has(c.worker_id)) posledni.set(c.worker_id, c)
+      if (!data || data.length < 1000) break
+    }
     const lide = [...posledni.values()].sort((a, b) => String(a.worker?.full_name || '').localeCompare(String(b.worker?.full_name || ''), 'cs'))
     if (!lide.length) { box.innerHTML = '<div style="color:var(--text3);font-size:13px">Žádná elektronicky podepsaná smlouva.</div>'; return }
     for (let i = 0; i < lide.length; i++) {
       const c = lide[i]
-      box.innerHTML = `<div style="color:var(--text3);font-size:13px">Čtu podpisy… ${i + 1} z ${lide.length}</div>`
+      { const stav = document.getElementById('pzs-stav'); if (stav) stav.textContent = `Čtu podpisy… ${i + 1} z ${lide.length}`; else box.innerHTML = `<div id="pzs-stav" style="color:var(--text3);font-size:13px">Čtu podpisy… ${i + 1} z ${lide.length}</div>` }
       let o = null, chyba = '', uzMa = false
-      try { uzMa = (await fetch(_podpisUrl(c.worker_id), { method: 'HEAD', cache: 'no-store' })).ok } catch (e) { /* neověřeno = neuložený */ }
+      uzMa = await _pzsExistuje(c.worker_id)
       try { o = await _podpisZPdf(c.signature_url, c.worker_sign_page) } catch (e) { chyba = String(e?.message || e).slice(0, 80) }
       // Podpis bývá cca 2,4 : 1 a má řídké čáry; úplně plný obrázek nebo velmi úzký proužek vzbudí podezření.
       const divny = !o || o.w < 40 || o.h < 15 || o.plnych > 0.6
-      _pzs.push({ workerId: c.worker_id, jmeno: c.worker?.full_name || '—', aktivni: c.worker?.is_active !== false, smlouva: c.title || '', kdy: c.signed_at, o, chyba, uzMa, vybrat: !!o && !divny && !uzMa })
+      _pzs.push({ workerId: c.worker_id, jmeno: c.worker?.full_name || '—', aktivni: c.worker?.is_active !== false, smlouva: c.title || '', kdy: c.signed_at, o, chyba, uzMa, divny, vybrat: false })
     }
     podpisyZeSmluvVykresli()
   } catch (e) {
@@ -5763,7 +5775,7 @@ async function podpisyZeSmluvNajdi() {
 function podpisyZeSmluvVykresli() {
   const box = document.getElementById('podpisy-ze-smluv'); if (!box) return
   const vybranych = _pzs.filter(x => x.vybrat).length
-  box.innerHTML = `<div style="font-size:13px;margin-bottom:10px"><b>${_pzs.length}</b> pracovníků · nalezeno podpisů: <b>${_pzs.filter(x => x.o).length}</b> · k uložení zaškrtnuto: <b id="pzs-pocet">${vybranych}</b></div>`
+  box.innerHTML = `<div style="font-size:13px;margin-bottom:10px"><b>${_pzs.length}</b> pracovníků · nalezeno podpisů: <b>${_pzs.filter(x => x.o).length}</b> · k uložení zaškrtnuto: <b id="pzs-pocet">${vybranych}</b> <button onclick="_pzs.forEach(x=>{if(x.o&&!x.uzMa&&!x.divny)x.vybrat=true});podpisyZeSmluvVykresli()" style="margin-left:8px;padding:3px 9px;border:1px solid var(--brd);background:#fff;border-radius:6px;cursor:pointer;font-size:12px;font-family:inherit">Zaškrtnout všechny bez podezření</button></div>`
     + `<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(210px,1fr));gap:10px">`
     + _pzs.map((x, i) => `<label style="display:block;border:1px solid var(--brd);border-radius:10px;padding:8px;background:#fff;cursor:${x.o ? 'pointer' : 'default'}">
         <div style="display:flex;align-items:center;gap:6px;margin-bottom:6px"><input type="checkbox" ${x.vybrat ? 'checked' : ''} ${x.o ? '' : 'disabled'} onchange="_pzs[${i}].vybrat=this.checked;document.getElementById('pzs-pocet').textContent=_pzs.filter(y=>y.vybrat).length" style="width:17px;height:17px;flex:none">
@@ -5781,9 +5793,8 @@ async function podpisyZeSmluvUloz() {
   for (const x of k) {
     try {
       // Co se mezitím uložilo (pracovník podepsal sám), se nepřepisuje.
-      let uz = false; try { uz = (await fetch(_podpisUrl(x.workerId), { method: 'HEAD', cache: 'no-store' })).ok } catch (e) { /* dál */ }
-      if (uz) { x.uzMa = true; x.vybrat = false; continue }
-      const { error } = await sb.storage.from('contracts').upload(workerSigStoragePath(x.workerId), x.o.blob, { contentType: 'image/png', upsert: false })
+      if (await _pzsExistuje(x.workerId)) { x.uzMa = true; x.vybrat = false; continue }
+      const { error } = await _pzsCas(sb.storage.from('contracts').upload(workerSigStoragePath(x.workerId), x.o.blob, { contentType: 'image/png', upsert: false }), 20000, 'uložení')
       if (error) throw new Error(error.message)
       ok++; x.uzMa = true; x.vybrat = false
     } catch (e) { selhalo.push(x.jmeno + ': ' + String(e?.message || e).slice(0, 60)) }
@@ -6073,7 +6084,7 @@ async function submitAdminSignatureWithPlacement() {
 // Po nahrání nové verze se snadno pozná, jestli se opravdu nasadila: otevřete
 // appku, zmáčkněte F12 (na Macu ⌥⌘I) a v konzoli je vypsané tohle datum. Když
 // tam svítí starší, prohlížeč nebo GitHub drží starou verzi.
-const SUBBAU_VERZE = '2026-11-11 f — Podpisy: poslední podpis pracovníka k použití u dalšího dokumentu, vytažení podpisů ze smluv'
+const SUBBAU_VERZE = '2026-11-11 f — Podpisy: poslední podpis pracovníka k použití u dalšího dokumentu, vytažení podpisů ze smluv (správce schvaluje)'
 console.log('SubBau docházka — verze ' + SUBBAU_VERZE)
 // Verze i dole v menu správce. Když někdo novinku „nevidí", podle ní se hned
 // pozná, jestli nemá otevřenou starou kopii appky — bez hledání v konzoli.
