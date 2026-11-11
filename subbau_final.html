@@ -22053,10 +22053,14 @@ async function odeslatFakturyPosli() {
       if (videno) {
         // vědomé znovuodeslání: záznam se PŘEVEZME jen tehdy, když je pořád přesně takový, jaký
         // jsme viděli (stav i čas) — jinak ho mezitím vzal jiný správce a neposíláme podruhé.
-        const { data: prevzato, error: pe } = await sb.from('faktury_odeslane').update({ stav: 'rezervovano', komu: email, kdy: new Date().toISOString() })
-          .eq('invoice_id', String(r.id)).eq('stav', videno.stav || 'odeslano').eq('kdy', videno.kdy).select('id')
+        // Rezervaci, která se teprve odesílá (mladší než 5 min), převzít nejde — jinak by dva
+        // správci poslali totéž naráz. Starší nejistá (zavřená karta, výpadek) jde převzít po kontrole schránky.
+        let dotaz = sb.from('faktury_odeslane').update({ stav: 'rezervovano', komu: email, kdy: new Date().toISOString() })
+          .eq('invoice_id', String(r.id)).eq('stav', videno.stav || 'odeslano').eq('kdy', videno.kdy)
+        if (videno.stav === 'rezervovano') dotaz = dotaz.lt('kdy', new Date(Date.now() - 5 * 60000).toISOString())
+        const { data: prevzato, error: pe } = await dotaz.select('id')
         if (pe) throw new Error('nepodařilo se převzít záznam o odeslání: ' + pe.message)
-        if (!prevzato || !prevzato.length) { await nactiOdeslaneFaktury().catch(() => {}); stav('↺ mezitím změnil jiný správce — neposílám', 'var(--amber)'); continue }
+        if (!prevzato || !prevzato.length) { await nactiOdeslaneFaktury().catch(() => {}); stav(videno.stav === 'rezervovano' ? '⏳ právě se odesílá (nebo před chvílí) — neposílám' : '↺ mezitím změnil jiný správce — neposílám', 'var(--amber)'); continue }
       } else {
         const { error: rz } = await sb.from('faktury_odeslane').insert({ invoice_id: String(r.id), komu: email, stav: 'rezervovano' })
         if (rz) {
@@ -22100,7 +22104,7 @@ async function odeslatFakturyPosli() {
       // serveru jen zmizela, e-mail ale mohl odejít — proto raději nejdřív zkontrolujte
       // schránku, než to zkusíte znovu: rezervace se maže jen při jasné chybě serveru.)
       if (rezervovano && !(e && e._nejasne)) { try { await sb.from('faktury_odeslane').delete().eq('invoice_id', String(r.id)) } catch (x) {} }
-      else if (rezervovano) _invOdeslane.set(String(r.id), { kdy: new Date().toISOString(), komu: email, stav: 'rezervovano' })
+      else if (rezervovano) { await nactiOdeslaneFaktury().catch(() => {}) }   // skutečný čas z databáze (porovnává se při převzetí)
       chyby++
       stav('❌ ' + String(e?.message || e).slice(0, 80), 'var(--red)')
       try { if (typeof zapisChybuAppky === 'function') zapisChybuAppky('faktura-odeslat-odberateli', String(e?.message || e), { invoiceNum: r.invoice_number }) } catch (x) {}
