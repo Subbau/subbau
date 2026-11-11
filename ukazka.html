@@ -3151,6 +3151,14 @@ setTimeout(function brzda() {
               <div id="contracts-list" style="padding:8px 0">Načítám...</div>
             </div>
           </div>
+          <div class="card" style="margin-top:16px" id="podpisy-ze-smluv-karta">
+            <div class="card-h"><h4>✍️ Podpisy pracovníků ze smluv</h4></div>
+            <div style="padding:16px">
+              <p style="font-size:13px;color:var(--text2);margin:0 0 10px;line-height:1.5">Vytáhne z podepsaných smluv podpis, který pracovník sám nakreslil, a uloží ho jako jeho „poslední podpis“. U dalšího dokumentu mu ho appka nabídne tlačítkem — podepsat musí sám. Nejdřív se podpisy jen ukážou, ty odškrtneš ty, které nevypadají dobře, a teprve potom se uloží.</p>
+              <button class="btn-pri" id="pzs-najdi" onclick="podpisyZeSmluvNajdi()" style="padding:10px 16px">🔍 Najít podpisy ve smlouvách</button>
+              <div id="podpisy-ze-smluv" style="margin-top:14px"></div>
+            </div>
+          </div>
         </div>
 
         <!-- FAKTURY -->
@@ -4390,6 +4398,7 @@ setTimeout(function brzda() {
           <canvas id="sign-canvas" style="display:block;width:100%;height:100%;touch-action:none;user-select:none"></canvas>
         </div>
         <button onclick="clearWorkerSignCanvas()" id="sign-btn-clear" style="font-size:12px;padding:6px;border:1px solid #ddd;border-radius:6px;cursor:pointer;margin-bottom:10px">Vymazat podpis</button>
+        <button onclick="useWorkerSignatureMemory()" id="worker-use-saved-sig-btn" style="display:none;font-size:12px;padding:6px 10px;border:1px solid #9c3b22;border-radius:6px;cursor:pointer;margin:0 0 10px 6px;background:#faf6ee;color:#9c3b22;font-weight:700">📎 Použít můj poslední podpis</button>
         <div id="worker-sig-pos-info" style="font-size:11px;color:#888;padding:7px 9px;background:#f0f0f0;border-radius:6px;margin-bottom:10px">Kliknete do PDF vlevo pro umisteni podpisu</div>
         <button id="sign-submit-btn" onclick="previewWorkerSignature()" style="width:100%;padding:13px;background:#211D1A;color:#E8A13A;border:none;border-radius:10px;font-size:14px;font-weight:700;cursor:pointer;font-family:inherit">
           Náhled a uložit
@@ -5781,6 +5790,7 @@ function setupWorkerSignCanvas() {
   // ověřuje právě pixely, takže by se uložil předchozí nakreslený podpis (Codex 6. 11. 2026).
   if (c._sigPad && c._sigPad.clear) c._sigPad.clear()
   workerSignCtx = c.getContext('2d')
+  refreshWorkerSavedSigBtn()
   const hint = document.getElementById('sign-canvas-hint')
   if (hint) {
     hint.style.display = 'flex'
@@ -5946,6 +5956,7 @@ async function submitWorkerSignWithPlacement() {
     if (dbErr) throw new Error(dbErr.message)
 
     showToast('✅ Smlouva úspěšně podepsána!')
+    zapamatujPodpisPracovnika(workerSignCanvas)   // pro příští dokumenty (nejlepší snaha, nezdržuje)
     closeSignModal()
     if (typeof loadMobContracts === 'function') loadMobContracts()
   } catch(e) {
@@ -6583,6 +6594,170 @@ function adminSigStoragePath() {
   return 'signatures/admin_' + uid + '.png'
 }
 
+// ── PODPIS PRACOVNÍKA PRO PŘÍŠTÍ DOKUMENTY (11. 11. 2026) ──────────────────────────────
+// Pracovník, který smlouvu podepsal, má svůj podpis uložený jako obrázek (průhledné PNG)
+// v úložišti contracts/signatures/worker_<id>.png. U dalšího dokumentu se mu nabídne
+// tlačítkem „Použít můj poslední podpis“ — PODEPSAT MUSÍ SÁM (klik do PDF + Náhled a uložit).
+// Správce tu nic za pracovníka nepodepisuje: nástroj níže jen vytáhne podpisy, které lidé
+// dali na smlouvy dřív, a uloží je až po odsouhlasení správcem.
+const workerSigStoragePath = (id) => 'signatures/worker_' + id + '.png'
+const _podpisUrl = (id) => sb.storage.from('contracts').getPublicUrl(workerSigStoragePath(id)).data?.publicUrl || ''
+// Ořízne plátno na nakreslené čáry (průhledné pozadí, nejvýš 500 px na šířku) → { dataUrl, blob, w, h, tmavych }.
+async function _podpisOrizni(canvas) {
+  const cw = canvas.width, ch = canvas.height
+  const d = canvas.getContext('2d').getImageData(0, 0, cw, ch).data
+  let minX = cw, minY = ch, maxX = -1, maxY = -1, n = 0
+  for (let y = 0; y < ch; y++) for (let x = 0; x < cw; x++) {
+    if (d[(y * cw + x) * 4 + 3] > 20) { n++; if (x < minX) minX = x; if (x > maxX) maxX = x; if (y < minY) minY = y; if (y > maxY) maxY = y }
+  }
+  if (!n) return null
+  const pad = Math.round(Math.max(cw, ch) * 0.02)
+  minX = Math.max(0, minX - pad); minY = Math.max(0, minY - pad); maxX = Math.min(cw - 1, maxX + pad); maxY = Math.min(ch - 1, maxY + pad)
+  const cropW = maxX - minX + 1, cropH = maxY - minY + 1, scale = Math.min(1, 500 / cropW)
+  const tmp = document.createElement('canvas'); tmp.width = Math.max(1, Math.round(cropW * scale)); tmp.height = Math.max(1, Math.round(cropH * scale))
+  tmp.getContext('2d').drawImage(canvas, minX, minY, cropW, cropH, 0, 0, tmp.width, tmp.height)
+  const blob = await new Promise(r => tmp.toBlob(r, 'image/png'))
+  return { dataUrl: tmp.toDataURL('image/png'), blob, w: tmp.width, h: tmp.height, plnych: n / (cropW * cropH) }
+}
+// Po úspěšném podpisu si pracovník podpis zapamatuje (nejlepší snaha — nic nehlásí, nikdy nezdrží podpis).
+async function zapamatujPodpisPracovnika(canvas) {
+  try {
+    const uid = currentUser?.id; if (!uid || !canvas) return
+    const o = await _podpisOrizni(canvas); if (!o?.blob) return
+    await Promise.race([sb.storage.from('contracts').upload(workerSigStoragePath(uid), o.blob, { contentType: 'image/png', upsert: true }), new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), 10000))])
+  } catch (e) { console.warn('[podpis pracovníka] uložení selhalo:', e?.message || e) }
+}
+// Tlačítko „Použít můj poslední podpis“ se ukáže jen když uložený podpis existuje.
+async function refreshWorkerSavedSigBtn() {
+  const btn = document.getElementById('worker-use-saved-sig-btn'); if (!btn) return
+  btn.style.display = 'none'
+  const uid = currentUser?.id; if (!uid) return
+  try {
+    const r = await fetch(_podpisUrl(uid), { method: 'HEAD', cache: 'no-store' })
+    if (r.ok && document.getElementById('worker-use-saved-sig-btn') === btn) btn.style.display = 'inline-block'
+  } catch (e) { /* bez spojení tlačítko nenabídneme */ }
+}
+async function useWorkerSignatureMemory() {
+  const uid = currentUser?.id, canvas = workerSignCanvas
+  if (!uid || !canvas) return
+  try {
+    const resp = await fetch(_podpisUrl(uid), { cache: 'no-store' })
+    if (!resp.ok) { showToast('⚠️ Uložený podpis nenalezen — podepište prosím prstem'); refreshWorkerSavedSigBtn(); return }
+    const url = URL.createObjectURL(await resp.blob())
+    const img = new Image()
+    img.onload = () => {
+      const ctx = canvas.getContext('2d'), dpr = Math.max(1, Math.min(window.devicePixelRatio || 1, 2))
+      if (canvas._sigPad && canvas._sigPad.clear) canvas._sigPad.clear(); else ctx.clearRect(0, 0, canvas.width, canvas.height)
+      const cw = canvas.width / dpr, ch = canvas.height / dpr, ratio = Math.min(cw / img.width, ch / img.height) * 0.9
+      const w = img.width * ratio, h = img.height * ratio
+      ctx.drawImage(img, (cw - w) / 2, (ch - h) / 2, w, h)
+      if (canvas._sigPad && canvas._sigPad.markInk) canvas._sigPad.markInk()
+      const hint = document.getElementById('sign-canvas-hint'); if (hint) hint.style.display = 'none'
+      URL.revokeObjectURL(url)
+      showToast('📎 Vložen váš poslední podpis — klikněte do PDF, kam se má umístit, a potvrďte')
+    }
+    img.onerror = () => { URL.revokeObjectURL(url); showToast('❌ Uložený podpis se nepodařilo načíst — podepište prosím znovu') }
+    img.src = url
+  } catch (e) { showToast('❌ Uložený podpis se nepodařilo načíst — podepište prosím znovu') }
+}
+
+// ── Správce: vytáhnout podpisy ze starých smluv ──
+// Podepsané PDF (signed/<id>_worker_signed.pdf) vzniklo tak, že se podpis pracovníka PŘIDAL jako
+// poslední obrázek na stranu — proto je to poslední obrázek v obsahu strany (pdf.js, tvar RGBA
+// s průhledností). Správce výsledek vždy vidí a odškrtne, co nesedí; uloží se jen zaškrtnuté.
+let _pzs = []
+async function _podpisZPdf(url, strana) {
+  await ensureLib('pdfjs')
+  pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js'
+  const doc = await pdfjsLib.getDocument(url).promise
+  try {
+    const strany = []
+    if (strana >= 1 && strana <= doc.numPages) strany.push(strana)
+    for (let i = doc.numPages; i >= 1; i--) if (!strany.includes(i)) strany.push(i)
+    for (const cislo of strany) {
+      const page = await doc.getPage(cislo), ops = await page.getOperatorList()
+      const jmena = []
+      ops.fnArray.forEach((f, i) => { if (f === pdfjsLib.OPS.paintImageXObject) jmena.push(ops.argsArray[i][0]) })
+      if (!jmena.length) continue
+      const img = await new Promise((res, rej) => { const t = setTimeout(() => rej(new Error('timeout')), 15000); page.objs.get(jmena[jmena.length - 1], (o) => { clearTimeout(t); res(o) }) })
+      if (!img || !img.width || !img.height) continue
+      const c = document.createElement('canvas'); c.width = img.width; c.height = img.height
+      // pdf.js podle prohlížeče vrací buď hotový obrázek (bitmap), nebo surová data RGBA/RGB.
+      if (img.bitmap) { c.getContext('2d').drawImage(img.bitmap, 0, 0); return await _podpisOrizni(c) }
+      if (!img.data) continue
+      const id = c.getContext('2d').createImageData(img.width, img.height)
+      const n = img.width * img.height
+      if (img.data.length === n * 4) id.data.set(img.data)
+      else if (img.data.length === n * 3) {
+        // bez průhlednosti: bílé pozadí se průhledné udělá, aby podpis nevytvořil bílý obdélník
+        for (let i = 0; i < n; i++) { const r = img.data[i * 3], g = img.data[i * 3 + 1], b = img.data[i * 3 + 2]; id.data[i * 4] = r; id.data[i * 4 + 1] = g; id.data[i * 4 + 2] = b; id.data[i * 4 + 3] = (r > 235 && g > 235 && b > 235) ? 0 : 255 }
+      } else continue
+      c.getContext('2d').putImageData(id, 0, 0)
+      return await _podpisOrizni(c)
+    }
+    return null
+  } finally { try { pdfjsUvolni(doc) } catch (e) { /* nic */ } }
+}
+async function podpisyZeSmluvNajdi() {
+  const box = document.getElementById('podpisy-ze-smluv'), btn = document.getElementById('pzs-najdi')
+  if (!box || btn?.disabled) return
+  if (btn) btn.disabled = true
+  _pzs = []
+  try {
+    box.innerHTML = '<div style="color:var(--text3);font-size:13px">Načítám smlouvy…</div>'
+    const { data, error } = await sb.from('contracts').select('id, worker_id, signature_url, signed_at, title, worker_sign_page, status, worker:profiles!worker_id(full_name, is_active)').eq('status', 'signed_electronic').not('signature_url', 'is', null).order('signed_at', { ascending: false }).limit(2000)
+    if (error) throw new Error(error.message)
+    const posledni = new Map()
+    for (const c of data || []) if (c.worker_id && !posledni.has(c.worker_id)) posledni.set(c.worker_id, c)
+    const lide = [...posledni.values()].sort((a, b) => String(a.worker?.full_name || '').localeCompare(String(b.worker?.full_name || ''), 'cs'))
+    if (!lide.length) { box.innerHTML = '<div style="color:var(--text3);font-size:13px">Žádná elektronicky podepsaná smlouva.</div>'; return }
+    for (let i = 0; i < lide.length; i++) {
+      const c = lide[i]
+      box.innerHTML = `<div style="color:var(--text3);font-size:13px">Čtu podpisy… ${i + 1} z ${lide.length}</div>`
+      let o = null, chyba = '', uzMa = false
+      try { uzMa = (await fetch(_podpisUrl(c.worker_id), { method: 'HEAD', cache: 'no-store' })).ok } catch (e) { /* neověřeno = neuložený */ }
+      try { o = await _podpisZPdf(c.signature_url, c.worker_sign_page) } catch (e) { chyba = String(e?.message || e).slice(0, 80) }
+      // Podpis bývá cca 2,4 : 1 a má řídké čáry; úplně plný obrázek nebo velmi úzký proužek vzbudí podezření.
+      const divny = !o || o.w < 40 || o.h < 15 || o.plnych > 0.6
+      _pzs.push({ workerId: c.worker_id, jmeno: c.worker?.full_name || '—', aktivni: c.worker?.is_active !== false, smlouva: c.title || '', kdy: c.signed_at, o, chyba, uzMa, vybrat: !!o && !divny && !uzMa })
+    }
+    podpisyZeSmluvVykresli()
+  } catch (e) {
+    box.innerHTML = `<div style="color:var(--red);font-size:13px">Nepodařilo se: ${escAttr(e?.message || e)}</div>`
+  } finally { if (btn) btn.disabled = false }
+}
+function podpisyZeSmluvVykresli() {
+  const box = document.getElementById('podpisy-ze-smluv'); if (!box) return
+  const vybranych = _pzs.filter(x => x.vybrat).length
+  box.innerHTML = `<div style="font-size:13px;margin-bottom:10px"><b>${_pzs.length}</b> pracovníků · nalezeno podpisů: <b>${_pzs.filter(x => x.o).length}</b> · k uložení zaškrtnuto: <b id="pzs-pocet">${vybranych}</b></div>`
+    + `<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(210px,1fr));gap:10px">`
+    + _pzs.map((x, i) => `<label style="display:block;border:1px solid var(--brd);border-radius:10px;padding:8px;background:#fff;cursor:${x.o ? 'pointer' : 'default'}">
+        <div style="display:flex;align-items:center;gap:6px;margin-bottom:6px"><input type="checkbox" ${x.vybrat ? 'checked' : ''} ${x.o ? '' : 'disabled'} onchange="_pzs[${i}].vybrat=this.checked;document.getElementById('pzs-pocet').textContent=_pzs.filter(y=>y.vybrat).length" style="width:17px;height:17px;flex:none">
+        <b style="font-size:12.5px;line-height:1.2">${escAttr(x.jmeno)}</b></div>
+        <div style="background:#fff;border:1px dashed var(--brd);border-radius:6px;height:70px;display:flex;align-items:center;justify-content:center;overflow:hidden">${x.o ? `<img src="${x.o.dataUrl}" alt="podpis" style="max-width:100%;max-height:68px">` : `<span style="font-size:11px;color:var(--text3)">podpis nenalezen${x.chyba ? ' (' + escAttr(x.chyba) + ')' : ''}</span>`}</div>
+        <div style="font-size:10.5px;color:var(--text3);margin-top:4px;line-height:1.35">${x.aktivni ? '' : 'ukončený · '}${escAttr(x.smlouva)}${x.kdy ? ' · ' + escAttr(String(x.kdy).slice(0, 10)) : ''}${x.uzMa ? '<br><b style="color:var(--green)">už má uložený podpis — nepřepisuje se</b>' : ''}</div></label>`).join('')
+    + `</div><button class="btn-pri" id="pzs-uloz" onclick="podpisyZeSmluvUloz()" style="margin-top:12px;padding:10px 16px">Uložit zaškrtnuté</button>`
+}
+async function podpisyZeSmluvUloz() {
+  const btn = document.getElementById('pzs-uloz'); if (btn?.disabled) return
+  const k = _pzs.filter(x => x.vybrat && x.o?.blob)
+  if (!k.length) { showToast('⚠️ Nic není zaškrtnuto'); return }
+  if (btn) { btn.disabled = true; btn.textContent = '⏳ Ukládám…' }
+  let ok = 0, selhalo = []
+  for (const x of k) {
+    try {
+      // Co se mezitím uložilo (pracovník podepsal sám), se nepřepisuje.
+      let uz = false; try { uz = (await fetch(_podpisUrl(x.workerId), { method: 'HEAD', cache: 'no-store' })).ok } catch (e) { /* dál */ }
+      if (uz) { x.uzMa = true; x.vybrat = false; continue }
+      const { error } = await sb.storage.from('contracts').upload(workerSigStoragePath(x.workerId), x.o.blob, { contentType: 'image/png', upsert: false })
+      if (error) throw new Error(error.message)
+      ok++; x.uzMa = true; x.vybrat = false
+    } catch (e) { selhalo.push(x.jmeno + ': ' + String(e?.message || e).slice(0, 60)) }
+  }
+  showToast(selhalo.length ? `⚠️ Uloženo ${ok}, nepodařilo se ${selhalo.length}: ${selhalo.slice(0, 2).join('; ')}` : `✅ Uloženo ${ok} podpisů`)
+  podpisyZeSmluvVykresli()
+}
+
 async function saveAdminSignatureMemory() {
   const canvas = document.getElementById('admin-sign-canvas')
   if (!canvas) return
@@ -6864,7 +7039,7 @@ async function submitAdminSignatureWithPlacement() {
 // Po nahrání nové verze se snadno pozná, jestli se opravdu nasadila: otevřete
 // appku, zmáčkněte F12 (na Macu ⌥⌘I) a v konzoli je vypsané tohle datum. Když
 // tam svítí starší, prohlížeč nebo GitHub drží starou verzi.
-const SUBBAU_VERZE = '2026-11-11 e — Faktury: odeslané faktury se načítají jen v otevřené složce a souběžně'
+const SUBBAU_VERZE = '2026-11-11 f — Podpisy: poslední podpis pracovníka k použití u dalšího dokumentu, vytažení podpisů ze smluv'
 console.log('StavKo docházka — verze ' + SUBBAU_VERZE)
 // Verze i dole v menu správce. Když někdo novinku „nevidí", podle ní se hned
 // pozná, jestli nemá otevřenou starou kopii appky — bez hledání v konzoli.
