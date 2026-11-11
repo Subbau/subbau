@@ -22042,7 +22042,7 @@ async function odeslatFakturyPosli() {
     const stav = (t, barva) => { if (radek) { radek.textContent = t; radek.style.color = barva || 'var(--text3)'; radek.style.fontWeight = '700' } }
     btn.textContent = 'Odesílám ' + (i + 1) + ' / ' + ids.length + '…'
     stav('⏳ odesílám…')
-    let rezervovano = false
+    let rezervovano = false, pokus = null
     try {
       // REZERVACE: záznam (stav „rezervovano") se zapíše PŘED e-mailem; jedna faktura = nejvýš jeden
       // záznam, hlídá to databáze. Druhý správce, který ji odesílá současně, narazí a e-mail
@@ -22051,24 +22051,18 @@ async function odeslatFakturyPosli() {
       // „⚠ nejisté" a pošle se znovu až vědomě po kontrole schránky.
       const videno = _invOdeslane.get(String(r.id))
       r._puvodniZaznam = videno ? { ...videno } : null
-      if (videno) {
-        // vědomé znovuodeslání: záznam se PŘEVEZME jen tehdy, když je pořád přesně takový, jaký
-        // jsme viděli (stav i čas) — jinak ho mezitím vzal jiný správce a neposíláme podruhé.
-        // Rezervaci, která se teprve odesílá (mladší než 5 min), převzít nejde — jinak by dva
-        // správci poslali totéž naráz. Starší nejistá (zavřená karta, výpadek) jde převzít po kontrole schránky.
-        let dotaz = sb.from('faktury_odeslane').update({ stav: 'rezervovano', komu: email, kdy: new Date().toISOString() })
-          .eq('invoice_id', String(r.id)).eq('stav', videno.stav || 'odeslano').eq('kdy', videno.kdy)
-        if (videno.stav === 'rezervovano') dotaz = dotaz.lt('kdy', new Date(Date.now() - 5 * 60000).toISOString())
-        const { data: prevzato, error: pe } = await dotaz.select('id')
-        if (pe) throw new Error('nepodařilo se převzít záznam o odeslání: ' + pe.message)
-        if (!prevzato || !prevzato.length) { await nactiOdeslaneFaktury().catch(() => {}); stav(videno.stav === 'rezervovano' ? '⏳ právě se odesílá (nebo před chvílí) — neposílám' : '↺ mezitím změnil jiný správce — neposílám', 'var(--amber)'); continue }
-      } else {
-        const { error: rz } = await sb.from('faktury_odeslane').insert({ invoice_id: String(r.id), komu: email, stav: 'rezervovano' })
-        if (rz) {
-          if (String(rz.code) === '23505') { await nactiOdeslaneFaktury().catch(() => {}); stav('✓ už odeslal jiný správce', 'var(--green)'); continue }
-          throw new Error(/relation|does not exist|schema cache|PGRST205|42P01|stav/i.test((rz.message || '') + (rz.code || ''))
-            ? 'chybí tabulka odeslaných faktur — spusťte nejdřív SQL migraci supabase-migrace-odeslani-faktur.sql' : 'nepodařilo se zapsat odeslání: ' + rz.message)
-        }
+      pokus = (window.crypto && crypto.randomUUID) ? crypto.randomUUID() : String(Date.now()) + Math.random().toString(36).slice(2)
+      // Rezervaci i převzetí dělá databáze (funkce faktury_rezervovat): čas i vlastnictví
+      // rozhoduje server, ne hodiny prohlížeče. Rezervaci, která se teprve odesílá (mladší
+      // než 5 min), převzít nejde; starší nejistá jde převzít po kontrole schránky.
+      const { data: vzato, error: rz } = await sb.rpc('faktury_rezervovat', { p_invoice: String(r.id), p_komu: email, p_pokus: pokus,
+        p_videno_stav: videno ? (videno.stav || 'odeslano') : null, p_videno_kdy: videno ? videno.kdy : null })
+      if (rz) throw new Error(/function|does not exist|schema cache|PGRST20|42883|42P01|relation/i.test((rz.message || '') + (rz.code || ''))
+        ? 'chybí funkce odeslaných faktur — spusťte nejdřív SQL migraci supabase-migrace-odeslani-faktur.sql' : 'nepodařilo se zapsat odeslání: ' + rz.message)
+      if (vzato !== true) {
+        await nactiOdeslaneFaktury().catch(() => {})
+        stav(!videno ? '✓ už odeslal jiný správce' : videno.stav === 'rezervovano' ? '⏳ právě se odesílá (nebo před chvílí) — neposílám' : '↺ mezitím změnil jiný správce — neposílám', !videno ? 'var(--green)' : 'var(--amber)')
+        continue
       }
       rezervovano = true
       const resp0 = await fetch(r.pdf_url)
@@ -22077,7 +22071,7 @@ async function odeslatFakturyPosli() {
       try { token = (await sb.auth.getSession())?.data?.session?.access_token || null } catch (e) {}
       const cis = String(r.invoice_number || '').replace(/[^a-zA-Z0-9_-]/g, '')
       const kdo = r.worker?.full_name || r.supplier_name || ''
-      const who = kdo.normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[^a-zA-Z0-9]+/g, '_').replace(/^_+|_+$/g, '')
+      const who = kdo.normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-zA-Z0-9]+/g, '_').replace(/^_+|_+$/g, '')
       let resp
       try { resp = await fetch('/api/odeslat-fakturu', { method: 'POST',
         headers: { 'content-type': 'application/json', ...(token ? { authorization: 'Bearer ' + token } : {}) },
@@ -22095,10 +22089,10 @@ async function odeslatFakturyPosli() {
         throw ce
       }
       ok++
-      const { data: potv, error: ue } = await sb.from('faktury_odeslane').update({ stav: 'odeslano', kdy: new Date().toISOString() }).eq('invoice_id', String(r.id)).select('kdy')
-      if (ue) console.warn('[faktury] záznam o odeslání se nepotvrdil:', ue.message)
-      const kdy = (potv && potv[0] && potv[0].kdy) || new Date().toISOString()   // čas tak, jak ho vrací databáze (porovnává se při převzetí)
-      if (ue) await nactiOdeslaneFaktury().catch(() => {})            // skutečný stav z databáze
+      const { data: potv, error: ue } = await sb.rpc('faktury_potvrdit', { p_invoice: String(r.id), p_pokus: pokus })
+      if (ue || !potv) console.warn('[faktury] záznam o odeslání se nepotvrdil:', ue ? ue.message : 'pokus už není aktuální')
+      const kdy = (typeof potv === 'string' && potv) || new Date().toISOString()   // čas z databáze
+      if (ue || !potv) await nactiOdeslaneFaktury().catch(() => {})            // skutečný stav z databáze
       else _invOdeslane.set(String(r.id), { kdy, komu: email, stav: 'odeslano' })
       stav('✓ odesláno ' + _invDmy(kdy.slice(0, 10)), 'var(--green)')
     } catch (e) {
@@ -22110,8 +22104,7 @@ async function odeslatFakturyPosli() {
         // (dřívější odeslání se stalo), jinak se záznam smaže.
         try {
           const dr = r._puvodniZaznam
-          if (dr) await sb.from('faktury_odeslane').update({ stav: dr.stav || 'odeslano', komu: dr.komu, kdy: dr.kdy }).eq('invoice_id', String(r.id))
-          else { await sb.from('faktury_odeslane').delete().eq('invoice_id', String(r.id)); _invOdeslane.delete(String(r.id)) }
+          await sb.rpc('faktury_uvolnit', { p_invoice: String(r.id), p_pokus: pokus, p_puv_stav: dr ? (dr.stav || 'odeslano') : null, p_puv_komu: dr ? dr.komu : null, p_puv_kdy: dr ? dr.kdy : null })
         } catch (x) {}
         await nactiOdeslaneFaktury().catch(() => {})
       }

@@ -48,6 +48,10 @@ comment on table public.faktury_odeslane is
 alter table public.faktury_odeslane add column if not exists stav text not null default 'odeslano' check (stav in ('rezervovano', 'odeslano'));
 create unique index if not exists faktury_odeslane_faktura on public.faktury_odeslane (invoice_id);
 
+-- Který pokus o odeslání záznam drží (každé klepnutí na Odeslat má své číslo) — dokončit
+-- nebo uklidit záznam smí jen ten pokus, který ho vytvořil.
+alter table public.faktury_odeslane add column if not exists pokus text;
+
 alter table public.faktury_prijemci enable row level security;
 alter table public.faktury_odeslane enable row level security;
 
@@ -64,10 +68,67 @@ revoke all on public.faktury_odeslane from anon;
 grant select, insert, update, delete on public.faktury_prijemci to authenticated;
 grant select, insert, update, delete on public.faktury_odeslane to authenticated;
 
+-- ČAS A VLASTNICTVÍ ROZHODUJE DATABÁZE, ne hodiny prohlížeče:
+--  • faktury_rezervovat — založí záznam „rezervovano" (nebo převezme starší, viděný
+--    správcem, a to jen když je odeslaný nebo rezervace starší 5 minut podle času serveru);
+--  • faktury_potvrdit  — po odeslání e-mailu změní záznam na „odeslano" (jen vlastní pokus);
+--  • faktury_uvolnit   — po jasné chybě záznam smaže, nebo vrátí původní (jen vlastní pokus).
+create or replace function public.faktury_rezervovat(p_invoice text, p_komu text, p_pokus text, p_videno_stav text, p_videno_kdy timestamptz)
+returns boolean language plpgsql as $f$
+declare n int;
+begin
+  if p_videno_stav is null then
+    insert into public.faktury_odeslane (invoice_id, komu, stav, pokus) values (p_invoice, p_komu, 'rezervovano', p_pokus)
+      on conflict (invoice_id) do nothing;
+    get diagnostics n = row_count;
+  else
+    update public.faktury_odeslane
+       set stav = 'rezervovano', komu = p_komu, kdy = now(), kdo = auth.uid(), pokus = p_pokus
+     where invoice_id = p_invoice and stav = p_videno_stav and kdy = p_videno_kdy
+       and (stav <> 'rezervovano' or kdy < now() - interval '5 minutes');
+    get diagnostics n = row_count;
+  end if;
+  return n > 0;
+end $f$;
+
+create or replace function public.faktury_potvrdit(p_invoice text, p_pokus text)
+returns timestamptz language plpgsql as $f$
+declare t timestamptz;
+begin
+  update public.faktury_odeslane set stav = 'odeslano', kdy = now()
+   where invoice_id = p_invoice and pokus = p_pokus and stav = 'rezervovano'
+  returning kdy into t;
+  return t;
+end $f$;
+
+create or replace function public.faktury_uvolnit(p_invoice text, p_pokus text, p_puv_stav text, p_puv_komu text, p_puv_kdy timestamptz)
+returns boolean language plpgsql as $f$
+declare n int;
+begin
+  if p_puv_stav is null then
+    delete from public.faktury_odeslane where invoice_id = p_invoice and pokus = p_pokus;
+  else
+    update public.faktury_odeslane set stav = p_puv_stav, komu = p_puv_komu, kdy = p_puv_kdy, pokus = null
+     where invoice_id = p_invoice and pokus = p_pokus;
+  end if;
+  get diagnostics n = row_count;
+  return n > 0;
+end $f$;
+
+revoke all on function public.faktury_rezervovat(text, text, text, text, timestamptz) from public, anon;
+revoke all on function public.faktury_potvrdit(text, text) from public, anon;
+revoke all on function public.faktury_uvolnit(text, text, text, text, timestamptz) from public, anon;
+grant execute on function public.faktury_rezervovat(text, text, text, text, timestamptz) to authenticated;
+grant execute on function public.faktury_potvrdit(text, text) to authenticated;
+grant execute on function public.faktury_uvolnit(text, text, text, text, timestamptz) to authenticated;
+
 commit;
 
--- Kontrola: obě tabulky existují a mají zapnutou ochranu řádků.
+-- Kontrola: obě tabulky existují, mají zapnutou ochranu řádků a funkce jsou na místě (3 řádky).
 select c.relname as tabulka, c.relrowsecurity as ochrana_radku
   from pg_class c
  where c.oid in ('public.faktury_prijemci'::regclass, 'public.faktury_odeslane'::regclass)
+ order by 1;
+select proname as funkce from pg_proc
+ where pronamespace = 'public'::regnamespace and proname in ('faktury_rezervovat', 'faktury_potvrdit', 'faktury_uvolnit')
  order by 1;
