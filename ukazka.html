@@ -6666,10 +6666,12 @@ async function useWorkerSignatureMemory() {
   try {
     // 1) uložený podpis; 2) jinak podpis z jeho poslední podepsané smlouvy
     let zdroj = null
-    let resp = null
-    try { resp = await _pzsCas(fetch(_podpisUrl(uid), { cache: 'no-store' }), 10000, 'podpis') } catch (e) { /* síť: zkusíme smlouvu */ }
-    if (resp && resp.ok) zdroj = { url: URL.createObjectURL(await resp.blob()), uvolnit: true }
-    else {
+    // Stažení uloženého podpisu včetně těla má jeden limit; jakákoli chyba = zkusíme smlouvu.
+    try {
+      const blob = await _pzsCas((async () => { const r = await fetch(_podpisUrl(uid), { cache: 'no-store' }); return r.ok ? await r.blob() : null })(), 10000, 'podpis')
+      if (blob) zdroj = { url: URL.createObjectURL(blob), uvolnit: true }
+    } catch (e) { /* síť: zkusíme smlouvu */ }
+    if (!zdroj) {
       const c = await _posledniPodepsanaSmlouva(uid)
       const o = c ? await _pzsCas(_podpisZPdf(c.signature_url, c.worker_sign_page), 60000, 'čtení smlouvy') : null
       if (o?.dataUrl) zdroj = { url: o.dataUrl, uvolnit: false }
