@@ -6079,7 +6079,7 @@ async function submitAdminSignatureWithPlacement() {
 // Po nahrání nové verze se snadno pozná, jestli se opravdu nasadila: otevřete
 // appku, zmáčkněte F12 (na Macu ⌥⌘I) a v konzoli je vypsané tohle datum. Když
 // tam svítí starší, prohlížeč nebo GitHub drží starou verzi.
-const SUBBAU_VERZE = '2026-11-11 k — Úprava dne (jen pauza, den v pořádku) + číslo smluv u Profilu + název staženého souboru smlouvy (jméno + druh)'
+const SUBBAU_VERZE = '2026-11-11 l — Smlouvy: i tlačítko PDF stahuje soubor pojmenovaný jménem a druhem smlouvy'
 console.log('SubBau docházka — verze ' + SUBBAU_VERZE)
 // Verze i dole v menu správce. Když někdo novinku „nevidí", podle ní se hned
 // pozná, jestli nemá otevřenou starou kopii appky — bez hledání v konzoli.
@@ -44467,6 +44467,18 @@ function contractVersions(c, idx) {
   return out
 }
 
+// Jméno souboru smlouvy: <Jméno>_<Název smlouvy>_<datum> — jméno člověka a druh
+// smlouvy, žádné číslo (majitel 11. 11. 2026). Datum odliší dvě smlouvy jednoho
+// člověka; bere se den založení, ten se nemění.
+function zakladNazvuSmlouvy(c, workerName) {
+  const datumSml = [c.created_at, c.signed_at, c.admin_signed_at]
+    .filter(t => t && !isNaN(new Date(t))).map(t => localDateStr(t))[0] || ''
+  // 11. 11. 2026 (majitel): ve jménu staženého souboru musí být jméno člověka
+  // a o jakou smlouvu jde (třeba „Pobyt“), ne číslo. Název smlouvy se bere
+  // z jejího názvu; bez názvu zůstává „Vertrag“.
+  return [bezpecnyNazevSouboru(workerName), bezpecnyNazevSouboru(c && c.title) || 'Vertrag', datumSml].filter(Boolean).join('_')
+}
+
 // Rozbalovací seznam verzí — u každé „zobrazit" a „stáhnout".
 function contractVersionsHtml(c, idx, workerName) {
   const vers = contractVersions(c, idx)
@@ -44474,12 +44486,7 @@ function contractVersionsHtml(c, idx, workerName) {
   // Vertrag_<jméno>_<datum smlouvy>_<verze>. Datum odliší dvě smlouvy
   // jednoho člověka. Bere se den založení — ten se nemění; podpis OSVČ se
   // při novém odeslání maže (signed_at: null) a název by se pak měnil.
-  const datumSml = [c.created_at, c.signed_at, c.admin_signed_at]
-    .filter(t => t && !isNaN(new Date(t))).map(t => localDateStr(t))[0] || ''
-  // 11. 11. 2026 (majitel): ve jménu staženého souboru musí být jméno člověka
-  // a o jakou smlouvu jde (třeba „Pobyt“), ne číslo. Název smlouvy se bere
-  // z jejího názvu; bez názvu zůstává „Vertrag“.
-  const base = [bezpecnyNazevSouboru(workerName), bezpecnyNazevSouboru(c.title) || 'Vertrag', datumSml].filter(Boolean).join('_')
+  const base = zakladNazvuSmlouvy(c, workerName)
   const hasOriginal = vers.some(v => v.file === 'bez_podpisu')
   const eyeIco = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:14px;height:14px;display:block"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>'
   const dlIco = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:14px;height:14px;display:block"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="M7 10l5 5 5-5"/><path d="M12 15V3"/></svg>'
@@ -45476,7 +45483,7 @@ async function loadAdminContracts() {
           <span class="pill ${c.status==='pending'?'pa':c.status==='signed_electronic'?'pg':'pr'}">${statusLabels[c.status]||c.status}</span>
           ${c.signed_at?`<div style="font-size:10px;color:var(--text3);margin-top:3px">Podepsáno OSVČ: ${datumCas(c.signed_at)}</div>`:''}
           ${c.admin_signed_at?`<div style="font-size:10px;color:var(--text3);margin-top:2px">Podepsáno SubBau: ${datumCas(c.admin_signed_at)}</div>`:''}
-          ${c.file_url?`<button onclick="openPdfUrl('${jsStr(c.file_url)}')" style="font-size:11px;color:var(--blue);display:block;margin-top:3px;background:none;border:none;cursor:pointer;padding:0;font-family:inherit;text-decoration:underline"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:1em;height:1em;flex-shrink:0;vertical-align:-2px"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/></svg> Smlouva PDF</button>`:''}
+          ${c.file_url?`<button onclick="downloadPdfUrl('${jsStr(c.file_url)}','${jsStr(zakladNazvuSmlouvy(c, c.worker?.full_name) + '_aktuell')}')" style="font-size:11px;color:var(--blue);display:block;margin-top:3px;background:none;border:none;cursor:pointer;padding:0;font-family:inherit;text-decoration:underline"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:1em;height:1em;flex-shrink:0;vertical-align:-2px"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/></svg> Smlouva PDF</button>`:''}
           ${c.status==='admin_pending'?`<button onclick="openAdminSignModal('${c.id}','${jsStr(c.title||'')}','${jsStr(c.file_url||'')}')" style="margin-top:6px;width:100%;padding:5px 8px;background:#211D1A;color:#E8A13A;border:none;border-radius:6px;cursor:pointer;font-size:11px;font-weight:700"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:1em;height:1em;flex-shrink:0;vertical-align:-2px"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/></svg> Podepsat jako admin</button>`:''}
           ${!c.signature_url?`<button onclick="openSignForWorker('${c.id}','${jsStr(c.title||'')}','${jsStr(c.file_url||'')}')" style="margin-top:4px;width:100%;padding:5px 8px;background:var(--green);color:#fff;border:none;border-radius:6px;cursor:pointer;font-size:11px;font-weight:700;font-family:inherit"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:1em;height:1em;flex-shrink:0;vertical-align:-2px"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/></svg> Podepsat za OSVČ</button>`:''}
           ${!c.signature_url && c.file_url?`<button onclick="openWorkerSignPlaceModal('${c.id}','${jsStr(c.title||'')}','${jsStr(c.file_url||'')}')" style="margin-top:4px;width:100%;padding:5px 8px;background:${c.worker_sign_page?'#e8f5e9':'none'};border:1px solid ${c.worker_sign_page?'#2e7d32':'#9c3b22'};color:${c.worker_sign_page?'#2e7d32':'#9c3b22'};border-radius:6px;cursor:pointer;font-size:11px;font-weight:700;font-family:inherit">📍 ${c.worker_sign_page?'Místo podpisu nastaveno (změnit)':'Určit místo podpisu OSVČ'}</button>`:''}
@@ -50395,7 +50402,7 @@ async function loadWdContracts(id) {
       <span class="pill ${sP[c.status]||'pa'}" style="font-size:11px;white-space:nowrap">${sL[c.status]||c.status}</span>
       ${c.company_signed_at ? `<span style="font-size:10px;color:var(--green);font-weight:600;white-space:nowrap">🏢 Firma podepsala ${datumCas(c.company_signed_at)}</span>` : ''}
       <div style="display:flex;gap:4px;flex-wrap:wrap;flex-shrink:0">
-        ${c.file_url ? `<button onclick="openPdfUrl('${jsStr(c.file_url)}')" style="font-size:11px;padding:2px 8px;border:1px solid var(--blue);border-radius:5px;cursor:pointer;background:none;color:var(--blue);font-family:inherit">PDF</button>` : ''}
+        ${c.file_url ? `<button onclick="downloadPdfUrl('${jsStr(c.file_url)}','${jsStr(zakladNazvuSmlouvy(c, wName) + '_aktuell')}')" style="font-size:11px;padding:2px 8px;border:1px solid var(--blue);border-radius:5px;cursor:pointer;background:none;color:var(--blue);font-family:inherit">PDF</button>` : ''}
         ${c.status==='admin_pending' ? `<button onclick="openAdminSignModal('${c.id}','${jsStr((c.title||''))}','${jsStr(c.file_url||'')}')" style="font-size:11px;padding:2px 8px;border:none;border-radius:5px;cursor:pointer;background:var(--blue);color:#fff;font-family:inherit;font-weight:700">Podepsat</button>` : ''}
         ${!c.signature_url ? `<button onclick="openSignForWorker('${c.id}','${jsStr((c.title||''))}','${jsStr(c.file_url||'')}')" style="font-size:11px;padding:2px 8px;border:none;border-radius:5px;cursor:pointer;background:var(--green);color:#fff;font-family:inherit;font-weight:700">Za OSVČ</button>` : ''}
         <button onclick="deleteContract('${c.id}','${jsStr((c.title||''))}','${jsStr(c.file_url||'')}','${jsStr(c.admin_signature_url||'')}','${jsStr(c.signature_url||'')}')" style="font-size:11px;padding:2px 8px;border:1px solid var(--red);border-radius:5px;cursor:pointer;background:none;color:var(--red);font-family:inherit"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:1em;height:1em;flex-shrink:0;vertical-align:-2px"><path d="M3 6h18M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6M14 11v6"/></svg> </button>
