@@ -6852,7 +6852,7 @@ async function submitAdminSignatureWithPlacement() {
 // Po nahrání nové verze se snadno pozná, jestli se opravdu nasadila: otevřete
 // appku, zmáčkněte F12 (na Macu ⌥⌘I) a v konzoli je vypsané tohle datum. Když
 // tam svítí starší, prohlížeč nebo GitHub drží starou verzi.
-const SUBBAU_VERZE = '2026-11-11 b — Faktury: „poslal jinak“ bez šedého řádku, nové „posílá trvale jinak“'
+const SUBBAU_VERZE = '2026-11-11 c — Faktury: odeslání faktur odběrateli e-mailem, po jedné, s výběrem'
 console.log('StavKo docházka — verze ' + SUBBAU_VERZE)
 // Verze i dole v menu správce. Když někdo novinku „nevidí", podle ní se hned
 // pozná, jestli nemá otevřenou starou kopii appky — bez hledání v konzoli.
@@ -22665,6 +22665,7 @@ async function loadWorkerInvoices() {
   _invCache = (data || []).filter(r => !jeSkrytaFirmaPracovnika(r.worker) && !skrytiFakt.has(r.worker_id))
   await nactiTymyFaktur(_invCache)   // firma v týdnu faktury podle docházky
   await nactiSedeRadkyFaktur().catch(e => console.warn('[faktury] šedé řádky:', e?.message || e))
+  await nactiOdeslaneFaktury().catch(e => console.warn('[faktury] odeslané:', e?.message || e))
   fillInvoiceYearFilter()
   // Tabulka faktur má stovky řádků (480 faktur = ~31 000 prvků, ~190 ms zaseknutí).
   // Kreslí se jen do OTEVŘENÉ složky — při startu a obnově na pozadí se dřív kreslila
@@ -22894,6 +22895,137 @@ async function fakturaPosilaTrvaleZapis(workerId, kw, rok, zapnout) {
   if (error) { showToast('❌ Nepodařilo se uložit: ' + error.message); renderWorkerInvoices(); fakturaSrovnejFajfky(); return }
   renderWorkerInvoices()
   fakturaSrovnejFajfky()
+}
+
+// ===== ODESÍLÁNÍ FAKTUR ODBĚRATELI JEDNÍM KLIKEM (11. 11. 2026) =====
+// Majitel: MMI chce každou fakturu zvlášť e-mailem. Tlačítko „Odeslat" u faktury nebo
+// „Odeslat označené" u firmy v týdnu otevře okno se seznamem faktur (zaškrtnete, které
+// jdou, které ne), e-mailem odběratele (pamatuje se u firmy) a odešle po jedné — každá
+// jako samostatný e-mail s PDF, z firemního mailboxu přes /api/odeslat-fakturu.
+// Co odešlo, se zapisuje do faktury_odeslane (supabase-migrace-odeslani-faktur.sql);
+// bez té migrace appka jen neukazuje „✓ odesláno" a posílání jinak funguje.
+let _invOdeslane = new Map()      // id faktury → { kdy, komu }
+let _invPrijemci = new Map()      // firma → e-mail
+async function nactiOdeslaneFaktury() {
+  const { data: o, error } = await sb.from('faktury_odeslane').select('invoice_id, kdy, komu').order('kdy', { ascending: true })
+  if (!error) { _invOdeslane = new Map(); (o || []).forEach(x => _invOdeslane.set(String(x.invoice_id), { kdy: x.kdy, komu: x.komu })) }
+  const { data: pr, error: e2 } = await sb.from('faktury_prijemci').select('firma, email')
+  if (!e2) { _invPrijemci = new Map(); (pr || []).forEach(x => _invPrijemci.set(String(x.firma), x.email)) }
+}
+function odeslanoStitek(id) {
+  const o = _invOdeslane.get(String(id))
+  return o ? `<span title="Odesláno e-mailem na ${escAttr(o.komu)} ${escAttr(_invDmy(String(o.kdy).slice(0, 10)))}" style="font-size:11px;font-weight:700;color:var(--green);white-space:nowrap">✓ odesláno</span>` : ''
+}
+let _odesDlg = null
+function odeslatFakturyOtevri(kw, rok, firma, jenId) {
+  const radky = (_invCache || []).filter(r => r && !r._sedy && r.pdf_url && String(r.kw) === String(kw) && String(r.kw_year) === String(rok)
+    && (jenId ? String(r.id) === String(jenId) : firmaFaktury(r) === firma))
+  if (!radky.length) { showToast('⚠️ Není co odesílat — u faktur chybí PDF'); return }
+  const firmaKlic = firma || firmaFaktury(radky[0])
+  _odesDlg = { radky, firma: firmaKlic, bezi: false }
+  const cz = v => (Number(v) || 0).toFixed(2).replace('.', ',')
+  const radekHtml = r => {
+    const o = _invOdeslane.get(String(r.id))
+    return `<label data-odes-radek="${escAttr(r.id)}" style="display:flex;align-items:center;gap:10px;padding:8px 4px;border-bottom:1px solid var(--brd);cursor:pointer">
+      <input type="checkbox" data-odes-cb="${escAttr(r.id)}" ${o ? '' : 'checked'} style="width:18px;height:18px;accent-color:var(--green);flex-shrink:0">
+      <span style="flex:1;min-width:0"><b>${escAttr(r.worker?.full_name || r.supplier_name || '—')}</b> · č. ${escAttr(r.invoice_number || '—')}<span style="color:var(--text3)"> · ${cz(r.total_amount)} €</span></span>
+      <span data-odes-stav style="font-size:12px;white-space:nowrap;${o ? 'color:var(--green);font-weight:700' : 'color:var(--text3)'}">${o ? '✓ odesláno ' + escAttr(_invDmy(String(o.kdy).slice(0, 10))) : ''}</span>
+    </label>`
+  }
+  let ov = document.getElementById('odes-dlg'); if (ov) ov.remove()
+  ov = document.createElement('div'); ov.id = 'odes-dlg'
+  ov.style.cssText = 'position:fixed;inset:0;z-index:9500;background:rgba(0,0,0,.45);display:flex;align-items:center;justify-content:center;padding:16px'
+  ov.innerHTML = `<div style="background:#fff;border-radius:14px;width:min(560px,100%);max-height:90vh;display:flex;flex-direction:column;box-shadow:0 20px 60px rgba(0,0,0,.35)">
+    <div style="padding:16px 18px 8px"><div style="font-size:17px;font-weight:800">✉ Odeslat faktury e-mailem</div>
+      <div style="font-size:12.5px;color:var(--text3);margin-top:2px">${escAttr(firmaKlic)} · KW ${escAttr(kw)}/${escAttr(rok)} · každá faktura jde jako samostatný e-mail s PDF</div></div>
+    <div style="padding:6px 18px"><label style="font-size:12.5px;font-weight:700;color:var(--text2)">E-mail odběratele</label>
+      <input id="odes-email" type="email" autocomplete="off" value="${escAttr(_invPrijemci.get(firmaKlic) || '')}" placeholder="např. rechnung@firma.de" style="width:100%;box-sizing:border-box;padding:9px 11px;border:1.5px solid var(--brd);border-radius:8px;font-size:14px;font-family:inherit;margin-top:3px">
+      <label style="display:flex;align-items:center;gap:6px;font-size:12px;color:var(--text2);margin-top:6px;cursor:pointer"><input id="odes-pamatovat" type="checkbox" checked style="accent-color:var(--green)"> Zapamatovat tenhle e-mail pro firmu ${escAttr(firmaKlic)}</label></div>
+    <div style="padding:6px 18px;overflow:auto;flex:1;min-height:0;font-size:13.5px">
+      <div style="display:flex;justify-content:space-between;align-items:center;font-size:12px;color:var(--text3);padding:4px 4px"><span>Zaškrtnuté se odešlou</span>
+        <span><a href="#" onclick="odeslatFakturyVse(true);return false" style="color:var(--blue)">všechny</a> · <a href="#" onclick="odeslatFakturyVse(false);return false" style="color:var(--blue)">žádná</a></span></div>
+      ${radky.map(radekHtml).join('')}</div>
+    <div id="odes-zprava" style="padding:4px 18px;font-size:12.5px;min-height:18px"></div>
+    <div style="padding:10px 18px 16px;display:flex;gap:8px;justify-content:flex-end">
+      <button type="button" id="odes-zavrit" onclick="odeslatFakturyZavri()" style="padding:9px 16px;border:1.5px solid var(--brd);border-radius:9px;background:#fff;font-size:14px;font-weight:700;cursor:pointer;font-family:inherit">Zavřít</button>
+      <button type="button" id="odes-posli" onclick="odeslatFakturyPosli()" class="btn-pri" style="padding:9px 18px;font-size:14px">Odeslat</button></div></div>`
+  document.body.appendChild(ov)
+  ov.addEventListener('change', odeslatFakturyPocet)
+  odeslatFakturyPocet()
+}
+function odeslatFakturyVse(zap) { document.querySelectorAll('#odes-dlg [data-odes-cb]').forEach(c => { c.checked = zap }); odeslatFakturyPocet() }
+function odeslatFakturyPocet() {
+  const n = document.querySelectorAll('#odes-dlg [data-odes-cb]:checked').length
+  const b = document.getElementById('odes-posli'); if (!b || (_odesDlg && _odesDlg.bezi)) return
+  b.textContent = n ? 'Odeslat (' + n + ')' : 'Odeslat'; b.disabled = !n
+}
+function odeslatFakturyZavri() {
+  if (_odesDlg && _odesDlg.bezi) { if (!confirm('Odesílání ještě běží. Opravdu zavřít? Co už odešlo, je odeslané.')) return; _odesDlg.zrusit = true }
+  document.getElementById('odes-dlg')?.remove(); _odesDlg = null
+  renderWorkerInvoices()
+}
+async function odeslatFakturyPosli() {
+  const d = _odesDlg; if (!d || d.bezi) return
+  const zprava = document.getElementById('odes-zprava')
+  const email = String(document.getElementById('odes-email')?.value || '').trim()
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) { zprava.innerHTML = '<span style="color:var(--red)">Doplňte platný e-mail odběratele.</span>'; return }
+  const ids = [...document.querySelectorAll('#odes-dlg [data-odes-cb]:checked')].map(c => c.dataset.odesCb)
+  if (!ids.length) return
+  if (!SUPABASE_URL) { zprava.innerHTML = '<span style="color:var(--text2)">V ukázce se e-maily neposílají.</span>'; return }
+  const pocet = ids.length
+  if (!confirm('Odeslat ' + pocet + ' ' + (pocet === 1 ? 'fakturu' : pocet < 5 ? 'faktury' : 'faktur') + ' na ' + email + '? Každá půjde jako zvláštní e-mail.')) return
+  d.bezi = true; d.zrusit = false
+  const btn = document.getElementById('odes-posli'); btn.disabled = true
+  document.querySelectorAll('#odes-dlg input').forEach(i => { i.disabled = true })
+  if (document.getElementById('odes-pamatovat')?.checked) {
+    const { error } = await sb.from('faktury_prijemci').upsert({ firma: d.firma, email, upraveno: new Date().toISOString() }, { onConflict: 'firma' })
+    if (!error) _invPrijemci.set(d.firma, email)
+  }
+  let ok = 0, chyby = 0
+  let token = null
+  for (let i = 0; i < ids.length && !d.zrusit; i++) {
+    const r = d.radky.find(x => String(x.id) === ids[i]); if (!r) continue
+    const radek = document.querySelector(`#odes-dlg [data-odes-radek="${CSS.escape(String(r.id))}"] [data-odes-stav]`)
+    const stav = (t, barva) => { if (radek) { radek.textContent = t; radek.style.color = barva || 'var(--text3)'; radek.style.fontWeight = '700' } }
+    btn.textContent = 'Odesílám ' + (i + 1) + ' / ' + ids.length + '…'
+    stav('⏳ odesílám…')
+    try {
+      const resp0 = await fetch(r.pdf_url)
+      if (!resp0.ok) throw new Error('PDF faktury se nepodařilo načíst (HTTP ' + resp0.status + ')')
+      const b64 = await blobToBase64(await resp0.blob())
+      try { token = (await sb.auth.getSession())?.data?.session?.access_token || null } catch (e) {}
+      const cis = String(r.invoice_number || '').replace(/[^a-zA-Z0-9_-]/g, '')
+      const kdo = r.worker?.full_name || r.supplier_name || ''
+      const who = kdo.normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[^a-zA-Z0-9]+/g, '_').replace(/^_+|_+$/g, '')
+      const resp = await fetch('/api/odeslat-fakturu', { method: 'POST',
+        headers: { 'content-type': 'application/json', ...(token ? { authorization: 'Bearer ' + token } : {}) },
+        body: JSON.stringify({ to: email, fileName: 'Rechnung_' + cis + (who ? '_' + who : '') + '.pdf', pdfBase64: b64,
+          subject: 'Rechnung ' + (r.invoice_number || '') + ' — ' + kdo + ' — KW ' + r.kw + '/' + r.kw_year,
+          text: 'Guten Tag,\n\nanbei erhalten Sie die Rechnung Nr. ' + (r.invoice_number || '') + ' (' + kdo + ') für KW ' + r.kw + '/' + r.kw_year + '.\n\nMit freundlichen Grüßen\nStavKo' }) })
+      const j = await resp.json().catch(() => ({}))
+      if (!resp.ok || !j.sent) {
+        const dukaz = j && j.reason
+        if (dukaz === 'not_configured') { stav('❌ mailbox není nastavený', 'var(--red)'); zprava.innerHTML = '<span style="color:var(--red)">Odesílání ještě není nastavené (heslo k mailboxu ve Vercelu). Nic neodešlo.</span>'; chyby++; break }
+        throw new Error(dukaz || ('HTTP ' + resp.status))
+      }
+      ok++
+      const kdy = new Date().toISOString()
+      _invOdeslane.set(String(r.id), { kdy, komu: email })
+      stav('✓ odesláno ' + _invDmy(kdy.slice(0, 10)), 'var(--green)')
+      const { error: ze } = await sb.from('faktury_odeslane').insert({ invoice_id: String(r.id), komu: email })
+      if (ze) console.warn('[faktury] záznam o odeslání se nezapsal:', ze.message)
+    } catch (e) {
+      chyby++
+      stav('❌ ' + String(e?.message || e).slice(0, 80), 'var(--red)')
+      try { if (typeof zapisChybuAppky === 'function') zapisChybuAppky('faktura-odeslat-odberateli', String(e?.message || e), { invoiceNum: r.invoice_number }) } catch (x) {}
+    }
+    if (i < ids.length - 1 && !d.zrusit) await new Promise(res => setTimeout(res, 1500))   // Wedos nemá rád dávku naráz
+  }
+  d.bezi = false
+  document.querySelectorAll('#odes-dlg input').forEach(i => { i.disabled = false })
+  btn.textContent = 'Odeslat'; odeslatFakturyPocet()
+  if (!zprava.textContent.includes('není nastavené')) zprava.innerHTML = '<span style="color:' + (chyby ? 'var(--red)' : 'var(--green)') + ';font-weight:700">' + (ok ? '✓ Odesláno: ' + ok : '') + (chyby ? (ok ? ' · ' : '') + 'selhalo: ' + chyby + ' (zkuste znovu jen ty zaškrtnuté)' : '') + '</span>'
+  if (ok) { document.querySelectorAll('#odes-dlg [data-odes-cb]').forEach(c => { if (_invOdeslane.has(c.dataset.odesCb)) c.checked = false }); odeslatFakturyPocet() }
 }
 
 function firmaFaktury(r) {
@@ -23250,7 +23382,7 @@ function renderWorkerInvoices() {
           : ((!r.kw || !(_souhrnFirmy.get(r.kw + '/' + r.kw_year + '|' + firmaTeto)?.faktur)
               || _nezaplacenoFirmy.get(r.kw + '/' + r.kw_year + '|' + firmaTeto)) ? '' : (_odlozeneCekaji.get(r.kw + '/' + r.kw_year + '|' + firmaTeto)
             ? '<span style="font-size:11px;font-weight:700;color:#1d4ed8">⏸ nezaplacené jsou jen odložené</span>'
-            : '<span style="font-size:11px;font-weight:700;color:var(--green)">✓ vše zaplaceno</span>'))}</div></td></tr>`)
+            : '<span style="font-size:11px;font-weight:700;color:var(--green)">✓ vše zaplaceno</span>'))}${(r.kw && _souhrnFirmy.get(r.kw + '/' + r.kw_year + '|' + firmaTeto)?.faktur) ? `<button onclick="event.stopPropagation();odeslatFakturyOtevri('${jsStr(r.kw)}','${jsStr(r.kw_year)}','${jsStr(firmaTeto)}')" title="Odeslat faktury téhle firmy v tomhle týdnu e-mailem odběrateli — vyberete, které" style="font-size:11px;padding:3px 9px;border:1px solid var(--green);border-radius:6px;cursor:pointer;background:#fff;color:var(--green);font-family:inherit;font-weight:700">✉ Odeslat e-mailem</button>` : ''}</div></td></tr>`)
         _poslFirma = firmaTeto
       }
     }
@@ -23306,6 +23438,8 @@ function renderWorkerInvoices() {
           ${r.pdf_url ? `<button onclick="openPdfUrl('${jsStr(r.pdf_url)}')" style="font-size:11px;padding:3px 8px;border:1px solid var(--blue);border-radius:6px;cursor:pointer;background:var(--bg2);color:var(--blue);font-family:inherit"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:1em;height:1em;flex-shrink:0;vertical-align:-2px"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg> Zobrazit</button>` : '<span style="font-size:11px;color:var(--text3)">bez PDF</span>'}
           ${r.pdf_url ? `<button onclick="downloadInvoicePdf('${jsStr(r.id)}')" style="font-size:11px;padding:3px 8px;border:1px solid var(--brd);border-radius:6px;cursor:pointer;background:#fff;font-family:inherit"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:1em;height:1em;flex-shrink:0;vertical-align:-2px"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="M7 10l5 5 5-5"/><path d="M12 15V3"/></svg> Stáhnout</button>` : ''}
           ${r.pdf_url ? `<button onclick="printInvoicePdf('${jsStr(r.pdf_url)}','${jsStr(r.id)}')" style="font-size:11px;padding:3px 8px;border:1px solid var(--brd);border-radius:6px;cursor:pointer;background:#fff;font-family:inherit"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:1em;height:1em;flex-shrink:0;vertical-align:-2px"><path d="M6 9V2h12v7M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2"/><rect x="6" y="14" width="12" height="8"/></svg> Tisk</button>` : ''}
+          ${r.pdf_url && r.kw ? `<button onclick="odeslatFakturyOtevri('${jsStr(r.kw)}','${jsStr(r.kw_year)}','${jsStr(firmaFaktury(r))}','${jsStr(r.id)}')" title="Odeslat tuhle fakturu e-mailem odběrateli" style="font-size:11px;padding:3px 8px;border:1px solid var(--green);border-radius:6px;cursor:pointer;background:#fff;color:var(--green);font-family:inherit">✉ Odeslat</button>` : ''}
+          ${odeslanoStitek(r.id)}
           ${r.original_pdf_url ? `<button onclick="openPdfUrl('${jsStr(r.original_pdf_url)}')" title="Faktura tak, jak ji poslal pracovník — ještě bez zálohy" style="font-size:11px;padding:3px 8px;border:1px dashed var(--brd);border-radius:6px;cursor:pointer;background:#fff;color:var(--text3);font-family:inherit"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:1em;height:1em;flex-shrink:0;vertical-align:-2px"><path d="M3 3v5h5"/><path d="M3.05 13A9 9 0 1 0 6 5.3L3 8"/><path d="M12 7v5l3 2"/></svg> Původní</button>` : ''}
           <button onclick="openInvoiceEdit('${jsStr(r.id)}')" title="Upravit fakturu — záloha v hotovosti" style="font-size:11px;padding:3px 8px;border:1px solid var(--brd);border-radius:6px;cursor:pointer;background:#fff;font-family:inherit"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:1em;height:1em;flex-shrink:0;vertical-align:-2px"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/></svg> Upravit</button>
           ${(r.status || 'new') === 'new' ? `<button onclick="setInvoiceStatus('${jsStr(r.id)}','seen')" style="font-size:11px;padding:3px 8px;border:1px solid var(--green);border-radius:6px;cursor:pointer;background:var(--green-l);color:var(--green);font-family:inherit"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:1em;height:1em;flex-shrink:0;vertical-align:-2px"><path d="M20 6 9 17l-5-5"/></svg> Vyřídit</button>` : ''}
