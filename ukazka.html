@@ -5782,6 +5782,7 @@ function setupWorkerSignCanvas() {
   // ověřuje právě pixely, takže by se uložil předchozí nakreslený podpis (Codex 6. 11. 2026).
   if (c._sigPad && c._sigPad.clear) c._sigPad.clear()
   workerSignCtx = c.getContext('2d')
+  _wsigTok++
   refreshWorkerSavedSigBtn()
   const hint = document.getElementById('sign-canvas-hint')
   if (hint) {
@@ -5795,6 +5796,7 @@ function setupWorkerSignCanvas() {
 }
 
 function clearWorkerSignCanvas() {
+  _wsigTok++
   if (workerSignCanvas && workerSignCanvas._sigPad) { workerSignCanvas._sigPad.clear() }
   else if (workerSignCtx && workerSignCanvas) workerSignCtx.clearRect(0,0,workerSignCanvas.width,workerSignCanvas.height)
   const hint = document.getElementById('sign-canvas-hint')
@@ -6598,6 +6600,7 @@ const _pzsExistuje = async (id) => {
   const ac = new AbortController(), t = setTimeout(() => ac.abort(), 8000)
   try { return (await fetch(_podpisUrl(id), { method: 'HEAD', cache: 'no-store', signal: ac.signal })).ok } catch (e) { return false } finally { clearTimeout(t) }
 }
+let _wsigTok = 0
 const workerSigStoragePath = (id) => 'signatures/worker_' + id + '.png'
 const _podpisUrl = (id) => sb.storage.from('contracts').getPublicUrl(workerSigStoragePath(id)).data?.publicUrl || ''
 // Ořízne plátno na nakreslené čáry (průhledné pozadí, nejvýš 500 px na šířku) → { dataUrl, blob, w, h, tmavych }.
@@ -6644,7 +6647,13 @@ async function refreshWorkerSavedSigBtn() {
 async function useWorkerSignatureMemory() {
   const uid = currentUser?.id, canvas = workerSignCanvas
   if (!uid || !canvas) return
+  // Opožděná odpověď nesmí přepsat to, co pracovník mezitím udělal (nakreslil, smazal, otevřel jinou smlouvu).
+  const tok = (_wsigTok = (_wsigTok || 0) + 1)
+  const zmena = () => { _wsigTok++ }
+  canvas.addEventListener('pointerdown', zmena, { once: true })
+  const platne = () => tok === _wsigTok && workerSignCanvas === canvas && currentUser?.id === uid
   const vloz = (img) => {
+    if (!platne()) return
     const ctx = canvas.getContext('2d'), dpr = Math.max(1, Math.min(window.devicePixelRatio || 1, 2))
     if (canvas._sigPad && canvas._sigPad.clear) canvas._sigPad.clear(); else ctx.clearRect(0, 0, canvas.width, canvas.height)
     const cw = canvas.width / dpr, ch = canvas.height / dpr, ratio = Math.min(cw / img.width, ch / img.height) * 0.9
@@ -6657,13 +6666,15 @@ async function useWorkerSignatureMemory() {
   try {
     // 1) uložený podpis; 2) jinak podpis z jeho poslední podepsané smlouvy
     let zdroj = null
-    const resp = await _pzsCas(fetch(_podpisUrl(uid), { cache: 'no-store' }), 10000, 'podpis')
-    if (resp.ok) zdroj = { url: URL.createObjectURL(await resp.blob()), uvolnit: true }
+    let resp = null
+    try { resp = await _pzsCas(fetch(_podpisUrl(uid), { cache: 'no-store' }), 10000, 'podpis') } catch (e) { /* síť: zkusíme smlouvu */ }
+    if (resp && resp.ok) zdroj = { url: URL.createObjectURL(await resp.blob()), uvolnit: true }
     else {
       const c = await _posledniPodepsanaSmlouva(uid)
       const o = c ? await _pzsCas(_podpisZPdf(c.signature_url, c.worker_sign_page), 60000, 'čtení smlouvy') : null
       if (o?.dataUrl) zdroj = { url: o.dataUrl, uvolnit: false }
     }
+    if (!platne()) { if (zdroj?.uvolnit) URL.revokeObjectURL(zdroj.url); return }
     if (!zdroj) { showToast('⚠️ Poslední podpis se nepodařilo najít — podepište prosím prstem'); refreshWorkerSavedSigBtn(); return }
     const img = new Image()
     img.onload = () => { try { vloz(img) } finally { if (zdroj.uvolnit) URL.revokeObjectURL(zdroj.url) } }
@@ -6688,8 +6699,21 @@ async function _podpisZPdf(url, strana) {
     for (let i = doc.numPages; i >= 1; i--) if (!strany.includes(i)) strany.push(i)
     for (const cislo of strany) {
       const page = await doc.getPage(cislo), ops = await page.getOperatorList()
-      const jmena = []
-      ops.fnArray.forEach((f, i) => { if (f === pdfjsLib.OPS.paintImageXObject) jmena.push(ops.argsArray[i][0]) })
+      // Podpis se do PDF vkládá vždy 120 × 50 bodů (submitWorkerSignWithPlacement) — logo a jiné obrázky mají jiný rozměr.
+      // Rozměr se čte z transformační matice před vykreslením obrázku (zásobník save/restore/transform).
+      const O = pdfjsLib.OPS, nasobit = (m, n) => [m[0] * n[0] + m[2] * n[1], m[1] * n[0] + m[3] * n[1], m[0] * n[2] + m[2] * n[3], m[1] * n[2] + m[3] * n[3], m[0] * n[4] + m[2] * n[5] + m[4], m[1] * n[4] + m[3] * n[5] + m[5]]
+      let ctm = [1, 0, 0, 1, 0, 0]; const zas = [], vsechny = [], sedi = []
+      ops.fnArray.forEach((f, i) => {
+        if (f === O.save) zas.push(ctm.slice())
+        else if (f === O.restore) ctm = zas.pop() || [1, 0, 0, 1, 0, 0]
+        else if (f === O.transform) ctm = nasobit(ctm, ops.argsArray[i])
+        else if (f === O.paintImageXObject) {
+          const jmeno = ops.argsArray[i][0], sirka = Math.hypot(ctm[0], ctm[1]), vyska = Math.hypot(ctm[2], ctm[3])
+          vsechny.push(jmeno); if (Math.abs(sirka - 120) < 1.5 && Math.abs(vyska - 50) < 1.5) sedi.push(jmeno)
+        }
+      })
+      // Bez obrázku správné velikosti se bere jen strana, kterou smlouva sama uvádí (worker_sign_page); jinak nic — raději žádný podpis než logo.
+      const jmena = sedi.length ? sedi : (cislo === strana ? vsechny : [])
       if (!jmena.length) continue
       const img = await new Promise((res, rej) => { const t = setTimeout(() => rej(new Error('timeout')), 15000); page.objs.get(jmena[jmena.length - 1], (o) => { clearTimeout(t); res(o) }) })
       if (!img || !img.width || !img.height) continue
@@ -22803,13 +22827,8 @@ async function loadWorkerInvoices() {
   const skrytiFakt = await skrytiLideIds()
   _invCache = (data || []).filter(r => !jeSkrytaFirmaPracovnika(r.worker) && !skrytiFakt.has(r.worker_id))
   await nactiTymyFaktur(_invCache)   // firma v týdnu faktury podle docházky
-  // Odeslané faktury (štítky, okno Odeslat) jen když je složka Faktur otevřená, a souběžně se šedými řádky —
-  // při startu a obnově na pozadí by zbytečně zdržovaly (11. 11. 2026, Codex). Při otevření složky se načtou.
-  const fakturyOtevrene = !!document.getElementById('v-faktury-archiv')?.classList.contains('on')
-  await Promise.all([
-    nactiSedeRadkyFaktur().catch(e => console.warn('[faktury] šedé řádky:', e?.message || e)),
-    fakturyOtevrene ? nactiOdeslaneFaktury().catch(e => console.warn('[faktury] odeslané:', e?.message || e)) : null
-  ])
+  await nactiSedeRadkyFaktur().catch(e => console.warn('[faktury] šedé řádky:', e?.message || e))
+  await nactiOdeslaneFaktury().catch(e => console.warn('[faktury] odeslané:', e?.message || e))
   fillInvoiceYearFilter()
   // Tabulka faktur má stovky řádků (480 faktur = ~31 000 prvků, ~190 ms zaseknutí).
   // Kreslí se jen do OTEVŘENÉ složky — při startu a obnově na pozadí se dřív kreslila
