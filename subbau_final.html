@@ -2647,6 +2647,18 @@ setTimeout(function brzda() {
               margin-top: var(--mmir-mezera-polozek); padding-top: var(--mmir-mezera-polozek); border-top: 2px solid var(--mmir-linka); min-width: 0;
             }
 
+            /* ── Pavouk stavby (pavouk.css): vedoucí nahoře, pod nimi sloupečky profesí ── */
+            @media (min-width: 721px) { .mmir-stavba.mmir-stavba--pavouk { max-width: none; flex-basis: 100%; } }
+            .mmir-vedouci { display: flex; flex-wrap: wrap; justify-content: center; gap: var(--mmir-mezera-polozek); min-width: 0; }
+            .mmir-sloupce { display: flex; flex-wrap: wrap; align-items: flex-start; gap: var(--mmir-mezera-polozek); min-width: 0; }
+            .mmir-sloupce--pod-vedenim { position: relative; padding-top: var(--mmir-mezera-polozek); border-top: 2px solid var(--mmir-linka); }
+            .mmir-sloupec { flex: 1 1 220px; max-width: 300px; display: flex; flex-direction: column; gap: var(--mmir-mezera-tesna); min-width: 0; padding-left: var(--mmir-mezera-polozek); border-left: 2px solid var(--mmir-linka); }
+            .mmir-sloupec__hlavicka { display: flex; align-items: baseline; justify-content: space-between; gap: var(--mmir-mezera-polozek); padding: var(--mmir-mezera-tesna) var(--mmir-mezera-polozek); border: 1px solid var(--mmir-linka); border-radius: var(--mmir-radius); background: var(--mmir-papir); }
+            .mmir-sloupec__nazev { font-size: var(--mmir-pismo-kulisa); font-weight: 700; letter-spacing: .04em; text-transform: uppercase; overflow-wrap: anywhere; }
+            .mmir-sloupec__pocet { color: var(--mmir-text-tlumeny); font-size: var(--mmir-pismo-kulisa); flex: none; }
+            .mmir-sloupec .mmir-karticka { display: flex; }
+            .mmir-vedouci + .mmir-sloupce, .mmir-sloupce + .mmir-zbytek { margin-top: 0; }
+
             /* ── Kartička člověka (karticka.css) ── */
             .mmir-karticka {
               display: inline-flex; align-items: center; gap: var(--mmir-mezera-polozek);
@@ -32506,6 +32518,18 @@ function mmiModel(j, lideMap) {
   }
   const dny = []
   for (let d = j.od, i = 0; d <= j.do && i < 31; d = mmiPosunDen(d, 1), i++) dny.push(d)
+  // VEDOUCÍ A PROFESE (11. 11. 2026): Stavbyplán je může posílat — j.profese [{id, nazev}],
+  // j.vedouci [{misto_id, clovek_id}] a u řádku plánu profese_id (na ten den), u člověka profese_id
+  // (jako obvykle). Když je neposílá (starší odkaz), rozpis vypadá jako dosud.
+  const profese = []
+  ;(Array.isArray(j.profese) ? j.profese : []).forEach(x => { if (x?.id && !profese.some(q => q.id === x.id)) profese.push({ id: String(x.id), nazev: String(x.nazev || '') }) })
+  const vedouci = new Set()
+  ;(Array.isArray(j.vedouci) ? j.vedouci : []).forEach(x => { if (x?.misto_id && x?.clovek_id) vedouci.add(x.misto_id + '|' + x.clovek_id) })
+  const profeseRadku = {}
+  for (const r of (j.plan || [])) {
+    if (r?.profese_id && lideMap.has(r.clovek_id)) (profeseRadku[r.clovek_id] = profeseRadku[r.clovek_id] || {})[r.den] = String(r.profese_id)
+  }
+  const maPavouka = profese.length > 0 || vedouci.size > 0
   // Koho smí SubBau přesouvat — viz „KOHO SMÍ SUBBAU PŘESOUVAT" výš.
   const surovi = {}
   ;(j.lide || []).forEach(c => { if (c?.id) surovi[c.id] = c })
@@ -32524,7 +32548,9 @@ function mmiModel(j, lideMap) {
   const cile = (cileZeStavbyplanu.length ? cileZeStavbyplanu : Object.values(mista))
     .slice().sort((a, b) => String(a.nazev || '').localeCompare(String(b.nazev || ''), 'cs'))
   for (const m of cile) if (!barva[m.id]) barva[m.id] = MMI_BARVY[bi++ % MMI_BARVY.length]
-  return { j, mista, plan, dny, lide, barva, cile, lzePresouvat: j.presouvani === true }
+  const profeseLidi = {}
+  ;(j.lide || []).forEach(c => { if (c?.id && c.profese_id) profeseLidi[c.id] = String(c.profese_id) })
+  return { j, mista, plan, dny, lide, barva, cile, lzePresouvat: j.presouvani === true, profese, vedouci, profeseRadku, profeseLidi, maPavouka }
 }
 
 const mmiNazev = (id) => id ? (_mmiM?.mista[id]?.nazev || '?') : 'bez stavby'
@@ -32727,12 +32753,34 @@ function mmirRadekDne(nadpis, lide, den, radek) {
 function mmirStavba(id, lide, den, smiseni) {
   const adresa = _mmiM.mista[id]?.adresa || ''
   const prazdna = !lide.length
-  return `<li class="mmir-stavba${prazdna ? ' mmir-stavba--prazdna' : ''}" data-mmi-stavba><div class="mmir-stavba__hlavicka">`
+  return `<li class="mmir-stavba${prazdna ? ' mmir-stavba--prazdna' : ''}${!prazdna && _mmiM.maPavouka && lide.some(c => _mmiM.vedouci.has(id + '|' + c.cid) || (_mmiM.profeseRadku[c.cid]?.[den] || _mmiM.profeseLidi[c.cid])) ? ' mmir-stavba--pavouk' : ''}" data-mmi-stavba><div class="mmir-stavba__hlavicka">`
     + `<span class="mmir-stavba__pruh" style="background:${mmirSyta(id)}" aria-hidden="true"></span>`
     + `<span class="mmir-stavba__nazev"${prazdna && adresa ? ` title="${escAttr(adresa)}"` : ''}>${escAttr(mmiNazev(id))}</span>`
     + `<span class="mmir-stavba__pocet" data-mmi-pocet>${prazdna ? 'Nikdo' : mmiPocty(lide, smiseni)}</span>`
     + (adresa && !prazdna ? `<span class="mmir-stavba__adresa">${escAttr(adresa)}</span>` : '') + '</div>'
-    + `<div class="mmir-bunka">${prazdna ? '' : `<div class="mmir-zbytek">${lide.map(c => mmirKarticka(c, den)).join('')}</div>`}</div></li>`
+    + `<div class="mmir-bunka">${prazdna ? '' : mmirPavouk(id, lide, den)}</div></li>`
+}
+// PAVOUK STAVBY (pavouk.css): vedoucí nahoře, od nich čára a pod ní sloupečky
+// profesí (Zedník 13, Formování 5 …); lidé bez profese pod čarou. Profese na
+// ten den má přednost před „jako obvykle" (týž řád jako ve Stavbyplánu).
+// Bez dat o vedoucích a profesích zůstává plochý seznam kartiček jako dřív.
+function mmirPavouk(id, lide, den) {
+  const M = _mmiM
+  if (!M.maPavouka) return `<div class="mmir-zbytek">${lide.map(c => mmirKarticka(c, den)).join('')}</div>`
+  const vedouci = [], sloupce = new Map(), bez = []
+  for (const c of lide) {
+    if (M.vedouci.has(id + '|' + c.cid)) { vedouci.push(c); continue }
+    const pid = M.profeseRadku[c.cid]?.[den] || M.profeseLidi[c.cid] || ''
+    const p = M.profese.find(x => x.id === pid)
+    if (!p) { bez.push(c); continue }
+    if (!sloupce.has(p.id)) sloupce.set(p.id, [])
+    sloupce.get(p.id).push(c)
+  }
+  const poradi = M.profese.filter(p => sloupce.has(p.id))
+  const kart = (c) => mmirKarticka(c, den)
+  return (vedouci.length ? `<div class="mmir-vedouci" data-mmi-vedouci>${vedouci.map(kart).join('')}</div>` : '')
+    + (poradi.length ? `<div class="mmir-sloupce${vedouci.length ? ' mmir-sloupce--pod-vedenim' : ''}" data-mmi-sloupce>${poradi.map(p => `<div class="mmir-sloupec" data-mmi-profese><div class="mmir-sloupec__hlavicka"><span class="mmir-sloupec__nazev">${escAttr(p.nazev)}</span><span class="mmir-sloupec__pocet">${sloupce.get(p.id).length}</span></div>${sloupce.get(p.id).map(kart).join('')}</div>`).join('')}</div>` : '')
+    + (bez.length ? `<div class="mmir-zbytek">${bez.map(kart).join('')}</div>` : '')
 }
 // Sklad mimo mřížku staveb (PruhSkladu.jsx).
 function mmirSklad(id, lide, den, smiseni) {
