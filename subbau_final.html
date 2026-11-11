@@ -1910,6 +1910,7 @@ setTimeout(function brzda() {
                 <button type="button" id="cal-abs-btn-nemoc" onclick="calAbsZacni('nemoc')" title="Zapsat nemoc klepnutím na den v kalendáři" style="padding:7px 12px;border:1.5px solid #6a4c93;border-radius:9px;background:#fff;color:#6a4c93;font-size:13px;font-weight:700;cursor:pointer;font-family:inherit">🤒 Nemoc</button>
                 <button type="button" id="cal-abs-btn-dovolena" onclick="calAbsZacni('dovolena')" title="Zapsat dovolenou klepnutím na den v kalendáři" style="padding:7px 12px;border:1.5px solid #2f7fc1;border-radius:9px;background:#fff;color:#2f7fc1;font-size:13px;font-weight:700;cursor:pointer;font-family:inherit">🏖 Dovolená</button>
                 <button type="button" id="cal-abs-btn-absence" onclick="calAbsZacni('absence')" title="Zapsat absenci klepnutím na den v kalendáři" style="padding:7px 12px;border:1.5px solid #b8460e;border-radius:9px;background:#fff;color:#b8460e;font-size:13px;font-weight:700;cursor:pointer;font-family:inherit">⚠️ Absence</button>
+                <button type="button" id="cal-abs-btn-smazat" onclick="calAbsZacni('smazat')" title="Smazat zapsanou nemoc, dovolenou nebo absenci klepnutím na den v kalendáři" style="padding:7px 12px;border:1.5px solid #c0392b;border-radius:9px;background:#fff;color:#c0392b;font-size:13px;font-weight:700;cursor:pointer;font-family:inherit">🗑 Smazat</button>
               </div>
               <div id="cal-celkem" class="kal-celkem"></div>
             </div>
@@ -5885,7 +5886,7 @@ async function submitAdminSignatureWithPlacement() {
 // Po nahrání nové verze se snadno pozná, jestli se opravdu nasadila: otevřete
 // appku, zmáčkněte F12 (na Macu ⌥⌘I) a v konzoli je vypsané tohle datum. Když
 // tam svítí starší, prohlížeč nebo GitHub drží starou verzi.
-const SUBBAU_VERZE = '2026-11-10 a — Krátké výpadky živého spojení se nezapisují do deníku (jen ty, co trvají přes minutu); přepojení správce si předem obnoví prošlý klíč, bez zavírání už obnoveného spojení'
+const SUBBAU_VERZE = '2026-11-11 a — Kalendář: tlačítko Smazat u nemoci, dovolené a absence'
 console.log('SubBau docházka — verze ' + SUBBAU_VERZE)
 // Verze i dole v menu správce. Když někdo novinku „nevidí", podle ní se hned
 // pozná, jestli nemá otevřenou starou kopii appky — bez hledání v konzoli.
@@ -17881,12 +17882,13 @@ async function renderCalendar(tichy) {
   // Tlačítka Nemoc/Dovolená/Absence jsou MIMO #cal-content (nepřekreslují se
   // s mřížkou), takže jejich "zapnutý" vzhled se musí hlídat zvlášť při
   // každém kreslení.
-  ;['nemoc', 'dovolena', 'absence'].forEach(k => {
+  ;['nemoc', 'dovolena', 'absence', 'smazat'].forEach(k => {
     const btn = document.getElementById('cal-abs-btn-' + k)
     if (!btn) return
     const on = _calAbsPick?.typ === k
-    btn.style.background = on ? ABSENCE[k].color : '#fff'
-    btn.style.color = on ? '#fff' : ABSENCE[k].color
+    const bar = k === 'smazat' ? '#c0392b' : ABSENCE[k].color
+    btn.style.background = on ? bar : '#fff'
+    btn.style.color = on ? '#fff' : bar
   })
 
   // Telefon: při otevření nového období (ne při obnově téhož) dojeď na dnešek,
@@ -17931,13 +17933,16 @@ async function renderCalendar(tichy) {
 function calAbsZacni(typ) {
   if (_calAbsPick && _calAbsPick.typ === typ) { _calAbsPick = null; renderCalendar(); return }
   _calAbsPick = { typ, workerId: null, jmeno: '', od: null, doo: null }
-  showToast('Klepněte v kalendáři na den u pracovníka — jedno klepnutí stačí na jeden den, druhým prodloužíte rozsah')
+  showToast(typ === 'smazat'
+    ? 'Klepněte v kalendáři na den, ve kterém je zapsaná nemoc, dovolená nebo absence — smaže se celý ten záznam'
+    : 'Klepněte v kalendáři na den u pracovníka — jedno klepnutí stačí na jeden den, druhým prodloužíte rozsah')
   renderCalendar()
 }
 function calAbsZrusit() { if (_calAbsPick && _calAbsPick.uklada) return; _calAbsPick = null; renderCalendar() }
 function calAbsKlik(workerId, den, jmeno) {
   const p = _calAbsPick
   if (!p || p.uklada) return
+  if (p.typ === 'smazat') { calAbsSmaz(workerId, den, jmeno); return }
   if (!p.workerId) {
     p.workerId = workerId; p.jmeno = jmeno; p.od = den; p.doo = den
     renderCalendar()
@@ -17958,9 +17963,45 @@ function calAbsKlik(workerId, den, jmeno) {
   p.od = trojice[0]; p.doo = trojice[2]
   renderCalendar()
 }
+// Tlačítko „Smazat" v kalendáři: klepnutí na den smaže celý zapsaný záznam
+// (nemoc / dovolená / absence), který ten den pokrývá. Vždy s potvrzením.
+async function calAbsSmaz(workerId, den, jmeno) {
+  const p = _calAbsPick
+  if (!p || p.typ !== 'smazat' || p.uklada) return
+  p.uklada = true
+  try {
+    const { data: zaz, error: e1 } = await sb.from('vacations').select('id, type, note, date_from, date_to')
+      .eq('worker_id', workerId).lte('date_from', den).gte('date_to', den)
+      .order('date_from', { ascending: true })
+    if (e1) { showToast('❌ Nepodařilo se načíst záznam: ' + e1.message); p.uklada = false; return }
+    if (!zaz || !zaz.length) { showToast('V ten den tu žádná nemoc, dovolená ani absence zapsaná není'); p.uklada = false; return }
+    const czd = d => { const x = String(d || '').split('-'); return x.length === 3 ? x[2] + '.' + x[1] + '.' + x[0] : (d || '') }
+    const z = zaz[0]
+    const ei = ABSENCE[absType(z)]
+    if (!confirm('Smazat ' + ei.label.toLowerCase() + ' (' + (jmeno || '') + ') ' + czd(z.date_from) + ' – ' + czd(z.date_to) + '?')) { p.uklada = false; return }
+    const { data, error } = await sb.from('vacations').delete().eq('id', z.id).select('id')
+    if (error || !data || !data.length) {
+      showToast('❌ Nepodařilo se smazat' + (error ? ': ' + error.message : ' — nemáte na to oprávnění'))
+      p.uklada = false; return
+    }
+    showToast('🗑 ' + ei.label + ' smazána — ' + (jmeno || ''))
+    p.uklada = false
+    renderCalendar()   // režim Smazat zůstává zapnutý, jde mazat dál; ukončí se tlačítkem Zrušit
+  } catch (e) {
+    showToast('❌ Nepodařilo se smazat: ' + (e?.message || e))
+    p.uklada = false
+  }
+}
 function calAbsListaHtml() {
   const p = _calAbsPick
   if (!p) return ''
+  if (p.typ === 'smazat') {
+    return `<div data-cal-abs-lista style="position:fixed;left:50%;transform:translateX(-50%);bottom:calc(12px + env(safe-area-inset-bottom));width:min(620px, calc(100vw - 24px));box-sizing:border-box;z-index:9000;padding:12px 14px;border:2px solid #c0392b;border-radius:12px;background:#fff;box-shadow:0 10px 30px rgba(0,0,0,.25);display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+      <div style="flex:1;min-width:200px"><div style="font-size:14.5px;font-weight:800;color:#c0392b">🗑 Smazat</div>
+      <div style="font-size:12.5px;color:var(--text2);margin-top:2px">Klepněte na den s nemocí, dovolenou nebo absencí — smaže se celý záznam (po potvrzení).</div></div>
+      <button type="button" onclick="calAbsZrusit()" style="min-height:40px;padding:8px 14px;border:1.5px solid var(--brd);border-radius:9px;background:#fff;font-size:14px;font-weight:700;cursor:pointer;font-family:inherit">Hotovo</button>
+    </div>`
+  }
   const info = ABSENCE[p.typ]
   const czd = d => { const x = String(d || '').split('-'); return x.length === 3 ? x[2] + '.' + x[1] + '.' + x[0] : (d || '') }
   const uklada = !!p.uklada
