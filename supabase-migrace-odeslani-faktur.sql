@@ -37,12 +37,15 @@ create table if not exists public.faktury_odeslane (
   invoice_id text not null,
   komu       text not null,
   kdy        timestamptz not null default now(),
-  kdo        uuid default auth.uid()
+  kdo        uuid default auth.uid(),
+  stav       text not null default 'odeslano' check (stav in ('rezervovano', 'odeslano'))
 );
 comment on table public.faktury_odeslane is
   'Která faktura kdy odešla e-mailem odběrateli. Jen správce.';
 -- Jedna faktura = nejvýš jeden záznam: databáze tak nepustí dva správce odeslat tutéž
 -- fakturu současně (druhý zápis selže). Vědomé znovuodeslání appka řeší smazáním starého.
+-- (stav: „rezervovano" = odesílá se / nejisté, „odeslano" = potvrzeno)
+alter table public.faktury_odeslane add column if not exists stav text not null default 'odeslano' check (stav in ('rezervovano', 'odeslano'));
 create unique index if not exists faktury_odeslane_faktura on public.faktury_odeslane (invoice_id);
 
 alter table public.faktury_prijemci enable row level security;

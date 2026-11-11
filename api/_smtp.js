@@ -39,8 +39,8 @@ function posliSmtp(nastaveni, zprava) {
   const { host, port, user, pass, od, komu, kopie } = nastaveni;
   const implicitni = nastaveni.implicitniTls != null ? !!nastaveni.implicitniTls : port === 465;
   return new Promise((resolve, reject) => {
-    let sock = null, buf = '', hotovo = false, cekajici = null;
-    const konec = (err) => { if (hotovo) return; hotovo = true; clearTimeout(casovac); try { sock && sock.destroy() } catch (e) {} err ? reject(err) : resolve(true) };
+    let sock = null, buf = '', hotovo = false, cekajici = null, poData = false;
+    const konec = (err) => { if (hotovo) return; hotovo = true; if (err && poData) err.nejasne = true; clearTimeout(casovac); try { sock && sock.destroy() } catch (e) {} err ? reject(err) : resolve(true) };
     const casovac = setTimeout(() => konec(new Error('SMTP: vypršel čas (30 s)')), 30000);
     const naData = (d) => {
       buf += d.toString('utf8');
@@ -93,6 +93,7 @@ function posliSmtp(nastaveni, zprava) {
       if (kopie && jeEmail(kopie)) await krok('RCPT TO:<' + adresa(kopie) + '>', [250, 251], 'kopie');
       await krok('DATA', [354], 'DATA');
       // tečka na začátku řádku se zdvojí; konec zprávy je <CRLF>.<CRLF>
+      poData = true;
       sock.write(zprava.replace(/^\./gm, '..') + (zprava.endsWith('\r\n') ? '' : '\r\n') + '.\r\n');
       await krok(null, [250], 'odeslání');
       try { posli('QUIT') } catch (e) {}

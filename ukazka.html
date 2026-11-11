@@ -22912,9 +22912,9 @@ async function nactiOdeslaneFaktury() {
   // za limitem ztratila štítek a faktura by se nabízela znovu.
   const nove = new Map(); let chyba = null
   for (let od = 0; od < 200000; od += 1000) {
-    const { data, error } = await sb.from('faktury_odeslane').select('invoice_id, kdy, komu').order('id', { ascending: true }).range(od, od + 999)
+    const { data, error } = await sb.from('faktury_odeslane').select('invoice_id, kdy, komu, stav').order('id', { ascending: true }).range(od, od + 999)
     if (error) { chyba = error; break }
-    ;(data || []).forEach(x => nove.set(String(x.invoice_id), { kdy: x.kdy, komu: x.komu }))
+    ;(data || []).forEach(x => nove.set(String(x.invoice_id), { kdy: x.kdy, komu: x.komu, stav: x.stav || 'odeslano' }))
     if (!data || data.length < 1000) break
   }
   if (!chyba) { _invOdeslane = nove; _invOdeslaneJe = true } else _invOdeslaneJe = false
@@ -22923,6 +22923,7 @@ async function nactiOdeslaneFaktury() {
 }
 function odeslanoStitek(id) {
   const o = _invOdeslane.get(String(id))
+  if (o && o.stav === 'rezervovano') return `<span title="Odesílání se nedokončilo nebo odpověď serveru zmizela — zkontrolujte schránku (Odeslané), než ji pošlete znovu" style="font-size:11px;font-weight:700;color:var(--amber);white-space:nowrap">⚠ nejisté</span>`
   return o ? `<span title="Odesláno e-mailem na ${escAttr(o.komu)} ${escAttr(_invDmy(String(o.kdy).slice(0, 10)))}" style="font-size:11px;font-weight:700;color:var(--green);white-space:nowrap">✓ odesláno</span>` : ''
 }
 let _odesDlg = null
@@ -22938,7 +22939,7 @@ function odeslatFakturyOtevri(kw, rok, firma, jenId) {
     return `<label data-odes-radek="${escAttr(r.id)}" style="display:flex;align-items:center;gap:10px;padding:8px 4px;border-bottom:1px solid var(--brd);cursor:pointer">
       <input type="checkbox" data-odes-cb="${escAttr(r.id)}" ${o ? '' : 'checked'} style="width:18px;height:18px;accent-color:var(--green);flex-shrink:0">
       <span style="flex:1;min-width:0"><b>${escAttr(r.worker?.full_name || r.supplier_name || '—')}</b> · č. ${escAttr(r.invoice_number || '—')}<span style="color:var(--text3)"> · ${cz(r.total_amount)} €</span></span>
-      <span data-odes-stav style="font-size:12px;white-space:nowrap;${o ? 'color:var(--green);font-weight:700' : 'color:var(--text3)'}">${o ? '✓ odesláno ' + escAttr(_invDmy(String(o.kdy).slice(0, 10))) : ''}</span>
+      <span data-odes-stav style="font-size:12px;white-space:nowrap;${o ? (o.stav === 'rezervovano' ? 'color:var(--amber);font-weight:700' : 'color:var(--green);font-weight:700') : 'color:var(--text3)'}">${o ? (o.stav === 'rezervovano' ? '⚠ nejisté — zkontrolujte schránku' : '✓ odesláno ' + escAttr(_invDmy(String(o.kdy).slice(0, 10)))) : ''}</span>
     </label>`
   }
   let ov = document.getElementById('odes-dlg'); if (ov) ov.remove()
@@ -23002,20 +23003,26 @@ async function odeslatFakturyPosli() {
     stav('⏳ odesílám…')
     let rezervovano = false
     try {
-      // REZERVACE: záznam o odeslání se zapíše PŘED e-mailem (jedna faktura = nejvýš jeden
-      // záznam, hlídá to databáze). Druhý správce, který by ji odesílal současně, narazí
-      // a e-mail neodejde podruhé. Když e-mail selže, rezervace se smaže.
-      if (_invOdeslane.has(String(r.id))) {
-        // vědomé znovuodeslání (správce ji zaškrtl i přesto, že už odešla) — starý záznam pryč
-        const { error: dl } = await sb.from('faktury_odeslane').delete().eq('invoice_id', String(r.id))
-        if (dl) throw new Error('nepodařilo se zrušit starý záznam o odeslání: ' + dl.message)
-        _invOdeslane.delete(String(r.id))
-      }
-      const { error: rz } = await sb.from('faktury_odeslane').insert({ invoice_id: String(r.id), komu: email })
-      if (rz) {
-        if (String(rz.code) === '23505') { await nactiOdeslaneFaktury().catch(() => {}); stav('✓ už odeslal jiný správce', 'var(--green)'); continue }
-        throw new Error(/relation|does not exist|schema cache|PGRST205|42P01/i.test((rz.message || '') + (rz.code || ''))
-          ? 'chybí tabulka odeslaných faktur — spusťte nejdřív SQL migraci supabase-migrace-odeslani-faktur.sql' : 'nepodařilo se zapsat odeslání: ' + rz.message)
+      // REZERVACE: záznam (stav „rezervovano") se zapíše PŘED e-mailem; jedna faktura = nejvýš jeden
+      // záznam, hlídá to databáze. Druhý správce, který ji odesílá současně, narazí a e-mail
+      // neodejde podruhé. Po úspěchu se stav změní na „odeslano". Při JASNÉ chybě se rezervace
+      // smaže; když nevíme, jestli e-mail odešel (výpadek spojení, vypršel čas), zůstane
+      // „⚠ nejisté" a pošle se znovu až vědomě po kontrole schránky.
+      const videno = _invOdeslane.get(String(r.id))
+      if (videno) {
+        // vědomé znovuodeslání: záznam se PŘEVEZME jen tehdy, když je pořád přesně takový, jaký
+        // jsme viděli (stav i čas) — jinak ho mezitím vzal jiný správce a neposíláme podruhé.
+        const { data: prevzato, error: pe } = await sb.from('faktury_odeslane').update({ stav: 'rezervovano', komu: email, kdy: new Date().toISOString() })
+          .eq('invoice_id', String(r.id)).eq('stav', videno.stav || 'odeslano').eq('kdy', videno.kdy).select('id')
+        if (pe) throw new Error('nepodařilo se převzít záznam o odeslání: ' + pe.message)
+        if (!prevzato || !prevzato.length) { await nactiOdeslaneFaktury().catch(() => {}); stav('↺ mezitím změnil jiný správce — neposílám', 'var(--amber)'); continue }
+      } else {
+        const { error: rz } = await sb.from('faktury_odeslane').insert({ invoice_id: String(r.id), komu: email, stav: 'rezervovano' })
+        if (rz) {
+          if (String(rz.code) === '23505') { await nactiOdeslaneFaktury().catch(() => {}); stav('✓ už odeslal jiný správce', 'var(--green)'); continue }
+          throw new Error(/relation|does not exist|schema cache|PGRST205|42P01|stav/i.test((rz.message || '') + (rz.code || ''))
+            ? 'chybí tabulka odeslaných faktur — spusťte nejdřív SQL migraci supabase-migrace-odeslani-faktur.sql' : 'nepodařilo se zapsat odeslání: ' + rz.message)
+        }
       }
       rezervovano = true
       const resp0 = await fetch(r.pdf_url)
@@ -23025,27 +23032,34 @@ async function odeslatFakturyPosli() {
       const cis = String(r.invoice_number || '').replace(/[^a-zA-Z0-9_-]/g, '')
       const kdo = r.worker?.full_name || r.supplier_name || ''
       const who = kdo.normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[^a-zA-Z0-9]+/g, '_').replace(/^_+|_+$/g, '')
-      const resp = await fetch('/api/odeslat-fakturu', { method: 'POST',
+      let resp
+      try { resp = await fetch('/api/odeslat-fakturu', { method: 'POST',
         headers: { 'content-type': 'application/json', ...(token ? { authorization: 'Bearer ' + token } : {}) },
         body: JSON.stringify({ to: email, fileName: 'Rechnung_' + cis + (who ? '_' + who : '') + '.pdf', pdfBase64: b64,
           subject: 'Rechnung ' + (r.invoice_number || '') + ' — ' + kdo + ' — KW ' + r.kw + '/' + r.kw_year,
-          text: 'Guten Tag,\n\nanbei erhalten Sie die Rechnung Nr. ' + (r.invoice_number || '') + ' (' + kdo + ') für KW ' + r.kw + '/' + r.kw_year + '.\n\nMit freundlichen Grüßen\nStavKo' }) })
+          text: 'Guten Tag,\n\nanbei erhalten Sie die Rechnung Nr. ' + (r.invoice_number || '') + ' (' + kdo + ') für KW ' + r.kw + '/' + r.kw_year + '.\n\nMit freundlichen Grüßen\nStavKo' }) }) }
+      catch (ne) { const e2 = new Error('spojení se přerušilo — zkontrolujte schránku, e-mail mohl odejít'); e2._nejasne = true; throw e2 }
       const j = await resp.json().catch(() => null)
       if (j === null) { const ne = new Error('odpověď serveru se nepodařilo přečíst — zkontrolujte schránku, e-mail mohl odejít'); ne._nejasne = true; throw ne }
       if (!resp.ok || !j.sent) {
         const dukaz = j && j.reason
         if (dukaz === 'not_configured') { try { await sb.from('faktury_odeslane').delete().eq('invoice_id', String(r.id)) } catch (x) {} stav('❌ mailbox není nastavený', 'var(--red)'); zprava.innerHTML = '<span style="color:var(--red)">Odesílání ještě není nastavené (heslo k mailboxu ve Vercelu). Nic neodešlo.</span>'; chyby++; break }
-        throw new Error(dukaz || ('HTTP ' + resp.status))
+        const ce = new Error(dukaz || ('HTTP ' + resp.status))
+        if (j && j.nejasne) { ce._nejasne = true; ce.message = (dukaz || 'chyba') + ' — zkontrolujte schránku, e-mail mohl odejít' }
+        throw ce
       }
       ok++
-      const kdy = new Date().toISOString()
-      _invOdeslane.set(String(r.id), { kdy, komu: email })
+      const { data: potv, error: ue } = await sb.from('faktury_odeslane').update({ stav: 'odeslano', kdy: new Date().toISOString() }).eq('invoice_id', String(r.id)).select('kdy')
+      if (ue) console.warn('[faktury] záznam o odeslání se nepotvrdil:', ue.message)
+      const kdy = (potv && potv[0] && potv[0].kdy) || new Date().toISOString()   // čas tak, jak ho vrací databáze (porovnává se při převzetí)
+      _invOdeslane.set(String(r.id), { kdy, komu: email, stav: ue ? 'rezervovano' : 'odeslano' })
       stav('✓ odesláno ' + _invDmy(kdy.slice(0, 10)), 'var(--green)')
     } catch (e) {
       // E-mail neodešel → rezervace se smaže, ať jde faktura poslat znovu. (Když odpověď
       // serveru jen zmizela, e-mail ale mohl odejít — proto raději nejdřív zkontrolujte
       // schránku, než to zkusíte znovu: rezervace se maže jen při jasné chybě serveru.)
       if (rezervovano && !(e && e._nejasne)) { try { await sb.from('faktury_odeslane').delete().eq('invoice_id', String(r.id)) } catch (x) {} }
+      else if (rezervovano) _invOdeslane.set(String(r.id), { kdy: new Date().toISOString(), komu: email, stav: 'rezervovano' })
       chyby++
       stav('❌ ' + String(e?.message || e).slice(0, 80), 'var(--red)')
       try { if (typeof zapisChybuAppky === 'function') zapisChybuAppky('faktura-odeslat-odberateli', String(e?.message || e), { invoiceNum: r.invoice_number }) } catch (x) {}

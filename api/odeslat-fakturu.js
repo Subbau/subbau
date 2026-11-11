@@ -100,7 +100,7 @@ module.exports = async function handler(req, res) {
   } catch (e) {
     const popis = String(e?.message || e).replace(pass, '***').slice(0, 220);
     await zapisChybuServeru('odeslat-fakturu', 'Odeslání faktury odběrateli selhalo: ' + popis.slice(0, 120), { krok: 'smtp', ucet: caller?.id });
-    res.status(200).json({ sent: false, reason: popis });
+    res.status(200).json({ sent: false, reason: popis, nejasne: !!(e && e.nejasne) });
   }
 };
 function isReply(v) { return jeEmail(v); }
