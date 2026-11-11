@@ -82,6 +82,18 @@ module.exports = async function handler(req, res) {
   if (!pdfBase64) { res.status(400).json({ sent: false, reason: 'missing_pdf' }); return; }
   if (pdfBase64.length * 0.75 > MAX_PDF_BYTES) { res.status(413).json({ sent: false, reason: 'pdf_too_large' }); return; }
 
+  // Rezervace faktury: appka pošle číslo faktury a pokusu; těsně před SMTP se v databázi (serverový
+  // čas, tokenem volajícího) ověří, že rezervace pořád patří TOMUHLE pokusu — jinak se neposílá.
+  const invoiceId = String(body.invoiceId || ''), pokus = String(body.pokus || '');
+  if (!invoiceId || !pokus) { res.status(400).json({ sent: false, reason: 'missing_reservation' }); return; }
+  try {
+    const rd = await fetch(`${SUPABASE_URL}/rest/v1/rpc/faktury_drzim`, { method: 'POST',
+      headers: { apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${callerToken}`, 'content-type': 'application/json', Accept: 'application/json' },
+      body: JSON.stringify({ p_invoice: invoiceId, p_pokus: pokus }) });
+    const dj = rd.ok ? await rd.json().catch(() => null) : null;
+    if (dj !== true) { res.status(200).json({ sent: false, reason: 'rezervace už nepatří tomuto pokusu — neposílám' }); return; }
+  } catch (e) { res.status(200).json({ sent: false, reason: 'rezervaci se nepodařilo ověřit — neposílám' }); return; }
+
   const host = process.env.WEDOS_SMTP_HOST, user = process.env.WEDOS_SMTP_USER, pass = process.env.WEDOS_SMTP_PASS;
   if (!host || !user || !pass) {
     // Není to chyba appky — jen se ještě nenastavil mailbox.
