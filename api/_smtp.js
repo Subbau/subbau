@@ -40,7 +40,8 @@ function posliSmtp(nastaveni, zprava) {
   const implicitni = nastaveni.implicitniTls != null ? !!nastaveni.implicitniTls : port === 465;
   return new Promise((resolve, reject) => {
     let sock = null, buf = '', hotovo = false, cekajici = null, poData = false;
-    const konec = (err) => { if (hotovo) return; hotovo = true; if (err && poData) err.nejasne = true; clearTimeout(casovac); try { sock && sock.destroy() } catch (e) {} err ? reject(err) : resolve(true) };
+    // po DATA bez odpovědi serveru (čas, spojení) nevíme, jestli zpráva dorazila; výslovné 4xx/5xx = jasné odmítnutí
+    const konec = (err) => { if (hotovo) return; hotovo = true; if (err && poData && !err.kod) err.nejasne = true; clearTimeout(casovac); try { sock && sock.destroy() } catch (e) {} err ? reject(err) : resolve(true) };
     const casovac = setTimeout(() => konec(new Error('SMTP: vypršel čas (30 s)')), 30000);
     const naData = (d) => {
       buf += d.toString('utf8');
@@ -62,7 +63,7 @@ function posliSmtp(nastaveni, zprava) {
     const krok = async (prikaz, ocekavane, popis) => {
       if (prikaz != null) posli(prikaz);
       const o = await cti();
-      if (!ocekavane.includes(o.kod)) throw new Error('SMTP ' + popis + ': ' + o.text.slice(0, 160));
+      if (!ocekavane.includes(o.kod)) { const er = new Error('SMTP ' + popis + ': ' + o.text.slice(0, 160)); er.kod = o.kod; throw er; }
       return o;
     };
     const bezi = async () => {

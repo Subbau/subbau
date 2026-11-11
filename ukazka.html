@@ -23009,6 +23009,7 @@ async function odeslatFakturyPosli() {
       // smaže; když nevíme, jestli e-mail odešel (výpadek spojení, vypršel čas), zůstane
       // „⚠ nejisté" a pošle se znovu až vědomě po kontrole schránky.
       const videno = _invOdeslane.get(String(r.id))
+      r._puvodniZaznam = videno ? { ...videno } : null
       if (videno) {
         // vědomé znovuodeslání: záznam se PŘEVEZME jen tehdy, když je pořád přesně takový, jaký
         // jsme viděli (stav i čas) — jinak ho mezitím vzal jiný správce a neposíláme podruhé.
@@ -23056,13 +23057,23 @@ async function odeslatFakturyPosli() {
       const { data: potv, error: ue } = await sb.from('faktury_odeslane').update({ stav: 'odeslano', kdy: new Date().toISOString() }).eq('invoice_id', String(r.id)).select('kdy')
       if (ue) console.warn('[faktury] záznam o odeslání se nepotvrdil:', ue.message)
       const kdy = (potv && potv[0] && potv[0].kdy) || new Date().toISOString()   // čas tak, jak ho vrací databáze (porovnává se při převzetí)
-      _invOdeslane.set(String(r.id), { kdy, komu: email, stav: ue ? 'rezervovano' : 'odeslano' })
+      if (ue) await nactiOdeslaneFaktury().catch(() => {})            // skutečný stav z databáze
+      else _invOdeslane.set(String(r.id), { kdy, komu: email, stav: 'odeslano' })
       stav('✓ odesláno ' + _invDmy(kdy.slice(0, 10)), 'var(--green)')
     } catch (e) {
       // E-mail neodešel → rezervace se smaže, ať jde faktura poslat znovu. (Když odpověď
       // serveru jen zmizela, e-mail ale mohl odejít — proto raději nejdřív zkontrolujte
       // schránku, než to zkusíte znovu: rezervace se maže jen při jasné chybě serveru.)
-      if (rezervovano && !(e && e._nejasne)) { try { await sb.from('faktury_odeslane').delete().eq('invoice_id', String(r.id)) } catch (x) {} }
+      if (rezervovano && !(e && e._nejasne)) {
+        // Jasná chyba: rezervace pryč. U vědomého znovuodeslání se vrátí původní záznam
+        // (dřívější odeslání se stalo), jinak se záznam smaže.
+        try {
+          const dr = r._puvodniZaznam
+          if (dr) await sb.from('faktury_odeslane').update({ stav: dr.stav || 'odeslano', komu: dr.komu, kdy: dr.kdy }).eq('invoice_id', String(r.id))
+          else { await sb.from('faktury_odeslane').delete().eq('invoice_id', String(r.id)); _invOdeslane.delete(String(r.id)) }
+        } catch (x) {}
+        await nactiOdeslaneFaktury().catch(() => {})
+      }
       else if (rezervovano) { await nactiOdeslaneFaktury().catch(() => {}) }   // skutečný čas z databáze (porovnává se při převzetí)
       chyby++
       stav('❌ ' + String(e?.message || e).slice(0, 80), 'var(--red)')
