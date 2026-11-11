@@ -5886,7 +5886,7 @@ async function submitAdminSignatureWithPlacement() {
 // Po nahrání nové verze se snadno pozná, jestli se opravdu nasadila: otevřete
 // appku, zmáčkněte F12 (na Macu ⌥⌘I) a v konzoli je vypsané tohle datum. Když
 // tam svítí starší, prohlížeč nebo GitHub drží starou verzi.
-const SUBBAU_VERZE = '2026-11-11 a — Kalendář: tlačítko Smazat u nemoci, dovolené a absence'
+const SUBBAU_VERZE = '2026-11-11 b — Faktury: „poslal jinak“ bez šedého řádku, nové „posílá trvale jinak“'
 console.log('SubBau docházka — verze ' + SUBBAU_VERZE)
 // Verze i dole v menu správce. Když někdo novinku „nevidí", podle ní se hned
 // pozná, jestli nemá otevřenou starou kopii appky — bez hledání v konzoli.
@@ -21781,6 +21781,21 @@ let _invJinak = new Map()         // 'pracovník|kw|rok' → { kdy } — „posl
 let _invSedeDochazka = { kdy: 0, od: '', radky: [], profily: [] }
 let _invPracovali = new Map()     // 'kw/rok|firma' → Set lidí, kteří tam ten týden opravdu pracovali
 const FAKT_JINAK_KLIC = 'fakt-jinak|'
+// „Posílá trvale jinak" (majitel 11. 11. 2026): u člověka, který faktury pravidelně
+// posílá jinak (e-mailem, papírově…). Od týdne, kde se to zapnulo, se každý další týden
+// bez faktury počítá jako „poslal jinak", dokud to správce neodklikne. Odkliknutí =
+// jako by nic nebylo (týdny se zase ukážou jako „čeká na fakturu"). Klíč:
+// fakt-trvale|pracovník|rokKW, jeden na člověka.
+const FAKT_TRVALE_KLIC = 'fakt-trvale|'
+let _invTrvale = new Map()        // pracovník → od týdne (rok*100+kw)
+// Poslal jinak? Buď ručně u týdne, nebo trvale od určitého týdne.
+function fakturaJinakInfo(workerId, kw, rok) {
+  const ruc = _invJinak.get(workerId + '|' + kw + '|' + rok)
+  if (ruc) return ruc
+  const od = _invTrvale.get(workerId)
+  if (od != null && Number(rok) * 100 + Number(kw) >= od) return { kdy: null, trvale: true }
+  return null
+}
 async function nactiSedeRadkyFaktur() {
   const tydny = _invCache.filter(r => r.kw && r.kw_year).map(r => Number(r.kw_year) * 100 + Number(r.kw))
   if (!tydny.length) { _invSede = []; return }
@@ -21810,6 +21825,15 @@ async function nactiSedeRadkyFaktur() {
     if (!error) {
       _invJinak = new Map()
       ;(jin || []).forEach(x => _invJinak.set(String(x.dismiss_key).slice(FAKT_JINAK_KLIC.length), { kdy: x.dismissed_at }))
+    }
+    const { data: trv, error: e2 } = await sb.from('doc_alert_dismissals').select('dismiss_key').like('dismiss_key', FAKT_TRVALE_KLIC + '%')
+    if (!e2) {
+      _invTrvale = new Map()
+      ;(trv || []).forEach(x => {
+        const d = String(x.dismiss_key).slice(FAKT_TRVALE_KLIC.length).split('|')
+        const od = Number(d[1])
+        if (d[0] && od && (!_invTrvale.has(d[0]) || od < _invTrvale.get(d[0]))) _invTrvale.set(d[0], od)
+      })
     }
   } catch (e) { /* bez fajfek se jen neukáže „poslal jinak" */ }
   const prof = new Map(_invSedeDochazka.profily.map(p => [p.id, p]))
@@ -21871,6 +21895,38 @@ async function fakturaPoslalJinak(workerId, kw, rok, zapnout) {
   if (zapnout) _invJinak.set(kl, { kdy: new Date().toISOString() })
   else _invJinak.delete(kl)
   renderWorkerInvoices()
+  fakturaSrovnejFajfky()
+}
+
+// Znovupoužitý řádek si nese fajfky z doby, kdy byl naposled vidět (vlastnost checked
+// není v HTML, takže ji porovnání řádků nepozná) — po překreslení je proto srovnáme
+// se skutečným stavem.
+function fakturaSrovnejFajfky() {
+  document.querySelectorAll('#inv-table tr[data-sedy]').forEach(tr => {
+    const [w, kw, rok] = String(tr.dataset.sedy).split('|')
+    const cb = tr.querySelectorAll('input[type=checkbox]')
+    const ruc = _invJinak.has(w + '|' + kw + '|' + rok)
+    if (cb[0] && cb[0].checked !== ruc) cb[0].checked = ruc
+    const trv = _invTrvale.has(w)
+    if (cb[1] && cb[1].checked !== trv) cb[1].checked = trv
+  })
+}
+// „Posílá trvale jinak": zapnutí platí od týdne řádku dál; vypnutí smaže všechny
+// záznamy člověka (i kdyby jich bylo víc).
+async function fakturaPosilaTrvale(workerId, kw, rok, zapnout) {
+  const predpona = FAKT_TRVALE_KLIC + workerId + '|'
+  let error = null
+  if (zapnout) {
+    const od = Number(rok) * 100 + Number(kw)
+    ;({ error } = await sb.from('doc_alert_dismissals').upsert({ dismiss_key: predpona + od, dismissed_by: currentUser?.id || null }, { onConflict: 'dismiss_key', ignoreDuplicates: true }))
+    if (!error) { const st = _invTrvale.get(workerId); if (st == null || od < st) _invTrvale.set(workerId, od) }
+  } else {
+    ;({ error } = await sb.from('doc_alert_dismissals').delete().like('dismiss_key', predpona + '%'))
+    if (!error) _invTrvale.delete(workerId)
+  }
+  if (error) { showToast('❌ Nepodařilo se uložit: ' + error.message); renderWorkerInvoices(); fakturaSrovnejFajfky(); return }
+  renderWorkerInvoices()
+  fakturaSrovnejFajfky()
 }
 
 function firmaFaktury(r) {
@@ -22149,7 +22205,7 @@ function renderWorkerInvoices() {
       const s = _souhrnFirmy.get(k) || { lidi: new Set(), faktur: 0, jinak: 0, chybi: [] }
       s.lidi.add(r.worker_id)
       if (!r._sedy) s.faktur++
-      else if (_invJinak.has(r.worker_id + '|' + r.kw + '|' + r.kw_year)) s.jinak++
+      else if (fakturaJinakInfo(r.worker_id, r.kw, r.kw_year)) s.jinak++
       else s.chybi.push(r.worker?.full_name || '—')
       _souhrnFirmy.set(k, s)
     })
@@ -22165,12 +22221,13 @@ function renderWorkerInvoices() {
   // Šedý řádek — stejné sloupce jako faktura, jen místo dokladu „faktura nepřišla".
   const radekSedy = r => {
     const kl = r.worker_id + '|' + r.kw + '|' + r.kw_year
-    const jinak = _invJinak.get(kl)
+    const jinak = fakturaJinakInfo(r.worker_id, r.kw, r.kw_year)
+    const trvale = _invTrvale.has(r.worker_id)
     const po = getWeekStartDate(Number(r.kw), Number(r.kw_year))
     const ne = new Date(po); ne.setDate(po.getDate() + 6)
     return `
-    <tr data-sedy="${escAttr(kl)}" style="background:#efede9;color:var(--text3)" title="${jinak ? 'Faktura poslaná jinak' : 'Pracoval, faktura zatím nepřišla'}">
-      <td style="border-left:5px solid transparent"><span style="display:inline-flex;align-items:center;gap:8px;min-width:0;opacity:.55">${fotkaHtml(r.worker?.avatar_url, r.worker?.full_name, 28)}<b>${escAttr(r.worker?.full_name || '—')}</b></span></td>
+    <tr data-sedy="${escAttr(kl)}"${jinak ? '' : ' style="background:#efede9;color:var(--text3)"'} title="${jinak ? (jinak.trvale ? 'Posílá trvale jinak' : 'Faktura poslaná jinak') : 'Pracoval, faktura zatím nepřišla'}">
+      <td style="border-left:5px solid transparent"><span style="display:inline-flex;align-items:center;gap:8px;min-width:0${jinak ? '' : ';opacity:.55'}">${fotkaHtml(r.worker?.avatar_url, r.worker?.full_name, 28)}<b>${escAttr(r.worker?.full_name || '—')}</b></span></td>
       <td style="font-size:12px;font-style:italic;white-space:nowrap">${jinak ? 'poslal jinak' : 'faktura nepřišla'}</td>
       <td></td>
       <td style="white-space:nowrap">KW ${escAttr(r.kw)}/${escAttr(r.kw_year)}<div style="font-size:11px;color:var(--text3)">${_invDmy(localDateStr(po))} –<br>${_invDmy(localDateStr(ne))}</div></td>
@@ -22178,8 +22235,8 @@ function renderWorkerInvoices() {
       <td style="text-align:right;white-space:nowrap">${(Number(r.total_hours) || 0).toFixed(2)} h</td>
       <td style="text-align:right">—</td>
       <td style="white-space:nowrap;font-size:12px">${jinak && jinak.kdy ? _invDmy(String(jinak.kdy).slice(0, 10)) : '—'}</td>
-      <td>${jinak ? '<span class="pill pg">✓ poslal jinak</span>' : '<span class="pill" style="background:#e2ded8;color:#6b6157">čeká na fakturu</span>'}</td>
-      <td><label title="Fakturu poslal jinak (e-mailem, papírově…) — zaškrtnutím ji počítáme jako dodanou" style="display:inline-flex;align-items:center;gap:6px;font-size:12px;font-weight:600;color:var(--text2);cursor:pointer;white-space:nowrap"><input type="checkbox" ${jinak ? 'checked' : ''} onchange="fakturaPoslalJinak('${jsStr(r.worker_id)}','${jsStr(r.kw)}','${jsStr(r.kw_year)}', this.checked)" style="width:17px;height:17px;cursor:pointer;accent-color:var(--green)">poslal jinak</label></td>
+      <td>${jinak ? '<span class="pill pg">✓ ' + (jinak.trvale ? 'posílá trvale jinak' : 'poslal jinak') + '</span>' : '<span class="pill" style="background:#e2ded8;color:#6b6157">čeká na fakturu</span>'}</td>
+      <td><label title="Fakturu poslal jinak (e-mailem, papírově…) — zaškrtnutím ji počítáme jako dodanou" style="display:inline-flex;align-items:center;gap:6px;font-size:12px;font-weight:600;color:var(--text2);cursor:pointer;white-space:nowrap"><input type="checkbox" ${jinak && !jinak.trvale ? 'checked' : ''} onchange="fakturaPoslalJinak('${jsStr(r.worker_id)}','${jsStr(r.kw)}','${jsStr(r.kw_year)}', this.checked)" style="width:17px;height:17px;cursor:pointer;accent-color:var(--green)">poslal jinak</label><br><label title="Tenhle člověk posílá faktury pořád jinak — každý další týden se zapíše jako „poslal jinak", dokud to neodkliknete" style="display:inline-flex;align-items:center;gap:6px;font-size:12px;font-weight:600;color:var(--text2);cursor:pointer;white-space:nowrap;margin-top:4px"><input type="checkbox" ${trvale ? 'checked' : ''} onchange="fakturaPosilaTrvale('${jsStr(r.worker_id)}','${jsStr(r.kw)}','${jsStr(r.kw_year)}', this.checked)" style="width:17px;height:17px;cursor:pointer;accent-color:var(--green)">posílá trvale jinak</label></td>
     </tr>`
   }
 
