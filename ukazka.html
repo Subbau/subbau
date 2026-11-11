@@ -5820,6 +5820,7 @@ function previewWorkerSignature() {
   const pixels = workerSignCtx.getImageData(0,0,workerSignCanvas.width,workerSignCanvas.height).data
   if (!pixels.some((v,i) => i%4===3 && v>0)) { showToast(signLangDE ? '⚠️ Bitte zuerst unterschreiben' : '⚠️ Nejprve nakreslete podpis'); return }
   if (workerPdfState.sigX === null || workerPdfState.sigX === undefined) { showToast(signLangDE ? '⚠️ Tippen Sie im PDF auf die Unterschriftstelle' : '⚠️ Klikněte v PDF kde chcete podpis'); return }
+  _wsigTok++   // rozběhnuté „Použít poslední podpis“ už plátno nezmění, když je otevřený náhled
   const img = document.getElementById('worker-sign-preview-img')
   if (img) img.src = workerSignCanvas.toDataURL('image/png')
   const ov = document.getElementById('worker-sign-preview')
@@ -6625,8 +6626,14 @@ async function zapamatujPodpisPracovnika(canvas) {
   try {
     const uid = currentUser?.id; if (!uid || !canvas) return
     const o = await _podpisOrizni(canvas); if (!o?.blob) return
-    await Promise.race([sb.storage.from('contracts').upload(workerSigStoragePath(uid), o.blob, { contentType: 'image/png', upsert: true }), new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), 10000))])
-  } catch (e) { console.warn('[podpis pracovníka] uložení selhalo:', e?.message || e) }
+    const r = await Promise.race([sb.storage.from('contracts').upload(workerSigStoragePath(uid), o.blob, { contentType: 'image/png', upsert: true }), new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), 10000))])
+    if (r && r.error) throw new Error(r.error.message)
+  } catch (e) {
+    console.warn('[podpis pracovníka] uložení selhalo:', e?.message || e)
+    // Starší uložený podpis by se jinak nabízel jako „poslední“, i když pracovník právě podepsal jiným —
+    // smaže se, a příště se vezme podpis z jeho poslední smlouvy (tedy ten nový).
+    try { await Promise.race([sb.storage.from('contracts').remove([workerSigStoragePath(currentUser.id)]), new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), 8000))]) } catch (x) { /* nejlepší snaha */ }
+  }
 }
 // Tlačítko „Použít můj poslední podpis“ se ukáže jen když uložený podpis existuje.
 // Poslední podepsaná smlouva pracovníka (jeho vlastní, čte ji pod svým přihlášením) — zdroj podpisu, když ještě nemá uložený.
@@ -6664,24 +6671,23 @@ async function useWorkerSignatureMemory() {
     showToast('📎 Vložen váš poslední podpis — klikněte do PDF, kam se má umístit, a potvrďte (nehodí-li se, smažte ho a podepište znovu)')
   }
   try {
-    // 1) uložený podpis; 2) jinak podpis z jeho poslední podepsané smlouvy
-    let zdroj = null
-    // Stažení uloženého podpisu včetně těla má jeden limit; jakákoli chyba = zkusíme smlouvu.
+    // 1) uložený podpis; 2) jinak (chybí, nejde stáhnout nebo je poškozený) podpis z jeho poslední podepsané smlouvy
+    const nactiObr = (url) => new Promise(res => { const i = new Image(); i.onload = () => res(i); i.onerror = () => res(null); i.src = url })
+    let img = null
     try {
       const blob = await _pzsCas((async () => { const r = await fetch(_podpisUrl(uid), { cache: 'no-store' }); return r.ok ? await r.blob() : null })(), 10000, 'podpis')
-      if (blob) zdroj = { url: URL.createObjectURL(blob), uvolnit: true }
+      if (blob) { const u = URL.createObjectURL(blob); try { img = await nactiObr(u) } finally { URL.revokeObjectURL(u) } }
     } catch (e) { /* síť: zkusíme smlouvu */ }
-    if (!zdroj) {
-      const c = await _posledniPodepsanaSmlouva(uid)
-      const o = c ? await _pzsCas(_podpisZPdf(c.signature_url, c.worker_sign_page), 60000, 'čtení smlouvy') : null
-      if (o?.dataUrl) zdroj = { url: o.dataUrl, uvolnit: false }
+    if (!img) {
+      try {
+        const c = await _posledniPodepsanaSmlouva(uid)
+        const o = c ? await _pzsCas(_podpisZPdf(c.signature_url, c.worker_sign_page), 60000, 'čtení smlouvy') : null
+        if (o?.dataUrl) img = await nactiObr(o.dataUrl)
+      } catch (e) { console.warn('[podpis] ze smlouvy:', e?.message || e) }
     }
-    if (!platne()) { if (zdroj?.uvolnit) URL.revokeObjectURL(zdroj.url); return }
-    if (!zdroj) { showToast('⚠️ Poslední podpis se nepodařilo najít — podepište prosím prstem'); refreshWorkerSavedSigBtn(); return }
-    const img = new Image()
-    img.onload = () => { try { vloz(img) } finally { if (zdroj.uvolnit) URL.revokeObjectURL(zdroj.url) } }
-    img.onerror = () => { if (zdroj.uvolnit) URL.revokeObjectURL(zdroj.url); showToast('❌ Uložený podpis se nepodařilo načíst — podepište prosím znovu') }
-    img.src = zdroj.url
+    if (!platne()) return
+    if (!img) { showToast('⚠️ Poslední podpis se nepodařilo najít — podepište prosím prstem'); refreshWorkerSavedSigBtn(); return }
+    vloz(img)
   } catch (e) { showToast('❌ Poslední podpis se nepodařilo načíst — podepište prosím znovu') }
 }
 
