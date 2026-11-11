@@ -7044,7 +7044,7 @@ async function submitAdminSignatureWithPlacement() {
 // Po nahrání nové verze se snadno pozná, jestli se opravdu nasadila: otevřete
 // appku, zmáčkněte F12 (na Macu ⌥⌘I) a v konzoli je vypsané tohle datum. Když
 // tam svítí starší, prohlížeč nebo GitHub drží starou verzi.
-const SUBBAU_VERZE = '2026-11-11 j — Úprava dne: změna jen pauzy už nepřepíše příchod a odchod'
+const SUBBAU_VERZE = '2026-11-11 j — Úprava dne: jen pauza nepřepíše příchod/odchod a opravený den je v pořádku'
 console.log('StavKo docházka — verze ' + SUBBAU_VERZE)
 // Verze i dole v menu správce. Když někdo novinku „nevidí", podle ní se hned
 // pozná, jestli nemá otevřenou starou kopii appky — bez hledání v konzoli.
@@ -39316,7 +39316,8 @@ async function saveEditAttRecord() {
   // později změnil, potvrzení neplatí a upozornění se vrátí.
   // Nezavřená směna se nepotvrzuje — chybějící odchod je pořád problém.
   const potvrzeniDne = co ? (ci + '|' + co) : null
-  const payloadSVyjimkou = { ...payload, ...vyjimka, dlouhy_den_potvrzen: potvrzeniDne }
+  // Opravený den je pro správce v pořádku (11. 11. 2026, majitel): „když to upravím, je to ok ten den" — zhasnou „dřív / pozdě".
+  const payloadSVyjimkou = { ...payload, ...vyjimka, dlouhy_den_potvrzen: potvrzeniDne, odchylka_ok: true }
   const maVyjimku = vyjimka.bez_vyplaty || vyjimka.bez_provize_den
     || vyjimka.vyplata_castka != null || !!vyjimka.vyplata_poznamka
   let bezVyjimky = false
@@ -39324,7 +39325,7 @@ async function saveEditAttRecord() {
     if (id) {
       // Úprava existujícího záznamu
       ;({ data: updData, error } = await sb.from('attendance').update(payloadSVyjimkou).eq('id', id).select())
-      if (error && /bez_vyplaty|bez_provize_den|vyplata_castka|vyplata_poznamka|dlouhy_den_potvrzen/i.test(error.message || '')) {
+      if (error && /bez_vyplaty|bez_provize_den|vyplata_castka|vyplata_poznamka|dlouhy_den_potvrzen|odchylka_ok/i.test(error.message || '')) {
         bezVyjimky = true
         ;({ data: updData, error } = await sb.from('attendance').update(payload).eq('id', id).select())
       }
@@ -39336,7 +39337,7 @@ async function saveEditAttRecord() {
       const zaklad = { worker_id: workerId, work_date: dateStr, kw, kw_year: kwYear,
                        team_id: await skupinaPracovnikaVDen(workerId, dateStr) }
       ;({ data: updData, error } = await dochazkaInsert({ ...payloadSVyjimkou, ...zaklad }, { vratitSeznam: true }))
-      if (error && /bez_vyplaty|bez_provize_den|vyplata_castka|vyplata_poznamka|dlouhy_den_potvrzen/i.test(error.message || '')) {
+      if (error && /bez_vyplaty|bez_provize_den|vyplata_castka|vyplata_poznamka|dlouhy_den_potvrzen|odchylka_ok/i.test(error.message || '')) {
         bezVyjimky = true
         ;({ data: updData, error } = await dochazkaInsert({ ...payload, ...zaklad }, { vratitSeznam: true }))
       }
@@ -50662,16 +50663,16 @@ async function loadWdAttendance() {
       <td class="wa-datum" style="font-size:12px;white-space:nowrap">${r.work_date ? new Date(r.work_date).toLocaleDateString('cs-CZ', { weekday: 'short', day: 'numeric', month: 'numeric', year: 'numeric' }).replace(/^(\S+)\s/, '<span class="wa-den">$1</span> ') : '—'}${vyjimkaOdznak}</td>
       <td class="wa-prichod" data-l="Příchod">
         <span style="font-weight:700;color:${odch.prichod ? '#1d4ed8' : 'var(--green)'}">${adj.checkIn || (r.check_in ? r.check_in.slice(0,5) : '—')}</span>
-        ${adj.flags.lateIn ? ' ' + flagBadge('lateIn', 'pozdě') : ''}${adj.flags.prichodKontrola ? ' ' + flagBadge('prichodKontrola', '!') : ''}${
+        ${adj.flags.lateIn && r.odchylka_ok !== true ? ' ' + flagBadge('lateIn', 'pozdě') : ''}${adj.flags.prichodKontrola && r.odchylka_ok !== true ? ' ' + flagBadge('prichodKontrola', '!') : ''}${
           odch.prichod ? ' ' + flagBadge('odchylka', odch.prichod) + (odch.odchod ? '' : odchylkaBtn(r.id, 'karta')) : ''}
         ${r.check_in && adj.checkIn && r.check_in.slice(0,5) !== adj.checkIn
           ? `<div style="font-size:10px;color:var(--text3);margin-top:1px">zaznamenáno ${r.check_in.slice(0,5)}</div>` : ''}
       </td>
-      <td class="wa-pod" data-l="Pauza od" style="font-size:12px;color:var(--text2)">${adj.flags.lateBreak ? flagBadge('lateBreak', brStartCell) : brStartCell}</td>
+      <td class="wa-pod" data-l="Pauza od" style="font-size:12px;color:var(--text2)">${adj.flags.lateBreak && r.odchylka_ok !== true ? flagBadge('lateBreak', brStartCell) : brStartCell}</td>
       <td class="wa-pdo" data-l="Pauza do" style="font-size:12px;color:var(--text2)">${brEndCell}</td>
       <td class="wa-odchod" data-l="Odchod">
         <span style="font-weight:700;color:${odch.odchod ? '#1d4ed8' : 'var(--red)'}">${adj.checkOut || (r.check_out ? r.check_out.slice(0,5) : '—')}</span>
-        ${adj.flags.earlyOut ? ' ' + flagBadge('earlyOut', 'dříve') : adj.flags.abnormal ? ' ' + flagBadge('abnormal', '!') : ''}${
+        ${adj.flags.earlyOut && r.odchylka_ok !== true ? ' ' + flagBadge('earlyOut', 'dříve') : adj.flags.abnormal ? ' ' + flagBadge('abnormal', '!') : ''}${
           odch.odchod ? ' ' + flagBadge('odchylka', odch.odchod) + odchylkaBtn(r.id, 'karta') : ''}
         ${r.check_out && adj.checkOut && r.check_out.slice(0,5) !== adj.checkOut
           ? `<div style="font-size:10px;color:var(--text3);margin-top:1px">zaznamenáno ${r.check_out.slice(0,5)}</div>` : ''}
