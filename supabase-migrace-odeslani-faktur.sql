@@ -41,7 +41,9 @@ create table if not exists public.faktury_odeslane (
 );
 comment on table public.faktury_odeslane is
   'Která faktura kdy odešla e-mailem odběrateli. Jen správce.';
-create index if not exists faktury_odeslane_faktura on public.faktury_odeslane (invoice_id);
+-- Jedna faktura = nejvýš jeden záznam: databáze tak nepustí dva správce odeslat tutéž
+-- fakturu současně (druhý zápis selže). Vědomé znovuodeslání appka řeší smazáním starého.
+create unique index if not exists faktury_odeslane_faktura on public.faktury_odeslane (invoice_id);
 
 alter table public.faktury_prijemci enable row level security;
 alter table public.faktury_odeslane enable row level security;
