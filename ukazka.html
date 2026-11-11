@@ -3658,6 +3658,10 @@ setTimeout(function brzda() {
             .mmir-karticka__stred { display: flex; flex-direction: column; min-width: 0; }
             .mmir-karticka .mmir-popis-osoby { align-items: flex-start; text-align: left; max-width: 170px; }
             @media (min-width: 721px) { .mmir-karticka .mmir-popis-osoby { max-width: 200px; } }
+            .mmir-karticka, .mmir-pryc-clovek--nezarazeni { cursor: grab; -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; }
+            .mmir-tahne, .mmir-tahne * { cursor: grabbing !important; }
+            .mmir-tah-zdroj { opacity: .35; }
+            .mmir-tah-cil { outline: 3px dashed var(--mmir-linka); outline-offset: 2px; background-color: rgba(0,0,0,.04); }
             @media (pointer: coarse) { .mmir-karticka { min-height: 44px; } }
             .mmir-karticka img, .mmir-pryc-clovek img { -webkit-user-drag: none; user-select: none; }
             @media (hover: hover) {
@@ -7040,7 +7044,7 @@ async function submitAdminSignatureWithPlacement() {
 // Po nahrání nové verze se snadno pozná, jestli se opravdu nasadila: otevřete
 // appku, zmáčkněte F12 (na Macu ⌥⌘I) a v konzoli je vypsané tohle datum. Když
 // tam svítí starší, prohlížeč nebo GitHub drží starou verzi.
-const SUBBAU_VERZE = '2026-11-11 h — Plán MMI: šířka vedoucích a profesí jako ve Stavbyplánu'
+const SUBBAU_VERZE = '2026-11-11 i — Plán MMI: šířky jako ve Stavbyplánu a tažení lidí na jinou stavbu'
 console.log('StavKo docházka — verze ' + SUBBAU_VERZE)
 // Verze i dole v menu správce. Když někdo novinku „nevidí", podle ní se hned
 // pozná, jestli nemá otevřenou starou kopii appky — bez hledání v konzoli.
@@ -33888,7 +33892,7 @@ function mmirRadekDne(nadpis, lide, den, radek) {
 function mmirStavba(id, lide, den, smiseni) {
   const adresa = _mmiM.mista[id]?.adresa || ''
   const prazdna = !lide.length
-  return `<li class="mmir-stavba${prazdna ? ' mmir-stavba--prazdna' : ''}${!prazdna && _mmiM.maPavouka && lide.some(c => _mmiM.vedouci.has(id + '|' + c.cid) || (_mmiM.profeseRadku[c.cid]?.[den] || _mmiM.profeseLidi[c.cid])) ? ' mmir-stavba--pavouk' : ''}" data-mmi-stavba><div class="mmir-stavba__hlavicka">`
+  return `<li class="mmir-stavba${prazdna ? ' mmir-stavba--prazdna' : ''}${!prazdna && _mmiM.maPavouka && lide.some(c => _mmiM.vedouci.has(id + '|' + c.cid) || (_mmiM.profeseRadku[c.cid]?.[den] || _mmiM.profeseLidi[c.cid])) ? ' mmir-stavba--pavouk' : ''}" data-mmi-stavba data-mmi-misto="${escAttr(String(id))}"><div class="mmir-stavba__hlavicka">`
     + `<span class="mmir-stavba__pruh" style="background:${mmirSyta(id)}" aria-hidden="true"></span>`
     + `<span class="mmir-stavba__nazev"${prazdna && adresa ? ` title="${escAttr(adresa)}"` : ''}>${escAttr(mmiNazev(id))}</span>`
     + `<span class="mmir-stavba__pocet" data-mmi-pocet>${prazdna ? 'Nikdo' : mmiPocty(lide, smiseni)}</span>`
@@ -34254,6 +34258,76 @@ function mmirPodOknem() {
 // jediná cesta ven, když se okno nevejde na výšku. Během odesílání se nezavře
 // (mmiZavriPresun to hlídá).
 document.addEventListener('keydown', e => { if (e.key === 'Escape' && document.getElementById('mmi-presun')) mmiZavriPresun() })
+
+// ── Tažení lidí (11. 11. 2026, majitel: „chytím ho, pustím jinam a tam bude,
+// dokud ho ve Stavbyplánu nebo já nedám zase jinam"). Karta se chytí a pustí na
+// jinou stavbu (nebo do „Bez stavby") ve stejném dni; zapíše se jako přesun
+// „dokud ho nepřesunou" od toho dne (týž POST jako okno). Klepnutí bez tažení
+// dál otevře okno. Myš táhne hned, prst až po podržení (0,35 s), ať jde rolovat.
+let _mmiTah = null, _mmiTahKonec = 0
+function mmiTahCil(x, y) {
+  const el = document.elementFromPoint(x, y)
+  const st = el?.closest('[data-mmi-stavba][data-mmi-misto]'), bez = el?.closest('[data-mmi-bez-stavby]')
+  const cil = st || bez
+  return cil && _mmiTah.blok.contains(cil) ? cil : null
+}
+function mmiTahZrus() {
+  const T = _mmiTah; if (!T) return
+  clearTimeout(T.cas); T.duch?.remove(); T.zvyrazneny?.classList.remove('mmir-tah-cil'); T.karta.classList.remove('mmir-tah-zdroj')
+  document.body.classList.remove('mmir-tahne'); _mmiTah = null
+}
+document.addEventListener('pointerdown', e => {
+  const karta = e.target.closest?.('#mmi-obsah .mmir-karticka[data-mmi-clovek-den], #mmi-obsah .mmir-pryc-clovek--nezarazeni')
+  if (!karta || e.button > 0 || _mmiTah) return
+  const m = String(karta.getAttribute('onclick') || '').match(/mmiOtevriPresun\((\d+),'([^']+)'/)
+  const blok = karta.closest('[data-mmi-den-blok]')
+  if (!m || !blok) return
+  _mmiTah = { karta, i: +m[1], den: m[2], blok, x0: e.clientX, y0: e.clientY, dotyk: e.pointerType === 'touch', jede: false, id: e.pointerId, duch: null, zvyrazneny: null, cil: null }
+  if (_mmiTah.dotyk) _mmiTah.cas = setTimeout(() => { if (_mmiTah) mmiTahStart(_mmiTah.x0, _mmiTah.y0) }, 350)
+}, true)
+function mmiTahStart(x, y) {
+  const T = _mmiTah; if (!T || T.jede) return
+  T.jede = true
+  const r = T.karta.getBoundingClientRect()
+  T.duch = T.karta.cloneNode(true); T.duch.removeAttribute('onclick'); T.duch.className += ' mmir-tah-duch'
+  T.duch.style.cssText += `;position:fixed;left:${r.left}px;top:${r.top}px;width:${r.width}px;pointer-events:none;z-index:2147483000;opacity:.92;box-shadow:0 8px 24px rgba(0,0,0,.28);transform:scale(1.02)`
+  T.dx = x - r.left; T.dy = y - r.top
+  document.body.appendChild(T.duch); T.karta.classList.add('mmir-tah-zdroj'); document.body.classList.add('mmir-tahne')
+}
+document.addEventListener('pointermove', e => {
+  const T = _mmiTah; if (!T || e.pointerId !== T.id) return
+  if (!T.jede) {
+    if (Math.hypot(e.clientX - T.x0, e.clientY - T.y0) < 8) return
+    if (T.dotyk) return mmiTahZrus()   // prst se hýbe dřív než po podržení = roluje
+    mmiTahStart(e.clientX, e.clientY)
+  }
+  T.duch.style.left = (e.clientX - T.dx) + 'px'; T.duch.style.top = (e.clientY - T.dy) + 'px'
+  const c = mmiTahCil(e.clientX, e.clientY)
+  if (c !== T.zvyrazneny) { T.zvyrazneny?.classList.remove('mmir-tah-cil'); c?.classList.add('mmir-tah-cil'); T.zvyrazneny = c }
+  // u okraje okna se roluje
+  if (e.clientY < 70) scrollBy(0, -18); else if (e.clientY > innerHeight - 70) scrollBy(0, 18)
+}, true)
+document.addEventListener('touchmove', e => { if (_mmiTah?.jede) e.preventDefault() }, { passive: false })
+document.addEventListener('pointerup', e => {
+  const T = _mmiTah; if (!T || e.pointerId !== T.id) return
+  const jede = T.jede, cil = jede ? mmiTahCil(e.clientX, e.clientY) : null
+  const { i, den } = T
+  if (jede) _mmiTahKonec = Date.now()
+  mmiTahZrus()
+  if (jede && cil) mmiTahPust(i, den, cil)
+}, true)
+document.addEventListener('pointercancel', () => { if (_mmiTah?.jede) _mmiTahKonec = Date.now(); mmiTahZrus() }, true)
+// Po tažení se nesmí otevřít okno (prohlížeč pošle klepnutí na kartu).
+document.addEventListener('click', e => { if (Date.now() - _mmiTahKonec < 400 && e.target.closest?.('.mmir-karticka, .mmir-pryc-clovek')) { e.stopPropagation(); e.preventDefault() } }, true)
+function mmiTahPust(i, den, cilEl) {
+  const M = _mmiM, c = M?.lide[i]; if (!c || _mmiPresun?.bezi) return
+  const cilId = cilEl.hasAttribute('data-mmi-bez-stavby') ? '' : cilEl.getAttribute('data-mmi-misto')
+  if ((M.plan[c.cid]?.[den] || '') === cilId) return
+  if (!M.lzePresouvat || !c.lzePresouvat) { showToast(!M.lzePresouvat ? 'Přesouvání se zapne po propojení se Stavbyplánem.' : 'Tohohle člověka může přesunout jen MMI ve Stavbyplánu.'); return }
+  if (cilId && !M.cile.some(x => x.id === cilId)) { showToast('Na tuhle stavbu přesunout nejde.'); return }
+  _mmiPresun = { i, den, cil: cilId, rozsah: 'trvale', bezi: false, chyba: '' }
+  mmiPotvrdPresun()
+}
 
 async function mmiPotvrdPresun() {
   const P = _mmiPresun, M = _mmiM
