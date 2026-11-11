@@ -115,20 +115,30 @@ begin
   return n > 0;
 end $f$;
 
+-- Drží tenhle pokus ještě rezervaci? (těsně před odesláním e-mailu; čas podle serveru)
+create or replace function public.faktury_drzim(p_invoice text, p_pokus text)
+returns boolean language sql stable as $f$
+  select exists (select 1 from public.faktury_odeslane
+                  where invoice_id = p_invoice and pokus = p_pokus and stav = 'rezervovano'
+                    and kdy > now() - interval '4 minutes');
+$f$;
+
 revoke all on function public.faktury_rezervovat(text, text, text, text, timestamptz) from public, anon;
 revoke all on function public.faktury_potvrdit(text, text) from public, anon;
 revoke all on function public.faktury_uvolnit(text, text, text, text, timestamptz) from public, anon;
+revoke all on function public.faktury_drzim(text, text) from public, anon;
 grant execute on function public.faktury_rezervovat(text, text, text, text, timestamptz) to authenticated;
 grant execute on function public.faktury_potvrdit(text, text) to authenticated;
 grant execute on function public.faktury_uvolnit(text, text, text, text, timestamptz) to authenticated;
+grant execute on function public.faktury_drzim(text, text) to authenticated;
 
 commit;
 
--- Kontrola: obě tabulky existují, mají zapnutou ochranu řádků a funkce jsou na místě (3 řádky).
+-- Kontrola: obě tabulky existují, mají zapnutou ochranu řádků a funkce jsou na místě (4 řádky).
 select c.relname as tabulka, c.relrowsecurity as ochrana_radku
   from pg_class c
  where c.oid in ('public.faktury_prijemci'::regclass, 'public.faktury_odeslane'::regclass)
  order by 1;
 select proname as funkce from pg_proc
- where pronamespace = 'public'::regnamespace and proname in ('faktury_rezervovat', 'faktury_potvrdit', 'faktury_uvolnit')
+ where pronamespace = 'public'::regnamespace and proname in ('faktury_rezervovat', 'faktury_potvrdit', 'faktury_uvolnit', 'faktury_drzim')
  order by 1;

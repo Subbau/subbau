@@ -22035,6 +22035,7 @@ async function odeslatFakturyPosli() {
     if (!error) _invPrijemci.set(d.firma, email)
   }
   let ok = 0, chyby = 0
+  const odeslaneTed = new Set()    // které faktury odešly teď (jen ty se na konci odškrtnou)
   let token = null
   for (let i = 0; i < ids.length && !d.zrusit; i++) {
     const r = d.radky.find(x => String(x.id) === ids[i]); if (!r) continue
@@ -22065,10 +22066,16 @@ async function odeslatFakturyPosli() {
         continue
       }
       rezervovano = true
-      const resp0 = await fetch(r.pdf_url)
+      // PDF se načítá nejvýš 30 s (rezervace tak trvá sekundy, ne minuty — převzít ji jiný správce smí až po 5 min)
+      const ac = new AbortController(); const ct = setTimeout(() => ac.abort(), 30000)
+      let resp0
+      try { resp0 = await fetch(r.pdf_url, { signal: ac.signal }) } catch (fe) { throw new Error('PDF faktury se nepodařilo načíst (' + (fe && fe.name === 'AbortError' ? 'vypršel čas' : 'chyba spojení') + ')') } finally { clearTimeout(ct) }
       if (!resp0.ok) throw new Error('PDF faktury se nepodařilo načíst (HTTP ' + resp0.status + ')')
       const b64 = await blobToBase64(await resp0.blob())
       try { token = (await sb.auth.getSession())?.data?.session?.access_token || null } catch (e) {}
+      // Těsně před odesláním ještě ověř, že rezervace pořád patří TOMUHLE pokusu (databáze, serverový čas).
+      const { data: drzim, error: de } = await sb.rpc('faktury_drzim', { p_invoice: String(r.id), p_pokus: pokus })
+      if (de || drzim !== true) throw new Error('rezervaci mezitím převzal jiný správce — neposílám')
       const cis = String(r.invoice_number || '').replace(/[^a-zA-Z0-9_-]/g, '')
       const kdo = r.worker?.full_name || r.supplier_name || ''
       const who = kdo.normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-zA-Z0-9]+/g, '_').replace(/^_+|_+$/g, '')
@@ -22088,7 +22095,7 @@ async function odeslatFakturyPosli() {
         if (j && j.nejasne) { ce._nejasne = true; ce.message = (dukaz || 'chyba') + ' — zkontrolujte schránku, e-mail mohl odejít' }
         throw ce
       }
-      ok++
+      ok++; odeslaneTed.add(String(r.id))
       const { data: potv, error: ue } = await sb.rpc('faktury_potvrdit', { p_invoice: String(r.id), p_pokus: pokus })
       if (ue || !potv) console.warn('[faktury] záznam o odeslání se nepotvrdil:', ue ? ue.message : 'pokus už není aktuální')
       const kdy = (typeof potv === 'string' && potv) || new Date().toISOString()   // čas z databáze
@@ -22124,7 +22131,7 @@ async function odeslatFakturyPosli() {
   ov.querySelectorAll('input').forEach(i => { i.disabled = false })
   btn.textContent = 'Odeslat'; odeslatFakturyPocet()
   if (!zprava.textContent.includes('není nastavené')) zprava.innerHTML = '<span style="color:' + (chyby ? 'var(--red)' : 'var(--green)') + ';font-weight:700">' + (ok ? '✓ Odesláno: ' + ok : '') + (chyby ? (ok ? ' · ' : '') + 'selhalo: ' + chyby + ' (zkuste znovu jen ty zaškrtnuté)' : '') + '</span>'
-  if (ok) { ov.querySelectorAll('[data-odes-cb]').forEach(c => { if (_invOdeslane.has(c.dataset.odesCb)) c.checked = false }); odeslatFakturyPocet() }
+  if (ok) { ov.querySelectorAll('[data-odes-cb]').forEach(c => { if (odeslaneTed.has(c.dataset.odesCb)) c.checked = false }); odeslatFakturyPocet() }
 }
 
 function firmaFaktury(r) {
