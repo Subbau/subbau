@@ -117,11 +117,12 @@ module.exports = async function handler(req, res) {
   // 2) Je volající admin? — dotaz přes service_role (obchází RLS, ale jen pro čtení role)
   try {
     const roleResp = await fetch(
-      `${SUPABASE_URL}/rest/v1/profiles?id=eq.${encodeURIComponent(callerId)}&select=role`,
+      `${SUPABASE_URL}/rest/v1/profiles?id=eq.${encodeURIComponent(callerId)}&select=role,is_active`,
       { headers: { apikey: serviceKey, Authorization: `Bearer ${serviceKey}` } }
     );
     const roleRows = roleResp.ok ? await roleResp.json() : [];
-    if (!roleRows.length || roleRows[0].role !== 'admin') {
+    // Deaktivovaný správce (is_active=false) s dosud platným tokenem nesmí nic měnit.
+    if (!roleRows.length || roleRows[0].role !== 'admin' || roleRows[0].is_active === false) {
       res.status(403).json({ ok: false, error: 'forbidden' });
       return;
     }
