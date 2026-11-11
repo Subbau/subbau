@@ -6719,7 +6719,8 @@ async function podpisyZeSmluvNajdi() {
       const { data, error } = await sb.from('contracts').select('id, worker_id, signature_url, signed_at, title, worker_sign_page, status, worker:profiles!worker_id(full_name, is_active)').eq('status', 'signed_electronic').not('signature_url', 'is', null).order('signed_at', { ascending: false }).order('id', { ascending: true }).range(od, od + 999)
       if (error) throw new Error(error.message)
       for (const c of data || []) if (c.worker_id && !posledni.has(c.worker_id)) posledni.set(c.worker_id, c)
-      if (!data || data.length < 1000) break
+      if (!data || !data.length) break
+      if (od + 1000 >= 50000) throw new Error('smluv je víc než 50 000 — výsledek by nebyl úplný')
     }
     const lide = [...posledni.values()].sort((a, b) => String(a.worker?.full_name || '').localeCompare(String(b.worker?.full_name || ''), 'cs'))
     if (!lide.length) { box.innerHTML = '<div style="color:var(--text3);font-size:13px">Žádná elektronicky podepsaná smlouva.</div>'; return }
@@ -6728,7 +6729,7 @@ async function podpisyZeSmluvNajdi() {
       { const stav = document.getElementById('pzs-stav'); if (stav) stav.textContent = `Čtu podpisy… ${i + 1} z ${lide.length}`; else box.innerHTML = `<div id="pzs-stav" style="color:var(--text3);font-size:13px">Čtu podpisy… ${i + 1} z ${lide.length}</div>` }
       let o = null, chyba = '', uzMa = false
       uzMa = await _pzsExistuje(c.worker_id)
-      try { o = await _podpisZPdf(c.signature_url, c.worker_sign_page) } catch (e) { chyba = String(e?.message || e).slice(0, 80) }
+      try { o = await _pzsCas(_podpisZPdf(c.signature_url, c.worker_sign_page), 60000, 'čtení smlouvy') } catch (e) { chyba = String(e?.message || e).slice(0, 80) }
       // Podpis bývá cca 2,4 : 1 a má řídké čáry; úplně plný obrázek nebo velmi úzký proužek vzbudí podezření.
       const divny = !o || o.w < 40 || o.h < 15 || o.plnych > 0.6
       _pzs.push({ workerId: c.worker_id, jmeno: c.worker?.full_name || '—', aktivni: c.worker?.is_active !== false, smlouva: c.title || '', kdy: c.signed_at, o, chyba, uzMa, divny, vybrat: false })
@@ -6741,7 +6742,7 @@ async function podpisyZeSmluvNajdi() {
 function podpisyZeSmluvVykresli() {
   const box = document.getElementById('podpisy-ze-smluv'); if (!box) return
   const vybranych = _pzs.filter(x => x.vybrat).length
-  box.innerHTML = `<div style="font-size:13px;margin-bottom:10px"><b>${_pzs.length}</b> pracovníků · nalezeno podpisů: <b>${_pzs.filter(x => x.o).length}</b> · k uložení zaškrtnuto: <b id="pzs-pocet">${vybranych}</b> <button onclick="_pzs.forEach(x=>{if(x.o&&!x.uzMa&&!x.divny)x.vybrat=true});podpisyZeSmluvVykresli()" style="margin-left:8px;padding:3px 9px;border:1px solid var(--brd);background:#fff;border-radius:6px;cursor:pointer;font-size:12px;font-family:inherit">Zaškrtnout všechny bez podezření</button></div>`
+  box.innerHTML = `<div style="font-size:13px;margin-bottom:10px"><b>${_pzs.length}</b> pracovníků · nalezeno podpisů: <b>${_pzs.filter(x => x.o).length}</b> · k uložení zaškrtnuto: <b id="pzs-pocet">${vybranych}</b></div>`
     + `<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(210px,1fr));gap:10px">`
     + _pzs.map((x, i) => `<label style="display:block;border:1px solid var(--brd);border-radius:10px;padding:8px;background:#fff;cursor:${x.o ? 'pointer' : 'default'}">
         <div style="display:flex;align-items:center;gap:6px;margin-bottom:6px"><input type="checkbox" ${x.vybrat ? 'checked' : ''} ${x.o ? '' : 'disabled'} onchange="_pzs[${i}].vybrat=this.checked;document.getElementById('pzs-pocet').textContent=_pzs.filter(y=>y.vybrat).length" style="width:17px;height:17px;flex:none">
