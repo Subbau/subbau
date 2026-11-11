@@ -36612,16 +36612,35 @@ async function savePdfDirect(html, filename) {
       // Vloží jeden (vysoký) obrázek a rozseká ho přes více stránek od pozice startY.
       const imgH = (img.h * usableW) / img.w
       let left = imgH, pos = 0, y = startY
-      let endY = y
       while (left > 0) {
         pdf.addImage(img.imgData, 'JPEG', margin, y - pos, usableW, imgH)
         const avail = pageH - margin - y
-        endY = y + Math.min(left, avail)
         left -= avail
         pos += avail
         if (left > 0) { pdf.addPage(); y = margin }
       }
-      return endY   // kde na poslední stránce obrázek končí
+    }
+
+    // Rozseká vysoký obrázek na výřezy po stránkách (každý se vloží jen do prostoru
+    // mezi okraji, nic se neopakuje ani nepřetéká do okrajů). Vrací Y konce na
+    // poslední stránce. Pro dlouhou hlavičku (audit 11. 11. 2026).
+    const addSlicedOriz = async (img, startY) => {
+      const im = await new Promise((ok, ne) => { const i = new Image(); i.onload = () => ok(i); i.onerror = () => ne(new Error('obrázek hlavičky nejde načíst')); i.src = img.imgData })
+      const pxNaMM = img.w / usableW
+      const celkemMM = img.h / pxNaMM
+      let hotovoMM = 0, y = startY, endY = startY
+      while (hotovoMM < celkemMM - 0.01) {
+        const avail = pageH - margin - y
+        const kusMM = Math.min(celkemMM - hotovoMM, avail)
+        const c = document.createElement('canvas')
+        c.width = img.w; c.height = Math.max(1, Math.round(kusMM * pxNaMM))
+        const g = c.getContext('2d'); g.fillStyle = '#fff'; g.fillRect(0, 0, c.width, c.height)
+        g.drawImage(im, 0, Math.round(hotovoMM * pxNaMM), img.w, c.height, 0, 0, img.w, c.height)
+        pdf.addImage(c.toDataURL('image/jpeg', 0.92), 'JPEG', margin, y, usableW, kusMM)
+        hotovoMM += kusMM; endY = y + kusMM
+        if (hotovoMM < celkemMM - 0.01) { pdf.addPage(); y = margin }
+      }
+      return endY
     }
 
     if (breakBlocks.length >= 1) {
@@ -36644,7 +36663,7 @@ async function savePdfDirect(html, filename) {
         // Dlouhá hlavička (víc směn, dlouhé popisy) se nesmí oříznout: nevejde-li se
         // do zbytku stránky, rozseká se přes stránky jako vysoký blok (audit 11. 11. 2026).
         const hlavickaPresStranky = hMM > pageH - margin - cursorY
-        const hlavickaKonec = hlavickaPresStranky ? addSliced(himg, cursorY) : null
+        const hlavickaKonec = hlavickaPresStranky ? await addSlicedOriz(himg, cursorY) : null
         if (!hlavickaPresStranky) pdf.addImage(himg.imgData, 'JPEG', margin, cursorY, usableW, hMM)
         // Opt-in: pokud hlavička nese data-pdf-break-after, vynuť novou stránku hned po ní
         // (např. týdenní výkaz týmu chce hlavičku samotnou na 1. listu, docházku od 2.)
