@@ -22872,7 +22872,15 @@ function fakturaSrovnejFajfky() {
 }
 // „Posílá trvale jinak": zapnutí platí od týdne řádku dál; vypnutí smaže všechny
 // záznamy člověka (i kdyby jich bylo víc).
-async function fakturaPosilaTrvale(workerId, kw, rok, zapnout) {
+// Ukládání jednoho člověka jde po řadě — rychlé zapnutí a hned vypnutí nesmí skončit
+// tím, že vypnutí doběhne dřív než zapnutí a ono zapnutí pak zůstane platit.
+const _invTrvaleFronta = new Map()
+function fakturaPosilaTrvale(workerId, kw, rok, zapnout) {
+  const dalsi = (_invTrvaleFronta.get(workerId) || Promise.resolve()).catch(() => {}).then(() => fakturaPosilaTrvaleZapis(workerId, kw, rok, zapnout))
+  _invTrvaleFronta.set(workerId, dalsi)
+  return dalsi
+}
+async function fakturaPosilaTrvaleZapis(workerId, kw, rok, zapnout) {
   const predpona = FAKT_TRVALE_KLIC + workerId + '|'
   let error = null
   if (zapnout) {
@@ -23355,6 +23363,7 @@ function _invVlozRadky(tbody, casti, html, drzetPolicko) {
   tbody._invPocet = tbody.childElementCount
   _invSledovat(tbody)
   _invHotovo(tbody)
+  fakturaSrovnejFajfky()   // fajfky šedých řádků vždy podle skutečného stavu (i po obnově od jiného správce)
 }
 // HLÍDÁNÍ ZÁSAHŮ DO ŘÁDKŮ. Znovu se smí použít jen řádek, na který od posledního
 // překreslení nikdo nesáhl. Jinak by zůstal, jak ho někdo změnil — např. tlačítko
