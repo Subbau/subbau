@@ -51,6 +51,8 @@ create unique index if not exists faktury_odeslane_faktura on public.faktury_ode
 -- Který pokus o odeslání záznam drží (každé klepnutí na Odeslat má své číslo) — dokončit
 -- nebo uklidit záznam smí jen ten pokus, který ho vytvořil.
 alter table public.faktury_odeslane add column if not exists pokus text;
+-- Pokus už začal posílat e-mail (server to označí těsně před SMTP, jednou — druhý stejný požadavek neprojde).
+alter table public.faktury_odeslane add column if not exists odesilano boolean not null default false;
 
 alter table public.faktury_prijemci enable row level security;
 alter table public.faktury_odeslane enable row level security;
@@ -83,7 +85,7 @@ begin
     get diagnostics n = row_count;
   else
     update public.faktury_odeslane
-       set stav = 'rezervovano', komu = p_komu, kdy = now(), kdo = auth.uid(), pokus = p_pokus
+       set stav = 'rezervovano', komu = p_komu, kdy = now(), kdo = auth.uid(), pokus = p_pokus, odesilano = false
      where invoice_id = p_invoice and stav = p_videno_stav and kdy = p_videno_kdy
        and (stav <> 'rezervovano' or kdy < now() - interval '5 minutes');
     get diagnostics n = row_count;
@@ -108,29 +110,34 @@ begin
   if p_puv_stav is null then
     delete from public.faktury_odeslane where invoice_id = p_invoice and pokus = p_pokus;
   else
-    update public.faktury_odeslane set stav = p_puv_stav, komu = p_puv_komu, kdy = p_puv_kdy, pokus = null
+    update public.faktury_odeslane set stav = p_puv_stav, komu = p_puv_komu, kdy = p_puv_kdy, pokus = null, odesilano = false
      where invoice_id = p_invoice and pokus = p_pokus;
   end if;
   get diagnostics n = row_count;
   return n > 0;
 end $f$;
 
--- Drží tenhle pokus ještě rezervaci? (těsně před odesláním e-mailu; čas podle serveru)
-create or replace function public.faktury_drzim(p_invoice text, p_pokus text)
-returns boolean language sql stable as $f$
-  select exists (select 1 from public.faktury_odeslane
-                  where invoice_id = p_invoice and pokus = p_pokus and stav = 'rezervovano'
-                    and kdy > now() - interval '4 minutes');
-$f$;
+-- Smí tenhle pokus teď poslat e-mail? ATOMICKY to spotřebuje: rezervace musí patřit pokusu, být
+-- čerstvá (podle času serveru) a e-mail se z ní ještě neposílal. Volá to server těsně před SMTP.
+create or replace function public.faktury_zacit_odesilani(p_invoice text, p_pokus text)
+returns boolean language plpgsql as $f$
+declare n int;
+begin
+  update public.faktury_odeslane set odesilano = true
+   where invoice_id = p_invoice and pokus = p_pokus and stav = 'rezervovano'
+     and odesilano = false and kdy > now() - interval '4 minutes';
+  get diagnostics n = row_count;
+  return n > 0;
+end $f$;
 
 revoke all on function public.faktury_rezervovat(text, text, text, text, timestamptz) from public, anon;
 revoke all on function public.faktury_potvrdit(text, text) from public, anon;
 revoke all on function public.faktury_uvolnit(text, text, text, text, timestamptz) from public, anon;
-revoke all on function public.faktury_drzim(text, text) from public, anon;
+revoke all on function public.faktury_zacit_odesilani(text, text) from public, anon;
 grant execute on function public.faktury_rezervovat(text, text, text, text, timestamptz) to authenticated;
 grant execute on function public.faktury_potvrdit(text, text) to authenticated;
 grant execute on function public.faktury_uvolnit(text, text, text, text, timestamptz) to authenticated;
-grant execute on function public.faktury_drzim(text, text) to authenticated;
+grant execute on function public.faktury_zacit_odesilani(text, text) to authenticated;
 
 commit;
 
@@ -140,5 +147,5 @@ select c.relname as tabulka, c.relrowsecurity as ochrana_radku
  where c.oid in ('public.faktury_prijemci'::regclass, 'public.faktury_odeslane'::regclass)
  order by 1;
 select proname as funkce from pg_proc
- where pronamespace = 'public'::regnamespace and proname in ('faktury_rezervovat', 'faktury_potvrdit', 'faktury_uvolnit', 'faktury_drzim')
+ where pronamespace = 'public'::regnamespace and proname in ('faktury_rezervovat', 'faktury_potvrdit', 'faktury_uvolnit', 'faktury_zacit_odesilani')
  order by 1;

@@ -51,7 +51,7 @@ module.exports = async function handler(req, res) {
   applyCors(req, res);
   if (req.method === 'OPTIONS') { res.status(204).end(); return; }
   if (req.method !== 'POST') { res.status(405).json({ sent: false, reason: 'method_not_allowed' }); return; }
-  if (rateLimited('odeslat-faktu:' + clientIp(req), 120)) { res.status(429).json({ sent: false, reason: 'rate_limited' }); return; }
+  if (rateLimited('odeslat-faktu:' + clientIp(req), 600)) { res.status(429).json({ sent: false, reason: 'rate_limited' }); return; }
 
   const callerToken = String(req.headers.authorization ?? '').replace(/^Bearer\s+/i, '').trim();
   if (!callerToken) { res.status(401).json({ sent: false, reason: 'missing_token' }); return; }
@@ -72,7 +72,7 @@ module.exports = async function handler(req, res) {
   if (!profil || profil.is_active !== true || String(profil.role || '').trim().toLowerCase() !== 'admin') {
     res.status(403).json({ sent: false, reason: 'not_allowed' }); return;
   }
-  if (rateLimited('odeslat-faktu-u:' + caller.id, 100)) { res.status(429).json({ sent: false, reason: 'rate_limited' }); return; }
+  if (rateLimited('odeslat-faktu-u:' + caller.id, 500)) { res.status(429).json({ sent: false, reason: 'rate_limited' }); return; }
 
   let body = {};
   try { body = typeof req.body === 'string' ? JSON.parse(req.body || '{}') : (req.body || {}); } catch { res.status(400).json({ sent: false, reason: 'bad_json' }); return; }
@@ -87,7 +87,7 @@ module.exports = async function handler(req, res) {
   const invoiceId = String(body.invoiceId || ''), pokus = String(body.pokus || '');
   if (!invoiceId || !pokus) { res.status(400).json({ sent: false, reason: 'missing_reservation' }); return; }
   try {
-    const rd = await fetch(`${SUPABASE_URL}/rest/v1/rpc/faktury_drzim`, { method: 'POST',
+    const rd = await fetch(`${SUPABASE_URL}/rest/v1/rpc/faktury_zacit_odesilani`, { method: 'POST',
       headers: { apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${callerToken}`, 'content-type': 'application/json', Accept: 'application/json' },
       body: JSON.stringify({ p_invoice: invoiceId, p_pokus: pokus }) });
     const dj = rd.ok ? await rd.json().catch(() => null) : null;

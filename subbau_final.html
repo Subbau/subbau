@@ -22062,20 +22062,21 @@ async function odeslatFakturyPosli() {
         ? 'chybí funkce odeslaných faktur — spusťte nejdřív SQL migraci supabase-migrace-odeslani-faktur.sql' : 'nepodařilo se zapsat odeslání: ' + rz.message)
       if (vzato !== true) {
         await nactiOdeslaneFaktury().catch(() => {})
-        stav(!videno ? '✓ už odeslal jiný správce' : videno.stav === 'rezervovano' ? '⏳ právě se odesílá (nebo před chvílí) — neposílám' : '↺ mezitím změnil jiný správce — neposílám', !videno ? 'var(--green)' : 'var(--amber)')
+        stav(!videno ? '⏳ jiný správce ji právě odesílá nebo už odeslal — neposílám' : videno.stav === 'rezervovano' ? '⏳ právě se odesílá (nebo před chvílí) — neposílám' : '↺ mezitím změnil jiný správce — neposílám', 'var(--amber)')
         continue
       }
       rezervovano = true
       // PDF se načítá nejvýš 30 s (rezervace tak trvá sekundy, ne minuty — převzít ji jiný správce smí až po 5 min)
       const ac = new AbortController(); const ct = setTimeout(() => ac.abort(), 30000)
-      let resp0
-      try { resp0 = await fetch(r.pdf_url, { signal: ac.signal }) } catch (fe) { throw new Error('PDF faktury se nepodařilo načíst (' + (fe && fe.name === 'AbortError' ? 'vypršel čas' : 'chyba spojení') + ')') } finally { clearTimeout(ct) }
-      if (!resp0.ok) throw new Error('PDF faktury se nepodařilo načíst (HTTP ' + resp0.status + ')')
-      const b64 = await blobToBase64(await resp0.blob())
+      let b64
+      try {
+        const resp0 = await fetch(r.pdf_url, { signal: ac.signal })
+        if (!resp0.ok) throw new Error('PDF faktury se nepodařilo načíst (HTTP ' + resp0.status + ')')
+        b64 = await blobToBase64(await resp0.blob())      // limit platí i pro stažení těla, ne jen hlaviček
+      } catch (fe) {
+        throw (fe && fe.name === 'AbortError') ? new Error('PDF faktury se nepodařilo načíst (vypršel čas)') : (/PDF faktury/.test((fe && fe.message) || '') ? fe : new Error('PDF faktury se nepodařilo načíst (chyba spojení)'))
+      } finally { clearTimeout(ct) }
       try { token = (await sb.auth.getSession())?.data?.session?.access_token || null } catch (e) {}
-      // Těsně před odesláním ještě ověř, že rezervace pořád patří TOMUHLE pokusu (databáze, serverový čas).
-      const { data: drzim, error: de } = await sb.rpc('faktury_drzim', { p_invoice: String(r.id), p_pokus: pokus })
-      if (de || drzim !== true) throw new Error('rezervaci mezitím převzal jiný správce — neposílám')
       const cis = String(r.invoice_number || '').replace(/[^a-zA-Z0-9_-]/g, '')
       const kdo = r.worker?.full_name || r.supplier_name || ''
       const who = kdo.normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-zA-Z0-9]+/g, '_').replace(/^_+|_+$/g, '')
@@ -22090,6 +22091,7 @@ async function odeslatFakturyPosli() {
       if (j === null) { const ne = new Error('odpověď serveru se nepodařilo přečíst — zkontrolujte schránku, e-mail mohl odejít'); ne._nejasne = true; throw ne }
       if (!resp.ok || !j.sent) {
         const dukaz = j && j.reason
+        if (dukaz === 'rate_limited' || resp.status === 429) { const rl = new Error('příliš mnoho odeslání najednou — počkejte pár minut a zkuste zbylé znovu'); rl._zastavit = true; throw rl }
         if (dukaz === 'not_configured') { const nn = new Error('mailbox není nastavený'); nn._nenastaveno = true; throw nn }
         const ce = new Error(dukaz || ('HTTP ' + resp.status))
         if (j && j.nejasne) { ce._nejasne = true; ce.message = (dukaz || 'chyba') + ' — zkontrolujte schránku, e-mail mohl odejít' }
@@ -22118,6 +22120,7 @@ async function odeslatFakturyPosli() {
       else if (rezervovano) { await nactiOdeslaneFaktury().catch(() => {}) }   // skutečný čas z databáze (porovnává se při převzetí)
       chyby++
       stav('❌ ' + String(e?.message || e).slice(0, 80), 'var(--red)')
+      if (e && e._zastavit) { zprava.innerHTML = '<span style="color:var(--red)">' + escAttr(e.message) + '</span>'; break }
       if (e && e._nenastaveno) {
         zprava.innerHTML = '<span style="color:var(--red)">Odesílání ještě není nastavené (heslo k mailboxu ve Vercelu). Nic neodešlo.</span>'
         break
