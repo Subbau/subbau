@@ -443,7 +443,19 @@ async function dbVsechno(cesta, klic) {
   const prvni = await db(`${cesta}&limit=${STRANKA_DB}&offset=0`, klic);
   if (!prvni || !prvni.length) return vse;
   for (const r of prvni) vse.push(r);
-  if (prvni.length < STRANKA_DB) return vse;
+  if (prvni.length < STRANKA_DB) {
+    // Databáze může mít nižší strop než STRANKA_DB (např. 500): kulatý počet řádků proto neznamená „konec".
+    // Pak se čte jako dřív — po skutečně vrácených kusech, dokud nepřijde prázdná stránka.
+    if (prvni.length < 50 || prvni.length % 50 !== 0) return vse;
+    let od = prvni.length;
+    for (let strana = 0; strana < MAX_STRANEK_DB * 20; strana++) {
+      const kus = await db(`${cesta}&limit=${STRANKA_DB}&offset=${od}`, klic);
+      if (!kus || !kus.length) return vse;
+      for (const r of kus) vse.push(r);
+      od += kus.length;
+    }
+    throw new Error('příliš mnoho řádků: ' + cesta.split('?')[0]);
+  }
   for (let strana = 1; strana < MAX_STRANEK_DB; strana += VLNA_DB) {
     const pocet = Math.min(VLNA_DB, MAX_STRANEK_DB - strana);
     const davka = await Promise.all(Array.from({ length: pocet }, (_, i) =>
