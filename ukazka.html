@@ -12575,11 +12575,13 @@ const jeBudouci = den => /^\d{4}-\d{2}-\d{2}$/.test(String(den || '')) && String
 // Záloha historie před úpravou: když se po ní nepodaří zapsat samotná hodnota
 // (profil / provize), volající historii vrátí zpět obnovHistoriiSazby —
 // jinak by zpětný přepočet nechal smazané hranice a minulé částky by se změnily.
-let _zalohaHistorieSazby = null
+const _zalohyHistorieSazby = {}   // klíč workerId|druh — souběžné změny sazeb si zálohy nepřepisují
+const _klicZalohy = (workerId, druh) => String(workerId) + '|' + druh
 async function obnovHistoriiSazby(workerId, druh) {
-  const Z = _zalohaHistorieSazby
-  _zalohaHistorieSazby = null
-  if (!Z || Z.workerId !== workerId || Z.druh !== druh) return
+  const kz = _klicZalohy(workerId, druh)
+  const Z = _zalohyHistorieSazby[kz]
+  delete _zalohyHistorieSazby[kz]
+  if (!Z) return
   try {
     const { data: ted, error: e1 } = await sb.from('worker_rate_history').select('id').eq('worker_id', workerId).eq('druh', druh)
     if (e1) throw e1
@@ -12600,11 +12602,11 @@ async function obnovHistoriiSazby(workerId, druh) {
 }
 async function ulozSazbuSHistorii(workerId, druh, puvodni, nova, odKdy, opts) {
   const dnes = localDateStr()
-  _zalohaHistorieSazby = null
+  delete _zalohyHistorieSazby[_klicZalohy(workerId, druh)]
   try {
     const { data: zaloha, error: chybaZalohy } = await sb.from('worker_rate_history').select('*').eq('worker_id', workerId).eq('druh', druh)
-    if (!chybaZalohy && zaloha) _zalohaHistorieSazby = { workerId, druh, rows: zaloha }
-  } catch (e) { _zalohaHistorieSazby = null }
+    if (!chybaZalohy && zaloha) _zalohyHistorieSazby[_klicZalohy(workerId, druh)] = { workerId, druh, rows: zaloha }
+  } catch (e) { delete _zalohyHistorieSazby[_klicZalohy(workerId, druh)] }
   // Chybějící tabulka (neproběhlá migrace) = není co mazat ani hlídat. Jméno
   // tabulky v hlášce nestačí — obsahuje ho i odmítnutí právy — a „schema cache"
   // hlásí i dočasně nedostupný server (PGRST002), proto jen tyhle kódy.
@@ -13168,7 +13170,7 @@ async function saveProvizeRate(input, workerId) {
   }
   const { error } = await sb.from('profiles').update({ hourly_rate_worker: rate }).eq('id', workerId)
   if (error) { await obnovHistoriiSazby(workerId, 'sazba'); showToast('❌ Chyba: ' + error.message); return }
-  _zalohaHistorieSazby = null
+  delete _zalohyHistorieSazby[_klicZalohy(workerId, 'sazba')]
   smazNuluVimOTom('sazba', workerId, rate)
   showToast(poprve ? '✅ Sazba nastavena'
     : odKdy === 'zpetne'
@@ -13268,7 +13270,7 @@ async function saveProvizeCommission(input, workerId) {
   const { error } = await sb.from('worker_commissions')
     .upsert({ worker_id: workerId, provize, updated_at: new Date().toISOString() }, { onConflict: 'worker_id' })
   if (error) { await obnovHistoriiSazby(workerId, 'provize'); showToast('❌ Chyba: ' + error.message); return }
-  _zalohaHistorieSazby = null
+  delete _zalohyHistorieSazby[_klicZalohy(workerId, 'provize')]
   smazNuluVimOTom('provize', workerId, provize)
   showToast(odKdy === 'zpetne'
     ? '✅ Provize uložena a přepočítána zpětně'
@@ -27320,7 +27322,8 @@ async function generateTeamAttendancePdf(teamId, teamName) {
     const komu = _sefPodle[wid] || wid
     if (_bezProvizeLidi.has(komu)) return 0
     // Sazba: zaměstnancova vlastní, má-li ji zapnutou a vyplněnou, jinak šéfova.
-    const od = provizniSazbaOd(wid, _sefPodle[wid] || null, _vlastniProvize, _provMap)
+    const _hKDni = (id, d) => { const hh = _histProv[id]; let vv = null; if (hh) for (let i = 0; i < hh.length; i++) { if (hh[i].od <= d) vv = hh[i].hodnota; else break } return vv }
+    const od = provizniSazbaOd(wid, _sefPodle[wid] || null, _vlastniProvize, _provMap, den, _hKDni)
     const h = _histProv[od]
     let v = null
     if (h) for (let i = 0; i < h.length; i++) { if (h[i].od <= den) v = h[i].hodnota; else break }
@@ -46142,13 +46145,9 @@ async function _uploadSignedContractVnitrni() {
 // OSVČ ji ještě musí elektronicky podepsat v appce. Na rozdíl od uploadContract()
 // admin nemusí podpis kreslit znovu (soubor ho už obsahuje), na rozdíl od
 // uploadSignedContract() to není hotovo — čeká se na podpis pracovníka.
-let _uploadAdminSignedBezi = false
-async function uploadAdminSignedContract() {
-  // Codex 11. 11. 2026: dvojí klepnutí na pomalém spojení vytvořilo dvě smlouvy a dvě oznámení.
-  if (_uploadAdminSignedBezi) return
-  _uploadAdminSignedBezi = true
-  try { await uploadAdminSignedContractBeh() } finally { _uploadAdminSignedBezi = false }
-}
+// Codex 11. 11. 2026: dvojí klepnutí na pomalém spojení vytvořilo dvě smlouvy a dvě oznámení.
+// Zámek je společný se dvěma sousedními tlačítky nahrávání (smlouva-nahrani).
+async function uploadAdminSignedContract() { return _jednouNaraz('smlouva-nahrani', uploadAdminSignedContractBeh) }
 async function uploadAdminSignedContractBeh() {
   const workerId = document.getElementById('contract-worker').value
   const title = document.getElementById('contract-title').value.trim()
@@ -53415,6 +53414,9 @@ async function saveWorkerProfile() {
   // Id pracovníka se zachytí hned: po awaitech (dotaz, okno „od kdy“) už může být otevřená jiná karta.
   const wid = currentWorkerId
   const pk = () => currentWorkerId === wid ? currentWorkerProfile : null
+  // Národnost se zachytí hned (po awaitech by ve formuláři mohla být jiná karta).
+  const narElStart = document.getElementById('wd-narodnost')
+  const narStart = narElStart && !narElStart.disabled ? (narElStart.value || null) : undefined
   const fullName = document.getElementById('wd-fullname-input')?.value.trim() || ''
   if (!fullName) { showToast('⚠️ Jméno nesmí být prázdné'); return }
   const rate = parseFloat(document.getElementById('wd-rate').value)||0
@@ -53517,9 +53519,8 @@ async function saveWorkerProfile() {
   // Národnost zvlášť: bez migrace supabase-migrace-narodnost.sql sloupec není
   // a kvůli němu nesmí spadnout uložení zbytku profilu.
   let narodnostNeulozena = ''
-  const narEl = document.getElementById('wd-narodnost')
-  if (narEl && !narEl.disabled) {
-    const nar = narEl.value || null
+  if (narStart !== undefined) {
+    const nar = narStart
     if ((pk()?.narodnost || null) !== nar) {
       const { data: nd, error: ne } = await sb.from('profiles').update({ narodnost: nar }).eq('id', wid).select('id, narodnost')
       if (ne || !nd || !nd.length) narodnostNeulozena = (ne && /narodnost|column|schema cache/i.test(ne.message || '')) ? 'migrace' : 'chyba'
