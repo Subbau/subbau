@@ -31221,6 +31221,9 @@ function oznacCisloRucne(el) {
 async function predvyplnitCisloFaktury(workerId, rok, pre = 'inv', tyden = null) {
   const poleEl = _pole(pre, 'num-full')
   if (!poleEl) return
+  // Pořadí volání: pozdní odpověď staršího dotazu (jiný týden/pracovník) nesmí přepsat číslo novějšího výběru.
+  const mojeCislo = poleEl._cisloPoradi = (poleEl._cisloPoradi || 0) + 1
+  const platne = () => poleEl._cisloPoradi === mojeCislo && poleEl.dataset.rucne !== '1'
   if (poleEl.dataset.rucne === '1') return
 
   // Za týden, který už fakturovaný byl, drží faktura svoje původní číslo —
@@ -31234,12 +31237,15 @@ async function predvyplnitCisloFaktury(workerId, rok, pre = 'inv', tyden = null)
     } catch (e) { error = e }
     // Nevíme, jestli týden už fakturu má → nové číslo nevymýšlet (vznikla by
     // druhá faktura za týž týden). Vystavení to ještě jednou ověří.
+    if (!platne()) return
     if (error) { poleEl.value = ''; return }
     const stare = String((data || [])[0]?.invoice_number || '').trim()
     if (stare) { poleEl.value = stare; return }
   }
 
-  poleEl.value = await dalsiCisloFaktury(workerId, rok)
+  const noveCislo = await dalsiCisloFaktury(workerId, rok)
+  if (!platne()) return
+  poleEl.value = noveCislo
 }
 
 // Kolikáté načítání týdne ve formuláři běží. Odpověď staršího se zahodí —
@@ -31328,7 +31334,10 @@ async function onInvoiceWeekChange() {
 
   // Co fakturoval naposledy. Většina lidí dělá pořád to samé, takže je to
   // trefa častěji než čerstvý překlad z docházky — a přepsat to může.
+  const textPredDotazem = itemEl.value
   const posledni = await posledniPolozkaFaktury(currentUser?.id)
+  // Mezitím mohl pracovník přepnout týden nebo začít psát — jeho text se nepřepíše.
+  if (sel.value !== v || poradi !== _invNacitaniTydne || itemEl.value !== textPredDotazem) return
   if (posledni) {
     itemEl.value = posledni
     autoGrowInvoiceItem()
@@ -31342,6 +31351,7 @@ async function onInvoiceWeekChange() {
   if (noteEl) noteEl.textContent = 'Skládám popis z vaší docházky…'
   const res = await buildInvoiceItemEn(week, year)
   // Než překlad doběhl, mohl pracovník přepnout týden nebo si text napsat sám
+  if (poradi !== _invNacitaniTydne) return
   if (sel.value !== v || itemEl.value.trim()) { itemEl.placeholder = defaultInvoiceItem(currentProfile?.profession); return }
   itemEl.value = res.text
   autoGrowInvoiceItem()
@@ -50851,6 +50861,7 @@ function closeInvoiceSentModal() {
 async function loadWdInvoiceForm(profile) {
   const sel = document.getElementById('wd-inv-week')
   if (!sel || !currentWorkerId) return
+  const wid = currentWorkerId   // karta se může během čekání přepnout na jiného člověka
 
   // Předvyplň bankovní údaje a sazbu z profilu pracovníka (admin je může přepsat)
   const ib = document.getElementById('wd-inv-iban'); if (ib) ib.value = profile?.invoice_iban || ''
@@ -50862,28 +50873,31 @@ async function loadWdInvoiceForm(profile) {
   const it = document.getElementById('wd-inv-item')
   if (it) {
     const byProf = defaultInvoiceItem(profile?.profession)
-    const saved = lsGet('inv_item_' + currentWorkerId)
+    const saved = lsGet('inv_item_' + wid)
     it.value = (!saved || saved === INVOICE_ITEM_DEFAULT) ? byProf : saved
     it.placeholder = byProf
   }
   // Splatnost se bere z Provizí (admin ji tam nastavuje), tady ji ještě může přepsat
-  await applyInvoiceDueFromProfile('wd-inv-due', profile, false, currentWorkerId)
+  await applyInvoiceDueFromProfile('wd-inv-due', profile, false, wid)
+  if (wid !== currentWorkerId) return
   // Ukaž odběratele včetně IČO a DIČ — chybějící údaje dotáhni z databáze firem
   renderWdInvoiceCustomerInfo(profile)
 
   // U firmy (s.r.o.) se v nabídce týdnů počítají i hodiny jejích zaměstnanců —
   // fakturuje za všechny dohromady, takže by jinak viděla „bez docházky"
   // i v týdnu, kdy jí lidé odpracovali stovky hodin.
-  let kohoPocitat = [currentWorkerId]
+  let kohoPocitat = [wid]
   {
     // Šéfem může být i živnostník (1. 10. 2026), ne jen s.r.o.
-    const { data: lide } = await sb.from('profiles').select('id').eq('zamestnavatel_id', currentWorkerId)
-    const ids = (lide || []).map(x => x.id).filter(x => x && x !== currentWorkerId)
+    const { data: lide } = await sb.from('profiles').select('id').eq('zamestnavatel_id', wid)
+    if (wid !== currentWorkerId) return
+    const ids = (lide || []).map(x => x.id).filter(x => x && x !== wid)
     if (ids.length) kohoPocitat = kohoPocitat.concat(ids)
   }
   const { data } = await sb.from('attendance')
     .select('kw, kw_year, total_hours')
     .in('worker_id', kohoPocitat)
+  if (wid !== currentWorkerId) return
 
   const weeks = new Map()
   ;(data || []).forEach(r => {
@@ -50952,6 +50966,8 @@ async function renderWdInvoiceCustomerInfo(profile) {
   box.innerHTML = radky.join('')
 }
 
+// Pořadí výpočtů rozpisu: pozdní výpočet pro starší sazbu nesmí přepsat částku podle nové.
+let _wdInvPoradi = 0
 // Ukáže, kolik hodin a jaká částka vyjde na faktuře pro zvolený týden
 async function updateWdInvoiceHours() {
   const box = document.getElementById('wd-inv-hours')
@@ -50960,6 +50976,7 @@ async function updateWdInvoiceHours() {
   hlidejDalsiPolozky('wd-inv', currentWorkerId + '|' + sel.value)
   const [week, year] = sel.value.split('/').map(Number)
   const workerIdPriStartu = currentWorkerId
+  const poradiVypoctu = ++_wdInvPoradi
   let data
   try { data = await dochazkaProFakturu(currentWorkerId, week, year) }
   catch (e) {
@@ -50972,6 +50989,7 @@ async function updateWdInvoiceHours() {
     return
   }
   const rate = parseFloat(document.getElementById('wd-inv-rate')?.value) || 0
+  if (poradiVypoctu !== _wdInvPoradi) return
   // Stejně jako u faktury pracovníka: pokud sazba v poli odpovídá té z profilu,
   // platí historie a každý den se počítá svou sazbou. Když sis sazbu přepsal
   // ručně, platí tvoje číslo na celý týden.
@@ -50989,6 +51007,7 @@ async function updateWdInvoiceHours() {
   // Mezi načtením a zápisem mohl admin přepnout týden nebo otevřít jiného
   // pracovníka — pak by tu zůstala viset částka, která k ničemu nepatří.
   if (sel.value !== `${week}/${year}` || currentWorkerId !== workerIdPriStartu) return
+  if (poradiVypoctu !== _wdInvPoradi || (parseFloat(document.getElementById('wd-inv-rate')?.value) || 0) !== rate) return
   const hours = rozpis.hodiny
   const amount = rozpis.castka
   const popisSazby = rozpis.skupiny.length > 1
@@ -51013,7 +51032,7 @@ async function updateWdInvoiceHours() {
   // jako u pracovníka: co se napíše k dalším, o to se sníží první.
   window._invTydenniCastka = amount > 0 ? amount : 0
   rozpocitatCastku('wd-inv')
-  await predvyplnitCisloFaktury(currentWorkerId, year, 'wd-inv', week)
+  await predvyplnitCisloFaktury(workerIdPriStartu, year, 'wd-inv', week)
 }
 
 // Vzhled faktury se ukládá hned při přepnutí — ať se na to nezapomene
