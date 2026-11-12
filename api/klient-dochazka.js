@@ -1272,12 +1272,17 @@ module.exports = async (req, res) => {
     const nyniIso = new Date().toISOString();
     const zapisNavstevu = (async () => {
       try {
-        let filtr = `id=eq.${odkaz.id}` +
-          `&or=(posledni_navsteva.is.null,posledni_navsteva.lt.${encodeURIComponent(nyniIso)})`;
+        const casPodm = `or(posledni_navsteva.is.null,posledni_navsteva.lt.${encodeURIComponent(nyniIso)})`;
+        let filtr = `id=eq.${odkaz.id}`;
         const zmena = { posledni_navsteva: nyniIso };
         if (prvniOtevreni) {
-          filtr += `&pocet_navstev=eq.${Number(odkaz.pocet_navstev || 0)}`;
-          zmena.pocet_navstev = (odkaz.pocet_navstev || 0) + 1;
+          const pocet = Number(odkaz.pocet_navstev || 0);
+          // Nula i NULL jsou „ještě nenavštíveno" (eq.0 by NULL nezachytilo).
+          const pocetPodm = pocet === 0 ? 'or(pocet_navstev.is.null,pocet_navstev.eq.0)' : `pocet_navstev.eq.${pocet}`;
+          filtr += `&and=(${casPodm},${pocetPodm})`;
+          zmena.pocet_navstev = pocet + 1;
+        } else {
+          filtr += `&or=(posledni_navsteva.is.null,posledni_navsteva.lt.${encodeURIComponent(nyniIso)})`;
         }
         const rz = await fetch(`${SUPABASE_URL}/rest/v1/client_links?${filtr}`, {
           method: 'PATCH',

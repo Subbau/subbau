@@ -12921,9 +12921,16 @@ async function nactiVsechnyHistorieSazeb(sloupce, druh) {
 // vrací se všude výchozí hodnota — tedy přesně stav, jaký byl před historií.
 async function sazbyPracovnika(workerId, druh, vychozi) {
   let h = []
-  const { data, error } = await sb.from('worker_rate_history')
-    .select('hodnota, valid_from').eq('worker_id', workerId).eq('druh', druh)
-    .order('valid_from', { ascending: true }).order('id').limit(5000)
+  // Po stránkách (server vrací nejvýš ~1000 řádků naráz) — jinak by se novější změny sazby ztratily.
+  let data = [], error = null
+  for (let od = 0; od < 50000; od += 1000) {
+    const r = await sb.from('worker_rate_history')
+      .select('hodnota, valid_from').eq('worker_id', workerId).eq('druh', druh)
+      .order('valid_from', { ascending: true }).order('id').range(od, od + 999)
+    if (r.error) { error = r.error; break }
+    data.push(...(r.data || []))
+    if (!r.data || r.data.length < 1000) break
+  }
   if (error) {
     // Chybějící tabulka (neproběhlá migrace) = žádná historie, počítá se jako dřív.
     // Jiná chyba se ale NESMÍ tvářit jako „historie není" — všechny dny by se
@@ -32444,7 +32451,7 @@ async function nactiMojeFaktury() {
     data = r.data
     // Chyba načtení není prázdný seznam: poslední úspěšný seznam zůstane a řekne se to.
     if (r.error) { console.warn('[moje faktury] načtení selhalo:', r.error.message); showToast('⚠️ Seznam odeslaných faktur se nepodařilo obnovit'); return }
-  } catch (e) { console.warn('[moje faktury] načtení selhalo:', e?.message) }
+  } catch (e) { console.warn('[moje faktury] načtení selhalo:', e?.message); return }   // zůstane poslední zobrazený seznam
   // Faktury podržené v telefonu (slabé spojení nebo přihlášení) — appka je
   // pošle sama, pracovník je tu vidí jako „čeká na odeslání" (1. 11. 2026).
   // Jen vlastní: na jednom telefonu se můžou střídat dva lidé.
