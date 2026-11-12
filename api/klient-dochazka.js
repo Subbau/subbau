@@ -556,7 +556,7 @@ module.exports = async (req, res) => {
     //   POST { akce:'poznamka_dne', id, smazat:true, kdo }                  → smazání SVÉ poznámky
     //
     // Obojí jen s hlavičkou x-stavbyplan-klic (kontrola výš). Jen lidé z part
-    // odkazu (nebo ti, co v nich pracovali). `kdo` = jméno Moniky ve Stavbyplánu;
+    // odkazu (jen ti, kdo v nich jsou teď). `kdo` = jméno Moniky ve Stavbyplánu;
     // upravit/smazat jde jen poznámku, kterou založil Stavbyplán pod stejným
     // jménem. Poznámky správců SubBau (zdroj 'spravce') se odsud měnit nedají.
     // ---------------------------------------------------------------
@@ -574,8 +574,9 @@ module.exports = async (req, res) => {
       try {
         const vazbyP = await db(`client_link_teams?select=team_id&link_id=eq.${odkaz.id}`, klic);
         const skupinyP = (vazbyP || []).map(v => v.team_id).filter(Boolean);
-        // Kdo z daných lidí smí v tomhle odkazu mít poznámku: je v partě odkazu,
-        // nebo v ní pracoval (tytéž dvě podmínky jako u zápisu poznámky k člověku).
+        // Kdo z daných lidí smí v tomhle odkazu mít poznámku: JEN ten, kdo je TEĎ v partě odkazu.
+        // Bývalý člen (stará docházka v partě) NE — po přesunu do jiné firmy by Monika jinak
+        // dostávala poznámky i z nové firmy (majitel 12. 11. 2026: „firma Treskower tam být nesmí").
         const povoleniLide = async (ids) => {
           const povoleno = new Set();
           if (!skupinyP.length || !ids.length) return povoleno;
@@ -584,16 +585,6 @@ module.exports = async (req, res) => {
             const kus = ids.slice(i, i + 100).map(encodeURIComponent).join(',');
             const p = await db(`profiles?select=id&id=in.(${kus})&team_id=in.(${sk})`, klic);
             (p || []).forEach(x => povoleno.add(x.id));
-          }
-          // Bývalí členové: každý zvlášť (limit=1) — společný dotaz by směny jednoho člověka
-          // mohly vyčerpat limit řádků a ostatní by se potichu ztratili. Po vlnách po osmi.
-          const zbyva = ids.filter(x => !povoleno.has(x));
-          for (let i = 0; i < zbyva.length; i += 8) {
-            const vlna = await Promise.all(zbyva.slice(i, i + 8).map(async (id) => {
-              const a = await db(`attendance?select=worker_id&worker_id=eq.${encodeURIComponent(id)}&team_id=in.(${sk})&limit=1`, klic);
-              return a && a.length ? id : null;
-            }));
-            vlna.forEach(id => { if (id) povoleno.add(id); });
           }
           return povoleno;
         };
