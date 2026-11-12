@@ -48101,13 +48101,16 @@ async function ulozZamestnavatele(el) {
   el.disabled = true
   const v = await zapisZamestnavatele(id, firmaId)
   el.disabled = false
+  const kartaPlati = currentWorkerId === id && !!currentWorkerProfile
   if (!v.ok) {
     showToast(v.zprava)
-    if (currentWorkerProfile) el.value = currentWorkerProfile.zamestnavatel_id || ''
+    if (kartaPlati) el.value = currentWorkerProfile.zamestnavatel_id || ''
     return
   }
-  if (currentWorkerProfile) currentWorkerProfile.zamestnavatel_id = firmaId
   showToast(firmaId ? '✅ Zařazen pod šéfa' : '✅ Pracuje sám na sebe')
+  // Paměť a kartu měníme jen tehdy, když je pořád otevřený ten samý člověk.
+  if (!kartaPlati) return
+  currentWorkerProfile.zamestnavatel_id = firmaId
   naplnVyberZamestnavatele(currentWorkerProfile)
   vykresliRadekZamestnance(currentWorkerProfile)
 }
@@ -50795,16 +50798,18 @@ async function dataProUkazkuVzhledu(workerId, profil) {
 async function ukazVzhledyPracovnika() {
   if (!currentWorkerId) { showToast('❌ Není vybrán pracovník'); return }
   showToast('⏳ Připravuji ukázku…')
+  // Komu ukázku otevíráme si zapamatujeme HNED. Než správce vybere (nebo se data načtou),
+  // může mezitím otevřít kartu někoho jiného — a volba by pak padla na špatného člověka.
+  const proKoho = currentWorkerId
   let profil = currentWorkerProfile
   try {
-    const { data } = await sb.from('profiles').select('*').eq('id', currentWorkerId).maybeSingle()
+    const { data } = await sb.from('profiles').select('*').eq('id', proKoho).maybeSingle()
     if (data) profil = data
   } catch (e) { console.warn('[ukázka vzhledu] profil:', e?.message) }
-  const data = await dataProUkazkuVzhledu(currentWorkerId, profil)
+  if (proKoho !== currentWorkerId) return
+  const data = await dataProUkazkuVzhledu(proKoho, profil)
+  if (proKoho !== currentWorkerId) return
   const ted = Number(profil?.invoice_design) || 1
-  // Komu ukázku otevíráme si zapamatujeme. Než správce vybere, může mezitím
-  // otevřít kartu někoho jiného — a volba by pak padla na špatného člověka.
-  const proKoho = currentWorkerId
   otevriUkazkuVzhledu(data, ted, async (idx, barva) => {
     if (barva != null && barva !== profil?.invoice_color) await ulozBarvuFaktury(barva, proKoho)
     await ulozVzhledFaktury(idx, proKoho)
@@ -50823,6 +50828,7 @@ async function ukazVzhledyFaktury() {
   const r = _invCache.find(x => x.id === _invEditId)
   if (!r) { showToast('⚠️ Faktura se nenašla — načtěte složku znovu'); return }
   showToast('⏳ Připravuji ukázku…')
+  const proFakturu = _invEditId   // zachytit hned, ne až po načtení
   let extra = {}
   try {
     const { data: prof } = await sb.from('profiles')
@@ -50830,12 +50836,12 @@ async function ukazVzhledyFaktury() {
     if (prof) extra = { email: prof.email, phone: prof.phone,
                         invoiceColorIdx: prof.invoice_color ?? null, designIdx: prof.invoice_design || 1 }
   } catch (e) { console.warn('[ukázka vzhledu] profil:', e?.message) }
+  if (_invEditId !== proFakturu) return   // mezitím se otevřela jiná faktura
   const sel = document.getElementById('invedit-design')
   const ted = Number(sel?.value) || Number(r.design_idx) || extra.designIdx || 1
   const data = invoiceDataFromRow(r, extra)
   // Okno úpravy se mezitím může zavřít — pak není kam vzhled uložit a nesmíme
   // tvrdit, že uložený je.
-  const proFakturu = _invEditId
   otevriUkazkuVzhledu(data, ted, async (idx, barva) => {
     const oknoBezi = _invEditId === proFakturu && document.getElementById('invedit-dialog')?.style.display === 'flex'
     if (oknoBezi && sel) { sel.value = String(idx); sel.dataset.dotknuto = '1' }
@@ -51098,7 +51104,9 @@ async function ulozBarvuFaktury(idx, workerId) {
   if (!kdo) return false
   const n = parseInt(idx, 10)
   if (!Number.isInteger(n) || n < 0 || n >= INVOICE_COLORS.length) return false
-  const { error } = await sb.from('profiles').update({ invoice_color: n }).eq('id', kdo)
+  const { error: chybaZapisu, data: zapsanaBarva } = await sb.from('profiles').update({ invoice_color: n }).eq('id', kdo).select('id')
+  // Zápis, který nezasáhl žádný řádek (práva, smazaný profil), projde bez chyby — to není uložení.
+  const error = chybaZapisu || ((!zapsanaBarva || !zapsanaBarva.length) ? { message: 'zápis nezasáhl žádný profil — zkontrolujte oprávnění' } : null)
   if (error) {
     showToast(/invoice_color|column|schema cache/i.test(error.message || '')
       ? '❌ Chybí sloupec invoice_color — barvy zatím nejdou nastavit'
@@ -51201,9 +51209,9 @@ async function prideliNejmenePouzivanyVzhled(workerId, prof) {
       .select('invoice_design').not('invoice_design', 'is', null)
     if (error) return null
     const nejlepsi = nejmenePouzivanyVzhled(data || [])
-    const { error: upErr } = await sb.from('profiles')
+    const { error: upErr, data: upData } = await sb.from('profiles')
       .update({ invoice_design: nejlepsi }).eq('id', workerId).select('id')
-    if (upErr) return null
+    if (upErr || !upData || !upData.length) return null
     prof.invoice_design = nejlepsi
     return nejlepsi
   } catch (e) { return null }
@@ -51217,7 +51225,11 @@ async function ulozVzhledFaktury(hodnota, workerId) {
   if (!Number.isInteger(n) || n < 1 || n > POCET_VZHLEDU) return
   const withTimeout = (p, ms) => Promise.race([p, new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), ms))])
   let error
-  try { ;({ error } = await withTimeout(sb.from('profiles').update({ invoice_design: n }).eq('id', kdo), 12000)) }
+  try {
+    let zapsano
+    ;({ error, data: zapsano } = await withTimeout(sb.from('profiles').update({ invoice_design: n }).eq('id', kdo).select('id'), 12000))
+    if (!error && (!zapsano || !zapsano.length)) error = { message: 'zápis nezasáhl žádný profil — zkontrolujte oprávnění' }
+  }
   catch (e) { error = e }
   if (error) {
     // Databáze má u sloupce podmínku na rozsah. Dokud neproběhne migrace,
