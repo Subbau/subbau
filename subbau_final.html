@@ -9489,7 +9489,12 @@ function _onAdminDbChange(table, payload) {
 // (Docházka 22 dotazů a 1,7 MB, Kalendář 0,8 MB, Pracovníci 1 MB, Týmy 44 dotazů) — ráno desítky
 // takových přenačtení po sobě. Obnova na pozadí téže sekce teď nejde častěji než jednou za pár vteřin
 // (zbylé změny se dorovnají v tom jednom kole); obnova po VLASTNÍ úpravě správce (hned = true) čeká jako dřív.
-const _SEKCE_ODSTUP = { dochazka: 2000, kalendar: 3000, pracovnici: 3000, tymy: 3000 }
+// Ostatní sekce (faktury, doklady, fotky, smlouvy…) měly jen 0,4 s odstup — archiv faktur (až 10 000 řádků) se při ranní vlně
+// přenačítal každé 2 s. Těžké sekce teď nejdou častěji než jednou za 12–15 s, lehké za 2,5 s.
+const _SEKCE_ODSTUP = { dochazka: 2000, kalendar: 3000, pracovnici: 3000, tymy: 3000,
+  'faktury-archiv': 15000, faktury: 8000, 'zalohove-faktury': 8000, dokumenty: 15000, fotky: 15000, smlouvy: 10000,
+  'historie-uprav': 15000, pristupy: 6000, provize: 4000, 'plan-mmi': 6000, odkazy: 8000, chat: 2500 }
+const _SEKCE_ODSTUP_VYCHOZI = 2500
 const _sekceNaposled = {}, _sekceOdlozeno = {}
 function obnovOtevrenouSekci(hned) {
   const sekce = _activeAdminView()
@@ -9497,7 +9502,7 @@ function obnovOtevrenouSekci(hned) {
   if (hned) { _sekceNaposled[sekce] = 0; if (_sekceOdlozeno[sekce]) { clearTimeout(_sekceOdlozeno[sekce]); _sekceOdlozeno[sekce] = 0 } }
   _debouncedRefresh('sekce:' + sekce, () => {
     if (_adminEditInProgress()) { setTimeout(obnovOtevrenouSekci, 4000); return }
-    const odstup = _SEKCE_ODSTUP[sekce] || 0, uplynulo = Date.now() - (_sekceNaposled[sekce] || 0)
+    const odstup = _SEKCE_ODSTUP[sekce] ?? _SEKCE_ODSTUP_VYCHOZI, uplynulo = Date.now() - (_sekceNaposled[sekce] || 0)
     if (uplynulo < odstup) {
       if (!_sekceOdlozeno[sekce]) _sekceOdlozeno[sekce] = setTimeout(() => { _sekceOdlozeno[sekce] = 0; obnovOtevrenouSekci() }, odstup - uplynulo + 20)
       return
@@ -28885,6 +28890,13 @@ async function mobCheckin(type) {
         rezim_prestavky: rezimPrestavky(currentProfile)
       }, { vratit: true, timeout: 12000 }))
 
+      if (error && String(error.code) === '23505') {
+        // Databáze už má dnes otevřenou směnu tohoto člověka (souběh dvou telefonů nebo opakovaný příchod po ztracené
+        // odpovědi) — žádná druhá se nezakládá; ukáže se stávající (viz supabase-migrace-dochazka-jedna-otevrena.sql).
+        showToast('✅ Příchod už je zapsaný'); _pustZamek()
+        try { getTodayRecord() } catch (e) { console.warn('[příchod] načtení stávající směny:', e && e.message) }
+        return
+      }
       if (error) {
         showToast(chybaText(error, 'Příchod se nezapsal')); _pustZamek()
         // Původní chybu (kód, stav) přiloží jádro deníku z chybaText (surova).
@@ -29779,6 +29791,20 @@ async function upomenChybejiciDoklady(rucne) {
     // šetří dotazy.
     if (lsGet('upominkaDoklady') === dnes) return
   }
+  // Atomické zabrání dne (12. 11. 2026): upomínku pouští při otevření appky KAŽDÝ správce (až 20) a čtení „už dnes odešla?“
+  // a vložení nejsou jedna operace — 200 lidí mohlo dostat 2–5 stejných zpráv. Jednoznačný klíč dne projde jen pro prvního.
+  const klicUpominky = 'upominka-doklady|' + dnes
+  let zabrano = false
+  if (!rucne) {
+    try {
+      const { data: zb, error: ezb } = await sb.from('doc_alert_dismissals')
+        .upsert({ dismiss_key: klicUpominky, dismissed_by: currentUser?.id || null }, { onConflict: 'dismiss_key', ignoreDuplicates: true }).select()
+      if (!ezb) {
+        if (!zb || !zb.length) { lsSet('upominkaDoklady', dnes); return }   // jiný správce už dnes upomíná
+        zabrano = true
+      }
+    } catch (e) { console.warn('[upomínka dokladů] zabrání dne:', e && e.message) }   // bez zabrání jede po starém (kontrola podle nadpisu)
+  }
   try {
     // Sloupec bez_ridicaku nemusí být (nenasazená migrace) — pak se načte bez něj
     // a řidičák se chce po všech, což je původní chování.
@@ -29840,6 +29866,7 @@ async function upomenChybejiciDoklady(rucne) {
     // že to běží. Místní pojistku schválně NEnastavujeme, ať se to zkusí znovu.
     const m = e?.message || String(e)
     console.warn('[upomínka dokladů]', m)
+    if (zabrano) { try { await sb.from('doc_alert_dismissals').delete().eq('dismiss_key', klicUpominky) } catch (x) { console.warn('[upomínka dokladů] uvolnění dne:', x && x.message) } }   // ať to zkusí jiný správce / příště
     showToast('⚠️ Upomínku na doklady se nepodařilo odeslat: ' + m)
   }
 }
