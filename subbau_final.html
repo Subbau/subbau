@@ -9277,6 +9277,21 @@ function realtimeUklid() {
   Object.keys(_rtVypadky).forEach(k => { const v = _rtVypadky[k]; if (v && v.t) clearTimeout(v.t); delete _rtVypadky[k] })
 }
 let invoiceRealtimeSub = null
+// Načtení složky faktur na pozadí se NESKLÁDÁ na sebe (výkon, 12. 11. 2026): jedno načtení
+// u 200 lidí stojí přes sto dotazů a desítky MB, a živé změny od lidí chodí po desítkách —
+// dřív se spustilo další načtení hned, i když předchozí ještě běželo. Teď běží nejvýš jedno
+// a změny, které přišly mezitím, dostanou jedno společné další načtení.
+let _invNacitaSe = false, _invZnovu = false
+function nactiFakturyNaPozadi() {
+  if (_invNacitaSe) { _invZnovu = true; return }
+  _invNacitaSe = true
+  let b
+  try { b = Promise.resolve(loadWorkerInvoices()) } catch (e) { b = Promise.reject(e) }
+  b.catch(e => console.warn('[faktury realtime] načtení:', e?.message || e)).then(() => {
+    _invNacitaSe = false
+    if (_invZnovu) { _invZnovu = false; nactiFakturyNaPozadi() }
+  })
+}
 function startInvoiceRealtime() {
   if (typeof sb === 'undefined' || !sb) return
   if (invoiceRealtimeSub) { try { sb.removeChannel(invoiceRealtimeSub) } catch(e) {} invoiceRealtimeSub = null }
@@ -9284,7 +9299,9 @@ function startInvoiceRealtime() {
     .on('postgres_changes', { event: '*', schema: 'public', table: 'worker_invoices' }, (payload) => {
       const evt = payload?.eventType || payload?.event || payload?.type || null
       if ((evt === 'INSERT' || evt === 'insert') && typeof playAdminBeep === 'function') playAdminBeep()
-      _debouncedRefresh('invoices', loadWorkerInvoices)
+      // Složka zavřená = nikdo to nevidí (načte se při otevření): sdružit na delší dobu.
+      const otevrena = !!document.getElementById('v-faktury-archiv')?.classList.contains('on')
+      _debouncedRefresh('invoices', nactiFakturyNaPozadi, otevrena ? 400 : 3000, otevrena ? 0 : 15000)
     })
     .subscribe((status, err) => {
       if (status === 'SUBSCRIBED') { console.log('[faktury realtime] aktivní'); realtimeObnoveno('admin-faktury') }
@@ -9347,6 +9364,7 @@ function _jenPritomnostVlastnihoProfilu(payload) {
 
 function _onAdminDbChange(table, payload) {
   if (table === 'profiles' && _jenPritomnostProfilu(payload)) return
+  if (table === 'attendance') { try { provizeDochZneplatni(payload) } catch (e) { /* nevadí */ } }
   const evt = payload?.eventType || payload?.event || payload?.type || null
   const isInsert = evt === 'INSERT' || evt === 'insert'
   const isUpdate = evt === 'UPDATE' || evt === 'update'
@@ -9492,6 +9510,7 @@ function obnovOtevrenouSekci(hned) {
 // jestli realtime kanál stihne doběhnout. Voláno přímo z edit/delete/manuál funkcí,
 // ne jen přes realtime, ať je to spolehlivé i při pomalejším připojení.
 async function refreshAttendanceEverywhere(workerId) {
+  try { provizeDochZneplatni(null) } catch (e) { /* Provize si rok stáhnou znovu */ }
   // POMALÉ PŘIPOJENÍ (27. 10. 2026, 1,5–2,4 s na dotaz): dřív se tu nejdřív
   // ČEKALO na celou nástěnku — desítky dotazů i volání Stavbyplánu kvůli
   // přesunům MMI — i když nebyla vidět, a teprve pak se obnovila docházka.
@@ -11508,6 +11527,25 @@ function provizeNext() {
 }
 function provizeToday() { provizeAnchor = new Date(); renderProvizeContent() }
 
+// ===== Provize: docházka celého roku se drží v paměti (výkon, 12. 11. 2026) =====
+// Každé vykreslení Provizí (listování týdnem, platba, každá živá změna od 200 lidí)
+// stahovalo CELÝ kalendářní rok docházky (u 200 lidí ~66 stránek, ~18 MB). Teď se
+// rok stáhne celý jednou a při dalším vykreslení se dotáhnou jen posledních 7 dní
+// (čerstvé příchody a úpravy); starší řádky se berou z paměti. Celý rok se stáhne
+// znovu, když: změnil se rok/rozsah, uplynuly 3 minuty, živá změna se týká staršího
+// dne (nebo smazání, kde datum neznáme), nebo správce sám upravil docházku.
+let _provizeDoch = null      // { klic, radky, plne (čas stažení celého roku), spinava }
+let _provizeDochGen = 0      // zvýší se při zneplatnění; neúplně dotažený rok se pak neuloží
+const PROVIZE_DOCH_TAIL_DNU = 7
+function provizeDochZneplatni(payload) {
+  const r = payload && (payload.new || payload.old)
+  const den = r && r.work_date ? String(r.work_date).slice(0, 10) : ''
+  const hranice = localDateStr(new Date(Date.now() - PROVIZE_DOCH_TAIL_DNU * 86400000))
+  if (den && den >= hranice) return   // čerstvý den: dotáhne se při příštím vykreslení
+  _provizeDochGen++
+  if (_provizeDoch) _provizeDoch.spinava = true
+}
+
 // Klíč firmy = company_id týmu (jinak název týmu, jinak "bez firmy") — stejná logika jako v kalendáři
 function provizeFirmOf(w, teamById, companyNameById) {
   if (!w.team_id || !teamById[w.team_id]) return 'Bez firmy'
@@ -11856,15 +11894,10 @@ async function srovnejNaplanovaneSazbyImpl() {
   if (_sazbySrovnanoDne === dnes || !smiVidetProvize()) return
   // Po stránkách: databáze vrátí nejvýš 1000 řádků na dotaz a bez nejnovějších
   // změn by se do profilu vrátila stará sazba (Codex 31. 10. 2026).
-  const h = []
-  for (let od = 0; od < 200000; od += 1000) {
-    const { data: kus, error } = await sb.from('worker_rate_history')
-      .select('worker_id, druh, hodnota, valid_from, created_at').lte('valid_from', dnes)
-      .order('valid_from', { ascending: true }).order('id').range(od, od + 999)
-    if (error) return
-    h.push(...(kus || []))
-    if (!kus || kus.length < 1000) break
-  }
+  const { data: h, error: chybaHistorie } = await dotahniStranky(od => sb.from('worker_rate_history')
+    .select('worker_id, druh, hodnota, valid_from, created_at').lte('valid_from', dnes)
+    .order('valid_from', { ascending: true }).order('id').range(od, od + 999), 1000, 6, 200)
+  if (chybaHistorie) return
   const platne = {}
   h.forEach(r => { platne[r.druh + '|' + r.worker_id] = r })
   const nastaly = Object.values(platne).filter(r => r.created_at
@@ -11982,20 +12015,45 @@ async function zrusPlanSazby(workerId, druh) {
   prekresliProvize()
 }
 
+// VŠECHNY STRÁNKY DOTAZU (výkon, 12. 11. 2026). Server vrací nejvýš 1000 řádků na dotaz,
+// větší výpisy se proto čtou po stránkách. Dřív šla jedna stránka po druhé — u 200 lidí
+// (rok docházky = ~50 stránek) to při 150 ms na dotaz dělalo 7 s a víc. Teď první stránka
+// sama (malá tabulka = jeden dotaz jako dřív) a když je plná, zbytek po vlnách `vlna`
+// stránek naráz. Výsledek je TENTÝŽ: stránky se skládají ve stejném pořadí a první chyba
+// (v pořadí stránek) vrátí { data: null, error } jako dřív. `nactiStranku(od)` vrací
+// { data, error }; dotaz musí mít jednoznačné řazení (…, id), jinak by se stránky překrývaly.
+async function dotahniStranky(nactiStranku, velikost = 1000, vlna = 6, maxStranek = 500) {
+  const prvni = await nactiStranku(0)
+  if (prvni.error) return { data: null, error: prvni.error }
+  const vse = (prvni.data || []).slice()
+  if (!prvni.data || prvni.data.length < velikost) return { data: vse, error: null }
+  for (let z = 1; z < maxStranek; z += vlna) {
+    const davka = await Promise.all(Array.from({ length: Math.min(vlna, maxStranek - z) }, (_, i) => nactiStranku((z + i) * velikost)))
+    for (const r of davka) {
+      if (r.error) return { data: null, error: r.error }
+      for (const x of (r.data || [])) vse.push(x)
+      if (!r.data || r.data.length < velikost) return { data: vse, error: null }
+    }
+  }
+  return { data: vse, error: null }
+}
+// Pracovní fronta: `fn` se pustí nad položkami, nejvýš `pocet` naráz.
+async function sPoctemNaraz(polozky, pocet, fn) {
+  let i = 0
+  await Promise.all(Array.from({ length: Math.min(pocet, polozky.length) }, async () => {
+    while (i < polozky.length) { const p = polozky[i++]; await fn(p) }
+  }))
+}
+
 // Celá historie sazeb po stránkách (server vrací nejvýš 1000 řádků na dotaz —
 // bez nejnovějších změn by se počítalo starou sazbou). Stabilní řazení + id.
 // Vrací { data, error } jako běžný dotaz; filtr `druh` je volitelný.
 async function nactiVsechnyHistorieSazeb(sloupce, druh) {
-  const out = []
-  for (let od = 0; od < 500000; od += 1000) {
+  return dotahniStranky(od => {
     let q = sb.from('worker_rate_history').select(sloupce)
     if (druh) q = q.eq('druh', druh)
-    const { data: kus, error } = await q.order('valid_from', { ascending: true }).order('id').range(od, od + 999)
-    if (error) return { data: null, error }
-    out.push(...(kus || []))
-    if (!kus || kus.length < 1000) break
-  }
-  return { data: out, error: null }
+    return q.order('valid_from', { ascending: true }).order('id').range(od, od + 999)
+  }, 1000, 6, 500)
 }
 
 // Načte historii jednoho údaje u jednoho pracovníka a vrátí funkci
@@ -12629,16 +12687,11 @@ async function generateProvizeFirmReport(firmName, mode) {
     // Docházka PO STRÁNKÁCH. Server vrací nejvýš 1000 řádků; měsíc všech firem
     // je přesahuje zhruba od 45 lidí — report by pak tiše vynechal hodiny
     // a firmě se vyfakturovalo méně. Stejně jako tabulka Provizí.
-    const att = []
-    for (let od = 0; od < 200000; od += 1000) {
-      const { data: kus, error: chybaKusu } = await sb.from('attendance')
-        .select('id, worker_id, work_date, check_in, check_out, break_start, break_end, total_hours, team_id, bez_vyplaty, bez_provize_den, vyplata_castka')
-        .gte('work_date', startStr).lte('work_date', endStr)
-        .order('id').range(od, od + 999)
-      if (chybaKusu) throw chybaKusu
-      att.push(...(kus || []))
-      if (!kus || kus.length < 1000) break
-    }
+    const { data: att, error: chybaKusu } = await dotahniStranky(od => sb.from('attendance')
+      .select('id, worker_id, work_date, check_in, check_out, break_start, break_end, total_hours, team_id, bez_vyplaty, bez_provize_den, vyplata_castka')
+      .gte('work_date', startStr).lte('work_date', endStr)
+      .order('id').range(od, od + 999), 1000, 6, 200)
+    if (chybaKusu) throw chybaKusu
     // Kdo je označený „bez provize", do vyúčtování nepatří — odešel dřív, než za
     // něj přijdou peníze, takže si za jeho hodiny nemá kdo nárokovat provizi.
     const vlastniRep = await nactiVlastniProvizeZamestnancu()
@@ -12885,12 +12938,20 @@ async function renderProvizeContent() {
   const _predemOd = localDateStr(new Date(Math.min(dStart.getTime(), wStart.getTime(), mStart.getTime(), yStart.getTime(), _tedProvize.getTime())))
   const _predemDo = localDateStr(new Date(Math.max(dEnd.getTime(), wEnd.getTime(), mEnd.getTime(), yEnd.getTime(), _tedProvize.getTime())))
   const pHistorie = _bezVyjimky(nactiVsechnyHistorieSazeb('worker_id, druh, hodnota, valid_from'))
+  const pVlastni = nactiVlastniProvizeZamestnancu()
   const pPlatby = _bezVyjimky(sb.from('provize_payments')
     .select('worker_id, paid').eq('period_type', 'week').eq('period_key', weekKey))
   const pPlatbyFirem = _bezVyjimky(sb.from('provize_platby_firem')
     .select('firma, paid').eq('period_key', weekKey))
+  // Rok docházky z paměti + čerstvý konec (viz provizeDochZneplatni).
+  const _klicDoch = _predemOd + '|' + _predemDo
+  const _tailOd = localDateStr(new Date(Date.now() - PROVIZE_DOCH_TAIL_DNU * 86400000))
+  const _cD = _provizeDoch
+  const _zCache = !!(_cD && _cD.klic === _klicDoch && !_cD.spinava && Date.now() - _cD.plne < 180000 && _tailOd > _predemOd)
+  const _dochOd = _zCache ? _tailOd : _predemOd
+  const _dochGen = _provizeDochGen
   const pPocetDochazky = _bezVyjimky(sb.from('attendance').select('id', { count: 'exact', head: true })
-    .gte('work_date', _predemOd).lte('work_date', _predemDo))
+    .gte('work_date', _dochOd).lte('work_date', _predemDo))
 
   const [{ data: workers, error: chybaLidi }, provResult, { data: teams, error: chybaTymu }, { data: companies, error: chybaFirem }, { data: subteams, error: chybaPodskupin }] = await Promise.all([
     sb.from('profiles').select('id, full_name, hourly_rate_worker, team_id, subteam_id, zamestnavatel_id, supplier_type, company_name').in('role', ['osvec', 'partak']).eq('is_active', true).order('full_name'),
@@ -12986,7 +13047,7 @@ async function renderProvizeContent() {
     console.warn('[provize] historie sazeb se nenačetla (tabulka chybí):', e?.message)
   }
 
-  const vlastniVysledek = await nactiVlastniProvizeZamestnancu()
+  const vlastniVysledek = await pVlastni   // pustilo se hned s první dávkou (nikdy nevyhodí chybu)
   if (vlastniVysledek.chyba) { provizeNejdou('Provize zaměstnanců', vlastniVysledek.chyba); return }
   const vlastniProvizeZam = vlastniVysledek.set
   const provMap = {}, termsMap = {}, bezProvize = new Set()
@@ -13033,11 +13094,11 @@ async function renderProvizeContent() {
 
   // Celý rok docházky se nevejde do výchozího limitu Supabase (~1000 řádků), proto načítáme
   // po stránkách — bez toho by roční provize tiše ukazovala jen zlomek odpracovaných hodin.
-  const att = []
+  let att = []
   const ATT_PAGE = 1000
   const strankaDochazky = (od) => sb.from('attendance')
       .select('worker_id, work_date, check_in, check_out, break_start, break_end, total_hours, team_id, bez_vyplaty, bez_provize_den, vyplata_castka')
-      .gte('work_date', fetchStart).lte('work_date', fetchEnd)
+      .gte('work_date', _zCache ? _tailOd : fetchStart).lte('work_date', fetchEnd)
       .order('id').range(od, od + ATT_PAGE - 1)
   // Kolik bude stránek, víme z počtu v první dávce → stáhnou se naráz. Zpracují
   // se ve stejném pořadí a podle stejných pravidel jako dřív jedna po druhé; když
@@ -13063,6 +13124,11 @@ async function renderProvizeContent() {
     if (!page || !page.length) break
     att.push(...page)
     if (page.length < ATT_PAGE) break
+  }
+  // Starší řádky z paměti + čerstvý konec; do paměti jde kopie (níže se z `att` maže).
+  if (_zCache) att = _cD.radky.filter(a => a.work_date < _tailOd).concat(att)
+  if (fetchStart === _predemOd && fetchEnd === _predemDo && _dochGen === _provizeDochGen) {
+    _provizeDoch = { klic: _klicDoch, radky: att.slice(), plne: _zCache ? _cD.plne : Date.now(), spinava: false }
   }
 
   const nowStr = now.toTimeString().slice(0, 8)
@@ -22327,16 +22393,9 @@ async function smazZalohu(id) {
 // Faktury s odečty po stránkách (server vrací nejvýš ~1000 řádků naráz) — jinak by
 // po dosažení limitu část odečtů nebyla započítaná a záloha by se použila znovu.
 async function fakturyOdectyVse(workerIds) {
-  const vse = []
-  for (let od = 0; od < 200000; od += 1000) {
-    const { data, error } = await sb.from('worker_invoices')
-      .select('id, worker_id, invoice_number, zalohy_pouzite').in('worker_id', workerIds)
-      .order('id', { ascending: true }).range(od, od + 999)
-    if (error) return { data: null, error }
-    vse.push(...(data || []))
-    if (!data || data.length < 1000) break
-  }
-  return { data: vse, error: null }
+  return dotahniStranky(od => sb.from('worker_invoices')
+    .select('id, worker_id, invoice_number, zalohy_pouzite').in('worker_id', workerIds)
+    .order('id', { ascending: true }).range(od, od + 999), 1000, 6, 200)
 }
 async function zalohyKOdecteni(workerId, invoiceNum, celkem, bezHlasky) {
   const prazdno = { castka: 0, popis: '', pouzite: [], chyba: false }
@@ -22440,17 +22499,8 @@ async function loadWorkerInvoices() {
   // PO STRÁNKÁCH (1. 10. 2026). Databáze vrací nejvýš 1000 řádků na dotaz —
   // při ~40 fakturách týdně by zhruba po půl roce ty nejstarší ze složky tiše
   // zmizely (a s nimi i ze soupisů a součtů).
-  const vsechnyFaktury = async (sloupce) => {
-    const vse = []
-    for (let od = 0; od < 200000; od += 1000) {
-      const { data: kus, error: e } = await sb.from('worker_invoices').select(sloupce)
-        .order('sent_at', { ascending: false }).order('id').range(od, od + 999)
-      if (e) return { data: null, error: e }
-      vse.push(...(kus || []))
-      if (!kus || kus.length < 1000) break
-    }
-    return { data: vse, error: null }
-  }
+  const vsechnyFaktury = (sloupce) => dotahniStranky(od => sb.from('worker_invoices').select(sloupce)
+    .order('sent_at', { ascending: false }).order('id').range(od, od + 999), 1000, 6, 200)
   let { data, error } = await vsechnyFaktury('*, worker:profiles(full_name, profession, crm_code, invoice_color, can_track_hours, is_active, invoice_design, team_id, subteam_id, avatar_url)')
   if (error) {
     // Bez spuštěné migrace sloupce chybí — načti aspoň to, co bylo dřív,
@@ -22484,9 +22534,14 @@ async function loadWorkerInvoices() {
   // ještě seznamem ID lidí ze schovaných firem — ať filtr nepovolí tiše.
   const skrytiFakt = await skrytiLideIds()
   _invCache = (data || []).filter(r => !jeSkrytaFirmaPracovnika(r.worker) && !skrytiFakt.has(r.worker_id))
-  await nactiTymyFaktur(_invCache)   // firma v týdnu faktury podle docházky
-  await nactiSedeRadkyFaktur().catch(e => console.warn('[faktury] šedé řádky:', e?.message || e))
-  await nactiOdeslaneFaktury().catch(e => console.warn('[faktury] odeslané:', e?.message || e))
+  // Tři nezávislá čtení naráz (dřív za sebou): firma v týdnu faktury podle docházky,
+  // šedé řádky a štítky odeslání. Zapisují do různých údajů; šedé řádky se doplní k týdnům
+  // bez faktury, takže se s firmami faktur nepřekrývají.
+  await Promise.all([
+    nactiTymyFaktur(_invCache),
+    nactiSedeRadkyFaktur().catch(e => console.warn('[faktury] šedé řádky:', e?.message || e)),
+    nactiOdeslaneFaktury().catch(e => console.warn('[faktury] odeslané:', e?.message || e)),
+  ])
   fillInvoiceYearFilter()
   // Tabulka faktur má stovky řádků (480 faktur = ~31 000 prvků, ~190 ms zaseknutí).
   // Kreslí se jen do OTEVŘENÉ složky — při startu a obnově na pozadí se dřív kreslila
@@ -22541,14 +22596,11 @@ async function nactiTymyFaktur(radky) {
   const lide = [...new Set(chybi.map(r => r.worker_id))]
   const roky = [...new Set(chybi.map(r => Number(r.kw_year)))]
   try {
-    for (let od = 0; od < 100000; od += 1000) {
-      const { data, error } = await sb.from('attendance').select('worker_id, kw, kw_year, team_id, work_date')
-        .in('worker_id', lide).in('kw_year', roky).not('team_id', 'is', null)
-        .order('work_date', { ascending: true }).order('id').range(od, od + 999)
-      if (error) return
-      ;(data || []).forEach(a => _tymFakturyTydne.set(a.worker_id + '|' + a.kw + '|' + a.kw_year, a.team_id))   // poslední den týdne vyhrává
-      if (!data || data.length < 1000) break
-    }
+    const { data, error } = await dotahniStranky(od => sb.from('attendance').select('worker_id, kw, kw_year, team_id, work_date')
+      .in('worker_id', lide).in('kw_year', roky).not('team_id', 'is', null)
+      .order('work_date', { ascending: true }).order('id').range(od, od + 999), 1000, 6, 100)
+    if (error) return
+    ;(data || []).forEach(a => _tymFakturyTydne.set(a.worker_id + '|' + a.kw + '|' + a.kw_year, a.team_id))   // poslední den týdne vyhrává
     chybi.forEach(r => _tymFakturyNacteno.add(r.worker_id + '|' + r.kw + '|' + r.kw_year))
   } catch (e) { /* zůstane dnešní zařazení */ }
 }
@@ -22589,29 +22641,28 @@ async function nactiSedeRadkyFaktur() {
   // Docházku a lidi stačí stáhnout jednou za 90 s — složka se obnovuje každou
   // minutu a při každé nové faktuře, šedé řádky se ale počítají pokaždé znovu.
   if (_invSedeDochazka.od !== od || Date.now() - _invSedeDochazka.kdy > 90000) {
-    const radky = []
-    for (let o = 0; o < 200000; o += 1000) {
-      const { data, error } = await sb.from('attendance')
-        .select('worker_id, kw, kw_year, team_id, work_date, total_hours')
-        .gte('work_date', od).not('check_in', 'is', null)
-        .order('work_date').order('id').range(o, o + 999)
-      if (error) { console.warn('[faktury] docházka pro šedé řádky:', error.message); return }
-      radky.push(...(data || []))
-      if (!data || data.length < 1000) break
-    }
-    const { data: profily, error: chybaLidi } = await sb.from('profiles')
+    // Lidé jdou souběžně s docházkou (nezávisí na ní).
+    const pProfily = Promise.resolve(sb.from('profiles')
       .select('id, full_name, role, zamestnavatel_id, avatar_url, invoice_color, team_id, subteam_id, crm_code')
-      .in('role', ['osvec', 'partak'])
+      .in('role', ['osvec', 'partak']))
+    const { data: radky, error: chybaDoch } = await dotahniStranky(o => sb.from('attendance')
+      .select('worker_id, kw, kw_year, team_id, work_date, total_hours')
+      .gte('work_date', od).not('check_in', 'is', null)
+      .order('work_date').order('id').range(o, o + 999), 1000, 6, 200)
+    if (chybaDoch) { console.warn('[faktury] docházka pro šedé řádky:', chybaDoch.message); pProfily.then(() => {}, () => {}); return }
+    const { data: profily, error: chybaLidi } = await pProfily
     if (chybaLidi) { console.warn('[faktury] lidé pro šedé řádky:', chybaLidi.message); return }
     _invSedeDochazka = { kdy: Date.now(), od, radky, profily: profily || [] }
   }
   try {
+    const pTrvale = Promise.resolve(sb.from('doc_alert_dismissals').select('dismiss_key').like('dismiss_key', FAKT_TRVALE_KLIC + '%'))
+    pTrvale.then(() => {}, () => {})   // chyba se ošetří až níž; dřív puštěný dotaz nesmí skončit jako neošetřený
     const { data: jin, error } = await sb.from('doc_alert_dismissals').select('dismiss_key, dismissed_at').like('dismiss_key', FAKT_JINAK_KLIC + '%')
     if (!error) {
       _invJinak = new Map()
       ;(jin || []).forEach(x => _invJinak.set(String(x.dismiss_key).slice(FAKT_JINAK_KLIC.length), { kdy: x.dismissed_at }))
     }
-    const { data: trv, error: e2 } = await sb.from('doc_alert_dismissals').select('dismiss_key').like('dismiss_key', FAKT_TRVALE_KLIC + '%')
+    const { data: trv, error: e2 } = await pTrvale
     if (!e2) {
       _invTrvale = new Map()
       ;(trv || []).forEach(x => {
@@ -22744,15 +22795,13 @@ let _invPrijemci = new Map()      // firma → e-mail
 async function nactiOdeslaneFaktury() {
   // Po stránkách (server vrací nejvýš ~1000 řádků naráz) — jinak by novější odeslání
   // za limitem ztratila štítek a faktura by se nabízela znovu.
-  const nove = new Map(); let chyba = null
-  for (let od = 0; od < 200000; od += 1000) {
-    const { data, error } = await sb.from('faktury_odeslane').select('invoice_id, kdy, komu, stav').order('id', { ascending: true }).range(od, od + 999)
-    if (error) { chyba = error; break }
-    ;(data || []).forEach(x => nove.set(String(x.invoice_id), { kdy: x.kdy, komu: x.komu, stav: x.stav || 'odeslano' }))
-    if (!data || data.length < 1000) break
-  }
+  const nove = new Map()
+  const pPrijemci = Promise.resolve(sb.from('faktury_prijemci').select('firma, email'))
+  pPrijemci.then(() => {}, () => {})
+  const { data: odeslane, error: chyba } = await dotahniStranky(od => sb.from('faktury_odeslane').select('invoice_id, kdy, komu, stav').order('id', { ascending: true }).range(od, od + 999), 1000, 6, 200)
+  ;(odeslane || []).forEach(x => nove.set(String(x.invoice_id), { kdy: x.kdy, komu: x.komu, stav: x.stav || 'odeslano' }))
   if (!chyba) { _invOdeslane = nove; _invOdeslaneJe = true } else _invOdeslaneJe = false
-  const { data: pr, error: e2 } = await sb.from('faktury_prijemci').select('firma, email')
+  const { data: pr, error: e2 } = await pPrijemci
   if (!e2) { _invPrijemci = new Map(); (pr || []).forEach(x => _invPrijemci.set(String(x.firma), x.email)) }
 }
 // Faktura byla po odeslání znovu uložena nebo upravena (nové PDF) — odeslaná verze už není ta aktuální.
@@ -26271,18 +26320,29 @@ function renderTeams() {
 // team_id u docházky nezná, vrátí se k dnešním členům (jako dřív).
 async function dochazkaTymuZaObdobi(teamId, clenoveTed, od, doo, sloupce) {
   const zaklad = () => sb.from('attendance').select(sloupce)
-  let q1 = zaklad().eq('team_id', teamId)
-  if (od) q1 = q1.gte('work_date', od)
-  if (doo) q1 = q1.lte('work_date', doo)
-  let q2 = clenoveTed.length ? zaklad().in('worker_id', clenoveTed).is('team_id', null) : null
-  if (q2 && od) q2 = q2.gte('work_date', od)
-  if (q2 && doo) q2 = q2.lte('work_date', doo)
-  const [a, b] = await Promise.all([q1, q2 || Promise.resolve({ data: [] })])
-  if (a.error && /team_id/i.test(a.error.message || '') && clenoveTed.length) {
-    let q = zaklad().in('worker_id', clenoveTed)
+  // Po stránkách: týden velké skupiny (přes ~170 lidí) má víc než 1000 řádků a server by
+  // zbytek tiše zahodil — v PDF by chyběli lidé. `id` v řazení drží stránky jednoznačně.
+  const stranky = (stavba) => dotahniStranky(o => stavba().order('id', { ascending: true }).range(o, o + 999), 1000, 6, 200)
+  const q1 = () => {
+    let q = zaklad().eq('team_id', teamId)
     if (od) q = q.gte('work_date', od)
     if (doo) q = q.lte('work_date', doo)
-    const c = await q
+    return q
+  }
+  const q2 = clenoveTed.length ? () => {
+    let q = zaklad().in('worker_id', clenoveTed).is('team_id', null)
+    if (od) q = q.gte('work_date', od)
+    if (doo) q = q.lte('work_date', doo)
+    return q
+  } : null
+  const [a, b] = await Promise.all([stranky(q1), q2 ? stranky(q2) : Promise.resolve({ data: [] })])
+  if (a.error && /team_id/i.test(a.error.message || '') && clenoveTed.length) {
+    const c = await stranky(() => {
+      let q = zaklad().in('worker_id', clenoveTed)
+      if (od) q = q.gte('work_date', od)
+      if (doo) q = q.lte('work_date', doo)
+      return q
+    })
     return c.error ? null : (c.data || [])
   }
   if (a.error || b.error) return null

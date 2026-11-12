@@ -430,14 +430,47 @@ async function db(cesta, klic) {
 // nepřijde prázdná stránka — funguje to při jakémkoli stropu. `cesta` musí
 // mít jednoznačné řazení (order …,id), jinak by se stránky mohly překrývat.
 const STRANKA_DB = 1000;
+//
+// VÝKON (12. 11. 2026): první stránka sama (malý výpis = jeden dotaz jako dřív), a když
+// je plná, další stránky se čtou po vlnách VLNA_DB naráz — ne jedna po druhé. Seznam
+// týdnů při prvním otevření čte docházku od roku 2000 (u 200 lidí přes 50 000 řádků):
+// po jedné stránce to bylo 50 obrátek za sebou a strop 50 stránek ho přitom usekl
+// chybou. Stránky se skládají ve stejném pořadí; strop je 300 stránek (300 000 řádků).
+const VLNA_DB = 6;
+const MAX_STRANEK_DB = 300;
 async function dbVsechno(cesta, klic) {
   const vse = [];
-  for (let strana = 0; strana < 50; strana++) {
-    const kus = await db(`${cesta}&limit=${STRANKA_DB}&offset=${vse.length}`, klic);
-    if (!kus || !kus.length) return vse;
-    vse.push(...kus);
+  const prvni = await db(`${cesta}&limit=${STRANKA_DB}&offset=0`, klic);
+  if (!prvni || !prvni.length) return vse;
+  for (const r of prvni) vse.push(r);
+  if (prvni.length < STRANKA_DB) return vse;
+  for (let strana = 1; strana < MAX_STRANEK_DB; strana += VLNA_DB) {
+    const pocet = Math.min(VLNA_DB, MAX_STRANEK_DB - strana);
+    const davka = await Promise.all(Array.from({ length: pocet }, (_, i) =>
+      db(`${cesta}&limit=${STRANKA_DB}&offset=${(strana + i) * STRANKA_DB}`, klic)));
+    for (const kus of davka) {
+      if (!kus || !kus.length) return vse;
+      for (const r of kus) vse.push(r);
+      if (kus.length < STRANKA_DB) return vse;
+    }
   }
   throw new Error('příliš mnoho řádků: ' + cesta.split('?')[0]);
+}
+
+// Seznam id do `in.(…)` po kusech. 200 uuid v jedné adrese je přes 7 kB a brány před
+// databází mají strop na délku adresy kolem 8 kB — odkaz s plnou firmou by spadl na 414.
+// `cteni(seznamVKusu)` vrací pole řádků jednoho kusu; kusy jdou souběžně a skládají se za
+// sebou. `razeni` (volitelné) srovná složený výsledek zpátky do pořadí jednoho dotazu.
+const KUS_ID = 100;
+async function podleId(ids, cteni, razeni) {
+  const seznam = Array.from(ids || []);
+  if (seznam.length <= KUS_ID) return cteni(seznam.map(encodeURIComponent).join(','));
+  const kusy = [];
+  for (let i = 0; i < seznam.length; i += KUS_ID) kusy.push(seznam.slice(i, i + KUS_ID));
+  const vysledky = await Promise.all(kusy.map(k => cteni(k.map(encodeURIComponent).join(','))));
+  const vse = [];
+  for (const v of vysledky) for (const r of (v || [])) vse.push(r);
+  return razeni ? vse.sort(razeni) : vse;
 }
 
 module.exports = async (req, res) => {
@@ -852,9 +885,16 @@ module.exports = async (req, res) => {
     const sPartou = (sloupce, odDne, doDne2, poradi = 'asc') => potom(dbVsechno(`attendance?select=${sloupce}` +
       `&team_id=in.(${teamIds.map(encodeURIComponent).join(',')})` +
       `&work_date=gte.${odDne}&work_date=lte.${doDne2}&order=work_date.${poradi},id.asc`, klic));
-    const bezParty = (sloupce, odDne, doDne2, poradi = 'asc') => potom(dbVsechno(`attendance?select=${sloupce}&team_id=is.null` +
-      `&worker_id=in.(${lideVeSkupinach.map(encodeURIComponent).join(',')})` +
-      `&work_date=gte.${odDne}&work_date=lte.${doDne2}&order=work_date.${poradi},id.asc`, klic));
+    // Lidé po kusech (adresa s 200 uuid je přes 7 kB); složené zpátky do pořadí dotazu (datum, id).
+    const bezParty = (sloupce, odDne, doDne2, poradi = 'asc') => potom(podleId(lideVeSkupinach,
+      (seznam) => dbVsechno(`attendance?select=${sloupce}&team_id=is.null` +
+        `&worker_id=in.(${seznam})` +
+        `&work_date=gte.${odDne}&work_date=lte.${doDne2}&order=work_date.${poradi},id.asc`, klic),
+      (a, b) => {
+        const d = String(a.work_date).localeCompare(String(b.work_date));
+        const o = poradi === 'desc' ? -d : d;
+        return o || String(a.id == null ? '' : a.id).localeCompare(String(b.id == null ? '' : b.id));
+      }));
 
     // Třetí kolo: docházka s partou (a týdny s partou) souběžně s lidmi.
     // (U dokladů se docházka nečte — viz rezimDokladu níž.)
@@ -903,9 +943,10 @@ module.exports = async (req, res) => {
       // „a1" — správce nahrává všechno jako <čas>_<jméno>, takže občanka
       // od správce má jméno stejného tvaru jako A1. Čtou se jen cesty.
       const zakazaneSoubory = async (lide) => {
-        const radky = await dbVsechno(`documents?select=file_path,file_url` +
-          `&worker_id=in.(${lide})&or=(doc_type.is.null,doc_type.not.in.(${druhyVDotazu}))` +
-          `&order=id.asc`, klic);
+        const radky = await podleId(String(lide).split(',').map(decodeURIComponent), (seznam) =>
+          dbVsechno(`documents?select=file_path,file_url` +
+            `&worker_id=in.(${seznam})&or=(doc_type.is.null,doc_type.not.in.(${druhyVDotazu}))` +
+            `&order=id.asc`, klic));
         return new Set((radky || []).map(cestaVKosi).filter(Boolean));
       };
 
@@ -913,9 +954,13 @@ module.exports = async (req, res) => {
         const doklady = {};
         if (lideOdkazu.size) {
           const [radkyD, zakazane] = await Promise.all([
-            dbVsechno(`documents?select=${SLOUPCE_DOKLADU}` +
-              `&worker_id=in.(${seznamLidi})&doc_type=in.(${druhyVDotazu})` +
-              `&order=uploaded_at.desc,id.asc`, klic),
+            podleId([...lideOdkazu], (seznam) => dbVsechno(`documents?select=${SLOUPCE_DOKLADU}` +
+              `&worker_id=in.(${seznam})&doc_type=in.(${druhyVDotazu})` +
+              `&order=uploaded_at.desc,id.asc`, klic), (a, b) => {
+              // pořadí jednoho dotazu: nahráno sestupně, pak id vzestupně
+              const u = String(b.uploaded_at == null ? '' : b.uploaded_at).localeCompare(String(a.uploaded_at == null ? '' : a.uploaded_at));
+              return u || String(a.id).localeCompare(String(b.id));
+            }),
             zakazaneSoubory(seznamLidi),
           ]);
           const videne = new Set();   // řádek přidaný mezi stránkami se může zopakovat
@@ -944,9 +989,9 @@ module.exports = async (req, res) => {
       const strana = String(dotaz.strana || '');
       if (!TVAR_ID_DOKLADU.test(idDokladu) || (strana !== 'predni' && strana !== 'zadni') ||
           !lideOdkazu.size) { nenalezen(); return; }
-      const nalez = await db(`documents?select=${SLOUPCE_DOKLADU}` +
+      const nalez = await podleId([...lideOdkazu], (seznam) => db(`documents?select=${SLOUPCE_DOKLADU}` +
         `&id=eq.${encodeURIComponent(idDokladu)}` +
-        `&worker_id=in.(${seznamLidi})&doc_type=in.(${druhyVDotazu})&limit=1`, klic);
+        `&worker_id=in.(${seznam})&doc_type=in.(${druhyVDotazu})&limit=1`, klic));
       const d = nalez && nalez[0];
       const druh = d && druhDokladu(d);
       const cesta = druh ? cestaDokladu(d) : '';
@@ -1048,11 +1093,12 @@ module.exports = async (req, res) => {
       // Páté kolo — výsledek se zpracuje až níž.
       const ids2 = [...new Set(vybraneDny.map(d => d.z.worker_id))].filter(Boolean);
       if (ids2.length) {
-        const seznam2 = ids2.map(encodeURIComponent).join(',');
-        slibDovolene = potom(db(
+        // Po kusech (viz podleId); strop 300 řádků a pořadí platí pro celek jako dřív.
+        slibDovolene = potom(podleId(ids2, (seznam2) => db(
           `vacations?select=worker_id,date_from,date_to,type,note` +
           `&worker_id=in.(${seznam2})&date_to=gte.${od}` +
-          `&order=date_from.asc&limit=300`, klic));
+          `&order=date_from.asc&limit=300`, klic),
+          (a, b) => String(a.date_from).localeCompare(String(b.date_from))).then(v => v.length > 300 ? v.slice(0, 300) : v));
       }
 
       let jmena = {}, sazbaTed = {}, provizeTed = {}, bezProvize = new Set(), historie = {};
@@ -1064,7 +1110,6 @@ module.exports = async (req, res) => {
       // lidem na stavbu přímo a potřebuje vědět, koho smí poslat s dodávkou.
       let telefony = {}, ridicaky = {}, ubytovani = {}, fotky = {};
       if (ids.length) {
-        const seznamIds = ids.map(encodeURIComponent).join(',');
 
         // ČTYŘI DOTAZY NARÁZ, NE ČTYŘI ZA SEBOU.
         //
@@ -1096,40 +1141,40 @@ module.exports = async (req, res) => {
           // viděl u každého člověka sazbu i provizi — vyžádal si to sám, aby
           // si mohl fakturu překontrolovat. V appce zůstává provize dál jen
           // pro správce.
-          db(`profiles?select=id,full_name,hourly_rate_worker,phone&id=in.(${seznamIds})`, klic),
+          podleId(ids, (s) => db(`profiles?select=id,full_name,hourly_rate_worker,phone&id=in.(${s})`, klic)),
           // ŘIDIČÁK SE POSUZUJE STEJNĚ JAKO V UPOMÍNCE (check-expiring-docs):
           // doklad platí, dokud nebyl odmítnutý nebo označený jako nečitelný.
           // Druhé, vlastní pravidlo by se časem rozešlo s appkou — přesně
           // jako by se rozešlo zaokrouhlování hodin, kdyby se počítalo dvakrát.
           // NEJDE VEN SAMOTNÝ DOKLAD ANI JEHO ČÍSLO, jen „má / nemá" a datum.
-          db(`documents?select=worker_id,status,valid_until&doc_type=eq.ridicak` +
-             `&worker_id=in.(${seznamIds})`, klic).catch(tise('řidičáky se nenačetly')),
-          db(`worker_commissions?select=worker_id,provize,bez_provize&worker_id=in.(${seznamIds})`,
-             klic).catch(tisePenize('provize se nenačetly')),
+          podleId(ids, (s) => db(`documents?select=worker_id,status,valid_until&doc_type=eq.ridicak` +
+             `&worker_id=in.(${s})`, klic)).catch(tise('řidičáky se nenačetly')),
+          podleId(ids, (s) => db(`worker_commissions?select=worker_id,provize,bez_provize&worker_id=in.(${s})`,
+             klic)).catch(tisePenize('provize se nenačetly')),
           // Historie sazeb — bez ní by se týden, ve kterém se sazba měnila,
           // spočítal celý novou sazbou a nesedělo by to s fakturou.
-          db(`worker_rate_history?select=worker_id,druh,hodnota,valid_from&worker_id=in.(${seznamIds})` +
-             `&order=valid_from.asc`, klic).catch(tisePenize('historie sazeb se nenačetla')),
+          podleId(ids, (s) => db(`worker_rate_history?select=worker_id,druh,hodnota,valid_from&worker_id=in.(${s})` +
+             `&order=valid_from.asc`, klic), (a, b) => String(a.valid_from).localeCompare(String(b.valid_from))).catch(tisePenize('historie sazeb se nenačetla')),
           // Adresa ubytování (od 30. 9. 2026). Zvlášť a s vlastním ošetřením —
           // bez ní se stránka obejde. Starší sloupec ubytovani_adresa nemusí
           // existovat, proto záloha jen s hlavním. KÓDY SE NEČTOU NIKDY.
-          db(`profiles?select=id,accommodation_address,ubytovani_adresa&id=in.(${seznamIds})`, klic)
-            .catch(() => db(`profiles?select=id,accommodation_address&id=in.(${seznamIds})`, klic))
+          podleId(ids, (s) => db(`profiles?select=id,accommodation_address,ubytovani_adresa&id=in.(${s})`, klic))
+            .catch(() => podleId(ids, (s) => db(`profiles?select=id,accommodation_address&id=in.(${s})`, klic)))
             .catch(tise('ubytování se nenačetlo')),
           // Zaměstnanci firem (s.r.o.) — jejich hodiny fakturuje firma její
           // sazbou a provize se počítá její provizí. Stejně jako Provize,
           // report firmy i faktura firmy v appce.
-          db(`profiles?select=id,zamestnavatel_id&id=in.(${seznamIds})`, klic)
+          podleId(ids, (s) => db(`profiles?select=id,zamestnavatel_id&id=in.(${s})`, klic))
             .catch(tisePenize('zařazení pod firmu se nenačetlo')),
           // Fotka pracovníka z appky (majitel 1. 10. 2026: „aby se ty fotky
           // propsaly i do toho odkazu"). Zvlášť a potichu — bez fotky se
           // stránka obejde. Ven jde jen odkaz do našeho úložiště fotek.
-          db(`profiles?select=id,avatar_url&id=in.(${seznamIds})`, klic)
+          podleId(ids, (s) => db(`profiles?select=id,avatar_url&id=in.(${s})`, klic))
             .catch(tise('fotky se nenačetly')),
           // Vlastní provize zaměstnance (od 1. 10. 2026, stejně jako v appce):
           // kdo ji má zapnutou a vyplněnou, počítá se jeho sazbou místo šéfovy.
           // Bez migrace sloupec není → nikdo, jako dosud.
-          db(`worker_commissions?select=worker_id&vlastni_provize_zamestnance=is.true&worker_id=in.(${seznamIds})`, klic)
+          podleId(ids, (s) => db(`worker_commissions?select=worker_id&vlastni_provize_zamestnance=is.true&worker_id=in.(${s})`, klic))
             .catch(tisePenize('vlastní provize zaměstnanců se nenačetly')),
         ]);
         for (const p of (vlastni || [])) vlastniProvize.add(p.worker_id);
