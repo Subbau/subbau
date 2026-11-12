@@ -36010,7 +36010,7 @@ async function generateAttendanceExport() {
   if (!checked.length) { showToast('⚠️ Vyberte aspoň jednoho pracovníka'); return }
   const ids = checked.map(c => c.value)
 
-  let startStr, endStr, periodLabel, obdobiDe
+  let startStr, endStr, periodLabel, obdobiDe, expWk = null, expYr = null   // týden se zachytí jednou, před dotazy
   if (period === 'day') {
     const d = document.getElementById('export-date')?.value
     if (!d) { showToast('⚠️ Vyberte datum'); return }
@@ -36021,6 +36021,7 @@ async function generateAttendanceExport() {
     const kw = document.getElementById('export-kw')?.value
     if (!kw) { showToast('⚠️ Vyberte týden'); return }
     const [week, year] = kw.split('-').map(Number)
+    expWk = week; expYr = year
     const sd = getWeekStartDate(week, year); const ed = new Date(sd); ed.setDate(ed.getDate()+6)
     startStr = localDateStr(sd); endStr = localDateStr(ed)
     obdobiDe = 'KW' + week + '_' + year
@@ -36029,12 +36030,13 @@ async function generateAttendanceExport() {
 
   showToast('⏳ Generuji PDF...')
 
-  const { data: att } = await sb.from('attendance')
+  const { data: att, error: attErr } = await sb.from('attendance')
     .select('*, worker:profiles!worker_id(full_name, profession)')
     .in('worker_id', ids)
     .gte('work_date', startStr).lte('work_date', endStr)
     .order('work_date').order('check_in')
 
+  if (attErr) { showToast('❌ Docházku se nepodařilo načíst — zkuste to prosím znovu'); return }
   if (!att?.length) { showToast('❌ Žádná data pro zvolené období a pracovníky'); return }
 
   const T = lang === 'en'
@@ -36067,8 +36069,7 @@ async function generateAttendanceExport() {
   const foremanByWorker = {}
   if (period === 'week') {
     try {
-      const kw = document.getElementById('export-kw')?.value
-      const [wk, yr] = kw.split('-').map(Number)
+      const wk = expWk, yr = expYr
       const { data: sheets, error: shErr } = await sb.from('weekly_hour_sheets')
         .select('worker_id, foreman_name, foreman_signature, created_at')
         .in('worker_id', ids).eq('kw', wk).eq('kw_year', yr)
@@ -36607,7 +36608,12 @@ async function savePdfDirect(html, filename) {
   try {
     // Počkej, až se načtou obrázky (podpis)
     const imgs = Array.from(holder.querySelectorAll('img'))
-    await Promise.all(imgs.map(img => img.complete ? Promise.resolve() : new Promise(res => { img.onload = res; img.onerror = res })))
+    // Časový limit: zavěšený přenos podpisu nesmí držet přípravu PDF donekonečna.
+    await Promise.race([
+      Promise.all(imgs.map(img => img.complete ? Promise.resolve() : new Promise(res => { img.onload = res; img.onerror = res }))),
+      new Promise(res => setTimeout(res, 15000))
+    ])
+    if (imgs.some(img => !img.complete)) showToast('⚠️ Obrázek (podpis) se nenačetl včas — v PDF může chybět')
     await new Promise(r => setTimeout(r, 150))
 
     const body = holder.querySelector('#__pdfbody')
@@ -36731,6 +36737,22 @@ async function savePdfDirect(html, filename) {
         pdf.addImage(img.imgData, 'JPEG', margin, cursorY, usableW, blockMM)
         cursorY += blockMM + 6
         firstOnPage = false
+      }
+      // Obsah za posledním stránkovaným blokem (datum vygenerování, označení systému)
+      // se dřív do PDF nedostal, přestože je v náhledu.
+      const vsechny = Array.from(body.children)
+      const zbytek = vsechny.slice(vsechny.lastIndexOf(breakBlocks[breakBlocks.length - 1]) + 1)
+      if (zbytek.some(n => (n.textContent || '').trim() || n.querySelector?.('img'))) {
+        const wrapZ = document.createElement('div')
+        wrapZ.style.cssText = 'width:746px;background:#fff'
+        zbytek.forEach(n => wrapZ.appendChild(n.cloneNode(true)))
+        body.parentElement.appendChild(wrapZ)
+        const zimg = await renderEl(wrapZ)
+        wrapZ.remove()
+        const zMM = (zimg.h * usableW) / zimg.w
+        if (cekaNovyList || (cursorY + zMM) > (pageH - margin)) { pdf.addPage(); cursorY = margin }
+        if (zMM > usableH) await addSlicedOriz(zimg, cursorY)
+        else pdf.addImage(zimg.imgData, 'JPEG', margin, cursorY, usableW, zMM)
       }
     } else {
       // Žádné stránkovací bloky → původní chování (jeden canvas, sliced).
