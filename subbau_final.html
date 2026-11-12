@@ -44301,7 +44301,7 @@ async function uploadContract() {
   if (!contractId) { showToast('❌ Nepodařilo se získat ID smlouvy'); progress.style.display='none'; return }
 
   // Pošli notifikaci pracovníkovi
-  await sb.from('notifications').insert({
+  const { error: notifErr1 } = await sb.from('notifications').insert({
     worker_id: workerId,
     title: '✍️ Nová smlouva k podpisu',
     message: `Byla vám zaslána smlouva "${escAttr(title)}". Přejděte do sekce Smlouvy a podepište ji.`,
@@ -44318,7 +44318,7 @@ async function uploadContract() {
   document.getElementById('contract-title').value = ''
   document.getElementById('contract-worker').value = ''
 
-  showToast('✅ Smlouva nahrána')
+  showToast(notifErr1 ? '⚠️ Smlouva je nahraná, ale zpráva pracovníkovi se neodeslala' : '✅ Smlouva nahrána')
   loadAdminContracts()
   if (fileUrl) offerFillThenSignPlace(contractId, title, fileUrl)
 }
@@ -44386,7 +44386,14 @@ async function uploadSignedContract() {
 // OSVČ ji ještě musí elektronicky podepsat v appce. Na rozdíl od uploadContract()
 // admin nemusí podpis kreslit znovu (soubor ho už obsahuje), na rozdíl od
 // uploadSignedContract() to není hotovo — čeká se na podpis pracovníka.
+let _uploadAdminSignedBezi = false
 async function uploadAdminSignedContract() {
+  // Codex 11. 11. 2026: dvojí klepnutí na pomalém spojení vytvořilo dvě smlouvy a dvě oznámení.
+  if (_uploadAdminSignedBezi) return
+  _uploadAdminSignedBezi = true
+  try { await uploadAdminSignedContractBeh() } finally { _uploadAdminSignedBezi = false }
+}
+async function uploadAdminSignedContractBeh() {
   const workerId = document.getElementById('contract-worker').value
   const title = document.getElementById('contract-title').value.trim()
   if (!workerId) { showToast('⚠️ Vyberte pracovníka'); return }
@@ -44431,17 +44438,26 @@ async function uploadAdminSignedContract() {
       created_at: new Date().toISOString()
     }).select().single(), 15000))
   } catch (e) { dbErr = e }
+  if (dbErr) {
+    // Codex 11. 11. 2026: po vypršení času mohl zápis přesto doběhnout — nejdřív ověřit, ať se smlouva nezaloží dvakrát.
+    try {
+      const { data: uzJe } = await sb.from('contracts').select('*').eq('worker_id', workerId).eq('file_url', fileUrl).limit(1)
+      if (uzJe && uzJe.length) { contractData = uzJe[0]; dbErr = null }
+    } catch (e) {}
+  }
   if (dbErr) { showToast('❌ Chyba DB: ' + dbErr.message); progress.style.display = 'none'; return }
 
   // Pošli notifikaci pracovníkovi — stejná jako u běžného nahrání k podpisu
+  let zpravaNeodeslana = false
   if (contractData?.id) {
-    await sb.from('notifications').insert({
+    const { error: notifErr } = await sb.from('notifications').insert({
       worker_id: workerId,
       title: '✍️ Nová smlouva k podpisu',
       message: `Byla vám zaslána smlouva "${escAttr(title)}". Přejděte do sekce Smlouvy a podepište ji.`,
       type: 'smlouva',
       is_read: false
     })
+    if (notifErr) zpravaNeodeslana = true
   }
 
   progress.style.display = 'none'
@@ -44452,7 +44468,7 @@ async function uploadAdminSignedContract() {
   document.getElementById('contract-title').value = ''
   document.getElementById('contract-worker').value = ''
 
-  showToast('✅ Smlouva nahrána')
+  showToast(zpravaNeodeslana ? '⚠️ Smlouva je nahraná, ale zpráva pracovníkovi se neodeslala' : '✅ Smlouva nahrána')
   loadAdminContracts()
   if (fileUrl && contractData?.id) offerFillThenSignPlace(contractData.id, title, fileUrl)
 }
@@ -44502,7 +44518,10 @@ async function ensureContractOriginal(contractId) {
 
 // Jediná cesta, kterou se mění file_url smlouvy — vždy nejdřív zazálohuje původní verzi.
 async function updateContractFile(contractId, updateData) {
-  if (updateData && updateData.file_url) await ensureContractOriginal(contractId)
+  // Codex 11. 11. 2026: bez úspěšné zálohy původní verze se file_url nemění (jinak by se původní verze nenávratně ztratila).
+  if (updateData && updateData.file_url && !(await ensureContractOriginal(contractId))) {
+    return { error: { message: 'Původní verzi smlouvy se nepodařilo odložit — smlouva zůstala beze změny. Zkuste to znovu.' } }
+  }
   // .select('id'): update, který nezměnil ani jeden řádek (smlouva mezitím zmizela, chybí oprávnění), se
   // dřív tvářil jako úspěch (Codex 6. 11. 2026).
   const r = await sb.from('contracts').update(updateData).eq('id', contractId).select('id')
@@ -44533,17 +44552,28 @@ async function downloadPdfUrl(url, filename) {
 }
 
 // Přehled souborů smluv v úložišti — jeden dotaz pro celý seznam, ne pro každou smlouvu.
+// Codex 11. 11. 2026: výpis složky po stránkách — víc než 1000 souborů se dřív nenačetlo a verze zmizely z nabídky.
+async function listStorageVse(slozka) {
+  let out = []
+  for (let off = 0, i = 0; i < 100; i++, off += 1000) {
+    const { data, error } = await sb.storage.from('contracts').list(slozka, { limit: 1000, offset: off })
+    if (error) throw error
+    out = out.concat(data || [])
+    if (!data || data.length < 1000) break
+  }
+  return out
+}
 async function loadContractStorageIndex() {
   const idx = { originals: new Set(), filled: {} }
   try {
-    const { data: signed } = await sb.storage.from('contracts').list('signed', { limit: 1000 })
+    const signed = await listStorageVse('signed')
     ;(signed || []).forEach(f => {
       const m = f && f.name && f.name.match(/^(.+)_original\.pdf$/)
       if (m) idx.originals.add(m[1])
     })
   } catch (e) { console.warn('[smlouvy] výpis složky signed:', e?.message) }
   try {
-    const { data: root } = await sb.storage.from('contracts').list('', { limit: 1000 })
+    const root = await listStorageVse('')
     ;(root || []).forEach(f => {
       const m = f && f.name && f.name.match(/^filled_(.+?)_(\d+)\.pdf$/)
       if (!m) return
@@ -44588,12 +44618,13 @@ async function resetContractToOriginal(contractId, title) {
     company_signature_url: null, company_signed_at: null, company_signer_name: null,
     status: 'admin_pending'
   }
-  let { error } = await sb.from('contracts')
-    .update({ ...zaklad, fill_fields: null, fill_base_at: null, fill_base_sigs: null }).eq('id', contractId)
+  let { data, error } = await sb.from('contracts')
+    .update({ ...zaklad, fill_fields: null, fill_base_at: null, fill_base_sigs: null }).eq('id', contractId).select('id')
   if (error && /fill_fields|fill_base_at|fill_base_sigs/.test(error.message || '')) {
-    ;({ error } = await sb.from('contracts').update(zaklad).eq('id', contractId))
+    ;({ data, error } = await sb.from('contracts').update(zaklad).eq('id', contractId).select('id'))
   }
   if (error) { showToast('❌ Chyba: ' + error.message); return }
+  if (!data || !data.length) { showToast('❌ Smlouva se nezměnila — mezitím zmizela, nebo chybí oprávnění'); return }
 
   // Podklad pro vyplňování patřil ke staré podobě — ať se příště vyrobí nový.
   try { await sb.storage.from('contracts').remove([fillBasePath(contractId)]) } catch (e) {}
@@ -44776,13 +44807,23 @@ async function deleteContract(contractId, title, fileUrl, adminSigUrl, workerSig
   if (error) { showToast('❌ Chyba: ' + error.message); return }
   if (!smazanoS || !smazanoS.length) { showToast('❌ Smlouva se nesmazala — databáze to nepovolila'); return }
 
-  for (const path of paths) {
+  // Codex 11. 11. 2026: mazaly se jen tři předané soubory; originál, podklad, firemní verze a vyplněné verze zůstávaly v úložišti.
+  try {
+    paths.push('signed/' + contractId + '_original.pdf', fillBasePath(contractId))
+    const { data: vSigned } = await sb.storage.from('contracts').list('signed', { limit: 1000, search: contractId })
+    ;(vSigned || []).forEach(f => { if (f && f.name && f.name.indexOf(contractId + '_') === 0) paths.push('signed/' + f.name) })
+    const { data: vRoot } = await sb.storage.from('contracts').list('', { limit: 1000, search: 'filled_' + contractId })
+    ;(vRoot || []).forEach(f => { if (f && f.name && f.name.indexOf('filled_' + contractId + '_') === 0) paths.push(f.name) })
+  } catch (e) { console.warn('Storage list:', e) }
+  let souboryZustaly = false
+  for (const path of Array.from(new Set(paths))) {
     try {
-      await sb.storage.from('contracts').remove([path])
-    } catch(e) { console.warn('Storage delete:', e) }
+      const { error: rmErr } = await sb.storage.from('contracts').remove([path])
+      if (rmErr) { souboryZustaly = true; console.warn('Storage delete:', rmErr.message) }
+    } catch(e) { souboryZustaly = true; console.warn('Storage delete:', e) }
   }
 
-  showToast('🗑 Smlouva smazána: ' + title)
+  showToast(souboryZustaly ? '🗑 Smlouva smazána: ' + title + ' (některé soubory v úložišti se nepodařilo odstranit)' : '🗑 Smlouva smazána: ' + title)
   loadAdminContracts()
 }
 
@@ -44794,10 +44835,16 @@ async function openCompanyLinkModal(contractId, title) {
   if (!m) return
   document.getElementById('company-link-title').textContent = title || ''
   document.getElementById('company-link-expiry').value = '3'
+  // Codex 11. 11. 2026: před načtením vyčistit odkaz předchozí smlouvy a pozdní odpověď cizí smlouvy zahodit.
+  document.getElementById('company-link-url').value = ''
+  document.getElementById('company-link-expiry-info').textContent = ''
+  document.getElementById('company-link-result').style.display = 'none'
+  document.getElementById('company-link-gen-area').style.display = 'block'
   m.style.display = 'flex'
 
   // Má smlouva už aktivní (neprošlý) odkaz? Pak ho rovnou zobraz (lze kopírovat / zneplatnit).
   const { data } = await sb.from('contracts').select('sign_token, sign_token_expires, company_signed_at').eq('id', contractId).maybeSingle()
+  if (_companyLinkContractId !== contractId) return
   const tokenActive = data?.sign_token && (!data.sign_token_expires || new Date(data.sign_token_expires) > new Date())
   if (tokenActive) {
     const url = window.location.origin + window.location.pathname + '?sign=' + data.sign_token
@@ -44824,11 +44871,14 @@ async function generateCompanyLink() {
   // Token vyrábíme kryptografickým generátorem, ne Math.random() — ten se dá při troše snahy dopočítat.
   const token = 'sb_' + Array.from(crypto.getRandomValues(new Uint8Array(24))).map(x => x.toString(16).padStart(2, '0')).join('')
   const expires = new Date(); expires.setDate(expires.getDate() + days)
-  const { error } = await sb.from('contracts').update({
+  const cid = _companyLinkContractId
+  const { data: zmeneno, error } = await sb.from('contracts').update({
     sign_token: token,
     sign_token_expires: expires.toISOString()
-  }).eq('id', _companyLinkContractId)
+  }).eq('id', cid).select('id')
   if (error) { showToast('❌ Chyba: ' + error.message); return }
+  if (!zmeneno || zmeneno.length !== 1) { showToast('❌ Odkaz se nepodařilo uložit — smlouva se mezitím změnila'); return }
+  if (_companyLinkContractId !== cid) return
   const url = window.location.origin + window.location.pathname + '?sign=' + token
   document.getElementById('company-link-url').value = url
   document.getElementById('company-link-expiry-info').textContent =
@@ -44836,23 +44886,26 @@ async function generateCompanyLink() {
   document.getElementById('company-link-gen-area').style.display = 'none'
   document.getElementById('company-link-result').style.display = 'block'
 }
-function copyCompanyLink() {
+async function copyCompanyLink() {
   const inp = document.getElementById('company-link-url')
   if (!inp) return
   inp.select(); inp.setSelectionRange(0, 99999)
   try {
-    navigator.clipboard.writeText(inp.value)
+    // Codex 11. 11. 2026: zamítnutí schránky (Safari) se dřív tvářilo jako úspěch.
+    await navigator.clipboard.writeText(inp.value)
     showToast('📋 Odkaz zkopírován')
   } catch(e) {
-    document.execCommand('copy')
-    showToast('📋 Odkaz zkopírován')
+    let ok = false
+    try { ok = document.execCommand('copy') } catch (e2) {}
+    showToast(ok ? '📋 Odkaz zkopírován' : '⚠️ Odkaz se nepodařilo zkopírovat — označte ho a zkopírujte ručně')
   }
 }
 async function revokeCompanyLink() {
   if (!_companyLinkContractId) return
   if (!confirm('Zneplatnit tento odkaz? Firma už přes něj nepodepíše.')) return
-  const { error } = await sb.from('contracts').update({ sign_token: null, sign_token_expires: null }).eq('id', _companyLinkContractId)
+  const { data: zmeneno, error } = await sb.from('contracts').update({ sign_token: null, sign_token_expires: null }).eq('id', _companyLinkContractId).select('id')
   if (error) { showToast('❌ Chyba: ' + error.message); return }
+  if (!zmeneno || zmeneno.length !== 1) { showToast('❌ Odkaz se nepodařilo zneplatnit — smlouva se mezitím změnila'); return }
   showToast('🔒 Odkaz zneplatněn')
   closeCompanyLinkModal()
 }
@@ -44873,7 +44926,7 @@ async function showCompanySignedView(contractId) {
   // Audit 30. 9. 2026: potvrzení „Vertrag unterschrieben" se ukazovalo vždycky,
   // i když databáze zápis nepustila (chybějící datum se doplnilo dnešním).
   // Teď se ukáže jen tehdy, když podpis v databázi opravdu je.
-  if (!chybaCteni && c && !c.company_signed_at) {
+  if (chybaCteni || !c || !c.company_signed_at) {
     // DENÍK CHYB (2. 11. 2026): firma podepisuje bez účtu — bez deníku by se o nepovedeném podpisu nikdo nedozvěděl. Klíč z odkazu (?sign=) do deníku NIKDY; jádro na téhle stránce zapisuje bez přihlášení (podpis-firmy).
     body.innerHTML = csErrorBox('Unterschrift nicht gespeichert',
       'Ihre Unterschrift konnte leider nicht gespeichert werden. Bitte versuchen Sie es erneut oder kontaktieren Sie SubBau.'
@@ -44986,8 +45039,9 @@ async function submitCompanyUploadedPDF() {
   if (btn) { btn.textContent = 'Wird hochgeladen...'; btn.disabled = true }
   try {
     const cId = _companySignContract.id
-    const path = `signed/${cId}_company_uploaded.pdf`
-    const { error: upErr } = await sb.storage.from('contracts').upload(path, _companyUploadFile, { contentType: 'application/pdf', upsert: true })
+    // Codex 11. 11. 2026: každý upload má vlastní neměnnou cestu — dřív upsert přepsal soubor, na který už mohl vést odkaz z dřívějšího podpisu.
+    const path = `signed/${cId}_company_uploaded_${Date.now()}.pdf`
+    const { error: upErr } = await sb.storage.from('contracts').upload(path, _companyUploadFile, { contentType: 'application/pdf', upsert: false })
     if (upErr) throw new Error(upErr.message)
     const { data: urlData } = sb.storage.from('contracts').getPublicUrl(path)
     const signedUrl = urlData?.publicUrl
@@ -45166,6 +45220,7 @@ async function openPdfFillModal(contractId, title, fileUrl) {
   pdfFillState.fields = []
   pdfFillState.hadSaved = false
   pdfFillState.zrusitPodpisy = false
+  pdfFillState.pdfBytes = null   // Codex 11. 11. 2026: ukládat jde jen z PDF, které se v tomto otevření opravdu načetlo
   pdfFillState.page = 1
   pdfFillState.fontSize = 16
   document.getElementById('pdf-fill-title').textContent = title || 'Vyplnit smlouvu'
@@ -45187,9 +45242,13 @@ async function openPdfFillModal(contractId, title, fileUrl) {
       if (r.error && /fill_fields|fill_base_at|fill_base_sigs/.test(r.error.message || '')) {
         r = await sb.from('contracts').select(SEL).eq('id', contractId).maybeSingle()
       }
+      // Codex 11. 11. 2026: bez načtených podpisů a polí by se editor tvářil jako u čisté smlouvy a uložení
+      // by přepsalo podklad i dřívější text. Při chybě se okno nenačte (uložit nejde).
+      if (r.error) throw r.error
       saved = r.data || null
-    } catch(e) { console.warn('[smlouva] stav smlouvy se nenačetl:', e?.message) }
+    } catch(e) { console.warn('[smlouva] stav smlouvy se nenačetl:', e?.message); if (!jeMoje()) return; throw new Error('stav smlouvy se nenačetl, zkuste to znovu') }
     if (!jeMoje()) return
+    if (!saved) throw new Error('smlouva nebyla nalezena')
 
     const ulozenaPole = Array.isArray(saved && saved.fill_fields) ? saved.fill_fields : []
     const maZaklad = !!(saved && saved.fill_base_at)
@@ -45445,7 +45504,8 @@ function pdfFillCreateFieldEl(f) {
   input.spellcheck = false
   input.textContent = f.text || ''
   input.style.cssText = `min-width:24px;min-height:${fsPx+6}px;font-size:${fsPx}px;font-family:Helvetica,Arial,sans-serif;color:#000;background:rgba(255,255,150,.35);border:1px dashed #c79a00;border-radius:3px;padding:1px 3px;outline:none;white-space:pre;line-height:1.2`
-  input.addEventListener('input', () => { f.text = input.textContent })
+  // Codex 11. 11. 2026: Enter v některých prohlížečích vloží <div>/<br>, textContent je spojil do jednoho řádku.
+  input.addEventListener('input', () => { f.text = (typeof input.innerText === 'string' ? input.innerText : input.textContent).replace(/\r/g, '').replace(/\n$/, '') })
   input.addEventListener('keydown', (ev) => { if (ev.key === 'Escape') input.blur() })
 
   // drag handle (☰) — táhne celé pole
@@ -45509,11 +45569,27 @@ async function pdfFillSave() {
   // vrátí do původní podoby. U nevyplněné smlouvy je to skoro jistě omyl.
   if (!filled.length && !pdfFillState.hadSaved) { showToast('⚠️ Nejdřív napište nějaký text'); return }
   if (!filled.length && !confirm('Smažete tím z PDF všechen dopsaný text a smlouva se vrátí do původní podoby.\n\nPokračovat?')) return
+  if (!pdfFillState.pdfBytes) { showToast('⚠️ PDF se ještě nenačetlo'); return }
   const btn = document.getElementById('pdf-fill-save-btn')
   if (btn) { btn.disabled = true; btn.textContent = '⏳ Ukládám…' }
   const loading = document.getElementById('pdf-fill-loading')
   if (loading) { loading.style.display = 'flex'; loading.textContent = 'Vkládám text do PDF…' }
+  // Zachycení při startu: okno se za běhu ukládání může zavřít a otevřít u jiné smlouvy.
+  const contractIdUkladani = pdfFillState.contractId
   try {
+    // Codex 11. 11. 2026: mezitím mohl někdo podepsat nebo smlouvu změnit — editor pracuje s PDF z otevření
+    // a uložením by podpis z PDF zmizel (v databázi by zůstal). Změnu poznáme a uložení odmítneme.
+    {
+      const { data: akt, error: aktErr } = await sb.from('contracts')
+        .select('file_url,signature_url,admin_signature_url,company_signature_url').eq('id', contractIdUkladani).maybeSingle()
+      const sigs = a => [a && a.signature_url, a && a.admin_signature_url, a && a.company_signature_url].filter(Boolean).join('|')
+      if (aktErr || !akt) throw new Error('nepodařilo se ověřit aktuální stav smlouvy, zkuste to znovu')
+      if (akt.file_url !== pdfFillState.fileUrl || sigs(akt) !== pdfFillState.podpisyTed.join('|')) {
+        if (loading) loading.style.display = 'none'
+        showToast('⚠️ Smlouva se mezitím změnila (nový podpis nebo úprava). Zavřete okno a otevřete ji znovu, jinak by se změna ztratila.')
+        return
+      }
+    }
     await ensureLib('pdflib')
     const { PDFDocument, rgb } = PDFLib
     const pdfDoc = await PDFDocument.load(pdfFillState.pdfBytes.slice(0))
@@ -45613,9 +45689,16 @@ async function pdfFillSave() {
       let { error: dbErr } = await updateContractFile(pdfFillState.contractId, upd)
       if (ukladatPole && dbErr && /fill_fields|fill_base_at|fill_base_sigs/.test(dbErr.message || '')) {
         bezMigrace = true
-        ;({ error: dbErr } = await updateContractFile(pdfFillState.contractId, { file_url: publicUrl }))
+        // Codex 11. 11. 2026: vypadnou jen sloupce fill_*; zrušení podpisů a stav se zachovají.
+        const { fill_fields: _ff, fill_base_at: _fb, fill_base_sigs: _fs, ...updBezFill } = upd
+        ;({ error: dbErr } = await updateContractFile(pdfFillState.contractId, updBezFill))
       }
-      if (dbErr) showToast('⚠️ PDF uloženo, ale záznam smlouvy se nepodařilo aktualizovat')
+      if (dbErr) {
+        // Codex 11. 11. 2026: editor i napsaný text zůstávají otevřené, nepokračuje se výběrem podpisu.
+        showToast('❌ Záznam smlouvy se nepodařilo aktualizovat — text zůstává v okně, zkuste Uložit znovu')
+        if (loading) loading.style.display = 'none'
+        return
+      }
       else if (bezMigrace) showToast('⚠️ PDF uloženo. Text ale příště upravit nepůjde — spusťte migraci supabase-migrace-upravitelny-text-smlouvy.sql')
       else if (!ukladatPole) showToast('✅ Text dopsán do PDF (upravit ho příště nepůjde)')
       else showToast(pdfFillState.hadSaved ? '✅ Text ve smlouvě upraven' : '✅ Vyplněné PDF uloženo — příště půjde upravit')
@@ -45720,6 +45803,7 @@ async function loadMobContracts() {
   }
   const div = document.getElementById('mob-contracts')
   if (!div) return
+  if (chybaSmluv) { console.warn('[smlouvy] načtení selhalo:', chybaSmluv.message); return }   // Codex 11. 11. 2026: výpadek není „žádné smlouvy" — zůstane poslední načtený seznam
   if (!data?.length) {
     div.innerHTML=`<div style="text-align:center;color:var(--text3);padding:30px 20px">
       <div style="font-size:40px;margin-bottom:10px">📄</div>
@@ -45752,7 +45836,7 @@ async function loadMobContracts() {
       </div>
       <div style="display:inline-flex;align-items:center;gap:6px;background:#fff;border:1px solid ${si.border};color:${si.color};font-size:11.5px;font-weight:800;padding:5px 11px;border-radius:20px;margin-bottom:${needsSign||isSigned?'12px':'0'}">${si.icon}<span>${si.label}</span></div>
       ${needsSign ? `<button onclick="openSignModal('${c.id}','${jsStr((c.title||''))}','${jsStr(c.file_url||'')}')" style="width:100%;padding:14px;background:#9c3b22;color:#fff;border:none;border-radius:12px;font-size:14px;font-weight:800;cursor:pointer;font-family:'Archivo',-apple-system,sans-serif;display:flex;align-items:center;justify-content:center;gap:8px"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:17px;height:17px"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/></svg><span>Podepsat smlouvu</span></button>` : ''}
-      ${isSigned && c.signature_url ? `<button onclick="openPdfUrl('${jsStr(c.signature_url)}')" style="width:100%;padding:11px;background:#fff;border:1.5px solid #3f7d54;border-radius:12px;font-size:13px;font-weight:700;cursor:pointer;font-family:inherit;color:#2f6b45;display:flex;align-items:center;justify-content:center;gap:8px"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:16px;height:16px"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg><span>Zobrazit podepsanou smlouvu</span></button>` : ''}
+      ${isSigned && c.signature_url ? `<button onclick="openPdfUrl('${jsStr(c.file_url || c.signature_url)}')" style="width:100%;padding:11px;background:#fff;border:1.5px solid #3f7d54;border-radius:12px;font-size:13px;font-weight:700;cursor:pointer;font-family:inherit;color:#2f6b45;display:flex;align-items:center;justify-content:center;gap:8px"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:16px;height:16px"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg><span>Zobrazit podepsanou smlouvu</span></button>` : ''}
       ${isSigned && c.file_url && !c.signature_url ? `<button onclick="openPdfUrl('${jsStr(c.file_url)}')" style="width:100%;padding:11px;background:#fff;border:1.5px solid #3f7d54;border-radius:12px;font-size:13px;font-weight:700;cursor:pointer;font-family:inherit;color:#2f6b45;display:flex;align-items:center;justify-content:center;gap:8px"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:16px;height:16px"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg><span>Zobrazit smlouvu</span></button>` : ''}
     </div>`
   }).join('')
@@ -45801,7 +45885,20 @@ function initSignaturePad(canvas, opts = {}) {
     ctx.lineCap = 'round'
     ctx.lineJoin = 'round'
     ctx.strokeStyle = color
-    if (prev) { try { ctx.putImageData(prev, 0, 0) } catch(e){} }
+    if (prev) {
+      // Codex 11. 11. 2026: bitmapa se dřív vracela ve stejných pixelech a při zmenšení (otočení telefonu) se oříznula.
+      // Podpis se teď přiměřeně zmenší/zvětší do nových rozměrů.
+      try {
+        const tmp = document.createElement('canvas')
+        tmp.width = prev.width; tmp.height = prev.height
+        tmp.getContext('2d').putImageData(prev, 0, 0)
+        const k = Math.min(canvas.width / prev.width, canvas.height / prev.height)
+        ctx.save()
+        ctx.setTransform(1, 0, 0, 1, 0, 0)
+        ctx.drawImage(tmp, 0, 0, prev.width * k, prev.height * k)
+        ctx.restore()
+      } catch(e){}
+    }
   }
   resize()
 
@@ -46078,7 +46175,11 @@ async function potvrdOznameni() {
       ;({ data, error } = await withTimeout(sb.from('oznameni_precteno')
         .update({ potvrzeno: true, kdy: new Date().toISOString() })
         .eq('oznameni_id', annId).eq('worker_id', currentUser.id).select('oznameni_id'), 12000))
-      if (error || !data || !data.length) {
+      // Codex 11. 11. 2026: skutečná chyba (výpadek sítě, ne chybějící migrace) se nesmí tvářit jako potvrzení
+      // ani si ho pamatovat v telefonu — chyba zůstane a pracovník to zkusí znovu.
+      if (error && !chybiMigraceOznameni(error)) {
+        data = null
+      } else if (error || !data || !data.length) {
         // Přepnout nejde (chybí migrace supabase-migrace-oznameni-potvrzeni.sql).
         // Když už potvrzené je, v pořádku; jinak si potvrzení zapamatuje aspoň
         // tenhle telefon, ať pracovník nezůstane u lišty, která nejde zavřít.
@@ -46189,10 +46290,17 @@ async function zverejniOznameniTed() {
 // předchozí — tak to fungovalo vždycky.
 async function nahradStaraOznameni(noveId, klic, bezMigrace) {
   const { data, error } = await sb.from('announcements')
-    .select(bezMigrace ? 'id' : 'id, komu, pro_lidi').eq('is_active', true).neq('id', noveId)
+    .select(bezMigrace ? 'id, created_at' : 'id, created_at, komu, pro_lidi').eq('is_active', true).neq('id', noveId)
   if (error) return null
-  const ids = (data || []).filter(a => bezMigrace
-    || (klic === 'vsem' ? a.pro_lidi == null : (a.komu && a.komu.klic === klic))).map(a => a.id)
+  // Codex 11. 11. 2026: vypínají se jen oznámení starší než to nové — souběžně vzniklé oznámení druhého správce
+  // zůstane svítit (dřív si dva správci navzájem vypnuli obě).
+  let hranice = null
+  try {
+    const { data: nov } = await sb.from('announcements').select('created_at').eq('id', noveId).maybeSingle()
+    if (nov && nov.created_at && !isNaN(new Date(nov.created_at))) hranice = new Date(nov.created_at).getTime()
+  } catch (e) {}
+  const ids = (data || []).filter(a => (hranice == null || !a.created_at || new Date(a.created_at).getTime() < hranice) && (bezMigrace
+    || (klic === 'vsem' ? a.pro_lidi == null : (a.komu && a.komu.klic === klic)))).map(a => a.id)
   if (!ids.length) return 0
   const { data: vyp, error: eVyp } = await sb.from('announcements')
     .update({ is_active: false }).in('id', ids).select('id')
@@ -46779,12 +46887,14 @@ async function loadNotifHistory() {
 
 async function loadMobNotifications() {
   if (!currentUser) return
-  const { data } = await sb.from('notifications')
+  const { data, error: chybaZprav } = await sb.from('notifications')
     .select('*')
     .eq('worker_id', currentUser.id)
     .order('created_at', { ascending: false })
   const div = document.getElementById('mob-notifications')
   if (!div) return
+  // Codex 11. 11. 2026: výpadek načítání není „žádné zprávy" — zůstane poslední načtený stav.
+  if (chybaZprav) { console.warn('[zprávy] načtení selhalo:', chybaZprav.message); return }
 
   // Badge počet nepřečtených
   const unread = data?.filter(n => !n.is_read).length || 0
@@ -46822,10 +46932,12 @@ async function loadMobNotifications() {
 async function markNotificationsRead() {
   if (!currentUser) return
   try {
-    await sb.from('notifications')
+    const { error: chybaOznaceni } = await sb.from('notifications')
       .update({ is_read: true })
       .eq('worker_id', currentUser.id)
       .eq('is_read', false)
+    // Codex 11. 11. 2026: při neúspěšném zápisu se badge neschová (počet by se po příštím načtení vrátil).
+    if (chybaOznaceni) { console.warn('[zprávy] označení za přečtené selhalo:', chybaOznaceni.message); return }
     // Skryj badge
     const badge = document.getElementById('mob-notif-count')
     if (badge) badge.style.display = 'none'
@@ -46895,11 +47007,13 @@ async function checkDocumentAlerts() {
 
   } else if (currentProfile?.role === 'osvec') {
     // OSVČ — zkontroluj jen své dokumenty
-    const { data } = await sb.from('documents')
+    const { data: dokumenty, error: chybaDokumentu } = await sb.from('documents')
       .select('*')
       .eq('worker_id', currentUser.id)
 
-    if (!data?.length) return
+    // Codex 11. 11. 2026: při chybě dotazu se nic nemění; prázdný seznam už povinné A1 kontroluje taky.
+    if (chybaDokumentu) { console.warn('[dokumenty] kontrola selhala:', chybaDokumentu.message); return }
+    const data = dokumenty || []
 
     const alerts = []
 
@@ -46920,10 +47034,14 @@ async function checkDocumentAlerts() {
       }
     })
 
-    if (!alerts.length) return
-
     const banner = document.getElementById('mob-doc-alert')
     const text = document.getElementById('mob-doc-alert-text')
+    if (!alerts.length) {
+      // Codex 11. 11. 2026: vyřešený problém nesmí dál svítit.
+      if (banner) banner.style.display = 'none'
+      if (text) text.innerHTML = ''
+      return
+    }
     if (!banner || !text) return
     banner.style.display = 'block'
     text.innerHTML = alerts.map(a => `<div style="margin-bottom:2px">${a}</div>`).join('')
@@ -47006,7 +47124,9 @@ async function saveTurnus() {
     return
   }
   showToast('✅ Turnus uložen')
-  loadTurnusInfo(work, off, start)
+  // Codex 11. 11. 2026: paměť profilu se po zápisu nezměnila a návrat do sekce vyplnil formulář starými hodnotami.
+  if (currentProfile) { currentProfile.turnus_work_weeks = work; currentProfile.turnus_off_weeks = off; currentProfile.turnus_start = start; currentProfile.turnus_weekends = weekends }
+  loadTurnusInfo(work, off, start, weekends)
 }
 
 function loadTurnus(profile) {
@@ -47022,15 +47142,15 @@ function loadTurnus(profile) {
     else { s.type = 'text'; s.value = '' }
   }
   if (wk) wk.value = profile.turnus_weekends ? 'true' : 'false'
-  loadTurnusInfo(profile.turnus_work_weeks, profile.turnus_off_weeks, profile.turnus_start)
+  loadTurnusInfo(profile.turnus_work_weeks, profile.turnus_off_weeks, profile.turnus_start, profile.turnus_weekends)
 }
 
-function loadTurnusInfo(work, off, start) {
+function loadTurnusInfo(work, off, start, weekends) {
   const box = document.getElementById('turnus-info')
   if (!box) return
   if (work != null && off != null && start) {
     const today = localDateStr()
-    const working = isWorkingDayByTurnus({ turnus_work_weeks: work, turnus_off_weeks: off, turnus_start: start }, today)
+    const working = isWorkingDayByTurnus({ turnus_work_weeks: work, turnus_off_weeks: off, turnus_start: start, turnus_weekends: weekends }, today)
     const offTxt = off === 0 ? 'bez volna (každý týden)' : `${off} ${off===1?'týden':'týdny'} volno`
     box.style.display = 'block'
     box.innerHTML = `Cyklus: <b>${work} ${work===1?'týden':'týdny'} práce / ${offTxt}</b>.<br>Dnes podle turnusu: <b>${working ? '🟢 pracovní den' : '⚪ volno'}</b>`
@@ -47058,7 +47178,8 @@ function isWorkingDayByTurnus(profile, dateStr) {
   const cycleWeeks = work + off
   if (cycleWeeks <= 0) return null
   if (off === 0) return true  // bez volna → pracuje každý (pracovní) týden
-  const diffDays = Math.floor((day - startD) / 86400000)
+  // Codex 11. 11. 2026: rozdíl lokálních půlnocí o přechodu na letní čas ztrácel hodinu a posunul týden — počítá se z UTC.
+  const diffDays = Math.round((Date.UTC(Y, M - 1, D) - Date.UTC(sy, sm - 1, sd)) / 86400000)
   const weekIndex = Math.floor(diffDays / 7) % cycleWeeks
   return weekIndex < work
 }
@@ -47223,12 +47344,14 @@ async function addVacation() {
 
 async function loadMobVacations() {
   if (!currentUser) return
-  const { data } = await sb.from('vacations')
+  const { data, error: chybaVolna } = await sb.from('vacations')
     .select('*')
     .eq('worker_id', currentUser.id)
     .order('date_from', { ascending: false })
   const div = document.getElementById('mob-vacations')
   if (!div) return
+  // Codex 11. 11. 2026: výpadek načítání není „žádná dovolená" — zůstane poslední načtený seznam.
+  if (chybaVolna) { console.warn('[nepřítomnost] načtení selhalo:', chybaVolna.message); return }
   if (!data?.length) {
     div.innerHTML = '<div style="text-align:center;padding:20px;color:var(--text3);font-size:13px">Žádná dovolená ani nemoc zatím nezapsaná</div>'
     return
@@ -47275,6 +47398,7 @@ async function deleteVacation(id, type) {
 // Admin — uložení turnusu pracovníka
 async function saveWorkerTurnus() {
   if (!currentWorkerId) return
+  const workerIdUkladani = currentWorkerId   // Codex 11. 11. 2026: zachyceno při startu — za běhu zápisu se může otevřít jiná karta
   const workRaw = document.getElementById('wd-turnus-work')?.value
   const offRaw = document.getElementById('wd-turnus-off')?.value
   const start = document.getElementById('wd-turnus-start')?.value || null
@@ -47287,11 +47411,17 @@ async function saveWorkerTurnus() {
     showToast('⚠️ Vyplňte týdny práce, volno i začátek cyklu')
     return
   }
+  // Codex 11. 11. 2026: rozsahy min/max na políčkách se při přímém uložení nevynucují — ověřit celá čísla v povoleném rozsahu.
+  if (allFilled && !(Number.isInteger(work) && work >= 1 && work <= 8 && Number.isInteger(off) && off >= 0 && off <= 6)) {
+    showToast('⚠️ Týdny práce musí být 1 až 8 a volno 0 až 6')
+    return
+  }
   const { error } = await sb.from('profiles').update({
     turnus_work_weeks: work, turnus_off_weeks: off, turnus_start: start, turnus_weekends: weekends
-  }).eq('id', currentWorkerId)
+  }).eq('id', workerIdUkladani)
   if (error) { showToast('❌ Chyba: ' + error.message); return }
   showToast('✅ Turnus uložen')
+  if (currentWorkerId !== workerIdUkladani) return
   if (currentWorkerProfile) { currentWorkerProfile.turnus_work_weeks = work; currentWorkerProfile.turnus_off_weeks = off; currentWorkerProfile.turnus_start = start; currentWorkerProfile.turnus_weekends = weekends }
   const ti = document.getElementById('wd-turnus-info')
   if (ti) {
@@ -47331,18 +47461,22 @@ function wdVacSetType(t) {
 
 async function loadWdVacations() {
   if (!currentWorkerId) return
-  const { data } = await sb.from('vacations')
+  const workerIdNacteni = currentWorkerId   // Codex 11. 11. 2026: pozdní odpověď jiného pracovníka nesmí přepsat otevřenou kartu
+  const { data, error: chybaNacteni } = await sb.from('vacations')
     .select('*')
-    .eq('worker_id', currentWorkerId)
+    .eq('worker_id', workerIdNacteni)
     .order('date_from', { ascending: false })
+  if (String(currentWorkerId) !== String(workerIdNacteni)) return
   const div = document.getElementById('wdt-dovolena')
   if (!div) return
+  // Codex 11. 11. 2026: při chybě čtení se formulář nepřestavuje (zmizela by rozepsaná úprava) a seznam se netváří jako prázdný.
+  if (chybaNacteni) { console.warn('[nepřítomnost] načtení selhalo:', chybaNacteni.message); return }
   const today = localDateStr()
   const cz = d => { const p = String(d||'').slice(0,10).split('-'); return p.length===3 ? p[2]+'. '+p[1]+'. '+p[0] : (d||'') }
 
   // Formulář — admin může nepřítomnost zapsat sám (třeba když mu pracovník volá)
   const form = `
-    <div id="wd-vac-form" style="border:1.5px solid var(--brd);border-radius:10px;padding:14px;margin-bottom:18px">
+    <div id="wd-vac-form" data-worker="${escAttr(workerIdNacteni)}" style="border:1.5px solid var(--brd);border-radius:10px;padding:14px;margin-bottom:18px">
       <div id="wd-vac-form-title" style="font-size:13px;font-weight:700;margin-bottom:4px">Zapsat nepřítomnost pracovníkovi</div>
       <p id="wd-vac-form-hint" style="font-size:12px;color:var(--text2);margin:0 0 10px">Pracovník dostane do aplikace zprávu, že mu byla zapsaná.</p>
       <label style="font-size:11px;color:var(--text3);display:block;margin-bottom:6px">Důvod nepřítomnosti</label>
@@ -47399,6 +47533,15 @@ async function loadWdVacations() {
   // Co má správce v rozpracované úpravě napsané, si vezmeme z formuláře dřív,
   // než se přepíše. Úprava končí, když záznam mezitím zmizel nebo je otevřená
   // karta jiného pracovníka.
+  // Codex 11. 11. 2026: rozepsaný NOVÝ záznam téhož pracovníka se při obnovení karty zachová.
+  let koncept = null
+  {
+    const f0 = document.getElementById('wd-vac-form')
+    if (!_wdVacEdit && f0 && !f0.dataset.upravuje && f0.dataset.worker === String(workerIdNacteni)) {
+      const k = { from: document.getElementById('wd-vac-from')?.value || '', to: document.getElementById('wd-vac-to')?.value || '', note: document.getElementById('wd-vac-note')?.value || '', type: _wdVacType }
+      if (k.from || k.to || k.note) koncept = k
+    }
+  }
   if (_wdVacEdit) {
     const staryForm = document.getElementById('wd-vac-form')
     if (staryForm && staryForm.dataset.upravuje === String(_wdVacEdit.id)) {
@@ -47415,6 +47558,12 @@ async function loadWdVacations() {
     list
   wdVacSetType('dovolena')   // po překreslení formuláře znovu zvýrazni výchozí druh
   if (_wdVacEdit) wdVacNastavUpravu()   // rozpracovaná úprava → vyplnit formulář
+  else if (koncept) {
+    const od = document.getElementById('wd-vac-from'); if (od) od.value = koncept.from
+    const doo = document.getElementById('wd-vac-to'); if (doo) doo.value = koncept.to
+    const pozn = document.getElementById('wd-vac-note'); if (pozn) pozn.value = koncept.note
+    wdVacSetType(koncept.type)
+  }
 }
 
 // Admin zapíše dovolenou nebo nemoc za pracovníka
@@ -47430,10 +47579,18 @@ async function wdAddVacation() {
   // ukládá se do TOHO SAMÉHO řádku — nový se nezakládá.
   if (_wdVacEdit) { await wdUlozUpravuNepritomnosti(from, to, note); return }
 
-  const info = ABSENCE[_wdVacType]
+  // Codex 11. 11. 2026: zámek proti dvojímu uložení (dvojklik = dva záznamy a dvě zprávy) a příjemce zachycený při startu.
+  if (_wdVacUklada) return
+  _wdVacUklada = true
+  const workerIdZapisu = currentWorkerId
+  const typZapisu = _wdVacType
+  const btnZapis = document.getElementById('wd-vac-save-btn')
+  if (btnZapis) btnZapis.disabled = true
+  try {
+  const info = ABSENCE[typZapisu]
   const { error, degraded } = await insertAbsence({
-    worker_id: currentWorkerId, date_from: from, date_to: to, note
-  }, _wdVacType, true)
+    worker_id: workerIdZapisu, date_from: from, date_to: to, note
+  }, typZapisu, true)
   if (error) {
     const jeOpravneni = /row-level security|policy|permission/i.test(error.message || '')
     showToast(jeOpravneni
@@ -47443,22 +47600,34 @@ async function wdAddVacation() {
   }
 
   // Pracovník ať o tom ví — jinak by mu záznam přistál v appce bez vysvětlení
+  let zpravaNeodesla = false
   try {
     const czd = d => { const p = String(d).slice(0,10).split('-'); return p[2]+'. '+p[1]+'. '+p[0] }
     const nazev = info.label.toLowerCase()
-    await sb.from('notifications').insert({
-      worker_id: currentWorkerId,
+    const { error: chybaZpravy } = await sb.from('notifications').insert({
+      worker_id: workerIdZapisu,
       title: info.emoji + ' Zapsaná ' + nazev,
       message: 'SubBau vám zapsal ' + nazev + ' ' + czd(from) + ' → ' + czd(to) + (note ? ' (' + note + ')' : '') + '.',
       type: 'obecna',
       is_read: false
     })
-  } catch(e) { console.warn('[nepřítomnost] upozornění pracovníkovi se neodeslalo:', e?.message) }
+    if (chybaZpravy) throw chybaZpravy
+  } catch(e) { console.warn('[nepřítomnost] upozornění pracovníkovi se neodeslalo:', e?.message); zpravaNeodesla = true }
 
-  showToast(degraded
+  showToast(zpravaNeodesla
+    ? '⚠️ ' + info.label + ' zapsána, ale zpráva pracovníkovi se neodeslala'
+    : degraded
     ? '⚠️ ' + info.label + ' zapsána, ale zatím se nerozlišuje — spusťte migraci supabase-migrace-VSE.sql'
     : '✅ ' + info.label + ' zapsána')
-  loadWdVacations()
+  // Zapsaný koncept se z formuláře smaže, ať ho obnova karty nevrátí.
+  if (String(currentWorkerId) === String(workerIdZapisu)) {
+    ;['wd-vac-from', 'wd-vac-to', 'wd-vac-note'].forEach(i => { const el = document.getElementById(i); if (el) el.value = '' })
+    loadWdVacations()
+  }
+  } finally {
+    _wdVacUklada = false
+    if (btnZapis) btnZapis.disabled = false
+  }
 }
 
 // Admin smaže dovolenou nebo nemoc pracovníka
@@ -47605,20 +47774,22 @@ async function wdUlozUpravuNepritomnosti(from, to, note) {
   }
 
   // Pracovník ať o změně ví — jinak by se mu dovolená v appce posunula bez vysvětlení
+  let zpravaNeodesla = false
   try {
     const czd = d => { const p = String(d).slice(0,10).split('-'); return p[2]+'. '+p[1]+'. '+p[0] }
     const nazev = info.label.toLowerCase()
-    await sb.from('notifications').insert({
+    const { error: chybaZpravy } = await sb.from('notifications').insert({
       worker_id: e.worker_id,
       title: info.emoji + ' Upravená ' + nazev,
       message: 'SubBau vám upravil ' + nazev + ' — teď ' + czd(from) + ' → ' + czd(to) + (note ? ' (' + note + ')' : '') + '.',
       type: 'obecna',
       is_read: false
     })
-  } catch(err) { console.warn('[nepřítomnost] upozornění pracovníkovi se neodeslalo:', err?.message) }
+    if (chybaZpravy) throw chybaZpravy
+  } catch(err) { console.warn('[nepřítomnost] upozornění pracovníkovi se neodeslalo:', err?.message); zpravaNeodesla = true }
 
   _wdVacEdit = null
-  showToast(r.degraded
+  showToast(zpravaNeodesla ? '⚠️ ' + info.label + ' upravena, ale zpráva pracovníkovi se neodeslala' : r.degraded
     ? '⚠️ ' + info.label + ' upravena, ale zatím se nerozlišuje — spusťte migraci supabase-migrace-VSE.sql'
     : '✅ ' + info.label + ' upravena')
   loadWdVacations()
@@ -47850,7 +48021,9 @@ function _odlozPipnuti() {
 // Stav visí na funkci, ne v proměnné na nejvyšší úrovni — žádná „let" by
 // nesměla být sáhnuta dřív, než se k ní skript dočte.
 function stavBezPodpisu() {
-  if (!stavBezPodpisu.s) stavBezPodpisu.s = { hodnota: null, kdy: 0 }
+  // Codex 11. 11. 2026: stav je svázaný s přihlášeným člověkem — po odhlášení a přihlášení jiného na stejném telefonu se nedědí.
+  const uid = klicBezPodpisu()
+  if (!stavBezPodpisu.s || (stavBezPodpisu.s.uid !== undefined && stavBezPodpisu.s.uid !== uid)) stavBezPodpisu.s = { hodnota: null, kdy: 0, uid }
   return stavBezPodpisu.s
 }
 // Poslední známá odpověď se pamatuje i v prohlížeči (pro každého člověka
@@ -47879,15 +48052,18 @@ function vetaBezPodpisu() {
 }
 async function mojeFirmaBezPodpisu(obnovit) {
   const st = stavBezPodpisu()
+  const klicVolani = klicBezPodpisu()
   if (!obnovit && st.hodnota !== null && Date.now() - st.kdy < 10 * 60 * 1000) return st.hodnota
   try {
     const r = await Promise.race([
       sb.rpc('muj_bez_podpisu_vykazu'),
       new Promise((_, ne) => setTimeout(() => ne(new Error('timeout')), 5000))
     ])
+    // Odpověď patří jinému člověku, než je teď přihlášený — zahodit.
+    if (klicBezPodpisu() !== klicVolani) return jeBezPodpisu()
     if (r?.error) { st.zkouseno = true; return jeBezPodpisu() }
-    stavBezPodpisu.s = { hodnota: r?.data === true, kdy: Date.now(), zkouseno: true }
-    lsSet(klicBezPodpisu(), stavBezPodpisu.s.hodnota ? '1' : '0')
+    stavBezPodpisu.s = { hodnota: r?.data === true, kdy: Date.now(), zkouseno: true, uid: klicVolani }
+    lsSet(klicVolani, stavBezPodpisu.s.hodnota ? '1' : '0')
     return stavBezPodpisu.s.hodnota
   } catch (e) { st.zkouseno = true; return jeBezPodpisu() }
 }
@@ -48153,6 +48329,11 @@ async function vyberZamestnance(sefId) {
     const odebrat = [...puvodne].filter(x => !vybrane.has(x))
     if (!pridat.length && !odebrat.length) { zavri(); return }
     e.target.disabled = true; e.target.textContent = 'Ukládám…'
+    // Codex 11. 11. 2026: kontrola vlastních faktur platí i pro hromadný výběr (dřív ji obcházel).
+    for (const pid of pridat) {
+      const nl = nabidka.find(l => l.id === pid)
+      if (!(await potvrdVlastniFaktury(pid, nl && nl.full_name))) { e.target.disabled = false; e.target.textContent = 'Uložit'; return }
+    }
     const chyby = []
     for (const pid of pridat) { const v = await zapisZamestnavatele(pid, sefId); if (!v.ok) chyby.push(v.zprava) }
     for (const pid of odebrat) { const v = await zapisZamestnavatele(pid, null); if (!v.ok) chyby.push(v.zprava) }
@@ -48190,6 +48371,21 @@ function vykresliInfoZamestnavatele(profil, firmy, podNim) {
 // Jediné místo, které zapisuje zařazení pod firmu — volá ho karta pracovníka
 // i Provize, ať se obě obrazovky chovají stejně.
 async function zapisZamestnavatele(workerId, firmaId) {
+  // Codex 11. 11. 2026: dialog se otevřel dřív než se jiný správce změnil vztahy — těsně před zápisem se znovu ověří,
+  // že šéf není sám zaměstnanec a že přiřazovaný nemá pod sebou lidi (jinak vznikne řetěz nebo kruh šéfů).
+  if (firmaId) {
+    try {
+      if (String(firmaId) === String(workerId)) return { ok: false, zprava: '❌ Člověk nemůže být zaměstnancem sám sebe' }
+      const [{ data: sef, error: eS }, { data: podNim, error: eP }] = await Promise.all([
+        sb.from('profiles').select('id, zamestnavatel_id').eq('id', firmaId).maybeSingle(),
+        sb.from('profiles').select('id').eq('zamestnavatel_id', workerId).limit(1)
+      ])
+      if (eS || eP) return { ok: false, zprava: '❌ Nepodařilo se ověřit aktuální zařazení: ' + (eS || eP).message }
+      if (!sef) return { ok: false, zprava: '❌ Šéf se nenašel' }
+      if (sef.zamestnavatel_id) return { ok: false, zprava: '❌ Vybraný šéf je mezitím sám zaměstnanec — zařazení se neuložilo' }
+      if (podNim && podNim.length) return { ok: false, zprava: '❌ Tento člověk má pod sebou vlastní lidi — zaměstnancem být nemůže' }
+    } catch (e) { return { ok: false, zprava: '❌ Nepodařilo se ověřit aktuální zařazení: ' + (e && e.message) } }
+  }
   const { data, error } = await sb.from('profiles')
     .update({ zamestnavatel_id: firmaId || null }).eq('id', workerId).select('id, zamestnavatel_id')
   if (error) {
@@ -48202,6 +48398,23 @@ async function zapisZamestnavatele(workerId, firmaId) {
     return { ok: false, zprava: '❌ Změna se neuložila — zařazení pod firmu mění jen správce' }
   }
   return { ok: true }
+}
+
+// Kontrola vlastních faktur před zařazením pod firmu. Vrací false, když správce zařazení odmítne.
+// Codex 11. 11. 2026: dřív jen v ulozZamestnavatele — hromadný výběr a Provize ji obcházely.
+async function potvrdVlastniFaktury(id, jmeno) {
+  try {
+    const { data: vlastni } = await sb.from('worker_invoices')
+      .select('kw, kw_year').eq('worker_id', id).order('sent_at', { ascending: false }).limit(1)
+    if (vlastni && vlastni.length) {
+      const posledni = vlastni[0]
+      const kde = posledni.kw ? ('týden KW ' + posledni.kw + '/' + posledni.kw_year) : 'minulost'
+      return confirm((jmeno ? jmeno + ': ' : '') + 'Tenhle pracovník si už sám vystavil fakturu (naposled ' + kde + ').\n\n'
+        + 'Pokud mu firma později znovu vyfakturuje tytéž týdny, vznikne dvojí vyúčtování — zkontrolujte to prosím ručně.\n\n'
+        + 'Zařadit pod firmu?')
+    }
+  } catch (e) { console.warn('[zaměstnavatel] kontrola vlastních faktur selhala:', e?.message) }
+  return true
 }
 
 async function ulozZamestnavatele(el) {
@@ -48228,11 +48441,14 @@ async function ulozZamestnavatele(el) {
   el.disabled = true
   const v = await zapisZamestnavatele(id, firmaId)
   el.disabled = false
+  // Codex 11. 11. 2026: mezitím se mohla otevřít karta jiného pracovníka — paměť ani ovládání cizí karty se nesmí měnit.
+  const stejnaKarta = String(currentWorkerId) === String(id) && currentWorkerProfile && String(currentWorkerProfile.id) === String(id)
   if (!v.ok) {
     showToast(v.zprava)
-    if (currentWorkerProfile) el.value = currentWorkerProfile.zamestnavatel_id || ''
+    if (stejnaKarta) el.value = currentWorkerProfile.zamestnavatel_id || ''
     return
   }
+  if (!stejnaKarta) { showToast(firmaId ? '✅ Zařazen pod šéfa' : '✅ Pracuje sám na sebe'); return }
   if (currentWorkerProfile) currentWorkerProfile.zamestnavatel_id = firmaId
   showToast(firmaId ? '✅ Zařazen pod šéfa' : '✅ Pracuje sám na sebe')
   naplnVyberZamestnavatele(currentWorkerProfile)
@@ -48291,6 +48507,7 @@ async function vyberSefa(workerId) {
     const firmaId = vybrano ? vybrano.value : ''
     if (firmaId === ted) { zavri(); return }
     e.target.disabled = true
+    if (firmaId && !(await potvrdVlastniFaktury(workerId, jmeno))) { e.target.disabled = false; return }
     const v = await zapisZamestnavatele(workerId, firmaId || null)
     if (!v.ok) { e.target.disabled = false; showToast(v.zprava); return }
     zavri()
