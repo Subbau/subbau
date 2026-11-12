@@ -30166,7 +30166,14 @@ async function radekDokladuExistuje(filePath) {
     return !!(r.data && r.data.length)
   } catch (e) { return null }
 }
+// Zámek: druhé spuštění během nahrávání by vytvořilo další cestu a další záznam.
+let _uploadDocumentBezi = false
 async function uploadDocument() {
+  if (_uploadDocumentBezi) return
+  _uploadDocumentBezi = true
+  try { await _uploadDocumentCore() } finally { _uploadDocumentBezi = false }
+}
+async function _uploadDocumentCore() {
   if (!currentUser) return
 
   const docType = document.getElementById('upload-doc-type').value
@@ -30189,12 +30196,18 @@ async function uploadDocument() {
   }
 
   if (!selectedFile) { showToast('⚠️ Vyfoťte dokument nebo vyberte soubor'); return }
+  // Snímek vybraných souborů: změna formuláře během nahrávání je nesmí zaměnit.
+  const sf1 = selectedFile, sf2 = selectedFile2
   // Velký soubor na slabém signálu na stavbě umí spadnout i přes tři pokusy
   // (audit 22. 10. 2026 — appka ho zkusí znovu, ale když je signál trvale
   // slabý, nepomůže to). Radši upozornit předem, než nechat nahrávání
   // opakovaně selhávat.
-  const celkemMB = ((selectedFile.size || 0) + (selectedFile2?.size || 0)) / 1024 / 1024
-  if (celkemMB > 5 && !confirm('Tenhle doklad má ' + (Math.round(celkemMB * 10) / 10) + ' MB — na slabém signálu na stavbě se nemusí podařit nahrát. Pokud můžete, zkuste to prosím na Wi-Fi.\n\nPokračovat i tak?')) return
+  const celkemMB = ((sf1.size || 0) + (sf2?.size || 0)) / 1024 / 1024
+  if (celkemMB > 5 && !confirm('Tenhle doklad má ' + (Math.round(celkemMB * 10) / 10) + ' MB — na slabém signálu na stavbě se nemusí podařit nahrát. Pokud můžete, zkuste to prosím na Wi-Fi.\n\nPokračovat i tak?')) {
+    const btnZpet = document.getElementById('upload-btn')
+    if (btnZpet) { btnZpet.disabled = false; btnZpet.textContent = '📤 Nahrát' }
+    return
+  }
   const isMulti = MULTISIDE_TYPES.includes(docType)
   const btn = document.getElementById('upload-btn')
   const progress = document.getElementById('upload-progress')
@@ -30205,7 +30218,7 @@ async function uploadDocument() {
   if (status) status.style.display = 'none'
 
   // 1. AI kontrola přední strany (čitelnost, typ, platnost)
-  const check = await checkDocumentReadability(selectedFile, docType)
+  const check = await checkDocumentReadability(sf1, docType)
   // Platnost bereme jen z automatické kontroly dokladu (pokud ji přečte).
   // Když ji nepřečte, zůstane prázdná a doplní ji admin v sekci Dokumenty.
   const validUntil = check.validUntil || null
@@ -30231,9 +30244,9 @@ async function uploadDocument() {
 
   // 1b. U vícestranných dokladů zkontroluj zadní stranu a porovnej, že patří stejné osobě
   let check2 = null
-  if (selectedFile2 && isMulti) {
+  if (sf2 && isMulti) {
     if (status) { status.style.display='block'; status.style.background='var(--blue-l)'; status.style.color='var(--blue)'; status.innerHTML='🤖 Kontroluji zadní stranu...' }
-    check2 = await checkDocumentReadability(selectedFile2, docType)
+    check2 = await checkDocumentReadability(sf2, docType)
     if (!check2.readable) {
       if (status) { status.style.display='block'; status.style.background='var(--red-l)'; status.style.color='var(--red)'; status.innerHTML='❌ <b>Zadní strana nebyla přijata</b><br><span style="font-size:12px;font-weight:400">'+(check2.reason||'Nahrajte čitelnou zadní stranu')+'</span>' }
       showToast('❌ Zadní strana zamítnuta — ' + (check2.reason || ''))
@@ -30281,17 +30294,17 @@ async function uploadDocument() {
   // - obrázek (fotka/sken, povoleno u OP) → převod na PDF (přední + zadní = stránky)
   let uploadBlob, uploadExt, uploadContentType
   // AUDIT 3. 11. 2026 (C2): zadní strana sloučená do PDF s přední se jen
-  // zapamatuje; selectedFile2 se tady NEmaže (dřív se nulovalo před nahráním,
+  // zapamatuje; sf2 se tady NEmaže (dřív se nulovalo před nahráním,
   // takže po chybě úložiště/databáze složil druhý pokus PDF jen z přední strany
   // a hlásil „Dokument uložen!“). Po úspěchu vynuluje oba soubory
   // closeUploadForm() → resetUploadForm().
   let zadniVPdf = false
-  const frontIsImage = selectedFile && (selectedFile.type?.startsWith('image/') || /\.(jpe?g|png|heic|webp)$/i.test(selectedFile.name))
+  const frontIsImage = sf1 && (sf1.type?.startsWith('image/') || /\.(jpe?g|png|heic|webp)$/i.test(sf1.name))
   if (frontIsImage) {
     try {
-      const imgs = [selectedFile]
-      if (selectedFile2 && (selectedFile2.type?.startsWith('image/') || /\.(jpe?g|png|heic|webp)$/i.test(selectedFile2.name))) {
-        imgs.push(selectedFile2)
+      const imgs = [sf1]
+      if (sf2 && (sf2.type?.startsWith('image/') || /\.(jpe?g|png|heic|webp)$/i.test(sf2.name))) {
+        imgs.push(sf2)
       }
       uploadBlob = await imagesToPdfBlob(imgs)
       uploadExt = 'pdf'
@@ -30304,7 +30317,7 @@ async function uploadDocument() {
       return
     }
   } else {
-    uploadBlob = selectedFile
+    uploadBlob = sf1
     uploadExt = 'pdf'
     uploadContentType = 'application/pdf'
   }
@@ -30335,7 +30348,7 @@ async function uploadDocument() {
     }
     return { error: posledniChyba }
   }
-  const predniHotova = !!(_predniStranaUlozena && _predniStranaUlozena.soubor === selectedFile && _predniStranaUlozena.typ === docType)
+  const predniHotova = !!(_predniStranaUlozena && _predniStranaUlozena.soubor === sf1 && _predniStranaUlozena.typ === docType)
   const filePath = `${currentUser.id}/${docType}_${Date.now()}.${uploadExt}`
   const { error: storageErr } = predniHotova ? { error: null } : await zkusVicekrat(
     () => withTimeout(sb.storage.from('documents').upload(filePath, uploadBlob, { upsert: true, contentType: uploadContentType }), 20000),
@@ -30402,11 +30415,11 @@ async function uploadDocument() {
   // A když se nepovede uložit, NESMÍ padnout zelené „Dokument uložen!“ — pracovník
   // by byl přesvědčený, že nahrál obě strany, a správce by doklad vrátil jako neúplný.
   let zadniStranaChyba = ''
-  if (selectedFile2 && isMulti && !zadniVPdf) {
+  if (sf2 && isMulti && !zadniVPdf) {
     try {
-      let blob2 = selectedFile2
-      const je2Obrazek = (selectedFile2.type || '').startsWith('image/') || /\.(jpe?g|png|heic|webp)$/i.test(selectedFile2.name || '')
-      if (je2Obrazek) blob2 = await imagesToPdfBlob([selectedFile2])
+      let blob2 = sf2
+      const je2Obrazek = (sf2.type || '').startsWith('image/') || /\.(jpe?g|png|heic|webp)$/i.test(sf2.name || '')
+      if (je2Obrazek) blob2 = await imagesToPdfBlob([sf2])
       const filePath2 = `${currentUser.id}/${docType}_${Date.now()}_strana2.pdf`
       const { error: stErr2 } = await zkusVicekrat(
         () => withTimeout(sb.storage.from('documents').upload(filePath2, blob2, { upsert: true, contentType: 'application/pdf' }), 20000),
@@ -30438,12 +30451,12 @@ async function uploadDocument() {
     } catch (e) {
       console.error('[uploadDocument] zadní strana selhala:', e)
       zadniStranaChyba = e?.message || 'neznámá chyba'
-      zapisChybuAppky('nahravani-dokumentu-zadni-strana', zadniStranaChyba, { docType, velikostMB: Math.round((selectedFile2?.size || 0) / 1024 / 1024 * 10) / 10 })
+      zapisChybuAppky('nahravani-dokumentu-zadni-strana', zadniStranaChyba, { docType, velikostMB: Math.round((sf2?.size || 0) / 1024 / 1024 * 10) / 10 })
     }
   }
 
   if (zadniStranaChyba) {
-    _predniStranaUlozena = { soubor: selectedFile, typ: docType }   // opakování nahraje jen zadní
+    _predniStranaUlozena = { soubor: sf1, typ: docType }   // opakování nahraje jen zadní
     showToast('⚠️ Přední strana uložena, zadní ne — zkuste ji prosím nahrát znovu')
     if (status) { status.style.display='block'; status.style.background='var(--red-l)'; status.style.color='var(--red)'; status.textContent='⚠️ Zadní strana se neuložila. Nahrajte ji prosím znovu.' }
     loadMobDocs()
@@ -30455,7 +30468,8 @@ async function uploadDocument() {
 
   _predniStranaUlozena = null
   showToast(validUntil ? ('✅ Dokument uložen! Platnost do ' + validUntil) : '✅ Dokument uložen!')
-  closeUploadForm()
+  // Formulář se zavře a vymaže jen tehdy, když je pořád ten, ze kterého operace vyšla.
+  if (selectedFile === sf1) closeUploadForm()
   loadMobDocs()
 
   btn.disabled = false
