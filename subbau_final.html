@@ -13097,7 +13097,7 @@ async function renderProvizeContent() {
   let att = []
   const ATT_PAGE = 1000
   const strankaDochazky = (od) => sb.from('attendance')
-      .select('worker_id, work_date, check_in, check_out, break_start, break_end, total_hours, team_id, bez_vyplaty, bez_provize_den, vyplata_castka')
+      .select('id, worker_id, work_date, check_in, check_out, break_start, break_end, total_hours, team_id, bez_vyplaty, bez_provize_den, vyplata_castka')
       .gte('work_date', _zCache ? _tailOd : fetchStart).lte('work_date', fetchEnd)
       .order('id').range(od, od + ATT_PAGE - 1)
   // Kolik bude stránek, víme z počtu v první dávce → stáhnou se naráz. Zpracují
@@ -13126,7 +13126,8 @@ async function renderProvizeContent() {
     if (page.length < ATT_PAGE) break
   }
   // Starší řádky z paměti + čerstvý konec; do paměti jde kopie (níže se z `att` maže).
-  if (_zCache) att = _cD.radky.filter(a => a.work_date < _tailOd).concat(att)
+  // Záznam, který mezitím někdo přesunul na novější den (je v čerstvém konci), se z paměti vyřadí podle id — jinak by se započítal dvakrát.
+  if (_zCache) { const noveId = new Set(att.map(a => a.id).filter(x => x != null)); att = _cD.radky.filter(a => a.work_date < _tailOd && !(a.id != null && noveId.has(a.id))).concat(att) }
   if (fetchStart === _predemOd && fetchEnd === _predemDo && _dochGen === _provizeDochGen) {
     _provizeDoch = { klic: _klicDoch, radky: att.slice(), plne: _zCache ? _cD.plne : Date.now(), spinava: false }
   }
@@ -24503,8 +24504,9 @@ async function saveInvoiceEditVnitrni() {
 
   // Adresa i do profilu jen na výslovné přání (jako účet).
   let adresaDoProfiluNeulozena = false
-  if (adresaDoProfilu && adresaNova && r.worker_id) {
-    const { data: adrZ, error: chybaAdresy } = await sb.from('profiles').update({ invoice_address: adresaNova }).eq('id', r.worker_id).select('id')
+  const adresaProProfil = adresaNova || (adrA.stav === 'cela' ? adrA.text : null)   // i beze změny: „převzít adresu z faktury do profilu“
+  if (adresaDoProfilu && adresaProProfil && r.worker_id) {
+    const { data: adrZ, error: chybaAdresy } = await sb.from('profiles').update({ invoice_address: adresaProProfil }).eq('id', r.worker_id).select('id')
     if (chybaAdresy || !adrZ || !adrZ.length) { adresaDoProfiluNeulozena = true; console.warn('[faktura] adresa se do profilu neuložila:', chybaAdresy?.message) }
   }
 
