@@ -13264,7 +13264,7 @@ function provizniSazbaOd(workerId, sefId, vlastni, provMap, den, hodnotaFn) {
   if (sazbaJeZadana(provMap[workerId])) return workerId
   if (den && hodnotaFn) {
     const v = hodnotaFn(workerId, den)
-    if (v != null && Number(v) > 0) return workerId
+    if (v != null && sazbaJeZadana(v)) return workerId
   }
   return sefId
 }
@@ -27357,7 +27357,7 @@ async function generateTeamAttendancePdf(teamId, teamName) {
         if (p.provize != null) _provMap[p.worker_id] = Number(p.provize)
       })
       const [hist, zam] = await Promise.all([
-        sb.from('worker_rate_history').select('worker_id, hodnota, valid_from').eq('druh', 'provize').order('valid_from', { ascending: true }),
+        nactiVsechnyHistorieSazeb('worker_id, hodnota, valid_from', 'provize'),
         sb.from('profiles').select('id, zamestnavatel_id').in('id', ids)
       ])
       // Chyba načtení se nesmí tvářit jako „nulové provize / žádná historie / bez zaměstnavatele".
@@ -47440,7 +47440,7 @@ async function pdfFillSave() {
     const outBytes = await pdfDoc.save()
     // Nahraj zpět do Supabase storage (stejný bucket jako smlouvy)
     const blob = new Blob([outBytes], { type:'application/pdf' })
-    const path = `filled_${pdfFillState.contractId}_${Date.now()}.pdf`
+    const path = `filled_${contractIdUkladani}_${Date.now()}.pdf`
     const { error: upErr } = await sb.storage.from('contracts').upload(path, blob, { contentType:'application/pdf', upsert:true })
     let publicUrl = null
     if (!upErr) {
@@ -47470,7 +47470,7 @@ async function pdfFillSave() {
         if (loading) loading.textContent = 'Ukládám podklad pro pozdější úpravy…'
         const zb = new Blob([pdfFillState.pdfBytes.slice(0)], { type:'application/pdf' })
         const { error: zErr } = await sb.storage.from('contracts')
-          .upload(fillBasePath(pdfFillState.contractId), zb, { contentType:'application/pdf', upsert:true })
+          .upload(fillBasePath(contractIdUkladani), zb, { contentType:'application/pdf', upsert:true })
         if (zErr) console.warn('[smlouva] podklad se neuložil:', zErr.message)
         else novyZaklad = new Date().toISOString()
       }
@@ -47499,12 +47499,12 @@ async function pdfFillSave() {
       }
 
       let bezMigrace = false
-      let { error: dbErr } = await updateContractFile(pdfFillState.contractId, upd)
+      let { error: dbErr } = await updateContractFile(contractIdUkladani, upd)
       if (ukladatPole && dbErr && /fill_fields|fill_base_at|fill_base_sigs/.test(dbErr.message || '')) {
         bezMigrace = true
         // Codex 11. 11. 2026: vypadnou jen sloupce fill_*; zrušení podpisů a stav se zachovají.
         const { fill_fields: _ff, fill_base_at: _fb, fill_base_sigs: _fs, ...updBezFill } = upd
-        ;({ error: dbErr } = await updateContractFile(pdfFillState.contractId, updBezFill))
+        ;({ error: dbErr } = await updateContractFile(contractIdUkladani, updBezFill))
       }
       if (dbErr) {
         // Codex 11. 11. 2026: editor i napsaný text zůstávají otevřené, nepokračuje se výběrem podpisu.
@@ -47517,7 +47517,7 @@ async function pdfFillSave() {
       else showToast(pdfFillState.hadSaved ? '✅ Text ve smlouvě upraven' : '✅ Vyplněné PDF uloženo — příště půjde upravit')
       loadAdminContracts()
       // Pokud pokračujeme na výběr místa podpisu, ať se otevře už s vyplněnou verzí
-      if (_pdfFillThenSignPlace && _pdfFillThenSignPlace.contractId === pdfFillState.contractId) {
+      if (_pdfFillThenSignPlace && _pdfFillThenSignPlace.contractId === contractIdUkladani) {
         _pdfFillThenSignPlace.fileUrl = publicUrl
       }
     }

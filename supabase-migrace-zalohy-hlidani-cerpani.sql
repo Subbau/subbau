@@ -19,6 +19,10 @@ begin
   end if;
   -- Jeden zámek na pracovníka: souběžný zápis druhé faktury i storno/smazání zálohy počká, až tahle skončí.
   perform pg_advisory_xact_lock(hashtext('zalohy:' || new.worker_id::text));
+  -- Záporný odečet by uměle zvýšil zbývající částku zálohy (−100 + 200 = 100) — žádná položka nesmí být záporná.
+  if exists (select 1 from jsonb_array_elements(new.zalohy_pouzite) q where coalesce(nullif(q->>'vzato', '')::numeric, 0) < 0) then
+    raise exception 'Odečet zálohy nemůže být záporný.' using errcode = '23514';
+  end if;
   -- Položky téhož čísla v jedné faktuře se sčítají (dvě položky po 60 € proti záloze 100 € = 120 €).
   for r in
     select e->>'cislo' as cislo, sum(coalesce((e->>'vzato')::numeric, 0)) as vzato
