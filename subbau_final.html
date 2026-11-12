@@ -47555,7 +47555,7 @@ async function openWorkerModal(id) {
   const emInput = document.getElementById('wd-email-input'); if (emInput) emInput.value = w.email || ''
   const phInput = document.getElementById('wd-phone-input'); if (phInput) phInput.value = w.phone || ''
   const wdProfSel = document.getElementById('wd-profession-sel')
-  if (wdProfSel) wdProfSel.value = w.profession || ''
+  if (wdProfSel) wdProfSel.value = (w.profession === 'lesar' ? 'lesenar' : w.profession) || ''   // starší hodnota „lesar“ z formuláře Přidat pracovníka
   document.getElementById('wd-role').textContent = {admin:'Admin',osvec:'OSVČ',partak:'Parťák',klient:'Klient'}[w.role] || w.role
   const wdBt = document.getElementById('wd-business-type')
   if (wdBt) wdBt.value = w.business_type || (w.is_osvec === false ? 'sro' : 'osvec')
@@ -51156,12 +51156,25 @@ async function generateInvoiceAdmin() {
   const sel = document.getElementById('wd-inv-week')
   if (!sel?.value) { showToast('⚠️ Vyberte týden'); return }
   const [week, year] = sel.value.split('/').map(Number)
+  // Celé zadání se zachytí před prvním awaitem — správce mezitím může otevřít jiného pracovníka.
+  const wid = currentWorkerId, selValue = sel.value
+  // Položky, které patří jinému člověku nebo týdnu, na tuhle fakturu nesmí.
+  hlidejDalsiPolozky('wd-inv', wid + '|' + selValue)
+  const zadani = {
+    iban: document.getElementById('wd-inv-iban')?.value.trim() || '',
+    swift: document.getElementById('wd-inv-swift')?.value.trim() || '',
+    rate: document.getElementById('wd-inv-rate')?.value,
+    dueDays: document.getElementById('wd-inv-due')?.value,
+    issueDate: document.getElementById('wd-inv-issue')?.value || '',
+    item: document.getElementById('wd-inv-item')?.value || '',
+    items: sebratPolozkyFaktury('wd-inv'),
+    invoiceNum: document.getElementById('wd-inv-num-full')?.value || ''
+  }
 
   // Profil načti čerstvý — ať faktura obsahuje aktuální fakturační údaje i odběratele
-  const { data: prof } = await sb.from('profiles').select('*').eq('id', currentWorkerId).maybeSingle()
+  const { data: prof } = await sb.from('profiles').select('*').eq('id', wid).maybeSingle()
   if (!prof) { showToast('❌ Profil pracovníka se nepodařilo načíst'); return }
-  // Položky, které patří jinému člověku nebo týdnu, na tuhle fakturu nesmí.
-  hlidejDalsiPolozky('wd-inv', currentWorkerId + '|' + sel.value)
+  if (wid !== currentWorkerId) { showToast('⚠️ Mezitím jste otevřel jiného pracovníka — fakturu spusťte znovu'); return }
   // Zaměstnanec firmy sám nefakturuje — jeho hodiny jsou na faktuře firmy.
   // Faktura tady by ty hodiny zaplatila podruhé (a jeho starou sazbou).
   if (jeZamestnanecFirmy(prof)) {
@@ -51171,19 +51184,9 @@ async function generateInvoiceAdmin() {
 
   await generateInvoiceMob('en', {
     profile: prof,
-    workerId: currentWorkerId,
+    workerId: wid,
     week, year,
-    iban: document.getElementById('wd-inv-iban')?.value.trim() || '',
-    swift: document.getElementById('wd-inv-swift')?.value.trim() || '',
-    rate: document.getElementById('wd-inv-rate')?.value,
-    dueDays: document.getElementById('wd-inv-due')?.value,
-    // Zpětné vystavení: datum na faktuře je to, co admin zadal (výchozí = sobota týdne)
-    issueDate: document.getElementById('wd-inv-issue')?.value || '',
-    item: document.getElementById('wd-inv-item')?.value || '',
-    // Položky a číslo faktury z adminského formuláře. Bez položek se faktura
-    // vystaví po starém, jen s hodinami × sazbou.
-    items: sebratPolozkyFaktury('wd-inv'),
-    invoiceNum: document.getElementById('wd-inv-num-full')?.value || ''
+    ...zadani
   })
 }
 
@@ -51216,6 +51219,9 @@ async function saveFinance() {
 
 async function saveWorkerProfile() {
   if(!currentWorkerId) return
+  // Id pracovníka se zachytí hned: po awaitech (dotaz, okno „od kdy“) už může být otevřená jiná karta.
+  const wid = currentWorkerId
+  const pk = () => currentWorkerId === wid ? currentWorkerProfile : null
   const fullName = document.getElementById('wd-fullname-input')?.value.trim() || ''
   if (!fullName) { showToast('⚠️ Jméno nesmí být prázdné'); return }
   const rate = parseFloat(document.getElementById('wd-rate').value)||0
@@ -51240,7 +51246,7 @@ async function saveWorkerProfile() {
   // pokračovat: prázdná odpověď vypadá stejně jako „sazbu nemá" a do profilu by
   // se zapsalo prázdno — pracovníkovi by pak vyšla faktura na nulu.
   const { data: puvProfil, error: chybaProfil } = await sb.from('profiles')
-    .select('hourly_rate_worker, full_name, ic, dic, is_vat_payer, email, phone').eq('id', currentWorkerId).maybeSingle()
+    .select('hourly_rate_worker, full_name, ic, dic, is_vat_payer, email, phone').eq('id', wid).maybeSingle()
   if (chybaProfil || !puvProfil) {
     showToast('❌ Profil se nepodařilo načíst — zkuste to prosím znovu')
     return
@@ -51250,13 +51256,13 @@ async function saveWorkerProfile() {
   // kontroly by uložení karty potichu vrátilo zpátky, co si pracovník mezitím
   // sám opravil (audit 16. 10. 2026).
   const citliveZmeny = ['ic', 'dic', 'is_vat_payer', 'email', 'phone'].filter(k =>
-    currentWorkerProfile && (currentWorkerProfile[k] ?? null) !== (puvProfil[k] ?? null))
+    pk() && (pk()[k] ?? null) !== (puvProfil[k] ?? null))
   if (citliveZmeny.length) {
     const popisky = { ic: 'IČO', dic: 'DIČ', is_vat_payer: 'plátcovství DPH', email: 'e-mail', phone: 'telefon' }
     const prepsat = confirm('Pracovník si mezitím sám změnil: ' + citliveZmeny.map(k => popisky[k]).join(', ') + '.\n\n'
       + 'OK = přesto uložit kartu (jeho změna se přepíše vaší)\nZrušit = zavřít kartu bez uložení a podívat se znovu')
     // DENÍK CHYB (2. 11. 2026, kritika — chyběl v A2): souběh s pracovníkem při uložení karty — co změnil (jen názvy polí) a co správce zvolil.
-    try { if (typeof denikChybZapis === 'function') denikChybZapis('potvrzeni|karta-pracovnika', 'Pracovník si mezitím změnil údaje — karta se ukládala přes ně', { odpoved: prepsat ? 'OK' : 'Zrušit', pole: citliveZmeny.join(','), workerId: currentWorkerId }) } catch (x) { console.warn('[deník chyb]', x) } // eslint-disable-line no-undef
+    try { if (typeof denikChybZapis === 'function') denikChybZapis('potvrzeni|karta-pracovnika', 'Pracovník si mezitím změnil údaje — karta se ukládala přes ně', { odpoved: prepsat ? 'OK' : 'Zrušit', pole: citliveZmeny.join(','), workerId: wid }) } catch (x) { console.warn('[deník chyb]', x) } // eslint-disable-line no-undef
     if (!prepsat) return
   }
   const puvSazba = puvProfil.hourly_rate_worker
@@ -51275,7 +51281,7 @@ async function saveWorkerProfile() {
       // Zavřel jsi okno — zbytek profilu se uloží, sazba zůstane, jaká byla.
       // Datum v budoucnu = naplánovaná změna: dnes platí dál ta dosavadní.
       sazbaKUlozeni = puvSazba
-      const poleSazba = document.getElementById('wd-rate')
+      const poleSazba = wid === currentWorkerId ? document.getElementById('wd-rate') : null
       if (poleSazba) poleSazba.value = puvSazba == null ? '' : puvSazba
     }
   }
@@ -51299,13 +51305,13 @@ async function saveWorkerProfile() {
   let error, zapsano
   let dphNeulozeno = false
   try {
-    ;({ error, data: zapsano } = await sb.from('profiles').update({ ...zaklad, ...dphPole }).eq('id', currentWorkerId).select('id'))
+    ;({ error, data: zapsano } = await sb.from('profiles').update({ ...zaklad, ...dphPole }).eq('id', wid).select('id'))
     // Kdyby v databázi chyběl některý sloupec k DPH, ať kvůli tomu nespadne
     // uložení zbytku profilu (jméno, sazba, profese…) — ulož aspoň základ.
     if (error && /column|schema cache/i.test(error.message || '')) {
       console.warn('[profil] DPH pole se neuložila:', error.message)
       dphNeulozeno = true
-      ;({ error, data: zapsano } = await sb.from('profiles').update(zaklad).eq('id', currentWorkerId).select('id'))
+      ;({ error, data: zapsano } = await sb.from('profiles').update(zaklad).eq('id', wid).select('id'))
     }
     // Provize (marže SubBau) se teď spravuje jen v sekci Provize, ne na kartě pracovníka
   } finally {
@@ -51321,10 +51327,10 @@ async function saveWorkerProfile() {
   const narEl = document.getElementById('wd-narodnost')
   if (narEl && !narEl.disabled) {
     const nar = narEl.value || null
-    if ((currentWorkerProfile?.narodnost || null) !== nar) {
-      const { data: nd, error: ne } = await sb.from('profiles').update({ narodnost: nar }).eq('id', currentWorkerId).select('id, narodnost')
+    if ((pk()?.narodnost || null) !== nar) {
+      const { data: nd, error: ne } = await sb.from('profiles').update({ narodnost: nar }).eq('id', wid).select('id, narodnost')
       if (ne || !nd || !nd.length) narodnostNeulozena = (ne && /narodnost|column|schema cache/i.test(ne.message || '')) ? 'migrace' : 'chyba'
-      else if (currentWorkerProfile) currentWorkerProfile.narodnost = nd[0].narodnost
+      else if (pk()) pk().narodnost = nd[0].narodnost
     }
   }
   // Vlaječky a němčina v seznamech se načtou znovu (změnila se úroveň nebo národnost)
@@ -51334,20 +51340,24 @@ async function saveWorkerProfile() {
   // řekla „Chyba" a v kartě by svítilo staré číslo.
   // Hlášení o sazbě se ukáže jako POSLEDNÍ — „✅ Profil uložen" ho dřív hned
   // přepsalo a nepovedený plán zmizel beze stopy (kontrola 31. 10. 2026).
+  let navratSelhal = false
   let sazbaVysledek = null   // 'plan' | 'plan-chyba' | 'chyba'
   if (odKdySazba && jeBudouci(odKdySazba)) {
-    sazbaVysledek = await ulozSazbuSHistorii(currentWorkerId, 'sazba', puvSazba, rate, odKdySazba) ? 'plan' : 'plan-chyba'
-  } else if (odKdySazba && !await ulozSazbuSHistorii(currentWorkerId, 'sazba', puvSazba, rate, odKdySazba)) {
+    sazbaVysledek = await ulozSazbuSHistorii(wid, 'sazba', puvSazba, rate, odKdySazba) ? 'plan' : 'plan-chyba'
+  } else if (odKdySazba && !await ulozSazbuSHistorii(wid, 'sazba', puvSazba, rate, odKdySazba)) {
     // Historie neprošla — vrátíme profilu původní sazbu, ať spolu nezůstanou
     // rozejité. Zbytek profilu je uložený a zůstává.
-    await sb.from('profiles').update({ hourly_rate_worker: puvSazba }).eq('id', currentWorkerId)
-    sazbaKUlozeni = puvSazba
-    const poleSazba = document.getElementById('wd-rate')
-    if (poleSazba) poleSazba.value = puvSazba == null ? '' : puvSazba
-    sazbaVysledek = 'chyba'
+    const { data: navrat, error: navratChyba } = await sb.from('profiles').update({ hourly_rate_worker: puvSazba }).eq('id', wid).select('id')
+    // Návrat sazby se musí potvrdit — jinak by profil mlčky zůstal na nové sazbě bez historie.
+    navratSelhal = !!navratChyba || !navrat || !navrat.length
+    sazbaKUlozeni = navratSelhal ? rate : puvSazba
+    const poleSazba = wid === currentWorkerId ? document.getElementById('wd-rate') : null
+    if (poleSazba) poleSazba.value = sazbaKUlozeni == null ? '' : sazbaKUlozeni
+    sazbaVysledek = navratSelhal ? 'nesoulad' : 'chyba'
   }
-  smazNuluVimOTom('sazba', currentWorkerId, sazbaKUlozeni)
+  smazNuluVimOTom('sazba', wid, sazbaKUlozeni)
   if (sazbaVysledek === 'plan-chyba') showToast('⚠️ Profil uložen, ale plán hodinovky ' + rate + ' €/h od ' + datumCz(odKdySazba) + ' se NEULOŽIL — zkuste ho prosím znovu')
+  else if (sazbaVysledek === 'nesoulad') showToast('❌ Sazba ' + rate + ' €/h se uložila do profilu, ale ne do historie sazeb, a návrat se nepovedl — zkontrolujte sazbu v kartě a v Provizích')
   else if (sazbaVysledek === 'chyba') showToast('⚠️ Sazba se nezměnila — zbytek profilu je uložený')
   else if (dphNeulozeno) showToast('⚠️ Profil uložen, ale údaje k DPH ne — v databázi chybí sloupce is_vat_payer / ic / dic')
   else if (narodnostNeulozena) showToast(narodnostNeulozena === 'migrace'
@@ -51355,9 +51365,10 @@ async function saveWorkerProfile() {
     : '⚠️ Profil uložen, ale národnost se neuložila — zkuste to prosím znovu')
   else showToast('✅ Profil uložen' + (sazbaVysledek === 'plan'
     ? ' — hodinovka ' + rate + ' €/h platí od ' + datumCz(odKdySazba) + ', do té doby ' + (puvSazba ?? '—') + ' €/h' : ''))
-  if (currentWorkerProfile) currentWorkerProfile.german_level = germanLevel
-  const hlVl = document.getElementById('wd-avatar-vlajka'); if (hlVl) hlVl.innerHTML = vlajkaHtml(currentWorkerId, currentWorkerProfile?.narodnost || null, false)
-  const hlDe = document.getElementById('wd-name-nemcina'); if (hlDe) hlDe.innerHTML = nemcinaHtml(currentWorkerId, germanLevel || null)
+  if (pk()) pk().german_level = germanLevel
+  if (wid === currentWorkerId) {
+  const hlVl = document.getElementById('wd-avatar-vlajka'); if (hlVl) hlVl.innerHTML = vlajkaHtml(wid, currentWorkerProfile?.narodnost || null, false)
+  const hlDe = document.getElementById('wd-name-nemcina'); if (hlDe) hlDe.innerHTML = nemcinaHtml(wid, germanLevel || null)
   // Aktualizuj hlavičku modalu (jméno, iniciály) i lokální cache pracovníků
   const wdNameEl = document.getElementById('wd-name')
   if (wdNameEl) wdNameEl.textContent = fullName
@@ -51367,14 +51378,15 @@ async function saveWorkerProfile() {
   if (wdAvatarInitEl && wdAvatarInitEl.style.display !== 'none') {
     wdAvatarInitEl.textContent = fullName.split(' ').map(n=>n[0]).join('').slice(0,2).toUpperCase()
   }
-  if (currentWorkerProfile) {
+  if (pk()) {
     // Ať faktura vystavená hned po uložení pracuje s novými údaji
-    Object.assign(currentWorkerProfile, {
+    Object.assign(pk(), {
       full_name: fullName, profession, is_vat_payer: isVatPayer, ic, dic,
       hourly_rate_worker: sazbaKUlozeni, business_type: businessType
     })
   }
-  const wIdx = (_workersCache||[]).find(w => String(w.id) === String(currentWorkerId))
+  }
+  const wIdx = (_workersCache||[]).find(w => String(w.id) === String(wid))
   if (wIdx) wIdx.full_name = fullName
   loadWorkers()
 }
@@ -51408,7 +51420,8 @@ function nastavTlacitkoPristupuNahore(isActive) {
 
 async function toggleAccessFromModal() {
   if(!currentWorkerId) return
-  const { data: w, error: readErr } = await sb.from('profiles').select('is_active').eq('id',currentWorkerId).maybeSingle()
+  const wid = currentWorkerId   // karta se mezitím může přepnout na jiného člověka
+  const { data: w, error: readErr } = await sb.from('profiles').select('is_active').eq('id',wid).maybeSingle()
   if (readErr || !w) { showToast('❌ Profil se nepodařilo načíst — zkuste to prosím znovu'); return }
   // Stejné chování jako v Přístupech: odebraný nesvítí jako čekající registrace, obnovený je schválený
   const upd = w.is_active
@@ -51416,11 +51429,11 @@ async function toggleAccessFromModal() {
     : { is_active: true, registration_status: 'approved' }
   // Bez kontroly počtu zapsaných řádků by appka ukázala „Přístup odebrán“ i
   // tehdy, kdy právo zápis tiše odmítlo a přístup zůstal aktivní.
-  const { error: updErr, data: updData } = await sb.from('profiles').update(upd).eq('id',currentWorkerId).select('id')
+  const { error: updErr, data: updData } = await sb.from('profiles').update(upd).eq('id',wid).select('id')
   if (updErr) { showToast('❌ Změna přístupu se neuložila: ' + updErr.message); return }
   if (!updData || !updData.length) { showToast('❌ Změna přístupu se neuložila — zkontrolujte oprávnění'); return }
   showToast(w.is_active?'🔒 Přístup odebrán':'✅ Přístup obnoven')
-  openWorkerModal(currentWorkerId)
+  if (wid === currentWorkerId) openWorkerModal(wid)
   loadWorkers()
 }
 
