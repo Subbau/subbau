@@ -23194,7 +23194,21 @@ async function odlozFakturu(id, zapnout) {
   showToast(zapnout ? '⏸ Faktura odložená' : '↩ Odložení zrušeno')
 }
 
-async function setInvoiceStatus(id, status) {
+// Změny stavu téže faktury jdou po řadě — zápis faktury a následný zápis Provizí
+// se tak nepředběhnou s další změnou (zaplaceno / zrušeno).
+const _invStatusFronta = new Map()
+function setInvoiceStatus(id, status) {
+  const dalsi = (_invStatusFronta.get(id) || Promise.resolve()).catch(() => {}).then(() => setInvoiceStatusZapis(id, status))
+  _invStatusFronta.set(id, dalsi)
+  return dalsi
+}
+// Jiná zaplacená faktura téhož člověka za týž týden — Provize „uhrazeno" je společná
+// pro pracovníka a týden, zrušením jedné faktury se nesmí odškrtnout, dokud druhá platí.
+function jinaZaplacenaVTydnu(vynechId, workerId, kw, kwYear) {
+  return (_invCache || []).some(x => x && x.id !== vynechId && x.worker_id === workerId
+    && String(x.kw) === String(kw) && String(x.kw_year) === String(kwYear) && x.status === 'paid')
+}
+async function setInvoiceStatusZapis(id, status) {
   const row = _invCache.find(r => r.id === id)
   const prev = row ? (row.status || 'new') : null
   const { data: zmeneno, error } = await sb.from('worker_invoices').update({ status }).eq('id', id).select('id')
@@ -23214,6 +23228,9 @@ async function setInvoiceStatus(id, status) {
   // Pouhé „Vyřídit" u nové faktury do provizí nesahá — jinak by odškrtlo,
   // co si admin předtím odklikal v Provizích.
   if (row && (status === 'paid' || prev === 'paid')) {
+    if (status !== 'paid' && jinaZaplacenaVTydnu(id, row.worker_id, row.kw, row.kw_year)) {
+      showToast('↩️ Zaplacení zrušeno'); return   // Provize zůstávají uhrazené — jiná faktura za týden je zaplacená
+    }
     const res = await syncProvizePaidFromInvoice(row.worker_id, row.kw, row.kw_year, status === 'paid')
     if (res.error) {
       const msg = res.error.message || ''
@@ -23565,7 +23582,9 @@ function openInvoiceEdit(id) {
   setTimeout(() => { try { amt.focus() } catch (e) {} }, 120)
 }
 
-function closeInvoiceEdit() {
+let _invEditUklada = false   // běží uložení — dialog se nezavře ani neotevře jiný nad rozpracovaným zápisem
+function closeInvoiceEdit(force) {
+  if (_invEditUklada && force !== true) return
   const d = document.getElementById('invedit-dialog')
   if (d) d.style.display = 'none'
   _invEditId = null
@@ -23597,12 +23616,18 @@ function invEditRecalc() {
     warn.textContent = over ? '⚠️ Záloha je vyšší než celá faktura (' + total.toFixed(2) + ' €)' : ''
   }
   const btn = document.getElementById('invedit-save-btn')
-  if (btn) { btn.disabled = over; btn.style.opacity = over ? '0.5' : '1' }
+  if (btn) { const zakaz = over || _invEditUklada; btn.disabled = zakaz; btn.style.opacity = zakaz ? '0.5' : '1' }
 }
 
 // Uloží zálohu a PŘEPÍŠE PDF. Bez přepsání PDF by v databázi seděla nová částka,
 // ale ve složce by pořád viselo staré PDF bez zálohy — a tisklo by se to špatné.
 async function saveInvoiceEdit() {
+  // Zámek proti dvojímu spuštění: úprava formuláře za běhu uložení tlačítko znovu povolovala.
+  if (_invEditUklada) return
+  _invEditUklada = true
+  try { return await saveInvoiceEditVnitrni() } finally { _invEditUklada = false }
+}
+async function saveInvoiceEditVnitrni() {
   const r = _invCache.find(x => x.id === _invEditId)
   if (!r) { showToast('⚠️ Faktura se nenašla'); return }
 
@@ -23751,7 +23776,9 @@ async function saveInvoiceEdit() {
     const puvodniCelkem = zalohyPuvodni.reduce((s2, p) => s2 + (Number(p.vzato) || 0), 0)
     if (cash <= 0.005) {
       upd.zalohy_pouzite = []
-    } else if (Math.abs(cash - puvodniCelkem) > 0.005 && puvodniCelkem > 0) {
+    } else if (cash < puvodniCelkem - 0.005 && puvodniCelkem > 0) {
+      // Jen snížení: zvýšení zálohy rozpis nezvětšuje — ze zálohové faktury se nesmí
+      // vzít víc, než kolik už bylo odečteno (zbytek je hotovost mimo zálohovou fakturu).
       // Poměrově — zbytek dorovnáme na poslední položce, ať součet sedí na cent.
       let zbyva = Math.round(cash * 100) / 100
       upd.zalohy_pouzite = zalohyPuvodni.map((p, i) => {
@@ -23782,15 +23809,22 @@ async function saveInvoiceEdit() {
     || String(r.kw_year ?? '') !== String(kwRokNovy ?? '')
   const byloZaplaceno = r.status === 'paid'
 
+  // Zápis se podmiňuje původním edited_at: když fakturu mezitím upravil někdo jiný,
+  // nepřepíše se jeho novější údaj (nula řádků → „mezitím se změnila").
+  const zapisUpravuFaktury = () => {
+    let q = sb.from('worker_invoices').update(upd).eq('id', r.id)
+    if (r.edited_at !== undefined) q = r.edited_at === null ? q.is('edited_at', null) : q.eq('edited_at', r.edited_at)
+    return q.select('id')
+  }
   let bezPuvodni = false
   let bezVzhledu = false
-  let { data: zapsanoF, error } = await sb.from('worker_invoices').update(upd).eq('id', r.id).select('id')
+  let { data: zapsanoF, error } = await zapisUpravuFaktury()
   // Sloupec se vzhledem ještě nemusí být v databázi. PDF už je přepsané správně,
   // takže zálohu ulož i bez něj a řekni nahlas, co chybí.
   if (error && /zalohy_pouzite/i.test(error.message || '')) {
     // Nespuštěná migrace — fakturu kvůli tomu neblokuj.
     delete upd.zalohy_pouzite
-    ;({ data: zapsanoF, error } = await sb.from('worker_invoices').update(upd).eq('id', r.id).select('id'))
+    ;({ data: zapsanoF, error } = await zapisUpravuFaktury())
   }
   // Sloupec cash_paid_typ nemusí být v databázi (nespuštěná migrace). PDF je
   // přepsané správně, jen si appka nezapamatuje, že šlo o zálohu na účet —
@@ -23799,12 +23833,12 @@ async function saveInvoiceEdit() {
   if (error && /cash_paid_typ/i.test(error.message || '')) {
     bezTypuZalohy = true
     delete upd.cash_paid_typ
-    ;({ data: zapsanoF, error } = await sb.from('worker_invoices').update(upd).eq('id', r.id).select('id'))
+    ;({ data: zapsanoF, error } = await zapisUpravuFaktury())
   }
   if (error && /design_idx/i.test(error.message || '')) {
     bezVzhledu = true
     delete upd.design_idx
-    ;({ data: zapsanoF, error } = await sb.from('worker_invoices').update(upd).eq('id', r.id).select('id'))
+    ;({ data: zapsanoF, error } = await zapisUpravuFaktury())
   }
   // Sloupce na původní verzi ještě nemusí být v databázi. Fakturu kvůli tomu
   // neblokuj — zálohu ulož i bez nich a řekni nahlas, co chybí.
@@ -23812,7 +23846,7 @@ async function saveInvoiceEdit() {
     bezPuvodni = true
     delete upd.original_pdf_url
     delete upd.original_pdf_path
-    ;({ data: zapsanoF, error } = await sb.from('worker_invoices').update(upd).eq('id', r.id).select('id'))
+    ;({ data: zapsanoF, error } = await zapisUpravuFaktury())
   }
   // Na číslo je v databázi unikátní index. Kdyby ho mezitím obsadila jiná
   // faktura, ať admin nečte hlášku z Postgresu, ale ví, co má udělat.
@@ -23874,7 +23908,9 @@ async function saveInvoiceEdit() {
   // ukazovala na týden, ke kterému faktura není.
   let provizeNepresunuta = ''
   if (kwZmeneno && byloZaplaceno) {
-    const stary = await syncProvizePaidFromInvoice(r.worker_id, r.kw, r.kw_year, false)
+    const stary = jinaZaplacenaVTydnu(r.id, r.worker_id, r.kw, r.kw_year)
+      ? { skipped: true }   // jiná zaplacená faktura za starý týden — Provize tam zůstanou uhrazené
+      : await syncProvizePaidFromInvoice(r.worker_id, r.kw, r.kw_year, false)
     const novy = await syncProvizePaidFromInvoice(r.worker_id, kwNovy, kwRokNovy, true)
     const chyba = stary.error || novy.error
     if (chyba) provizeNepresunuta = chyba.message || String(chyba)
@@ -23882,7 +23918,7 @@ async function saveInvoiceEdit() {
 
   Object.assign(r, upd)
   renderWorkerInvoices()
-  closeInvoiceEdit()
+  closeInvoiceEdit(true)
   if (provizeNepresunuta) {
     finish('⚠️ Faktura přepsaná, ale „uhrazeno" v Provizích zůstalo u starého týdne: ' + provizeNepresunuta)
     return
