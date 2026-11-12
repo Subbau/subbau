@@ -11618,6 +11618,10 @@ const jeBudouci = den => /^\d{4}-\d{2}-\d{2}$/.test(String(den || '')) && String
 // jinak by zpětný přepočet nechal smazané hranice a minulé částky by se změnily.
 const _zalohyHistorieSazby = {}   // klíč workerId|druh — souběžné změny sazeb si zálohy nepřepisují
 const _klicZalohy = (workerId, druh) => String(workerId) + '|' + druh
+function uvolniZalohuHistorieSazby(workerId, druh) {
+  const kz = _klicZalohy(workerId, druh), Z = _zalohyHistorieSazby[kz]
+  if (Z && --Z.bezi <= 0) delete _zalohyHistorieSazby[kz]
+}
 async function obnovHistoriiSazby(workerId, druh) {
   const kz = _klicZalohy(workerId, druh)
   const Z = _zalohyHistorieSazby[kz]
@@ -11641,13 +11645,28 @@ async function obnovHistoriiSazby(workerId, druh) {
     showToast('⚠️ Historie sazby se po chybě nepodařilo vrátit — zkontrolujte ji a uložte sazbu znovu')
   }
 }
+// Obálka: při neúspěchu uvolní zálohu (nikdo ji nevrací ani neuvolní); u úspěchu ji uvolní volající po zápisu profilu/provize.
 async function ulozSazbuSHistorii(workerId, druh, puvodni, nova, odKdy, opts) {
+  let ok = false
+  try { ok = await ulozSazbuSHistoriiVnitrni(workerId, druh, puvodni, nova, odKdy, opts) } finally { if (!ok) uvolniZalohuHistorieSazby(workerId, druh) }
+  return ok
+}
+async function ulozSazbuSHistoriiVnitrni(workerId, druh, puvodni, nova, odKdy, opts) {
   const dnes = localDateStr()
-  delete _zalohyHistorieSazby[_klicZalohy(workerId, druh)]
-  try {
-    const { data: zaloha, error: chybaZalohy } = await sb.from('worker_rate_history').select('*').eq('worker_id', workerId).eq('druh', druh)
-    if (!chybaZalohy && zaloha) _zalohyHistorieSazby[_klicZalohy(workerId, druh)] = { workerId, druh, rows: zaloha }
-  } catch (e) { delete _zalohyHistorieSazby[_klicZalohy(workerId, druh)] }
+  // Souběžná uložení téže sazby sdílejí JEDNU zálohu — tu nejstarší (stav před všemi změnami); čítač drží, dokud nedoběhnou všechna.
+  const kz0 = _klicZalohy(workerId, druh)
+  // Záloha starší než 2 minuty je opuštěná (volající ji neuvolnil) — začíná se znovu.
+  if (_zalohyHistorieSazby[kz0] && Date.now() - _zalohyHistorieSazby[kz0].od > 120000) delete _zalohyHistorieSazby[kz0]
+  if (_zalohyHistorieSazby[kz0]) _zalohyHistorieSazby[kz0].bezi++
+  else {
+    try {
+      const { data: zaloha, error: chybaZalohy } = await sb.from('worker_rate_history').select('*').eq('worker_id', workerId).eq('druh', druh)
+      if (!chybaZalohy && zaloha) {
+        if (_zalohyHistorieSazby[kz0]) _zalohyHistorieSazby[kz0].bezi++
+        else _zalohyHistorieSazby[kz0] = { workerId, druh, rows: zaloha, bezi: 1, od: Date.now() }
+      }
+    } catch (e) { console.warn('[sazby] zálohu historie se nepodařilo načíst:', e && e.message) }
+  }
   // Chybějící tabulka (neproběhlá migrace) = není co mazat ani hlídat. Jméno
   // tabulky v hlášce nestačí — obsahuje ho i odmítnutí právy — a „schema cache"
   // hlásí i dočasně nedostupný server (PGRST002), proto jen tyhle kódy.
@@ -12211,7 +12230,7 @@ async function saveProvizeRate(input, workerId) {
   }
   const { error } = await sb.from('profiles').update({ hourly_rate_worker: rate }).eq('id', workerId)
   if (error) { await obnovHistoriiSazby(workerId, 'sazba'); showToast('❌ Chyba: ' + error.message); return }
-  delete _zalohyHistorieSazby[_klicZalohy(workerId, 'sazba')]
+  uvolniZalohuHistorieSazby(workerId, 'sazba')
   smazNuluVimOTom('sazba', workerId, rate)
   showToast(poprve ? '✅ Sazba nastavena'
     : odKdy === 'zpetne'
@@ -12311,7 +12330,7 @@ async function saveProvizeCommission(input, workerId) {
   const { error } = await sb.from('worker_commissions')
     .upsert({ worker_id: workerId, provize, updated_at: new Date().toISOString() }, { onConflict: 'worker_id' })
   if (error) { await obnovHistoriiSazby(workerId, 'provize'); showToast('❌ Chyba: ' + error.message); return }
-  delete _zalohyHistorieSazby[_klicZalohy(workerId, 'provize')]
+  uvolniZalohuHistorieSazby(workerId, 'provize')
   smazNuluVimOTom('provize', workerId, provize)
   showToast(odKdy === 'zpetne'
     ? '✅ Provize uložena a přepočítána zpětně'
@@ -52458,6 +52477,7 @@ async function saveWorkerProfile() {
   // Národnost se zachytí hned (po awaitech by ve formuláři mohla být jiná karta).
   const narElStart = document.getElementById('wd-narodnost')
   const narStart = narElStart && !narElStart.disabled ? (narElStart.value || null) : undefined
+  const narPuvodni = currentWorkerProfile?.narodnost || null   // stav karty při startu — porovnává se s ním, ne s právě otevřenou kartou
   const fullName = document.getElementById('wd-fullname-input')?.value.trim() || ''
   if (!fullName) { showToast('⚠️ Jméno nesmí být prázdné'); return }
   const rate = parseFloat(document.getElementById('wd-rate').value)||0
@@ -52562,7 +52582,7 @@ async function saveWorkerProfile() {
   let narodnostNeulozena = ''
   if (narStart !== undefined) {
     const nar = narStart
-    if ((pk()?.narodnost || null) !== nar) {
+    if (narPuvodni !== nar) {
       const { data: nd, error: ne } = await sb.from('profiles').update({ narodnost: nar }).eq('id', wid).select('id, narodnost')
       if (ne || !nd || !nd.length) narodnostNeulozena = (ne && /narodnost|column|schema cache/i.test(ne.message || '')) ? 'migrace' : 'chyba'
       else if (pk()) pk().narodnost = nd[0].narodnost
