@@ -446,7 +446,7 @@ async function dbVsechno(cesta, klic) {
   if (prvni.length < STRANKA_DB) {
     // Databáze může mít nižší strop než STRANKA_DB (např. 500): kratší stránka proto neznamená „konec".
     // Pak se čte jako dřív — po skutečně vrácených kusech, dokud nepřijde prázdná stránka.
-    if (prvni.length < 100) return vse;   // nižší strop než 100 řádků nikdo nenastavuje; kratší výpis je celý
+    // (Jeden dotaz navíc na konci — prázdná stránka potvrdí, že výpis je celý; funguje při jakémkoli stropu.)
     let od = prvni.length;
     for (let strana = 0; strana < MAX_STRANEK_DB * 20; strana++) {
       const kus = await db(`${cesta}&limit=${STRANKA_DB}&offset=${od}`, klic);
