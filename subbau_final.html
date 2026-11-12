@@ -14515,7 +14515,7 @@ async function stahniStrankyOdhad(klic, fab) {
     od0 += davka * 1000; davka = 4
   }
   if (!error) _strankyOdhad[klic] = Math.max(1, Math.ceil(vse.length / 1000))
-  return { data: error && !vse.length ? null : vse, error }
+  return { data: error ? null : vse, error }   // neúplný výpis (chyba na pozdější stránce) se nikdy nevydává za úplný
 }
 
 // Najde dny, které přesáhly 20:30 — buď pracovník skončil až po 20:30
@@ -20497,6 +20497,7 @@ async function _poslednizpravyPracovniku(workers) {
   // První načtení: nejnovějších max. 3000 zpráv (zbytek lidí je neaktivní — ukáže se jejich profese);
   // další: jen zprávy novější než poslední viděná.
   const maxStran = prvni ? 3 : 5
+  let uzavreno = false
   let nejnovejsi = C.od
   for (let od = 0; od < maxStran * 1000; od += 1000) {
     let q = sb.from('chat_messages').select('worker_id, message, created_at, sender_role')
@@ -20508,9 +20509,11 @@ async function _poslednizpravyPracovniku(workers) {
       if (!stary || String(m.created_at) > String(stary.created_at)) C.mapa[m.worker_id] = m
       if (String(m.created_at) > nejnovejsi) nejnovejsi = String(m.created_at)
     })
-    if (!kus || kus.length < 1000) break
-    if (prvni && workers.every(w => C.mapa[w.id])) break
+    if (!kus || kus.length < 1000) { uzavreno = true; break }
+    if (prvni && workers.every(w => C.mapa[w.id])) { uzavreno = true; break }
   }
+  // Přírůstek přesáhl limit stran (dlouhý výpadek) → zprávy mezi tím by se přeskočily; příští načtení začne znovu od začátku.
+  if (!prvni && !uzavreno) { _chatPosledniMezi = { uid, mapa: {}, od: '', zkuseno: new Set() }; return C.mapa }
   if (nejnovejsi) C.od = nejnovejsi
   // Kdo po načtení poslední zprávu nemá (jeho zprávy jsou starší než posledních 3000), se doplní jednotlivě
   // (každý jednou za relaci, při chybě se zkusí znovu) — přírůstkové načítání by ho samo nikdy nedoplnilo.
@@ -40155,6 +40158,7 @@ async function _loadDocumentAlertsStatTelo() {
   let rDocs = await stahniStrankyOdhad('doklady', dotazDoklady('id, worker_id, doc_type, status, valid_until, no_expiry'))
   if (rDocs.error && (rDocs.error.code === '42703' || /column .* does not exist|schema cache/i.test(rDocs.error.message || ''))) rDocs = await stahniStrankyOdhad('doklady', dotazDoklady('*'))
   const allDocs = rDocs.data
+  if (!allDocs) { console.warn('[doklady] načtení selhalo:', rDocs.error?.message); return }   // neúplný seznam nesmí vyrobit falešná upozornění
 
   // Načti "vykřížkované" (skryté) položky upozornění — aby nepřekážely.
   // Perzistentně přes tabulku doc_alert_dismissals; fallback = session (okno).
