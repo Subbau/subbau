@@ -17331,6 +17331,44 @@ function fotkaDoSeznamu(url) {
 // nesedí, zkusí se to znovu (nejvýš 3× celkem). Když se velikost nedá zjistit
 // (starší úložiště, jiný tvar odpovědi), bere se nahrání jako hotové jako dřív
 // — tohle jen PŘIDÁVÁ jistotu, nikdy nebrzdí víc, než musí.
+// ZMENŠENÍ FOTKY PŘED NAHRÁNÍM (12. 11. 2026, audit zátěže): fotka z telefonu má 3–10 MB. Při 200 lidech a několika
+// fotkách denně to je desítky GB přenosu na slabém signálu, pomalé nahrávání, zaplněné úložiště a pomalá galerie.
+// Delší strana se zmenší na 2048 px (čitelné i při přiblížení) a uloží jako JPEG 0,85; menší soubory a cokoli, co
+// se nepodaří zpracovat, zůstane beze změny (nahrání nikdy nezablokuje). Zpracovává se po jedné (paměť telefonu).
+async function zmensiFotkuProNahrani(file, maxStrana = 2048, kvalita = 0.85) {
+  try {
+    if (!file || !/^image\/(jpeg|png|webp|heic|heif)$/i.test(file.type || '') && !/\.(jpe?g|png|webp|heic|heif)$/i.test(file.name || '')) return file
+    if (file.size <= 600 * 1024) return file   // už je malá
+    let zdroj = null, w = 0, h = 0, uvolni = null
+    if (typeof createImageBitmap === 'function') {
+      try { zdroj = await createImageBitmap(file, { imageOrientation: 'from-image' }); w = zdroj.width; h = zdroj.height; uvolni = () => { try { zdroj.close() } catch (e) {} } } catch (e) { zdroj = null }
+    }
+    if (!zdroj) {
+      const adresa = URL.createObjectURL(file)
+      try {
+        zdroj = await new Promise((ok, ne) => { const i = new Image(); i.onload = () => ok(i); i.onerror = ne; i.src = adresa })
+        w = zdroj.naturalWidth; h = zdroj.naturalHeight
+      } finally { URL.revokeObjectURL(adresa) }
+    }
+    if (!w || !h) return file
+    const m = Math.min(1, maxStrana / Math.max(w, h))
+    const cw = Math.max(1, Math.round(w * m)), ch = Math.max(1, Math.round(h * m))
+    const c = document.createElement('canvas'); c.width = cw; c.height = ch
+    const x = c.getContext('2d')
+    x.fillStyle = '#fff'; x.fillRect(0, 0, cw, ch)
+    x.drawImage(zdroj, 0, 0, cw, ch)
+    if (uvolni) uvolni()
+    const blob = await new Promise(ok => { try { c.toBlob(ok, 'image/jpeg', kvalita) } catch (e) { ok(null) } })
+    c.width = 0; c.height = 0   // uvolní paměť plátna (Safari)
+    if (!blob || blob.size >= file.size) return file   // nezmenšilo se — nech originál
+    const jmeno = String(file.name || 'foto').replace(/\.[^.]+$/, '') + '.jpg'
+    return new File([blob], jmeno, { type: 'image/jpeg', lastModified: Date.now() })
+  } catch (e) {
+    console.warn('[fotka] zmenšení se nepovedlo, nahraje se originál:', e && e.message)
+    return file
+  }
+}
+
 async function nahrajFotkuOverene(bucket, cesta, soubor, options) {
   const i = cesta.lastIndexOf('/')
   const slozkaCesty = i >= 0 ? cesta.slice(0, i) : '', jmeno = i >= 0 ? cesta.slice(i + 1) : cesta
@@ -27607,8 +27645,9 @@ async function uploadCheckoutPhotos(attId) {
   const fronta = _checkoutPhotoQueue.slice()
   const uploaded = []
   for (let i = 0; i < fronta.length; i++) {
-    const { file } = fronta[i]
+    const { file: puvodniSoubor } = fronta[i]
     try {
+      const file = await zmensiFotkuProNahrani(puvodniSoubor)
       const ext = (file.name.split('.').pop() || 'jpg').toLowerCase().replace(/[^a-z0-9]/g, '') || 'jpg'
       // cesta podle pracovníka (stejně jako volné focení), ať RLS sedí
       const uid = currentUser?.id || attId
@@ -27675,8 +27714,8 @@ async function onSitePhotos(input) {
   let okCount = 0
   let lastError = ''
   for (let i = 0; i < files.length; i++) {
-    const file = files[i]
     try {
+      const file = await zmensiFotkuProNahrani(files[i])
       const ext = (file.name.split('.').pop() || 'jpg').toLowerCase().replace(/[^a-z0-9]/g, '') || 'jpg'
       const path = `${currentUser.id}/${Date.now()}_${i}.${ext}`
       const { error: upErr } = await nahrajFotkuOverene('site-photos', path, file, { contentType: file.type || 'image/jpeg', upsert: true })
