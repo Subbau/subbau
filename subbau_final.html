@@ -32521,8 +32521,11 @@ async function nactiOdkazMmi() {
 
 // Stáhne plán ze Stavbyplánu; 5 minut drží poslední výsledek, ať nástěnka
 // a sekce nevolají Stavbyplán při každém přepnutí.
+// Pořadí stahování: starší odpověď, která doběhne po novější, nesmí přepsat mezipaměť.
+let _mmiPoradiStahovani = 0, _mmiPoradiZapsane = 0
 async function stahniPlanMmi(odkaz, znovu) {
   if (!znovu && _mmi.data && _mmi.data.__odkaz === odkaz && Date.now() - _mmi.kdy < 5 * 60000) return _mmi.data
+  const poradiStahovani = ++_mmiPoradiStahovani
   const ovl = new AbortController()
   const stop = setTimeout(() => ovl.abort(), 20000)
   let j = null
@@ -32537,7 +32540,7 @@ async function stahniPlanMmi(odkaz, znovu) {
     throw err
   }
   j.__odkaz = odkaz
-  _mmi = { data: j, kdy: Date.now() }
+  if (poradiStahovani > _mmiPoradiZapsane) { _mmi = { data: j, kdy: Date.now() }; _mmiPoradiZapsane = poradiStahovani }
   return j
 }
 
@@ -35398,6 +35401,7 @@ function askAddressIfNeeded(attId, actionLabel) {
 let _gpsWatchId = null
 let _gpsBestAccuracy = Infinity
 let _gpsAccuracy = null
+let _gpsMereni = 0       // číslo běžícího měření: starší měření (časovače, překlad adresy) nové nepřepíše
 let _gpsStopped = false  // GPS se ten den vypne, jakmile má pracovník adresu
 
 // Má dnešní záznam už potvrzenou adresu? (ručně i GPS) → pak GPS netřeba
@@ -35442,6 +35446,8 @@ function getGPS(force) {
   }
 
   // Reset pro nové měření — vždy čerstvá poloha (žádná stará z cache)
+  const mojeMereni = ++_gpsMereni
+  const aktualniMereni = () => mojeMereni === _gpsMereni
   _gpsBestAccuracy = Infinity
   if (_gpsWatchId !== null) { try { navigator.geolocation.clearWatch(_gpsWatchId) } catch(e){} _gpsWatchId = null }
 
@@ -35457,6 +35463,7 @@ function getGPS(force) {
 
   // Sleduj polohu a vyber tu nejpřesnější (watchPosition dává postupně lepší údaje)
   _gpsWatchId = navigator.geolocation.watchPosition(async p => {
+    if (!aktualniMereni()) return
     const acc = p.coords.accuracy || 9999
     const elapsed = Date.now() - startTime
 
@@ -35483,7 +35490,7 @@ function getGPS(force) {
       finishGps()
     }
   }, err => {
-    if (settled) return
+    if (settled || !aktualniMereni()) return
     settled = true
     stopGPS()   // nepovedlo se → dál to nezkoušej, baterka
     if (g) g.textContent = '⚠️ Poloha se nenačetla'
@@ -35497,10 +35504,10 @@ function getGPS(force) {
   updateGpsStrip()   // měření běží → ukaž proužek s průběhem a tlačítky
 
   // Pojistka: i kdyby watch dlouho nedal ≤30 m, po 15 s dokonči s tím nejlepším co máme
-  setTimeout(() => { if (!settled && _gpsBestAccuracy < Infinity) finishGps() }, 15000)
+  setTimeout(() => { if (!settled && aktualniMereni() && _gpsBestAccuracy < Infinity) finishGps() }, 15000)
   // Tvrdá pojistka: kdyby GPS úplně mlčela 20 s → ruční zadání
   setTimeout(() => {
-    if (!settled && _gpsBestAccuracy === Infinity) {
+    if (!settled && aktualniMereni() && _gpsBestAccuracy === Infinity) {
       settled = true
       stopGPS()   // 20 s a nic → GPS vypni, ať nemele naprázdno
       if (g) g.textContent = '⚠️ Poloha trvá dlouho'
@@ -35511,13 +35518,15 @@ function getGPS(force) {
   }, 20000)
 
   async function finishGps() {
-    if (settled) return
+    if (settled || !aktualniMereni()) return
     settled = true
+    // Souřadnice, přesnost a adresa tohoto měření se drží lokálně — globály může mezitím přepsat nové měření.
+    const lat = gpsLat, lng = gpsLng, presnost = _gpsAccuracy
     // Souřadnice máme → sledování polohy okamžitě vypni. Překlad na adresu
     // (a uložení) doběhne i bez zapnuté GPS, takže telefon nic dalšího nežere.
     stopGPS()
 
-    gpsAddr = `${gpsLat.toFixed(5)}, ${gpsLng.toFixed(5)}`
+    gpsAddr = `${lat.toFixed(5)}, ${lng.toFixed(5)}`
     if (!_manualAddressLocked) {
       if (g) g.textContent = '📍 Načítám adresu…'
       if (mg) mg.textContent = '📍 Načítám adresu…'
@@ -35527,7 +35536,7 @@ function getGPS(force) {
     // 1) OpenStreetMap Nominatim — ulice + číslo + město
     try {
       const r = await fetchAdresy(
-        `https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${gpsLat}&lon=${gpsLng}&addressdetails=1&accept-language=cs&zoom=18`,
+        `https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${lat}&lon=${lng}&addressdetails=1&accept-language=cs&zoom=18`,
         { headers: { 'Accept': 'application/json' } }, 10000)
       if (r.ok) {
         const j = await r.json()
@@ -35549,7 +35558,7 @@ function getGPS(force) {
     // 2) Fallback: BigDataCloud
     if (!resolved) {
       try {
-        const res = await fetchAdresy(`https://api.bigdatacloud.net/data/reverse-geocode-client?latitude=${gpsLat}&longitude=${gpsLng}&localityLanguage=cs`, undefined, 10000)
+        const res = await fetchAdresy(`https://api.bigdatacloud.net/data/reverse-geocode-client?latitude=${lat}&longitude=${lng}&localityLanguage=cs`, undefined, 10000)
         const data = await res.json()
         const parts = []
         if (data.street) parts.push(data.street)
@@ -35560,38 +35569,39 @@ function getGPS(force) {
       } catch(e) { /* zůstanou souřadnice */ }
     }
 
-    gpsAddr = resolved || `${gpsLat.toFixed(5)}, ${gpsLng.toFixed(5)}`
+    const adresaMereni = resolved || `${lat.toFixed(5)}, ${lng.toFixed(5)}`
+    if (aktualniMereni()) gpsAddr = adresaMereni
     // Ulož GPS adresu do svého pole (ať ji admin vidí i když pracovník zadal i ruční)
     const jinyUcet = !currentUser || currentUser.id !== ucetZacatek
     const jinaSmena = !!attZacatek && todayAttId !== attZacatek
-    if (todayRecord && !jinyUcet && !jinaSmena) todayRecord.gps_address = gpsAddr
+    if (todayRecord && !jinyUcet && !jinaSmena) todayRecord.gps_address = adresaMereni
     if (todayAttId && !jinyUcet && !jinaSmena && !adminEditedAtt(todayRecord)) {
-      const gpsUpd = { gps_address: gpsAddr }
-      if (gpsLat && gpsLng) { gpsUpd.location_lat = gpsLat; gpsUpd.location_lng = gpsLng }
+      const gpsUpd = { gps_address: adresaMereni }
+      if (lat && lng) { gpsUpd.location_lat = lat; gpsUpd.location_lng = lng }
       // pokud ještě není žádná hlavní adresa, dosaď GPS i do location_address
       if (!(todayRecord && todayRecord.manual_address) && !(todayRecord && todayRecord.address_source === 'manual')) {
-        gpsUpd.location_address = gpsAddr
+        gpsUpd.location_address = adresaMereni
         gpsUpd.address_source = 'gps'
-        if (todayRecord) { todayRecord.location_address = gpsAddr; todayRecord.address_source = 'gps' }
+        if (todayRecord) { todayRecord.location_address = adresaMereni; todayRecord.address_source = 'gps' }
       }
       // Pozor: todayAttId se mohl mezitím vynulovat (odchod) — proto si ho
       // podržíme a výsledek zápisu si ověříme.
       const denProZapis = todayAttId
       const maRucni = !!(todayRecord && (todayRecord.manual_address || todayRecord.address_source === 'manual')) || _manualAddressLocked
-      ulozAdresuDne(denProZapis, gpsAddr, gpsUpd.address_source || 'gps', gpsLat, gpsLng, maRucni).then(v => {
+      ulozAdresuDne(denProZapis, adresaMereni, gpsUpd.address_source || 'gps', lat, lng, maRucni).then(v => {
         if (!v.ok) showToast('⚠️ Poloha se nepodařila uložit — zadejte prosím adresu ručně')
       })
     }
     // Pokud pracovník mezitím zadal adresu ručně, GPS nepřepíše zobrazení, jen se uloží na pozadí
-    if (_manualAddressLocked) return
+    if (_manualAddressLocked || !aktualniMereni()) return
 
     // Ukaž adresu + jak je přesná. Při špatné přesnosti varuj.
-    const acc = _gpsAccuracy || 0
+    const acc = presnost || 0
     let accLabel = ''
     if (acc > 100) accLabel = ` ⚠️ nepřesné (±${Math.round(acc)} m)`
     else if (acc > 0) accLabel = ` (±${Math.round(acc)} m)`
-    if (g) g.textContent = '📍 ' + gpsAddr + accLabel
-    if (mg) mg.textContent = '📍 ' + gpsAddr + accLabel
+    if (g) g.textContent = '📍 ' + adresaMereni + accLabel
+    if (mg) mg.textContent = '📍 ' + adresaMereni + accLabel
 
     // Když je poloha hodně nepřesná nebo bez ulice → nabídni ruční doplnění
     if (!resolved || acc > 100) {
