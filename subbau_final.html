@@ -20512,6 +20512,20 @@ async function _poslednizpravyPracovniku(workers) {
     if (prvni && workers.every(w => C.mapa[w.id])) break
   }
   if (nejnovejsi) C.od = nejnovejsi
+  // Kdo po prvním načtení poslední zprávu nemá (jeho zprávy jsou starší než posledních 3000), se doplní jednotlivě —
+  // jinak by ho přírůstkové načítání už nikdy nedoplnilo. Nejvýš 60 lidí naráz, zbytek příště.
+  if (prvni) {
+    const chybi = workers.filter(w => !C.mapa[w.id]).slice(0, 60)
+    for (let i = 0; i < chybi.length; i += 10) {
+      await Promise.all(chybi.slice(i, i + 10).map(async w => {
+        try {
+          const { data, error } = await sb.from('chat_messages').select('worker_id, message, created_at, sender_role')
+            .eq('worker_id', w.id).order('created_at', { ascending: false }).limit(1)
+          if (!error && data && data[0]) C.mapa[w.id] = data[0]
+        } catch (e) { console.warn('[chat] poslední zpráva:', e && e.message) }
+      }))
+    }
+  }
   return C.mapa
 }
 async function _loadAdminChatListTed() {
@@ -42718,7 +42732,7 @@ window.SABLONY_FAKTUR[15] = function (V) {
     <tr>
       <td style="vertical-align:bottom;padding:0 16px 8px 0">
         <div style="${POPISEK}">${V.L.supplier}</div>
-        <div style="font-size:9.5px;color:#5F5952;line-height:1.5;margin-top:2px">${(V.dodavatel.adresa || '').split('\n').join(' · ')}</div>
+        <div style="font-size:9.5px;color:#5F5952;line-height:1.5;margin-top:2px">${(V.dodavatel.adresa || '').split('\n').join('<br>')}</div>
       </td>
       <td style="width:270px;text-align:right;vertical-align:bottom;padding:0 0 8px">
         <span style="${POPISEK}">${V.L.ico}</span>&nbsp;<span style="font-size:9.5px;font-weight:600">${V.dodavatel.ic}</span>${V.dodavatel.platceDph ? `<br><span style="${POPISEK}">${V.L.dic}</span>&nbsp;<span style="font-size:9.5px;font-weight:600">${V.dodavatel.dic}</span>` : ''}
