@@ -1,0 +1,73 @@
+-- Hlídání čerpání záloh v databázi (audit 11. 11. 2026: dvě faktury si mohly odečíst tutéž zálohu,
+-- storno/smazání zálohy mohlo proběhnout těsně po jejím zúčtování).
+-- Appka funguje i BEZ této migrace (kontroluje čerstvě před zápisem); tahle migrace zavírá poslední
+-- souběh na straně databáze. Idempotentní — jde pustit opakovaně. Nemění žádná existující data.
+-- Hlídá se jen NOVÝ zápis: starší, už přečerpané faktury zůstanou, jak jsou, a jejich oprava
+-- (která nemění zalohy_pouzite) projde.
+
+-- 1) Faktura smí z jedné zálohy vzít jen tolik, kolik záloha obsahuje (po odečtení ostatních faktur).
+create or replace function public.zalohy_hlidej_cerpani() returns trigger
+language plpgsql security definer set search_path = public as $$
+declare
+  p jsonb; v_cislo text; v_vzato numeric; v_jinde numeric; v_castka numeric;
+begin
+  if new.worker_id is null or new.zalohy_pouzite is null or jsonb_typeof(new.zalohy_pouzite) <> 'array' then
+    return new;
+  end if;
+  if tg_op = 'UPDATE' and new.zalohy_pouzite is not distinct from old.zalohy_pouzite then
+    return new;
+  end if;
+  -- Jeden zámek na pracovníka: souběžná zápis druhé faktury počká, až tahle skončí.
+  perform pg_advisory_xact_lock(hashtext('zalohy:' || new.worker_id::text));
+  for p in select * from jsonb_array_elements(new.zalohy_pouzite) loop
+    v_cislo := p->>'cislo';
+    v_vzato := coalesce((p->>'vzato')::numeric, 0);
+    continue when v_cislo is null or v_vzato <= 0;
+    select z.castka into v_castka from public.zalohove_faktury z
+      where z.worker_id = new.worker_id and z.cislo = v_cislo;
+    continue when v_castka is null;
+    select coalesce(sum((e->>'vzato')::numeric), 0) into v_jinde
+      from public.worker_invoices w,
+           jsonb_array_elements(case when jsonb_typeof(w.zalohy_pouzite) = 'array' then w.zalohy_pouzite else '[]'::jsonb end) e
+      where w.worker_id = new.worker_id and w.id is distinct from new.id and e->>'cislo' = v_cislo;
+    if v_jinde + v_vzato > v_castka + 0.01 then
+      raise exception 'Záloha % je už čerpaná jinou fakturou (zbývá % z %).', v_cislo, greatest(v_castka - v_jinde, 0), v_castka
+        using errcode = '23514';
+    end if;
+  end loop;
+  return new;
+end $$;
+
+drop trigger if exists zalohy_hlidej_cerpani_trg on public.worker_invoices;
+create trigger zalohy_hlidej_cerpani_trg
+  before insert or update of zalohy_pouzite on public.worker_invoices
+  for each row execute function public.zalohy_hlidej_cerpani();
+
+-- 2) Zálohu, kterou už některá faktura odečetla, nejde smazat ani stornovat.
+create or replace function public.zalohy_hlidej_storno() returns trigger
+language plpgsql security definer set search_path = public as $$
+declare
+  v_cislo text; v_worker uuid; v_pouzito numeric;
+begin
+  if tg_op = 'UPDATE' then
+    if new.stav is not distinct from old.stav or new.stav <> 'stornovana' then return new; end if;
+    v_cislo := old.cislo; v_worker := old.worker_id;
+  else
+    v_cislo := old.cislo; v_worker := old.worker_id;
+  end if;
+  perform pg_advisory_xact_lock(hashtext('zalohy:' || v_worker::text));
+  select coalesce(sum((e->>'vzato')::numeric), 0) into v_pouzito
+    from public.worker_invoices w,
+         jsonb_array_elements(case when jsonb_typeof(w.zalohy_pouzite) = 'array' then w.zalohy_pouzite else '[]'::jsonb end) e
+    where w.worker_id = v_worker and e->>'cislo' = v_cislo;
+  if v_pouzito > 0.005 then
+    raise exception 'Záloha % už byla odečtená z faktury — nejde stornovat ani smazat.', v_cislo using errcode = '23514';
+  end if;
+  if tg_op = 'DELETE' then return old; end if;
+  return new;
+end $$;
+
+drop trigger if exists zalohy_hlidej_storno_trg on public.zalohove_faktury;
+create trigger zalohy_hlidej_storno_trg
+  before update of stav or delete on public.zalohove_faktury
+  for each row execute function public.zalohy_hlidej_storno();
