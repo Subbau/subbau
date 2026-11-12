@@ -8728,13 +8728,18 @@ async function _initAppInner(user) {
         if (eIns) console.warn('Login log: zápis přihlášení selhal:', eIns.message)
         // 2. Smaž záznamy starší než 30 dní (detail aktivity ukazuje přihlášení za posledních 30 dní;
         //    dřív se mazalo po 3 dnech a přehled byl neúplný)
-        const cutoff = new Date()
-        cutoff.setDate(cutoff.getDate() - 30)
-        const { error: eDel } = await sb.from('login_history')
-          .delete()
-          .eq('worker_id', user.id)
-          .lt('logged_at', cutoff.toISOString())
-        if (eDel) console.warn('Login log: mazání staré historie selhalo:', eDel.message)
+        //    Úklid stačí jednou za 12 hodin (výkon 12. 11. 2026: dřív zápis navíc při každém otevření appky).
+        const klicUklidu = 'sb_lh_uklid_' + user.id
+        if (Date.now() - (Number(lsGet(klicUklidu)) || 0) > 12 * 3600 * 1000) {
+          const cutoff = new Date()
+          cutoff.setDate(cutoff.getDate() - 30)
+          const { error: eDel } = await sb.from('login_history')
+            .delete()
+            .eq('worker_id', user.id)
+            .lt('logged_at', cutoff.toISOString())
+          if (eDel) console.warn('Login log: mazání staré historie selhalo:', eDel.message)
+          else lsSet(klicUklidu, String(Date.now()))
+        }
         // 3. Aktualizuj last_login_at a count v profiles
         const { error: eUpd } = await sb.from('profiles').update({
           last_login_at: new Date().toISOString(),
@@ -9821,7 +9826,7 @@ function showOsvec(profile) {
     startOsvecRealtime()
     updateChatBadge()
     if (window._osvecChatBadgeInt) clearInterval(window._osvecChatBadgeInt)
-    window._osvecChatBadgeInt = setInterval(updateChatBadge, 20000)
+    window._osvecChatBadgeInt = setInterval(_chatBadgeTik, 20000)
     checkDocumentAlerts()
     souhlasPredNavodem()   // nový člověk: nejdřív potvrzení (GDPR, poloha, OSVČ), pak návod
     checkInstallNudge()
@@ -16877,6 +16882,25 @@ function nactiVlajky(vynutit) {
   })().finally(() => { _vlajkyBezi = null })
   return _vlajkyBezi
 }
+// Vlastní národnost a němčina pracovníka (faktura pracovníka potřebuje jen svůj jazyk; výkon 12. 11. 2026:
+// nactiVlajky stahuje všechny profily, u pracovníka přes 200 řádků kvůli jednomu). Řádek se
+// zapíše do téže mapy, platí minutu; celé načtení (nactiVlajky) jím nic nepřeskočí.
+let _mojeVlajkaKdy = { id: '', kdy: 0 }
+async function nactiVlajkyMoje(workerId) {
+  const id = String(workerId || '')
+  if (!id) return _lideVlajky.mapa
+  if (_mojeVlajkaKdy.id === id && Date.now() - _mojeVlajkaKdy.kdy < 60000) return _lideVlajky.mapa
+  if (Date.now() - _lideVlajky.kdy < 60000 && _lideVlajky.mapa.has(id)) return _lideVlajky.mapa
+  let r = await sb.from('profiles').select('id, narodnost, german_level').eq('id', id).maybeSingle()
+  // Bez migrace sloupec narodnost chybí — stejně jako v nactiVlajky se zkusí bez něj.
+  if (r.error && (r.error.code === '42703' || /narodnost/i.test(r.error.message || ''))) {
+    r = await sb.from('profiles').select('id, german_level').eq('id', id).maybeSingle()
+  }
+  if (r.error || !r.data) return nactiVlajky()   // nejasný výsledek: cesta jako dřív
+  _lideVlajky.mapa.set(id, { narodnost: r.data.narodnost || null, nemcina: r.data.german_level || null })
+  _mojeVlajkaKdy = { id, kdy: Date.now() }
+  return _lideVlajky.mapa
+}
 // Po uložení profilu (třeba po spuštěné migraci) načíst znovu a zkusit i národnost.
 // POČET ČERNÝCH PUNTÍKŮ U JMÉNA. Majitel 1. 10. 2026: „v docházce a
 // v pracovníkách chci vidět počet puntíků, kdo kolik má." Jeden dotaz pro
@@ -19823,9 +19847,16 @@ function startOsvecRealtime() {
     .on('postgres_changes', { event: '*', schema: 'public', table: 'contracts', filter: 'worker_id=eq.' + uid }, () => {
       _debouncedRefreshMob('contracts', () => { if (typeof loadMobContracts==='function') loadMobContracts() })
     })
-    // Zprávy / oznámení od SubBau
-    .on('postgres_changes', { event: '*', schema: 'public', table: 'notifications' }, () => {
+    // Zprávy / oznámení od SubBau. Filtr podle pracovníka (výkon 12. 11. 2026): bez něj
+    // šla každá zpráva všem připojeným telefonům a databáze u každého ověřovala práva
+    // (hromadná zpráva 200 lidem = 40 000 ověření místo 200). Seznam stejně čte jen
+    // zprávy tohoto pracovníka, takže se obnovuje přesně při stejných změnách jako dřív.
+    .on('postgres_changes', { event: '*', schema: 'public', table: 'notifications', filter: 'worker_id=eq.' + uid }, () => {
       _debouncedRefreshMob('notif', () => { if (typeof loadMobNotifications==='function') loadMobNotifications() })
+    })
+    // Nová zpráva od kanceláře v chatu → odznak hned, dotazování ho jen dorovnává (viz _chatBadgeTik).
+    .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'chat_messages', filter: 'worker_id=eq.' + uid }, () => {
+      _debouncedRefreshMob('chat-odznak', () => { if (typeof updateChatBadge==='function') updateChatBadge() })
     })
     // Oznámení (lišta nahoře). Do 30. 9. 2026 tu omylem stálo obnovení Zpráv,
     // takže nové oznámení se ukázalo až po znovunačtení appky.
@@ -19842,7 +19873,10 @@ function startOsvecRealtime() {
         if (currentProfile) Object.assign(currentProfile, payload.new)
       }
       // Docházka se obnovuje i po heartbeatu, jako dřív (stav směny po návratu do appky)
-      _debouncedRefreshMob('profil-dochazka', () => { if (typeof getTodayRecord === 'function') getTodayRecord() })
+      // Ozvěna samotného heartbeatu stav dne nečte znovu, když se četl před chvílí
+      // (start, návrat do appky, tichá obnova) — dřív to bylo 2–3 dotazy navíc při každém tepu.
+      const stavDneCerstvy = jenPritomnost && Date.now() - (window._ctuStartKdy || 0) < 45000 && (window._mobZapisKdy || 0) < (window._ctuStartKdy || 0)
+      if (!stavDneCerstvy) _debouncedRefreshMob('profil-dochazka', () => { if (typeof getTodayRecord === 'function') getTodayRecord() })
       if (jenPritomnost) return
       // Rozepsaný telefon (pole má fokus nebo jiný text, než s jakým se vykreslilo)
       // by překreslení karty smazalo — kartu odlož, dokud ho pracovník neuloží
@@ -20091,8 +20125,17 @@ async function _sendChatMessageVnitrni() {
   }
 }
 
+// Dotazování odznaku chatu: schovaná appka se neptá a při živém spojení stačí jednou za minutu
+// (nové zprávy chodí živě, viz startOsvecRealtime); bez spojení jako dřív po 20 s.
+function _chatBadgeTik() {
+  if (document.visibilityState === 'hidden') return
+  const spojeno = typeof osvecRealtimeSub !== 'undefined' && osvecRealtimeSub && osvecRealtimeSub.state === 'joined'
+  if (spojeno && Date.now() - (window._chatBadgeKdy || 0) < 55000) return
+  updateChatBadge()
+}
 async function updateChatBadge() {
   if (!currentUser) return
+  window._chatBadgeKdy = Date.now()
   // Pokud je chat otevřený, badge nezobrazovat
   const chatView = document.getElementById('mob-v-chat')
   if (chatView?.classList.contains('on')) {
@@ -27742,7 +27785,19 @@ async function getTodayRecord() {
   const today = localDateStr()
   const _ctuOd = Date.now()
   const _ctuUid = currentUser.id   // pozdní odpověď předchozího účtu se zahodí (audit 11. 11. 2026)
-  // Načti VŠECHNY záznamy pro dnešek (může být více směn)
+  window._ctuStartKdy = _ctuOd   // kdy naposled začalo čtení stavu dne (ozvěna heartbeatu ho nespouští znovu, viz startOsvecRealtime)
+  // Načti VŠECHNY záznamy pro dnešek (může být více směn). Souběžně s tím se čtou
+  // nezavřené starší směny (včerejšek pro noční směnu + banner o zapomenutém odchodu):
+  // dřív dva dotazy za sebou a třetí v kontrole banneru (výkon 12. 11. 2026).
+  const _ctuVcera = new Date(); _ctuVcera.setDate(_ctuVcera.getDate() - 1)
+  const _ctuVceraStr = localDateStr(_ctuVcera)
+  const _ctuStarsi = Promise.resolve(sb.from('attendance').select('*')
+    .eq('worker_id', currentUser.id)
+    .is('check_out', null)
+    .not('check_in', 'is', null)
+    .lte('work_date', _ctuVceraStr)
+    .order('work_date', {ascending: true})
+    .limit(200)).catch(e => ({ data: null, error: e }))
   const { data, error } = await sb.from('attendance').select('*')
     .eq('worker_id', currentUser.id)
     .eq('work_date', today)
@@ -27765,18 +27820,14 @@ async function getTodayRecord() {
   // na „Začít směnu“ a rozdělanou směnu by už neměl jak ukončit.
   let vceraOtevrena = null, vceraChyba = false
   if (!(data || []).some(r => r.check_in && !r.check_out)) {
-    try {
-      const v = new Date(); v.setDate(v.getDate() - 1)
-      const { data: vc, error: vcErr } = await sb.from('attendance').select('*')
-        .eq('worker_id', currentUser.id)
-        .eq('work_date', localDateStr(v))
-        .is('check_out', null)
-        .not('check_in', 'is', null)
-        .order('check_in', {ascending: false})
-        .limit(1)
-      if (vcErr) vceraChyba = true
-      else if (vc && vc[0]) vceraOtevrena = vc[0]
-    } catch(e) { vceraChyba = true }
+    const _ctuS = await _ctuStarsi
+    if (_ctuS.error) vceraChyba = true
+    else {
+      // Včerejší nezavřená směna: nejpozdější příchod (jako dřív order check_in desc, limit 1).
+      const vc = (_ctuS.data || []).filter(r => String(r.work_date || '').slice(0, 10) === _ctuVceraStr)
+        .sort((a, b) => String(b.check_in || '').localeCompare(String(a.check_in || '')))
+      if (vc[0]) vceraOtevrena = vc[0]
+    }
   }
   if (!currentUser || currentUser.id !== _ctuUid) return
   // Selhané dohledání včerejška není „včera nic neběží": běžící směna zůstává,
@@ -27846,22 +27897,27 @@ async function getTodayRecord() {
   }
   // Schovej/ukaž proužek "Načítám polohu" podle toho, jestli už je adresa
   if (typeof updateGpsStrip === 'function') updateGpsStrip()
-  zkontrolujStarouOtevrenouSmenu()
+  zkontrolujStarouOtevrenouSmenu(_ctuStarsi.then(x => x.error ? [] : (x.data || []).filter(r => String(r.work_date || '').slice(0, 10) < _ctuVceraStr)))
 }
 
 // Jen upozorní — nic neopravuje ani nenabízí k ukončení (ta stará směna může
 // být dávno rozporuplná a appka by si neporadila, jaký odchod/den z toho udělat).
 // Ať aspoň pracovník ví, že mu něco chybí, a může se ozvat do kanceláře.
-async function zkontrolujStarouOtevrenouSmenu() {
+async function zkontrolujStarouOtevrenouSmenu(uzNactene) {
   const banner = document.getElementById('stara-otevrena-smena-banner')
   if (!banner || !currentUser) return
   try {
-    const vcera = new Date(); vcera.setDate(vcera.getDate() - 1)
-    const { data } = await sb.from('attendance').select('work_date')
-      .eq('worker_id', currentUser.id)
-      .is('check_out', null).not('check_in', 'is', null)
-      .lt('work_date', localDateStr(vcera))
-      .order('work_date', { ascending: true }).limit(1)
+    // `uzNactene` = slib nezavřených směn starších než včerejšek od nejstarší, které už čte
+    // getTodayRecord (bez dalšího dotazu); bez něj se čte samostatně jako dřív.
+    let data = uzNactene ? await uzNactene : undefined
+    if (!Array.isArray(data)) {
+      const vcera = new Date(); vcera.setDate(vcera.getDate() - 1)
+      ;({ data } = await sb.from('attendance').select('work_date')
+        .eq('worker_id', currentUser.id)
+        .is('check_out', null).not('check_in', 'is', null)
+        .lt('work_date', localDateStr(vcera))
+        .order('work_date', { ascending: true }).limit(1))
+    }
     const stara = data && data[0]
     if (stara) {
       banner.textContent = '⚠️ Máte nedokončenou směnu ze dne ' + stara.work_date.split('-').reverse().join('.') + '. Ozvěte se prosím do kanceláře, ať vám hodiny nepropadnou.'
@@ -31712,9 +31768,9 @@ async function loadInvoiceForm() {
     custEl.style.color = p.invoice_customer_name ? 'var(--text)' : 'var(--red)'
   }
 
+  nactiMojeFaktury()   // seznam odeslaných faktur nezávisí na týdnu — čte se souběžně (výkon 12. 11. 2026)
   await loadInvoiceWeeks()
   await onInvoiceWeekChange()
-  nactiMojeFaktury()
 }
 
 // Vlastní odeslané faktury pracovníka — jen vyřízené/zaplacené (status != 'new').
@@ -31863,7 +31919,7 @@ async function buildInvoiceItemEn(week, year) {
     // Každý popis zvlášť a stejnou cestou jako výkazy (i se stejnou pamětí):
     // spojený text pozná Google jen v JEDNOM jazyce a polský popis mezi
     // českými by nechal nepřeložený (ověřeno 4. 10. 2026).
-    try { await nactiVlajky() } catch (e) {}
+    try { await nactiVlajkyMoje(currentUser.id) } catch (e) {}   // jen vlastní řádek, ne všech 200+ profilů
     const jazyk = jazykPracovnika(currentUser.id)
     // Den s „-" nebo jen zkratkou či jménem („OSB") nemá co překládat: bez
     // písmen se vynechá, zkratka zůstane, jak je (dřív kvůli němu spadla
@@ -32215,6 +32271,15 @@ async function onInvoiceWeekChange() {
   hlidejDalsiPolozky('inv', (currentUser?.id || '') + '|' + v)
   const [week, year] = v.split('/')
 
+  // Čtení, která na sobě nezávisí, se pouští naráz (výkon 12. 11. 2026): číslo faktury a
+  // naposledy fakturovaný text dřív čekaly za výpočtem částky — na slabém signálu to bylo
+  // 7 kol dotazů za sebou, tlačítko Vytvořit bylo celou dobu zamčené. Výsledek je stejný,
+  // každé čtení si hlídá pozdní odpovědi samo.
+  const cisloPredem = predvyplnitCisloFaktury(currentUser?.id, parseInt(year), 'inv', week)
+  cisloPredem.catch(() => {})   // chybu ohlásí až await níž (stejný catch jako dřív)
+  const vlastniTextPredem = lsGet(_invItemKey(week, year))
+  const posledniPredem = (vlastniTextPredem && vlastniTextPredem.trim()) ? null : posledniPolozkaFaktury(currentUser?.id)
+
   // Množství se předvyplní odpracovanými hodinami za ten týden a cena sazbou —
   // na faktuře se ale slovo „hodiny" neobjeví, je to prostě množství × cena.
   // Co si člověk přepíše, se už nepřepisuje zpátky.
@@ -32249,7 +32314,7 @@ async function onInvoiceWeekChange() {
     window._invTydenniCastka = castka
     rozpocitatCastku('inv')
     ukazSrazkuVeFakture('inv', rozpisTydnePracovnika)
-    await predvyplnitCisloFaktury(currentUser?.id, parseInt(year), 'inv', week)
+    await cisloPredem
     // Částka i číslo jsou za tenhle týden — teprve teď jde faktura vystavit.
     if (sel.value === v && poradi === _invNacitaniTydne) window._invCastkaTyden = v
   } catch (e) { console.warn('[faktura] předvyplnění položky:', e?.message) }
@@ -32270,7 +32335,7 @@ async function onInvoiceWeekChange() {
   // Co fakturoval naposledy. Většina lidí dělá pořád to samé, takže je to
   // trefa častěji než čerstvý překlad z docházky — a přepsat to může.
   const textPredDotazem = itemEl.value
-  const posledni = await posledniPolozkaFaktury(currentUser?.id)
+  const posledni = await (posledniPredem || posledniPolozkaFaktury(currentUser?.id))
   // Mezitím mohl pracovník přepnout týden nebo začít psát — jeho text se nepřepíše.
   if (sel.value !== v || poradi !== _invNacitaniTydne || itemEl.value !== textPredDotazem) return
   if (posledni) {
@@ -38583,7 +38648,7 @@ async function onExportWeekChange() {
 async function loadMobExportWeeks() {
   const sel = document.getElementById('mob-export-week')
   if (!sel || !currentUser) return
-  const { data } = await sb.from('attendance').select('kw,kw_year').eq('worker_id', currentUser.id).order('kw_year',{ascending:false}).order('kw',{ascending:false})
+  const { data } = await _tydnyDochazkyPracovnika()   // sdílený dotaz s Fakturou (viz _tydnyDochazkyPracovnika)
   // Týdny s docházkou
   const map = new Map((data||[]).map(r => [r.kw+'/'+r.kw_year, { kw: r.kw, kw_year: r.kw_year }]))
   // Přidej i posledních 8 týdnů (i bez docházky) — kvůli zpětnému podpisu
@@ -45126,6 +45191,33 @@ function titulekNaDobuTisku(titulek, okno) {
   return konec
 }
 
+// Všechny týdny docházky přihlášeného pracovníka (kw, kw_year, hodiny) po stránkách.
+// Při startu je chtějí dva seznamy týdnů naráz (výkaz hodin i faktura) — sdílejí jeden
+// dotaz (výkon 12. 11. 2026: dřív dvakrát celá docházka za 1,5 roku, 460 řádků).
+let _tydnyDochazkyBezi = null
+function _tydnyDochazkyPracovnika() {
+  const uid = currentUser && currentUser.id
+  if (_tydnyDochazkyBezi && _tydnyDochazkyBezi.uid === uid) return _tydnyDochazkyBezi.p
+  const p = (async () => {
+    const data = []
+    for (let od = 0; od < 100000; od += 1000) {
+      const { data: kus, error } = await sb.from('attendance')
+        .select('kw, kw_year, total_hours')
+        .eq('worker_id', uid)
+        .order('kw_year', {ascending: false})
+        .order('kw', {ascending: false})
+        .order('id', {ascending: true})
+        .range(od, od + 999)
+      if (error) return { data: null, error }
+      data.push(...(kus || []))
+      if (!kus || kus.length < 1000) break
+    }
+    return { data, error: null }
+  })()
+  const zaznam = _tydnyDochazkyBezi = { uid, p }
+  p.finally(() => { if (_tydnyDochazkyBezi === zaznam) _tydnyDochazkyBezi = null }).catch(() => {})
+  return p
+}
 async function loadInvoiceWeeks() {
   if (!currentUser) return
   const sel = document.getElementById('inv-week-sel')
@@ -45133,19 +45225,8 @@ async function loadInvoiceWeeks() {
 
   // Po stránkách (server vrací nejvýš ~1000 řádků naráz) a s kontrolou chyby: výpadek spojení
   // se nesmí tvářit jako „žádné odpracované týdny" — dosavadní nabídka se zachová.
-  const data = []
-  for (let od = 0; od < 100000; od += 1000) {
-    const { data: kus, error: chybaTydnu } = await sb.from('attendance')
-      .select('kw, kw_year, total_hours')
-      .eq('worker_id', currentUser.id)
-      .order('kw_year', {ascending: false})
-      .order('kw', {ascending: false})
-      .order('id', {ascending: true})
-      .range(od, od + 999)
-    if (chybaTydnu) { console.warn('[faktura] týdny se nenačetly:', chybaTydnu.message); return }
-    data.push(...(kus || []))
-    if (!kus || kus.length < 1000) break
-  }
+  const { data, error: chybaTydnu } = await _tydnyDochazkyPracovnika()
+  if (chybaTydnu) { console.warn('[faktura] týdny se nenačetly:', chybaTydnu.message); return }
 
   if (!data?.length) {
     sel.innerHTML = '<option value="">Žádné odpracované týdny</option>'
@@ -47990,7 +48071,7 @@ async function loadNotifHistory() {
 async function loadMobNotifications() {
   if (!currentUser) return
   const { data, error: chybaZprav } = await sb.from('notifications')
-    .select('*')
+    .select('id, title, message, is_read, created_at')   // jen co se vykresluje (výkon 12. 11. 2026)
     .eq('worker_id', currentUser.id)
     .order('created_at', { ascending: false })
   const div = document.getElementById('mob-notifications')
