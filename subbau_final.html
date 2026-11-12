@@ -4376,6 +4376,20 @@ let workerPdfState = {
   lockedSig: false  // true = admin už určil pevné místo, OSVČ s ním nemůže hýbat
 }
 let workerSignCanvas = null, workerSignCtx = null, workerDrawing = false
+let _signOpenTok = 0, _wpdfTok = 0, _asigTok = 0   // pořadí otevření okna / načtení PDF / uloženého podpisu správce (pozdní odpověď se zahodí)
+
+// Stažení PDF včetně čtení těla s časovým limitem a skutečným zrušením (dřív visel „Ukládám“ donekonečna).
+async function _pdfBajtyLimit(url, ms, opts) {
+  const ac = new AbortController(), t = setTimeout(() => ac.abort(), ms)
+  try {
+    const r = await fetch(url, Object.assign({}, opts || {}, { signal: ac.signal }))
+    if (!r.ok) throw new Error('HTTP ' + r.status + ' – PDF nelze stáhnout')
+    return await r.arrayBuffer()
+  } catch (e) {
+    if (ac.signal.aborted) throw new Error('Timeout – zkontrolujte připojení')
+    throw e
+  } finally { clearTimeout(t) }
+}
 
 // Vzhled značky místa podpisu — volný (přetažitelný rámeček) vs pevně daný
 // administrátorem (vypadá jako řádek na podpis, nedá se s ním hýbat).
@@ -4498,7 +4512,8 @@ async function saveAdminSignedPDF(signedBlob) {
   if (!contractId) throw new Error('Chybí contractId')
   const isForWorker = pdfSignState.signMode === 'for_worker'
   const suffix = isForWorker ? 'worker_signed' : 'admin_signed'
-  const filePath = 'signed/' + contractId + '_' + suffix + '.pdf'
+  // Každá verze pod novou cestou: pozdě dokončený starší upload nemůže přepsat novější (ani cizí) soubor.
+  const filePath = 'signed/' + contractId + '_' + suffix + '_' + Date.now() + '.pdf'
   const {error:upErr} = await sb.storage.from('contracts').upload(filePath, signedBlob, {contentType:'application/pdf',upsert:true})
   if (upErr) throw new Error('Upload: ' + upErr.message)
   const {data:urlData} = sb.storage.from('contracts').getPublicUrl(filePath)
@@ -4514,7 +4529,8 @@ async function saveAdminSignedPDF(signedBlob) {
       await sb.from('notifications').insert({worker_id:cData.worker_id,title:'Smlouva čeká na váš podpis',message:'Smlouva "' + (cData.title||'') + '" čeká na váš podpis.',type:'smlouva',is_read:false})
     }
   }
-  closeAdminSignModal(); showToast('Smlouva podepsána! ✓'); loadAdminContracts()
+  if (pdfSignState.contractId === contractId) closeAdminSignModal()
+  showToast('Smlouva podepsána! ✓'); loadAdminContracts()
   if (typeof currentWorkerId !== 'undefined' && currentWorkerId && typeof loadWdContracts === 'function') loadWdContracts(currentWorkerId)
 }
 
@@ -4525,7 +4541,7 @@ async function saveWorkerSignedPDF(signedBlob) {
 
   // REŽIM FIRMA — ulož do company sloupců (podpis firmy k existující smlouvě)
   if (isCompany) {
-    const filePath = 'signed/' + contractId + '_company_signed.pdf'
+    const filePath = 'signed/' + contractId + '_company_signed_' + Date.now() + '.pdf'
     const {error:upErr} = await sb.storage.from('contracts').upload(filePath, signedBlob, {contentType:'application/pdf',upsert:true})
     if (upErr) throw new Error('Upload: ' + upErr.message)
     const {data:urlData} = sb.storage.from('contracts').getPublicUrl(filePath)
@@ -4537,20 +4553,21 @@ async function saveWorkerSignedPDF(signedBlob) {
       // sign_token ponecháváme — firma se přes stejný odkaz vrátí ke smlouvě (jen ke stažení)
     })
     if (dbErr) throw new Error('DB: ' + dbErr.message)
-    closeSignModal()
+    if (workerPdfState.contractId === contractId) closeSignModal()
     showCompanySignedView(contractId)
     _companySignMode = false
     return
   }
 
-  const filePath = 'signed/' + contractId + '_worker_signed.pdf'
+  const filePath = 'signed/' + contractId + '_worker_signed_' + Date.now() + '.pdf'
   const {error:upErr} = await sb.storage.from('contracts').upload(filePath, signedBlob, {contentType:'application/pdf',upsert:true})
   if (upErr) throw new Error('Upload: ' + upErr.message)
   const {data:urlData} = sb.storage.from('contracts').getPublicUrl(filePath)
   const signedUrl = urlData?.publicUrl
   const {error:dbErr} = await updateContractFile(contractId, {file_url:signedUrl,signature_url:signedUrl,signed_at:new Date().toISOString(),status:'signed_electronic'})
   if (dbErr) throw new Error('DB: ' + dbErr.message)
-  closeSignModal(); showToast('Smlouva podepsána! ✓'); loadMobContracts()
+  if (workerPdfState.contractId === contractId) closeSignModal()
+  showToast('Smlouva podepsána! ✓'); loadMobContracts()
 }
 
 // Uloží parametry a buď ukáže průvodce (poprvé), nebo rovnou otevře modal
@@ -4608,7 +4625,10 @@ function signTxt(key) {
 }
 
 async function _doOpenSignModal(contractId, title, fileUrl) {
+  const otevTok = ++_signOpenTok   // pozdní odpověď dřív otevřené smlouvy nesmí zasáhnout do tohoto okna
+  _wpdfTok++                        // rozběhnuté načítání PDF předchozí smlouvy se zahodí
   try {
+  { const stary = workerPdfState.pdfDoc; workerPdfState.pdfDoc = null; pdfjsUvolni(stary) }   // předchozí dokument i s vláknem pdf.js pryč
   signContractId = contractId
   workerPdfState.contractId = contractId
   workerPdfState.fileUrl = fileUrl
@@ -4629,6 +4649,7 @@ async function _doOpenSignModal(contractId, title, fileUrl) {
     const { data: cRow } = await sb.from('contracts')
       .select('worker_sign_page, worker_sign_x, worker_sign_y')
       .eq('id', contractId).maybeSingle()
+    if (otevTok !== _signOpenTok) return   // mezitím zavřeno nebo otevřena jiná smlouva
     if (cRow && cRow.worker_sign_page && cRow.worker_sign_x !== null && cRow.worker_sign_y !== null) {
       workerPdfState.lockedSig = true
       workerPdfState.sigPage = cRow.worker_sign_page
@@ -4662,6 +4683,7 @@ async function _doOpenSignModal(contractId, title, fileUrl) {
 
   // Počkaj 1 frame aby sa modal renderoval - potom meraj rozmery
   await new Promise(r => requestAnimationFrame(r))
+  if (otevTok !== _signOpenTok) return
 
   // Nastav signature canvas PO renderovaní modalu (initSignaturePad si poradí s rozměry i Retina scale)
   workerSignCanvas = document.getElementById('sign-canvas')
@@ -4679,6 +4701,7 @@ async function _doOpenSignModal(contractId, title, fileUrl) {
         try { if (typeof _dnPanel === 'function') _dnPanel('smlouva-pdf', '❌ PDF viewer se nenačetl', { misto: '_doOpenSignModal', chyba: String((e && e.message) || e).slice(0, 200) }) } catch (x) { console.warn('[deník chyb]', x) } // eslint-disable-line no-undef
       }
     }
+    if (otevTok !== _signOpenTok) return
     await loadWorkerPDF(fileUrl)
   }
   } catch(openErr) {
@@ -4688,6 +4711,7 @@ async function _doOpenSignModal(contractId, title, fileUrl) {
 }
 
 async function loadWorkerPDF(url) {
+  const mojeTok = ++_wpdfTok   // po každém čekání se ověří, že se mezitím neotevřela jiná smlouva / nezavřelo okno
   const loading = document.getElementById('worker-pdf-loading')
   if (loading) { loading.style.display = 'block'; loading.textContent = 'Nacitam smlouvu...' }
   try {
@@ -4695,6 +4719,7 @@ async function loadWorkerPDF(url) {
       if (loading) loading.textContent = 'Načítám PDF viewer...'
       try { await ensureLib('pdfjs') } catch(e) {}
     }
+    if (mojeTok !== _wpdfTok) return
     if (typeof pdfjsLib === 'undefined') {
       if (loading) loading.textContent = 'PDF.js neni nacten'
       return
@@ -4707,11 +4732,17 @@ async function loadWorkerPDF(url) {
       new Promise((_, rej) => setTimeout(() => rej(new Error('Timeout – zkontrolujte pripojeni')), 15000))
     ])
     if (!fetchResp.ok) throw new Error('HTTP ' + fetchResp.status + ' – PDF nelze stáhnout')
+    if (mojeTok !== _wpdfTok) return
     if (loading) loading.textContent = 'Zpracovavam PDF...'
     const pdfBytes = await fetchResp.arrayBuffer()
+    if (mojeTok !== _wpdfTok) return
     // Předej bytes (ne URL) – vyhne se CORS na pdf.js workeru
     const task = pdfjsLib.getDocument({ data: pdfBytes })
-    workerPdfState.pdfDoc = await task.promise
+    const docNovy = await task.promise
+    // Mezitím se otevřela jiná smlouva / okno se zavřelo: dočtený dokument nikdo neukáže, zavře se i s vláknem.
+    if (mojeTok !== _wpdfTok) { pdfjsUvolni(docNovy); return }
+    pdfjsUvolni(workerPdfState.pdfDoc)
+    workerPdfState.pdfDoc = docNovy
     workerPdfState.totalPages = workerPdfState.pdfDoc.numPages
     // Pevné místo podpisu → rovnou na tu stranu, kterou určil admin.
     workerPdfState.currentPage = workerPdfState.lockedSig
@@ -4720,6 +4751,7 @@ async function loadWorkerPDF(url) {
     await renderWorkerPDFPage(workerPdfState.currentPage)
     if (loading) loading.style.display = 'none'
   } catch(e) {
+    if (mojeTok !== _wpdfTok) return   // chyba zahozeného načítání se nikomu neukazuje
     // DENÍK CHYB (2. 11. 2026): smlouva se pracovníkovi nenačetla — podpis nejde dokončit.
     if (loading) {
       loading.style.display = 'block'
@@ -4745,15 +4777,25 @@ function setWorkerSigPos(cx, cy, scaledVp) {
 
 async function renderWorkerPDFPage(pageNum) {
   if (!workerPdfState.pdfDoc) return
+  const doc = workerPdfState.pdfDoc
   const canvas = document.getElementById('worker-pdf-render-canvas')
   if (!canvas) return
-  const page = await workerPdfState.pdfDoc.getPage(pageNum)
+  // Okno zavřené / jiná smlouva (dokument je zavřený, viz pdfjsUvolni) → potichu skončit; jiná chyba jde dál.
+  const jinaChyba = (e) => { if (doc === workerPdfState.pdfDoc) throw e }
+  // Rychlé listování: předchozí render se zruší a vyčká se na jeho konec, pozdní stránka nepřepíše novější.
+  const mojeReq = (workerPdfState.renderReq = (workerPdfState.renderReq || 0) + 1)
+  let page
+  try { page = await doc.getPage(pageNum) } catch (e) { jinaChyba(e); return }
+  if (mojeReq !== workerPdfState.renderReq) return
+  { const pred = workerPdfState.renderTask; if (pred) { try { pred.cancel() } catch (e) {} try { await pred.promise } catch (e) {} } }
+  if (mojeReq !== workerPdfState.renderReq || doc !== workerPdfState.pdfDoc) return
   const container = document.getElementById('worker-pdf-canvas-container')
   const w = container ? container.clientWidth - 4 : 500
   const vp = page.getViewport({ scale: 1 })
   const scale = w / vp.width
   workerPdfState.scale = scale
   const scaledVp = page.getViewport({ scale })
+  workerPdfState.vpH = scaledVp.height   // aktuální výška pro tažení značky (posluchače se instalují jen jednou)
   // Poznámka: fyzická velikost canvasu se nastavuje níže s DPR
   const dpr2 = Math.min(window.devicePixelRatio || 1, 2)  // max DPR=2 – inak crashi pamet
   // HiDPI fix: ostrý render na Retina/mobilním displeji
@@ -4763,7 +4805,10 @@ async function renderWorkerPDFPage(pageNum) {
   canvas.style.height = scaledVp.height + 'px'
   const wCtx = canvas.getContext('2d')
   wCtx.scale(dpr2, dpr2)
-  await page.render({ canvasContext: wCtx, viewport: scaledVp }).promise
+  const rTask = page.render({ canvasContext: wCtx, viewport: scaledVp })
+  workerPdfState.renderTask = rTask
+  try { await rTask.promise } catch (e) { if (mojeReq !== workerPdfState.renderReq) return; jinaChyba(e); return }
+  if (mojeReq !== workerPdfState.renderReq) return
   const info = document.getElementById('worker-pdf-page-info')
   if (info) info.textContent = `Strana ${pageNum} / ${workerPdfState.totalPages}`
   // Click handler — pevné místo podpisu se klikem nedá měnit
@@ -4783,6 +4828,15 @@ async function renderWorkerPDFPage(pageNum) {
     if (marker0) { marker0.style.display = 'block'; marker0.style.left = cx + 'px'; marker0.style.top = cy + 'px' }
   } else if (workerPdfState.lockedSig && marker0) {
     marker0.style.display = 'none'
+  } else if (!workerPdfState.lockedSig && marker0) {
+    // Volná značka patří jen na stranu, kam byla umístěna (sigPage); jinde se skryje a při návratu se obnoví.
+    if (workerPdfState.sigX !== null && workerPdfState.sigX !== undefined && workerPdfState.sigPage === pageNum) {
+      marker0.style.display = 'block'
+      marker0.style.left = (workerPdfState.sigX * scale) + 'px'
+      marker0.style.top = (scaledVp.height - (workerPdfState.sigY || 0) * scale) + 'px'
+    } else {
+      marker0.style.display = 'none'
+    }
   }
 
   // Drag worker marker — jen když místo podpisu není pevně dané adminem
@@ -4807,7 +4861,7 @@ async function renderWorkerPDFPage(pageNum) {
       wMarker.style.top = nT + 'px'
       const sc2 = workerPdfState.scale || 1
       workerPdfState.sigX = nL / sc2
-      workerPdfState.sigY = scaledVp.height / sc2 - nT / sc2
+      workerPdfState.sigY = (workerPdfState.vpH || scaledVp.height) / sc2 - nT / sc2
       // Podpis patří na stranu, kterou má pracovník právě před sebou
       workerPdfState.sigPage = workerPdfState.currentPage
     })
@@ -4860,6 +4914,8 @@ function clearWorkerSignCanvas() {
 }
 
 function closeSignModal() {
+  _signOpenTok++; _wpdfTok++   // rozběhnuté otevírání / načítání PDF se po zavření zahodí
+  { const stary = workerPdfState.pdfDoc; workerPdfState.pdfDoc = null; pdfjsUvolni(stary) }   // dokument i s vláknem pdf.js pryč
   const modal = document.getElementById('sign-modal')
   if (modal) { modal.removeAttribute('style') }  // CSS display:none platí
   document.body.style.overflow = ''
@@ -4904,34 +4960,38 @@ async function submitWorkerSignWithPlacement() {
   const btn = document.getElementById('sign-submit-btn')
   if (btn) { btn.textContent = signLangDE ? '⏳ Wird gespeichert...' : '⏳ Ukládám...'; btn.disabled = true }
 
+  // Snímek vstupů při startu: po každém čekání by se jinak četl globální stav, který mezitím mohla
+  // změnit jiná otevřená smlouva (uložilo by se PDF/podpis/místo jiné smlouvy).
+  const ws = { contractId: workerPdfState.contractId, fileUrl: workerPdfState.fileUrl, sigPage: workerPdfState.sigPage, sigX: workerPdfState.sigX, sigY: workerPdfState.sigY }
+  // Prepočet z markera - presnejší ako uložené koordináty (čte se hned, dokud plátno patří k této straně)
+  {
+    const wMarkerEl = document.getElementById('worker-sig-marker')
+    const wCanvasEl = document.getElementById('worker-pdf-render-canvas')
+    if (wMarkerEl && wCanvasEl && wMarkerEl.style.display !== 'none' && workerPdfState.currentPage === ws.sigPage && wCanvasEl.clientHeight) {
+      const mLeft = parseFloat(wMarkerEl.style.left) || 0
+      const mTop  = parseFloat(wMarkerEl.style.top)  || 0
+      const sc = workerPdfState.scale || 1
+      ws.sigX = mLeft / sc
+      ws.sigY = (wCanvasEl.clientHeight / sc) - (mTop / sc)
+    }
+  }
+  const sigSnimek = workerSignCanvas
+
   try {
-    const sigBlob = await new Promise(r => workerSignCanvas.toBlob(r, 'image/png'))
+    const sigBlob = await new Promise(r => sigSnimek.toBlob(r, 'image/png'))
     const sigBytes = await sigBlob.arrayBuffer()
-    const pdfResp = await fetch(workerPdfState.fileUrl)
-    const pdfBytes = await pdfResp.arrayBuffer()
+    const pdfBytes = await _pdfBajtyLimit(ws.fileUrl, 20000)
 
     await ensureLib('pdflib')
     const { PDFDocument } = PDFLib
     const pdfDoc = await PDFDocument.load(pdfBytes)
     const sigImg = await pdfDoc.embedPng(sigBytes)
-    const page = pdfDoc.getPage(workerPdfState.sigPage - 1)
+    const page = pdfDoc.getPage(ws.sigPage - 1)
     const { width: pageW, height: pageH } = page.getSize()
     const sw = 120, sh = 50
 
-    // Prepočet z markera - presnejší ako uložené koordináty
-    let finalX = workerPdfState.sigX
-    let finalY = workerPdfState.sigY
-
-    const wMarkerEl = document.getElementById('worker-sig-marker')
-    const wCanvasEl = document.getElementById('worker-pdf-render-canvas')
-    if (wMarkerEl && wCanvasEl && wMarkerEl.style.display !== 'none') {
-      const mLeft = parseFloat(wMarkerEl.style.left) || 0
-      const mTop  = parseFloat(wMarkerEl.style.top)  || 0
-      const sc = workerPdfState.scale || 1
-      const cssH = wCanvasEl.clientHeight || (pageH * sc)
-      finalX = mLeft / sc
-      finalY = (cssH / sc) - (mTop / sc)
-    }
+    const finalX = ws.sigX
+    const finalY = ws.sigY
 
     console.log('[podpis] X=' + Math.round(finalX) + ' Y=' + Math.round(finalY) + ' strana ' + pageW.toFixed(0) + 'x' + pageH.toFixed(0))
 
@@ -4950,11 +5010,11 @@ async function submitWorkerSignWithPlacement() {
     // Ulož podpis do company sloupců (k existující smlouvě pracovníka).
     const isCompany = _companySignMode || !!_signToken || !!_companySignContract
     if (isCompany) {
-      const cId = _companySignContract?.id || workerPdfState.contractId
+      const cId = _companySignContract?.id || ws.contractId
       // Nahrání podepsaného PDF do storage (firma = anon; když selže, uložíme aspoň do DB)
       let cSignedUrl = null
       try {
-        const cPath = `signed/${cId}_company_signed.pdf`
+        const cPath = `signed/${cId}_company_signed_${Date.now()}.pdf`   // nová cesta na každý pokus: pozdní starší upload nepřepíše novější
         const up = await Promise.race([
           sb.storage.from('contracts').upload(cPath, signedBlob, { contentType: 'application/pdf', upsert: true }),
           new Promise((_, rej) => setTimeout(() => rej(new Error('upload-timeout')), 12000))
@@ -4982,13 +5042,14 @@ async function submitWorkerSignWithPlacement() {
       const { error: cDbErr } = await updateContractFile(cId, upd)
       if (cDbErr) throw new Error(cDbErr.message)
 
-      closeSignModal()
+      if (workerPdfState.contractId === ws.contractId) closeSignModal()
       showCompanySignedView(cId)
       _companySignMode = false
       return
     }
 
-    const filePath = `signed/${workerPdfState.contractId}_worker_signed.pdf`
+    // Nová cesta na každý pokus: po timeoutu uploadu by pozdě dokončený starší pokus jinak přepsal novější podpis.
+    const filePath = `signed/${ws.contractId}_worker_signed_${Date.now()}.pdf`
     // Bez časového limitu by na slabém signálu na stavbě podpis smlouvy jen
     // viselo donekonečna, beze slova — stejně jako sousední firemní větev výš.
     const casOdpovedi = (p) => Promise.race([p, new Promise((_, rej) => setTimeout(() => rej(new Error('upload-timeout')), 12000))])
@@ -4998,7 +5059,7 @@ async function submitWorkerSignWithPlacement() {
     const { data: urlData } = sb.storage.from('contracts').getPublicUrl(filePath)
     const signedUrl = urlData?.publicUrl
 
-    const { error: dbErr } = await casOdpovedi(updateContractFile(workerPdfState.contractId, {
+    const { error: dbErr } = await casOdpovedi(updateContractFile(ws.contractId, {
       file_url: signedUrl,
       signature_url: signedUrl,
       signed_at: new Date().toISOString(),
@@ -5007,8 +5068,8 @@ async function submitWorkerSignWithPlacement() {
     if (dbErr) throw new Error(dbErr.message)
 
     showToast('✅ Smlouva úspěšně podepsána!')
-    zapamatujPodpisPracovnika(workerSignCanvas)   // pro příští dokumenty (nejlepší snaha, nezdržuje)
-    closeSignModal()
+    zapamatujPodpisPracovnika(sigSnimek)   // pro příští dokumenty (nejlepší snaha, nezdržuje)
+    if (workerPdfState.contractId === ws.contractId) closeSignModal()   // okno jiné smlouvy se nezavírá
     if (typeof loadMobContracts === 'function') loadMobContracts()
   } catch(e) {
     // Neuložený podpis dostane srozumitelnou hlášku v jazyce podepisujícího;
@@ -5229,14 +5290,19 @@ async function wspRenderPage(pageNum) {
   // Okno se mezitím zavřelo nebo se otevřela jiná smlouva (dokument je zavřený,
   // viz pdfjsUvolni) — pak se potichu skončí; jiná chyba jde dál jako dřív.
   const jinaChyba = (e) => { if (doc === wspState.pdfDoc) throw e }
+  const mojeReq = (wspState.renderReq = (wspState.renderReq || 0) + 1)   // rychlé listování: nejnovější požadavek vyhrává
   let page
   try { page = await doc.getPage(pageNum) } catch (e) { jinaChyba(e); return }
+  if (mojeReq !== wspState.renderReq) return
+  { const pred = wspState.renderTask; if (pred) { try { pred.cancel() } catch (e) {} try { await pred.promise } catch (e) {} } }
+  if (mojeReq !== wspState.renderReq || doc !== wspState.pdfDoc) return
   const container = document.getElementById('wsp-canvas-container')
   const containerWidth = container ? container.clientWidth - 4 : 600
   const viewport = page.getViewport({ scale: 1.0 })
   const scale = containerWidth / viewport.width
   wspState.scale = scale
   const scaledViewport = page.getViewport({ scale })
+  wspState.vpH = scaledViewport.height   // aktuální výška pro tažení značky (posluchač se instaluje jen jednou)
   const dpr = Math.min(window.devicePixelRatio || 1, 2)
   canvas.width = Math.floor(scaledViewport.width * dpr)
   canvas.height = Math.floor(scaledViewport.height * dpr)
@@ -5244,7 +5310,10 @@ async function wspRenderPage(pageNum) {
   canvas.style.height = scaledViewport.height + 'px'
   const ctx = canvas.getContext('2d')
   ctx.scale(dpr, dpr)
-  try { await page.render({ canvasContext: ctx, viewport: scaledViewport }).promise } catch (e) { jinaChyba(e); return }
+  const rTask = page.render({ canvasContext: ctx, viewport: scaledViewport })
+  wspState.renderTask = rTask
+  try { await rTask.promise } catch (e) { if (mojeReq !== wspState.renderReq) return; jinaChyba(e); return }
+  if (mojeReq !== wspState.renderReq) return
 
   const info = document.getElementById('wsp-page-info')
   if (info) info.textContent = `Strana ${pageNum} / ${wspState.totalPages}`
@@ -5289,7 +5358,7 @@ function wspSetupHandlers(canvas, viewport) {
       marker.style.top = newTop + 'px'
       const sc = wspState.scale || 1
       wspState.x = newLeft / sc
-      wspState.y = viewport.height / sc - newTop / sc
+      wspState.y = (wspState.vpH || viewport.height) / sc - newTop / sc
     })
     marker.addEventListener('pointerup', () => {
       if (!dragging) return
@@ -5383,18 +5452,20 @@ async function saveWorkerSignPlacement() {
   if (!wspState.contractId) return
   const btn = document.getElementById('wsp-save-btn')
   if (btn) { btn.disabled = true; btn.textContent = '⏳ Ukládám...' }
+  // Snímek vstupů při startu: po čekání by se jinak četl wspState, který mezitím mohla nahradit jiná smlouva.
+  const wst = wspState
+  const wv = { contractId: wst.contractId, fileUrl: wst.fileUrl, page: wst.page, x: wst.x, y: wst.y, texts: (wst.texts || []).map(t => ({ ...t })) }
   try {
-    let fileUrl = wspState.fileUrl
+    let fileUrl = wv.fileUrl
     if (hasTexts) {
-      const resp = await fetch(wspState.fileUrl)
-      const pdfBytes = await resp.arrayBuffer()
+      const pdfBytes = await _pdfBajtyLimit(wv.fileUrl, 20000)
       await ensureLib('pdflib')
       const { PDFDocument, rgb } = PDFLib
       const pdfDoc = await PDFDocument.load(pdfBytes)
       // P\u00edsmo s h\u00e1\u010dky. D\u0159\u00edv se tu psalo Helvetikou, tak\u017ee se text s diakritikou
       // vepsal do smlouvy bez h\u00e1\u010dk\u016f (\u201eDekuji" m\u00edsto \u201eD\u011bkuji").
       const { font, unicode } = await embedCzechFont(pdfDoc)
-      wspState.texts.forEach(t => {
+      wv.texts.forEach(t => {
         const pageIndex = (t.page || 1) - 1
         if (pageIndex < 0 || pageIndex >= pdfDoc.getPageCount()) return
         const page = pdfDoc.getPage(pageIndex)
@@ -5408,15 +5479,18 @@ async function saveWorkerSignPlacement() {
       })
       const outBytes = await pdfDoc.save()
       const outBlob = new Blob([outBytes], { type: 'application/pdf' })
-      const filePath = `contracts/${wspState.contractId}_edited_${Date.now()}.pdf`
-      const { error: upErr } = await sb.storage.from('contracts').upload(filePath, outBlob, { contentType:'application/pdf', upsert:true })
+      const filePath = `contracts/${wv.contractId}_edited_${Date.now()}.pdf`
+      const { error: upErr } = await Promise.race([
+        sb.storage.from('contracts').upload(filePath, outBlob, { contentType:'application/pdf', upsert:true }),
+        new Promise((_, rej) => setTimeout(() => rej(new Error('vypršel časový limit — zkontrolujte připojení')), 60000))
+      ])
       if (upErr) throw new Error('Upload: ' + upErr.message)
       const { data: urlData } = sb.storage.from('contracts').getPublicUrl(filePath)
-      fileUrl = urlData?.publicUrl || wspState.fileUrl
+      fileUrl = urlData?.publicUrl || wv.fileUrl
     }
     const upd = {}
     if (hasTexts) upd.file_url = fileUrl
-    if (hasSig) { upd.worker_sign_page = wspState.page; upd.worker_sign_x = wspState.x; upd.worker_sign_y = wspState.y }
+    if (hasSig) { upd.worker_sign_page = wv.page; upd.worker_sign_x = wv.x; upd.worker_sign_y = wv.y }
 
     // Tohle je DRUHÁ cesta, kterou se do smlouvy píše text (vedle okna „Vyplnit /
     // dopsat do PDF"). Text se tu vypálí rovnou do PDF a nikde se nepamatuje, kde
@@ -5426,18 +5500,20 @@ async function saveWorkerSignPlacement() {
     // podoby smlouvy a text dopsaný tady v ní zůstane.
     let error
     if (hasTexts) {
-      try { await sb.storage.from('contracts').remove([fillBasePath(wspState.contractId)]) } catch (e) {}
-      ;({ error } = await updateContractFile(wspState.contractId,
+      ;({ error } = await updateContractFile(wv.contractId,
         { ...upd, fill_fields: null, fill_base_at: null, fill_base_sigs: null }))
       if (error && /fill_fields|fill_base_at|fill_base_sigs/.test(error.message || '')) {
-        ;({ error } = await updateContractFile(wspState.contractId, upd))
+        ;({ error } = await updateContractFile(wv.contractId, upd))
       }
     } else {
-      ;({ error } = await sb.from('contracts').update(upd).eq('id', wspState.contractId))
+      // Kontrola změněného řádku jako u textu (smlouva mezitím smazaná / bez oprávnění = chyba, ne „uloženo“)
+      ;({ error } = await updateContractFile(wv.contractId, upd))
     }
     if (error) throw new Error(error.message)
+    // Podklad se maže až PO potvrzeném zápisu do DB (při selhání zápisu zůstává původní smlouva i s podkladem).
+    if (hasTexts) { try { await sb.storage.from('contracts').remove([fillBasePath(wv.contractId)]) } catch (e) {} }
     showToast(hasTexts ? '✅ Uloženo (text vepsán do smlouvy)' : '✅ Místo podpisu uloženo')
-    closeWorkerSignPlaceModal()
+    if (wspState === wst) closeWorkerSignPlaceModal()   // okno jiné smlouvy se nezavírá
     if (typeof loadAdminContracts === 'function') loadAdminContracts()
     if (typeof currentWorkerId !== 'undefined' && currentWorkerId && typeof loadWdContracts === 'function') loadWdContracts(currentWorkerId)
   } catch (e) {
@@ -5496,12 +5572,16 @@ async function renderPDFPage(pageNum) {
   const doc = pdfSignState.pdfDoc
   const canvas = document.getElementById('pdf-render-canvas')
   if (!canvas) return
+  const mojeReq = (pdfSignState.renderReq = (pdfSignState.renderReq || 0) + 1)   // rychlé listování: nejnovější požadavek vyhrává
   // Okno se mezitím zavřelo nebo se otevřela jiná smlouva (dokument je zavřený,
   // viz pdfjsUvolni) — pak se potichu skončí; jiná chyba jde dál jako dřív.
   const jinaChyba = (e) => { if (doc === pdfSignState.pdfDoc) throw e }
 
   let page
   try { page = await doc.getPage(pageNum) } catch (e) { jinaChyba(e); return }
+  if (mojeReq !== pdfSignState.renderReq) return
+  { const pred = pdfSignState.renderTask; if (pred) { try { pred.cancel() } catch (e) {} try { await pred.promise } catch (e) {} } }
+  if (mojeReq !== pdfSignState.renderReq || doc !== pdfSignState.pdfDoc) return
   const container = document.getElementById('pdf-canvas-container')
   const containerWidth = container ? container.clientWidth - 4 : 600
   const viewport = page.getViewport({ scale: 1.0 })
@@ -5509,6 +5589,7 @@ async function renderPDFPage(pageNum) {
   pdfSignState.scale = scale
 
   const scaledViewport = page.getViewport({ scale })
+  pdfSignState.vpH = scaledViewport.height   // aktuální výška pro tažení značky (posluchač se instaluje jen jednou)
   const dpr = Math.min(window.devicePixelRatio || 1, 2)  // max DPR=2
   // HiDPI fix: canvas fyzická velikost = CSS velikost × devicePixelRatio
   canvas.width = Math.floor(scaledViewport.width * dpr)
@@ -5518,7 +5599,10 @@ async function renderPDFPage(pageNum) {
 
   const ctx = canvas.getContext('2d')
   ctx.scale(dpr, dpr)  // škáluj kontext pro ostrý render
-  try { await page.render({ canvasContext: ctx, viewport: scaledViewport }).promise } catch (e) { jinaChyba(e); return }
+  const rTask = page.render({ canvasContext: ctx, viewport: scaledViewport })
+  pdfSignState.renderTask = rTask
+  try { await rTask.promise } catch (e) { if (mojeReq !== pdfSignState.renderReq) return; jinaChyba(e); return }
+  if (mojeReq !== pdfSignState.renderReq) return
 
   // Aktualizuj info
   const info = document.getElementById('pdf-page-info')
@@ -5533,6 +5617,10 @@ async function renderPDFPage(pageNum) {
       pdfSignState.sigX * scale,
       (scaledViewport.height / scale - pdfSignState.sigY) * scale
     )
+  } else {
+    // Značka patří jen na stranu, kam byla umístěna; jinde se skryje (jinak by visela nad cizí stranou).
+    const m = document.getElementById('sig-placement-marker')
+    if (m) m.style.display = 'none'
   }
 }
 
@@ -5570,7 +5658,7 @@ function setupPDFClickHandler(canvas, viewport) {
       // Aktualizuj PDF koordináty priebežne
       const sc = pdfSignState.scale || 1
       pdfSignState.sigX = newLeft / sc
-      pdfSignState.sigY = viewport.height / sc - newTop / sc
+      pdfSignState.sigY = (pdfSignState.vpH || viewport.height) / sc - newTop / sc
     })
     marker.addEventListener('pointerup', (e) => {
       if (!dragging) return
@@ -5614,6 +5702,7 @@ function setupAdminSignCanvas() {
 }
 
 function clearAdminSignCanvas() {
+  _asigTok++   // rozběhnuté „Použít uložený podpis“ už plátno nezmění
   const canvas = document.getElementById('admin-sign-canvas')
   if (!canvas) return
   if (canvas._sigPad) { canvas._sigPad.clear(); return }
@@ -5679,8 +5768,9 @@ async function _podpisOrizni(canvas) {
 }
 // Po úspěšném podpisu si pracovník podpis zapamatuje (nejlepší snaha — nic nehlásí, nikdy nezdrží podpis).
 async function zapamatujPodpisPracovnika(canvas) {
+  const uid = currentUser?.id   // účet z okamžiku podpisu: upload i úklid patří jemu, ne tomu, kdo je přihlášen později
   try {
-    const uid = currentUser?.id; if (!uid || !canvas) return
+    if (!uid || !canvas) return
     const o = await _podpisOrizni(canvas); if (!o?.blob) return
     const r = await Promise.race([sb.storage.from('contracts').upload(workerSigStoragePath(uid), o.blob, { contentType: 'image/png', upsert: true }), new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), 10000))])
     if (r && r.error) throw new Error(r.error.message)
@@ -5688,7 +5778,7 @@ async function zapamatujPodpisPracovnika(canvas) {
     console.warn('[podpis pracovníka] uložení selhalo:', e?.message || e)
     // Starší uložený podpis by se jinak nabízel jako „poslední“, i když pracovník právě podepsal jiným —
     // smaže se, a příště se vezme podpis z jeho poslední smlouvy (tedy ten nový).
-    try { await Promise.race([sb.storage.from('contracts').remove([workerSigStoragePath(currentUser.id)]), new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), 8000))]) } catch (x) { /* nejlepší snaha */ }
+    try { if (currentUser?.id !== uid) return; await Promise.race([sb.storage.from('contracts').remove([workerSigStoragePath(uid)]), new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), 8000))]) } catch (x) { /* nejlepší snaha */ }
   }
 }
 // Tlačítko „Použít můj poslední podpis“ se ukáže jen když uložený podpis existuje.
@@ -5867,6 +5957,12 @@ async function saveAdminSignatureMemory() {
 
 async function useAdminSignatureMemory() {
   let saved = null
+  // Účet, plátno a pořadí zachycené PŘED čekáním: pozdní odpověď nesmí přepsat novou kresbu ani plátno jiné smlouvy.
+  const uid0 = (typeof currentUser !== 'undefined' && currentUser?.id) ? currentUser.id : null
+  const canvas0 = document.getElementById('admin-sign-canvas')
+  const tok0 = (_asigTok = (_asigTok || 0) + 1)
+  if (canvas0) canvas0.addEventListener('pointerdown', () => { _asigTok++ }, { once: true })
+  const platne = () => tok0 === _asigTok && !!canvas0 && canvas0.isConnected && document.getElementById('admin-sign-canvas') === canvas0 && ((typeof currentUser !== 'undefined' && currentUser?.id) || null) === uid0
   // Cloud je zdroj pravdy pro sdílení mezi zařízeními — zkus ho VŽDY jako první,
   // jinak by počítač s libovolným (třeba starým) lokálním podpisem nikdy nezjistil,
   // že na jiném zařízení (iPad) byl mezitím uložen novější. Lokální kopie je jen
@@ -5884,19 +5980,21 @@ async function useAdminSignatureMemory() {
             r.onerror = () => res(null)
             r.readAsDataURL(blob)
           })
-          if (saved) lsSet(adminSigKlic(), saved)
+          if (saved && ((typeof currentUser !== 'undefined' && currentUser?.id) || null) === uid0) lsSet(adminSigKlic(), saved)
         }
       }
     } catch(e) { console.warn('[admin sig] cloud fetch selhal:', e?.message) }
   }
+  if (!platne()) return   // mezitím se podepsalo ručně / zavřelo okno / změnil účet
   // Cloud nedostupný (offline) nebo tam zatím nic není → zkus alespoň lokální zálohu
   let podpisZeStarsi = false
   if (!saved) { const l = adminSigNactiLokalni(); saved = l.data; podpisZeStarsi = l.starsi }
   if (!saved) { showToast('⚠️ Žádný uložený podpis — nejprve ho nakreslete a uložte tlačítkem výše'); refreshAdminSavedSigBtn(); return }
-  const canvas = document.getElementById('admin-sign-canvas')
+  const canvas = canvas0
   if (!canvas) return
   const img = new Image()
   img.onload = () => {
+    if (!platne()) return
     const ctx = canvas.getContext('2d')
     const dpr = Math.max(1, Math.min(window.devicePixelRatio || 1, 2))
     if (canvas._sigPad && canvas._sigPad.clear) canvas._sigPad.clear()
@@ -5934,6 +6032,7 @@ function closeAdminSignModal() {
   if (modal) { modal.removeAttribute('style') }  // Vymaž inline štýl → CSS display:none platí
   document.body.style.overflow = ''
   adminSignContractId = null
+  _asigTok++   // rozběhnuté „Použít uložený podpis“ po zavření nic nevloží
   pdfSignState.sigX = null; pdfSignState.sigY = null
   try { screen.orientation?.unlock?.() } catch(e) {}
   // Dokument i s vláknem pdf.js pryč (viz pdfjsUvolni); rozkreslená stránka
@@ -5984,16 +6083,20 @@ async function submitAdminSignatureWithPlacement() {
   const btn = document.getElementById('admin-sign-submit-btn')
   if (btn) { btn.textContent = '⏳ Ukládám do PDF...'; btn.disabled = true }
 
+  // Snímek vstupů při startu (smlouva, soubor, místo, režim): po čekání by se jinak četl globální stav
+  // a podpis by mohl skončit u jiné smlouvy, kterou správce mezitím otevřel.
+  const as = { contractId: pdfSignState.contractId, fileUrl: pdfSignState.fileUrl, sigPage: pdfSignState.sigPage, sigX: pdfSignState.sigX, sigY: pdfSignState.sigY, isForWorker: pdfSignState.signMode === 'for_worker' }
+
   try {
     // 1. Získej podpis jako PNG bytes
     const sigBlob = await new Promise(r => canvas.toBlob(r, 'image/png'))
     if (!sigBlob) throw new Error('Podpis se nepodařilo převést na obrázek (zkuste to znovu)')
     const sigBytes = await sigBlob.arrayBuffer()
 
-    // 2. Načti originální PDF
-    const pdfResponse = await fetch(pdfSignState.fileUrl, { cache: 'no-store' })
-    if (!pdfResponse.ok) throw new Error(`Nepodařilo se stáhnout originální PDF (HTTP ${pdfResponse.status}) — zkontrolujte připojení a zkuste to znovu`)
-    const pdfBytes = await pdfResponse.arrayBuffer()
+    // 2. Načti originální PDF (s limitem na stažení i čtení těla)
+    let pdfBytes
+    try { pdfBytes = await _pdfBajtyLimit(as.fileUrl, 20000, { cache: 'no-store' }) }
+    catch (e) { throw new Error(`Nepodařilo se stáhnout originální PDF (${e.message}) — zkontrolujte připojení a zkuste to znovu`) }
 
     // 3. pdf-lib: embed podpis do PDF
     await ensureLib('pdflib')
@@ -6002,15 +6105,15 @@ async function submitAdminSignatureWithPlacement() {
     const sigImage = await pdfDoc.embedPng(sigBytes)
 
     // Získej správnou stranu (0-indexed)
-    const pageIndex = pdfSignState.sigPage - 1
+    const pageIndex = as.sigPage - 1
     const page = pdfDoc.getPage(pageIndex)
     const { width, height } = page.getSize()
 
     // Umísti podpis - velikost 120x50 bodů
     const sigWidth = 120, sigHeight = 50
     page.drawImage(sigImage, {
-      x: Math.max(0, Math.min(pdfSignState.sigX - sigWidth/2, width - sigWidth)),
-      y: Math.max(0, Math.min(pdfSignState.sigY - sigHeight/2, height - sigHeight)),
+      x: Math.max(0, Math.min(as.sigX - sigWidth/2, width - sigWidth)),
+      y: Math.max(0, Math.min(as.sigY - sigHeight/2, height - sigHeight)),
       width: sigWidth,
       height: sigHeight,
       opacity: 1
@@ -6025,27 +6128,32 @@ async function submitAdminSignatureWithPlacement() {
     const signedBlob = new Blob([signedPdfBytes], { type: 'application/pdf' })
 
     // 5. Upload podepsaného PDF
-    const filePath = `signed/${pdfSignState.contractId}_admin_signed.pdf`
-    const { error: upErr } = await sb.storage.from('contracts').upload(filePath, signedBlob, {
-      contentType: 'application/pdf', upsert: true
-    })
+    // Režim se určí PŘED nahráním: podpis za pracovníka nesmí přepsat soubor podpisu správce
+    // (na který může ukazovat admin_signature_url); každá verze jde pod novou cestu.
+    const filePath = `signed/${as.contractId}_${as.isForWorker ? 'worker_signed' : 'admin_signed'}_${Date.now()}.pdf`
+    const { error: upErr } = await Promise.race([
+      sb.storage.from('contracts').upload(filePath, signedBlob, { contentType: 'application/pdf', upsert: true }),
+      new Promise((_, rej) => setTimeout(() => rej(new Error('Upload: vypršel časový limit — zkontrolujte připojení a zkuste to znovu')), 60000))
+    ])
     if (upErr) throw new Error('Upload error: ' + upErr.message)
 
     const { data: urlData } = sb.storage.from('contracts').getPublicUrl(filePath)
     const signedUrl = urlData?.publicUrl
 
     // 6. Aktualizuj DB
-    const isForWorker = pdfSignState.signMode === 'for_worker'
+    const isForWorker = as.isForWorker
     const updateData = isForWorker
       ? { file_url: signedUrl, signature_url: signedUrl, signed_at: new Date().toISOString(), status: 'signed_electronic' }
       : { file_url: signedUrl, admin_signature_url: signedUrl, admin_signed_at: new Date().toISOString(), status: 'pending' }
-    const { error: dbErr } = await updateContractFile(pdfSignState.contractId, updateData)
+    const { error: dbErr } = await updateContractFile(as.contractId, updateData)
     if (dbErr) throw new Error('DB error: ' + dbErr.message)
 
     // 7. Notifikace pracovníkovi — jen u běžného admin podpisu (ne když admin podepsal za OSVČ)
     let zpravaNeodesla = false
     if (!isForWorker) {
-      const { data: cont } = await sb.from('contracts').select('worker_id,title').eq('id', pdfSignState.contractId).maybeSingle()
+      const { data: cont, error: chybaCt } = await sb.from('contracts').select('worker_id,title').eq('id', as.contractId).maybeSingle()
+      // Příjemce se nenačetl (chyba dotazu / smlouva zmizela) → zpráva neodešla, správce se to musí dozvědět.
+      if (chybaCt || !cont) zpravaNeodesla = true
       if (cont) {
         // Text zprávy je prostý text — escapuje se až při zobrazení (jinak by
         // pracovník viděl „&amp;" místo „&").
@@ -6063,7 +6171,7 @@ async function submitAdminSignatureWithPlacement() {
       : (zpravaNeodesla
         ? '✅ Podpis vložen do PDF — ale zprávu pracovníkovi se nepodařilo poslat, dejte mu vědět'
         : '✅ Podpis vložen do PDF a odeslán pracovníkovi!'))
-    closeAdminSignModal()
+    if (pdfSignState.contractId === as.contractId) closeAdminSignModal()   // okno jiné smlouvy se nezavírá
     loadAdminContracts()
     if (typeof currentWorkerId !== 'undefined' && currentWorkerId && typeof loadWdContracts === 'function') loadWdContracts(currentWorkerId)
 
@@ -7964,6 +8072,8 @@ if ('serviceWorker' in navigator) {
       setTimeout(() => {
         // Obnova mohla začít v těch 400 ms (typicky hned po probuzení appky).
         if (obnovaPrihlaseniBezi() && Date.now() - zacatek < 180000) { setTimeout(zkusPrenacist, 1000); return }
+        // Faktura se mohla otevřít / odeslat právě v těch 400 ms — přenačtení by ji přerušilo (stejný strop 3 min jako výš).
+        if (fakturaVPraci() && Date.now() - zacatek < 180000) { setTimeout(zkusPrenacist, 1000); return }
         // Během těch 400 ms mohl začít zápis nebo psaní — přenačtení by je přerušilo.
         // Rozepsaný text čeká až 15 min, běžící zápis jako dřív nejvýš 60 s (strop pro kartu na staré verzi).
         const cekaTed = Date.now() - zacatek
@@ -8294,6 +8404,7 @@ let clockInt = null
 // ============ INIT ============
 let appInitialized = false
 let authHandling = false  // zamek proti soubehu
+let _authDalsiUzivatel = null  // jiný účet, který se přihlásil během běžícího startu (nastartuje se po něm)
 
 window.addEventListener('online', () => {
   const b = document.getElementById('offline-banner')
@@ -8453,20 +8564,33 @@ sb.auth.onAuthStateChange(async (event, session) => {
     }
     // Silný guard: stejný user a app je inicializovaná nebo běží
     if (currentUser?.id === session.user.id && (appInitialized || authHandling)) {
-      clearAuthTimeout()
+      // Nedokončený start si nouzový časový limit nechá (opakovaný event ho dřív rušil).
+      if (!authHandling) clearAuthTimeout()
       return
     }
-    if (authHandling) return
+    if (authHandling) {
+      // Během startu se přihlásil JINÝ účet: událost se nesmí zahodit. Zaznamenat identitu hned
+      // (rozběžený start ji pozná a zahodí se) a po jeho konci nastartovat poslední platnou relaci.
+      currentUser = session.user
+      _authDalsiUzivatel = session.user
+      return
+    }
     authHandling = true
     appInitialized = true
     currentUser = session.user  // Nastav okamžitě před async
     startAuthTimeout()
     // DŮLEŽITÉ: initApp NEVOLAT přímo v auth callbacku — Supabase drží interní zámek
     // a jakýkoli DB dotaz uvnitř callbacku se zasekne (deadlock). Odložíme ho mimo callback.
-    const u = session.user
-    setTimeout(async () => {
-      try { await initApp(u) } finally { clearAuthTimeout(); authHandling = false }
+    const spustStart = (u) => setTimeout(async () => {
+      try { await initApp(u) } finally {
+        clearAuthTimeout(); authHandling = false
+        const dalsi = _authDalsiUzivatel; _authDalsiUzivatel = null
+        if (dalsi && dalsi.id !== u.id && currentUser && currentUser.id === dalsi.id) {
+          authHandling = true; appInitialized = true; startAuthTimeout(); spustStart(dalsi)
+        }
+      }
     }, 0)
+    spustStart(session.user)
   }
 })
 
@@ -8581,19 +8705,23 @@ async function _initAppInner(user) {
     ;(async () => {
       try {
         // 1. Ulož nové přihlášení
-        await sb.from('login_history').insert({ worker_id: user.id })
-        // 2. Smaž záznamy starší než 3 dny (zachovej všechna přihlášení za posledních 3 dny)
+        const { error: eIns } = await sb.from('login_history').insert({ worker_id: user.id })
+        if (eIns) console.warn('Login log: zápis přihlášení selhal:', eIns.message)
+        // 2. Smaž záznamy starší než 30 dní (detail aktivity ukazuje přihlášení za posledních 30 dní;
+        //    dřív se mazalo po 3 dnech a přehled byl neúplný)
         const cutoff = new Date()
-        cutoff.setDate(cutoff.getDate() - 3)
-        await sb.from('login_history')
+        cutoff.setDate(cutoff.getDate() - 30)
+        const { error: eDel } = await sb.from('login_history')
           .delete()
           .eq('worker_id', user.id)
           .lt('logged_at', cutoff.toISOString())
+        if (eDel) console.warn('Login log: mazání staré historie selhalo:', eDel.message)
         // 3. Aktualizuj last_login_at a count v profiles
-        await sb.from('profiles').update({
+        const { error: eUpd } = await sb.from('profiles').update({
           last_login_at: new Date().toISOString(),
           login_count: (profile.login_count || 0) + 1
         }).eq('id', user.id)
+        if (eUpd) console.warn('Login log: zápis počítadla selhal:', eUpd.message)
       } catch(e) { console.warn('Login log error:', e) }
     })()
     // Spusť heartbeat — značí pracovníka jako "online" (každých 5 min)
@@ -10234,6 +10362,8 @@ function uklidRelace() {
   if (window._osvecChatBadgeInt) { clearInterval(window._osvecChatBadgeInt); window._osvecChatBadgeInt = null }
   if (window._audioKeepAliveInt) { clearInterval(window._audioKeepAliveInt); window._audioKeepAliveInt = null }
   if (typeof _rtFallbackInt !== 'undefined' && _rtFallbackInt) { clearInterval(_rtFallbackInt); _rtFallbackInt = null }
+  // Odemčený export PDF a Provize patří přihlášenému: po odhlášení (i samovolném) pryč, ať je nezdědí další účet v téže záložce.
+  try { sessionStorage.removeItem('exportPdfUnlocked'); sessionStorage.removeItem('exportPdfUnlockedUid'); sessionStorage.removeItem('provizeUnlocked') } catch (e) {}
 }
 async function doLogout() {
   console.log('[doLogout] called')
@@ -10336,9 +10466,11 @@ async function zjistiHistoriiPracovnika(workerId) {
 
 // Odebere pracovníkovi přístup, ale všechno po něm nechá být.
 async function archivujPracovnika(workerId, workerName) {
-  const { error } = await sb.from('profiles')
-    .update({ is_active: false, registration_status: 'removed' }).eq('id', workerId)
+  const { data: zmeneno, error } = await sb.from('profiles')
+    .update({ is_active: false, registration_status: 'removed' }).eq('id', workerId).select('id,is_active')
   if (error) { showToast('❌ Chyba: ' + error.message); return false }
+  // Změna nula řádků (RLS, souběžné odstranění) není archivace; ověří se i výsledný stav.
+  if (!zmeneno || !zmeneno.length || zmeneno[0].is_active !== false) { showToast('❌ Archivace se neuložila (zkontrolujte oprávnění)'); return false }
   showToast(`📦 Archivováno: ${workerName} — historie zůstala zachovaná`)
   return true
 }
@@ -10522,12 +10654,22 @@ async function loadAccess() {
     sb.from('companies').select('id, name')
   ])
   let data = rProf.data
+  let chybaProfilu = rProf.error || null
   if (!data) {
     // Starší databáze nemusí mít subteam_id — ať sekce funguje i bez něj.
-    ;({ data } = await sb.from('profiles')
+    const rNahr = await sb.from('profiles')
       .select('id, full_name, email, role, is_active, last_login_at, login_count, last_seen_at, team_id')
-      .in('role', ['osvec', 'partak']).order('full_name'))
+      .in('role', ['osvec', 'partak']).order('full_name')
+    data = rNahr.data
+    chybaProfilu = rNahr.error || null
   }
+  // Výpadek se nesmí tvářit jako „žádní pracovníci“.
+  if (!data && chybaProfilu) {
+    tbody.innerHTML = '<tr><td colspan="6" style="text-align:center;padding:20px;color:#c0392b">❌ Nepodařilo se načíst pracovníky — zkuste to znovu</td></tr>'
+    console.warn('[přístupy] načtení selhalo:', chybaProfilu.message)
+    return
+  }
+  if (rTeams.error || rComp.error) { console.warn('[přístupy] číselníky se nenačetly:', (rTeams.error || rComp.error).message); showToast('⚠️ Firmy se nenačetly — řazení a názvy firem mohou být neúplné') }
 
   // Název firmy bereme stejně jako docházka: přes company_id týmu, jinak
   // očištěné jméno týmu. Kdo nikam nepatří, jde nakonec.
@@ -10567,17 +10709,21 @@ async function loadAccess() {
   if (workerIds.length) {
     const cutoffDate = new Date()
     cutoffDate.setDate(cutoffDate.getDate() - 3)
-    const { data: hist } = await sb.from('login_history')
-      .select('worker_id, logged_at')
-      .in('worker_id', workerIds)
-      .gte('logged_at', cutoffDate.toISOString())
-      .order('logged_at', { ascending: false })
-      .limit(200)
-    if (hist) {
+    // Celé období po stránkách (dřív společný limit 200 na všechny lidi: starší přihlášení některých vypadla).
+    for (let od = 0, stranek = 0; stranek < 20; stranek++, od += 1000) {
+      const { data: hist, error: chybaHist } = await sb.from('login_history')
+        .select('worker_id, logged_at')
+        .in('worker_id', workerIds)
+        .gte('logged_at', cutoffDate.toISOString())
+        .order('logged_at', { ascending: false })
+        .range(od, od + 999)
+      if (chybaHist) { console.warn('[přístupy] historie přihlášení se nenačetla:', chybaHist.message); break }
+      if (!hist || !hist.length) break
       hist.forEach(h => {
         if (!loginHistMap[h.worker_id]) loginHistMap[h.worker_id] = []
         loginHistMap[h.worker_id].push(h.logged_at)  // všechna přihlášení za 3 dny
       })
+      if (hist.length < 1000) break
     }
   }
 
@@ -10604,7 +10750,7 @@ async function loadAccess() {
       ? `<div style="font-size:10.5px;line-height:1.35;margin-top:2px;margin-left:16px;color:var(--text3)">${firmaPristupu(w) ? '🏢 ' + escAttr(firmaPristupu(w)) : ''}${(firmaPristupu(w) && podsk) ? ' · ' : ''}${podsk ? `<span style="color:${subC.text};font-weight:700">👥 ${escAttr(podsk)}</span>` : ''}</div>`
       : ''
     const logins = loginHistMap[w.id] || []
-    const lastLogin = logins.length ? fmtLogin(logins[0]) : 'Nikdy'
+    const lastLogin = logins.length ? fmtLogin(logins[0]) : (w.last_login_at ? fmtLogin(w.last_login_at) : 'Nikdy')   // bez historie se bere poslední přihlášení z profilu
     const online = isOnline(w.last_seen_at)
     const dot = `<span title="${online ? 'Online' : 'Offline'}" style="display:inline-block;width:9px;height:9px;border-radius:50%;background:${online ? '#1d9e75' : '#c0392b'};margin-right:7px;flex-shrink:0;box-shadow:0 0 0 2px ${online ? 'rgba(29,158,117,.2)' : 'rgba(192,57,43,.15)'}"></span>`
     return hlavickaFirmy + `
@@ -11183,7 +11329,8 @@ async function posliCekajiciChyby() {
 }
 
 async function odemkniExportPdf() {
-  try { if (sessionStorage.getItem('exportPdfUnlocked')) return true } catch (e) {}
+  // Odemčení platí jen pro účet, který heslo zadal (úklid relace ho maže při odhlášení, tohle chrání i před výměnou účtu bez odhlášení).
+  try { if (sessionStorage.getItem('exportPdfUnlocked') && sessionStorage.getItem('exportPdfUnlockedUid') === String(currentUser?.id || '')) return true } catch (e) {}
   let seznam = null
   const { data, error } = await sb.from('export_access').select('email')
   if (error) {
@@ -11208,7 +11355,7 @@ async function odemkniExportPdf() {
     showToast('❌ Nesprávný e-mail nebo heslo')
     return false
   }
-  try { sessionStorage.setItem('exportPdfUnlocked', email) } catch (e) {}
+  try { sessionStorage.setItem('exportPdfUnlocked', email); sessionStorage.setItem('exportPdfUnlockedUid', String(currentUser?.id || '')) } catch (e) {}
   zapisBezpecnostniUdalost('odemceni_exportu_pdf')
   return true
 }
