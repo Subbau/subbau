@@ -48770,6 +48770,7 @@ async function prepniOtazku(ids, zapnout, btn) {
       if (btn) btn.disabled = false
       return
     }
+    if (data.length < seznam.length) showToast('⚠️ Otazník se uložil jen u ' + data.length + ' z ' + seznam.length + ' záznamů dne')
     await loadTodayTimeline()
   } catch (e) { console.warn('[otazník]', e); showToast('❌ Otazník se nepodařilo uložit'); if (btn) btn.disabled = false }
 }
@@ -48841,6 +48842,13 @@ async function ulozPuntik(workerId, den, duvod, jmeno) {
 }
 
 async function smazatPuntik(id, workerId) {
+  // Puntík z už vyřízené trojice nejde smazat: po smazání by se do dalšího trojice počítaly
+  // už potrestané puntíky a nabídla by se druhá srážka.
+  const nPred = await nactiPuntiky(workerId)
+  if (nPred.chyba) { showToast('❌ Puntíky se nepodařilo načíst — nic se nesmazalo'); return }
+  const stPred = puntikyStav(nPred.seznam)
+  const poradi = stPred.seznam.findIndex(p => String(p.id) === String(id))
+  if (poradi >= 0 && poradi < stPred.provedeno * PUNTIKY_NA_SRAZKU) { showToast('⚫ Tenhle puntík už je započtený do vyřízené srážky — nejde smazat'); return }
   if (!confirm('Smazat tenhle puntík?\n\nSrážka, která už se za trojici zapsala, zůstane — tu je případně potřeba vrátit v úpravě dne.')) return
   const { data, error } = await sb.from('puntiky').delete().eq('id', id).select('id')
   if (error || !data || !data.length) {
@@ -48857,6 +48865,11 @@ async function smazatPuntik(id, workerId) {
 async function odecistSrazku(workerId, den, jmeno) {
   const { data: dny, error } = await sb.from('attendance').select('*').eq('worker_id', workerId).eq('work_date', den)
   if (error) { showToast('❌ Docházku dne se nepodařilo načíst: ' + error.message); return false }
+  // Čekající trojice se ověří PŘED zápisem částky (druhý správce ji mohl mezitím vyřídit).
+  const nPred = await nactiPuntiky(workerId)
+  if (nPred.chyba) { showToast('❌ Puntíky se nepodařilo načíst — srážka se nezapsala. Zkuste to prosím znovu.'); return false }
+  const stPred = puntikyStav(nPred.seznam)
+  if (!(stPred.ceka > 0) || !stPred.dovrsil) { showToast('⚫ Žádná srážka za puntíky už nečeká (mezitím ji někdo vyřídil)'); return false }
   const uzavrene = (dny || []).filter(r => r.check_out && Number(r.total_hours) > 0)
   if (!uzavrene.length) {
     showToast('⚫ Den ' + new Date(den + 'T00:00:00').toLocaleDateString('cs-CZ') + ' nemá uzavřenou docházku — srážku jde zapsat, až pracovník odejde (v jeho kartě u puntíků)')
@@ -48887,7 +48900,8 @@ async function odecistSrazku(workerId, den, jmeno) {
   } catch (e) { showToast('❌ Sazbu se nepodařilo načíst — srážka se nezapsala. Zkuste to prosím znovu.'); return false }
   if (!(sazba > 0)) { showToast('⚠️ Pracovník nemá hodinovou sazbu — srážku nejde spočítat'); return false }
   const h = Number(r.total_hours) || 0
-  const hPo = Math.max(0, Math.round((h - SRAZKA_HODIN) * 100) / 100)
+  const hSrazka = Math.min(SRAZKA_HODIN, h)   // krátká směna: neodečte se víc, než odpracoval
+  const hPo = Math.max(0, Math.round((h - hSrazka) * 100) / 100)
   const castka = Math.round(hPo * sazba * 100) / 100
   const eur = (x) => x.toLocaleString('cs-CZ', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + ' €'
   // Hodiny zůstanou, ale částka dne klesne — vystavená faktura by nesouhlasila.
@@ -48896,14 +48910,19 @@ async function odecistSrazku(workerId, den, jmeno) {
       + 'Po srážce: ' + hPo + ' h × ' + eur(sazba) + ' = ' + eur(castka) + '\n\n'
       + 'Zapíše se jako ručně nastavená částka dne. Odběratel dál vidí odpracované hodiny beze změny.')) return false
   const { data: z, error: ez } = await sb.from('attendance')
-    .update({ vyplata_castka: castka, vyplata_poznamka: SRAZKA_POZNAMKA }).eq('id', r.id).select('id, vyplata_castka')
+    .update({ vyplata_castka: castka, vyplata_poznamka: hSrazka === SRAZKA_HODIN ? SRAZKA_POZNAMKA : 'Srážka ' + (Math.round(hSrazka * 100) / 100) + ' h — ' + PUNTIKY_NA_SRAZKU + ' černé puntíky' })
+    .eq('id', r.id).is('vyplata_castka', null).select('id, vyplata_castka')
   if (ez || !z || !z.length || Number(z[0].vyplata_castka) !== castka) {
-    showToast('❌ Srážka se nezapsala' + (ez ? ': ' + ez.message : ' — zkontrolujte oprávnění'))
+    showToast('❌ Srážka se nezapsala' + (ez ? ': ' + ez.message : ' — den se mezitím změnil (částka už je nastavená) nebo chybí oprávnění'))
     return false
   }
   // Označit trojici. Když se to nepodaří, srážka UŽ PLATÍ — musí se to říct,
   // jinak by appka nabídla srážku za tutéž trojici znovu.
   const n = await nactiPuntiky(workerId)
+  if (n.chyba) {
+    showToast('⚠️ Srážka zapsaná, ale puntíky se nepodařilo načíst a neoznačily se — NEODEČÍTEJTE ji znovu.')
+    return true
+  }
   const st = puntikyStav(n.seznam)
   if (st.dovrsil) {
     const { data: m, error: em } = await sb.from('puntiky')
