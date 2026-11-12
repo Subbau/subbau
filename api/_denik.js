@@ -266,7 +266,8 @@ async function zapisChybuServeru(funkce, zprava, detail) {
     if (minule && ted - minule.kdy < 60000) { minule.navic++; return false; }
     if (zaKolikSekund('server:' + f, 20)) return false;
     const navic = minule ? minule.navic : 0;
-    POSLEDNI.set(klicSlouceni, { kdy: ted, navic: 0 });
+    const zaznam = { kdy: ted, navic: 0 };
+    POSLEDNI.set(klicSlouceni, zaznam);
     if (POSLEDNI.size > 500) POSLEDNI.clear();
     const d = cistyDetail(detail);
     d.v = 1;
@@ -279,7 +280,12 @@ async function zapisChybuServeru(funkce, zprava, detail) {
     const commit = String(process.env.VERCEL_GIT_COMMIT_SHA || '').slice(0, 7);
     if (/^[0-9a-f]{7}$/.test(commit)) d.verze = 'server ' + commit;
     const v = await vlozDoDeniku([{ kdo: null, kdo_jmeno: null, kde, zprava: veta, detail: d }], klic, 2500);
-    if (!v.ok) console.error('[deník chyb] serverový zápis se nepovedl:', v.stav, v.kod);
+    if (!v.ok) {
+      console.error('[deník chyb] serverový zápis se nepovedl:', v.stav, v.kod);
+      // Neúspěšný zápis nesmí potlačit další pokus: značka se vrátí a čekající počet zůstane.
+      zaznam.kdy = 0;
+      zaznam.navic += navic;
+    }
     return v.ok;
   } catch (e) {
     return false;

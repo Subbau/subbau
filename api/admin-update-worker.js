@@ -95,6 +95,7 @@ module.exports = async function handler(req, res) {
   try {
     const callerResp = await fetch(`${SUPABASE_URL}/auth/v1/user`, {
       headers: { apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${callerToken}` },
+      signal: AbortSignal.timeout(8000),
     });
     if (!callerResp.ok) {
       res.status(401).json({ ok: false, error: 'invalid_session' });
@@ -118,7 +119,7 @@ module.exports = async function handler(req, res) {
   try {
     const roleResp = await fetch(
       `${SUPABASE_URL}/rest/v1/profiles?id=eq.${encodeURIComponent(callerId)}&select=role,is_active`,
-      { headers: { apikey: serviceKey, Authorization: `Bearer ${serviceKey}` } }
+      { headers: { apikey: serviceKey, Authorization: `Bearer ${serviceKey}` }, signal: AbortSignal.timeout(8000) }
     );
     const roleRows = roleResp.ok ? await roleResp.json() : [];
     // Deaktivovaný správce (is_active=false) s dosud platným tokenem nesmí nic měnit.
@@ -166,7 +167,7 @@ module.exports = async function handler(req, res) {
     try {
       const targetResp = await fetch(
         `${SUPABASE_URL}/rest/v1/profiles?id=eq.${encodeURIComponent(userId)}&select=role`,
-        { headers: { apikey: serviceKey, Authorization: `Bearer ${serviceKey}` } }
+        { headers: { apikey: serviceKey, Authorization: `Bearer ${serviceKey}` }, signal: AbortSignal.timeout(8000) }
       );
       const targetRows = targetResp.ok ? await targetResp.json() : [];
       if (!targetRows.length) {
@@ -197,6 +198,7 @@ module.exports = async function handler(req, res) {
     const updateResp = await fetch(
       `${SUPABASE_URL}/auth/v1/admin/users/${encodeURIComponent(userId)}`,
       {
+        signal: AbortSignal.timeout(8000),
         method: 'PUT',
         headers: {
           apikey: serviceKey,
@@ -222,22 +224,45 @@ module.exports = async function handler(req, res) {
   }
 
   // 5) Ať e-mail v profiles (viditelný v appce) odpovídá tomu přihlašovacímu
+  let profilSrovnan = true;
   if (newEmail) {
+    profilSrovnan = false;
     try {
+      // Souběh dvou změn: do profilu patří to, co je v Auth skutečně naposled, ne
+      // adresa z tohoto požadavku (ta může být už přepsaná druhým správcem).
+      let emailProProfil = newEmail;
+      try {
+        const ra = await fetch(`${SUPABASE_URL}/auth/v1/admin/users/${encodeURIComponent(userId)}`, {
+          headers: { apikey: serviceKey, Authorization: `Bearer ${serviceKey}` },
+          signal: AbortSignal.timeout(5000),
+        });
+        if (ra.ok) {
+          const ua = await ra.json();
+          if (ua && typeof ua.email === 'string' && ua.email) emailProProfil = ua.email;
+        }
+      } catch (e) { /* zůstane adresa z požadavku */ }
       const r = await fetch(`${SUPABASE_URL}/rest/v1/profiles?id=eq.${encodeURIComponent(userId)}`, {
+        signal: AbortSignal.timeout(8000),
         method: 'PATCH',
         headers: {
           apikey: serviceKey,
           Authorization: `Bearer ${serviceKey}`,
           'Content-Type': 'application/json',
-          Prefer: 'return=minimal',
+          Prefer: 'return=representation',
         },
-        body: JSON.stringify({ email: newEmail }),
+        body: JSON.stringify({ email: emailProProfil }),
       });
       // Odmítnutí nic neshodí (viz níž), jen se zapíše — dřív zmizelo beze stopy.
       if (!r.ok) {
         await zapisChybuServeru('admin-update-worker', 'E-mail v profilu se nesrovnal s přihlášením (HTTP ' + r.status + ')',
           { t: 'varovani', krok: 'profil', stav: r.status, kod: kodZTela(await r.text().catch(() => '')) || undefined, ucet: callerId });
+      } else {
+        const radky = await r.json().catch(() => null);
+        profilSrovnan = Array.isArray(radky) && radky.length > 0;
+        if (!profilSrovnan) {
+          await zapisChybuServeru('admin-update-worker', 'E-mail v profilu se nesrovnal s přihlášením (profil nenalezen)',
+            { t: 'varovani', krok: 'profil', stav: r.status, ucet: callerId });
+        }
       }
     } catch (e) {
       // Přihlášení novým e-mailem už funguje (bod 4 proběhl) — jen se nesynchronizovala
@@ -247,5 +272,6 @@ module.exports = async function handler(req, res) {
     }
   }
 
-  res.status(200).json({ ok: true });
+  // ok zůstává true (přihlášení se změnilo); profil_synchronizovan:false říká, že profil zaostal.
+  res.status(200).json(profilSrovnan ? { ok: true } : { ok: true, profil_synchronizovan: false });
 };

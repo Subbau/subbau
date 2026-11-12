@@ -42,6 +42,8 @@ function posliSmtp(nastaveni, zprava) {
     let sock = null, buf = '', hotovo = false, cekajici = null, poData = false;
     // po DATA bez odpovědi serveru (čas, spojení) nevíme, jestli zpráva dorazila; výslovné 4xx/5xx = jasné odmítnutí
     const konec = (err) => { if (hotovo) return; hotovo = true; if (err && poData && !err.kod) err.nejasne = true; clearTimeout(casovac); try { sock && sock.destroy() } catch (e) {} err ? reject(err) : resolve(true) };
+    // Server spojení zavřel dřív, než jsme skončili: nečekat na 30 s limit (po DATA zůstává „nejasné“).
+    const zavreno = () => konec(new Error('SMTP: spojení uzavřeno serverem'));
     const casovac = setTimeout(() => konec(new Error('SMTP: vypršel čas (30 s)')), 30000);
     const naData = (d) => {
       buf += d.toString('utf8');
@@ -74,7 +76,7 @@ function posliSmtp(nastaveni, zprava) {
         await krok('STARTTLS', [220], 'STARTTLS');
         sock.removeAllListeners('data');
         sock = tls.connect({ socket: sock, host, servername: host });
-        sock.on('data', naData); sock.on('error', konec);
+        sock.on('data', naData); sock.on('error', konec); sock.on('close', zavreno);
         await new Promise((res, rej) => { sock.once('secureConnect', res); sock.once('error', rej) });
         ehlo = await krok('EHLO subbau.cz', [250], 'EHLO po STARTTLS');
       } else if (!implicitni && !nastaveni.dovolBezTls) {
@@ -102,7 +104,7 @@ function posliSmtp(nastaveni, zprava) {
     const pripoj = () => {
       if (implicitni) { sock = tls.connect({ host, port, servername: host }); sock.once('secureConnect', () => bezi().then(() => konec(null), konec)) }
       else { sock = net.connect({ host, port }); sock.once('connect', () => bezi().then(() => konec(null), konec)) }
-      sock.on('data', naData); sock.on('error', konec);
+      sock.on('data', naData); sock.on('error', konec); sock.on('close', zavreno);
     };
     try { pripoj() } catch (e) { konec(e) }
   });
