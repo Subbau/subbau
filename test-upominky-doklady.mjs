@@ -37,8 +37,8 @@ function postavFunkci(data) {
     return []
   }
   // eslint-disable-next-line no-new-func
-  const f = new Function('sb', 'DOC_LABELS', 'POVINNE_DOKLADY', 'UPOMINKA_NADPIS', telo + '; return upomenChybejiciDoklady')
-  return { fn: f(sb, DOC_LABELS, POVINNE_DOKLADY, '📄 Chybí nám od vás doklady'), odeslane }
+  const f = new Function('sb', 'sbVse', 'DOC_LABELS', 'POVINNE_DOKLADY', 'UPOMINKA_NADPIS', telo + '; return upomenChybejiciDoklady')
+  return { fn: f(sb, sb, DOC_LABELS, POVINNE_DOKLADY, '📄 Chybí nám od vás doklady'), odeslane }
 }
 
 const lide = [

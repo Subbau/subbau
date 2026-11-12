@@ -1267,34 +1267,25 @@ module.exports = async (req, res) => {
     // jen při skutečném otevření — stránka to pozná a pošle `prvni=1`.
     // Čas poslední návštěvy se naopak zapisuje vždycky.
     // Zápis se spustí hned a počká se na něj až před odpovědí (serverová funkce by jinak
-    // mohla skončit dřív, než zápis doběhne). Přednost má atomická funkce v databázi
-    // (supabase-migrace-klient-navsteva.sql); bez ní se použije podmíněný PATCH.
+    // mohla skončit dřív, než zápis doběhne). Čas jen dopředu (opožděný zápis nepřepíše
+    // novější návštěvu); počet jen z přečené hodnoty (souběžný zápis ji nepřepíše starším).
     const nyniIso = new Date().toISOString();
-    const hlavickyZapisu = { apikey: klic, Authorization: `Bearer ${klic}`, 'Content-Type': 'application/json' };
     const zapisNavstevu = (async () => {
       try {
-        const rf = await fetch(`${SUPABASE_URL}/rest/v1/rpc/klient_navsteva`, {
-          method: 'POST', headers: hlavickyZapisu, signal: AbortSignal.timeout(4000),
-          body: JSON.stringify({ p_id: odkaz.id, p_cas: nyniIso, p_prvni: !!prvniOtevreni }),
-        });
-        if (rf.ok) return;
-        const zmena = {};
-        // čas jen dopředu: opožděný zápis nepřepíše novější návštěvu
-        const r1 = await fetch(`${SUPABASE_URL}/rest/v1/client_links?id=eq.${odkaz.id}` +
-          `&or=(posledni_navsteva.is.null,posledni_navsteva.lt.${encodeURIComponent(nyniIso)})`, {
-          method: 'PATCH', headers: hlavickyZapisu, signal: AbortSignal.timeout(4000),
-          body: JSON.stringify({ posledni_navsteva: nyniIso }),
-        });
-        if (!r1.ok) console.warn('[klient] čas návštěvy se nezapsal:', r1.status);
+        let filtr = `id=eq.${odkaz.id}` +
+          `&or=(posledni_navsteva.is.null,posledni_navsteva.lt.${encodeURIComponent(nyniIso)})`;
+        const zmena = { posledni_navsteva: nyniIso };
         if (prvniOtevreni) {
-          // počet jen z hodnoty, kterou jsme četli: souběžný zápis ho nepřepíše starším
-          const r2 = await fetch(`${SUPABASE_URL}/rest/v1/client_links?id=eq.${odkaz.id}` +
-            `&pocet_navstev=eq.${Number(odkaz.pocet_navstev || 0)}`, {
-            method: 'PATCH', headers: hlavickyZapisu, signal: AbortSignal.timeout(4000),
-            body: JSON.stringify({ pocet_navstev: (odkaz.pocet_navstev || 0) + 1 }),
-          });
-          if (!r2.ok) console.warn('[klient] počet návštěv se nezapsal:', r2.status);
+          filtr += `&pocet_navstev=eq.${Number(odkaz.pocet_navstev || 0)}`;
+          zmena.pocet_navstev = (odkaz.pocet_navstev || 0) + 1;
         }
+        const rz = await fetch(`${SUPABASE_URL}/rest/v1/client_links?${filtr}`, {
+          method: 'PATCH',
+          headers: { apikey: klic, Authorization: `Bearer ${klic}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify(zmena),
+          signal: AbortSignal.timeout(4000),
+        });
+        if (!rz.ok) console.warn('[klient] návštěva se nezapsala:', rz.status);
       } catch (e) { console.warn('[klient] návštěva se nezapsala:', (e && e.name) || e); }
     })();
 
