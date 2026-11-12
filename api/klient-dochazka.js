@@ -393,9 +393,22 @@ function tydenOdDo(dnes) {
 // Jediné povolené barvy poznámky. Co tu není, se uloží jako „bez barvy".
 const BARVY_POZNAMKY = ['cervena', 'oranzova', 'zelena', 'modra', 'cerna'];
 
+const OKNO_ODKAZU = new Map();
+function okenniPocet(id) {
+  const ted = Date.now();
+  let z = OKNO_ODKAZU.get(id);
+  if (!z || ted - z.od > 3600000) {
+    if (OKNO_ODKAZU.size > 2000) OKNO_ODKAZU.clear();
+    z = { od: ted, n: 0 };
+    OKNO_ODKAZU.set(id, z);
+  }
+  return ++z.n;
+}
+
 async function db(cesta, klic) {
   const r = await fetch(`${SUPABASE_URL}/rest/v1/${cesta}`, {
     headers: { apikey: klic, Authorization: `Bearer ${klic}`, Accept: 'application/json' },
+    signal: AbortSignal.timeout(15000),
   });
   if (!r.ok) {
     const telo = await r.text().catch(() => '');
@@ -472,7 +485,9 @@ module.exports = async (req, res) => {
 
     // Brzda proti pumpování dat: počítáme podle ODKAZU, ne podle IP adresy —
     // tu si útočník v hlavičce napíše jakou chce, takže by to nic nedrželo.
-    if ((odkaz.pocet_navstev || 0) > 100000) {
+    // Brzda je v časovém okně (hodina, po instanci funkce), ne podle celoživotního počtu
+    // návštěv — ten po dosažení hranice zablokoval platný odkaz napořád.
+    if (okenniPocet(odkaz.id) > 10000) {
       res.status(429).json({ ok: false, chyba: 'prilis_mnoho' });
       return;
     }
@@ -864,9 +879,10 @@ module.exports = async (req, res) => {
       const v = vybal(await slibMimo);
       (v || []).forEach(x => { if (x.id) mimoVykaz.add(x.id); });
     } catch (e) {
-      // U docházky se při chybě nevyřadí nikdo (tak to bylo vždycky). U dokladů
-      // by tím ven šly doklady lidí, kteří ve výkazu být nemají — proto 500.
-      if (rezimDokladu) throw e;
+      // Neověřený filtr = ven by mohli jít lidé vyřazení z výkazu (docházka, telefon…),
+      // proto 500 v obou režimech. Výjimka: sloupec ve_vykazu ještě neexistuje (migrace
+      // neproběhla) — pak nikdo vyřazený není.
+      if (e.kod !== '42703') throw e;
       console.warn('[klient] ve_vykazu se nenačetlo (migrace?):', e.message);
     }
     if (mimoVykaz.size) {
@@ -1066,6 +1082,15 @@ module.exports = async (req, res) => {
         const tise = (popis) => (e) => {
           console.warn('[klient] ' + popis + ':', e.message); return null;
         };
+        // Podklady pro PENÍZE (provize, historie sazeb, zařazení pod firmu): výpadek nesmí
+        // dát potichu nulovou provizi nebo dnešní sazbu u historického týdne → chyba 500.
+        // Jen chybějící tabulka/sloupec (migrace neproběhla) se přeskočí jako dřív.
+        const tisePenize = (popis) => (e) => {
+          if (e && (e.kod === '42703' || e.kod === '42P01' || e.kod === 'PGRST204' || e.kod === 'PGRST205')) {
+            console.warn('[klient] ' + popis + ':', e.message); return null;
+          }
+          throw e;
+        };
         const [lidi, dokl, prov, h, ubyt, zam, fot, vlastni] = await Promise.all([
           // Jméno, hodinová sazba a telefon. SubBau si přeje, aby odběratel
           // viděl u každého člověka sazbu i provizi — vyžádal si to sám, aby
@@ -1080,11 +1105,11 @@ module.exports = async (req, res) => {
           db(`documents?select=worker_id,status,valid_until&doc_type=eq.ridicak` +
              `&worker_id=in.(${seznamIds})`, klic).catch(tise('řidičáky se nenačetly')),
           db(`worker_commissions?select=worker_id,provize,bez_provize&worker_id=in.(${seznamIds})`,
-             klic).catch(tise('provize se nenačetly')),
+             klic).catch(tisePenize('provize se nenačetly')),
           // Historie sazeb — bez ní by se týden, ve kterém se sazba měnila,
           // spočítal celý novou sazbou a nesedělo by to s fakturou.
           db(`worker_rate_history?select=worker_id,druh,hodnota,valid_from&worker_id=in.(${seznamIds})` +
-             `&order=valid_from.asc`, klic).catch(tise('historie sazeb se nenačetla')),
+             `&order=valid_from.asc`, klic).catch(tisePenize('historie sazeb se nenačetla')),
           // Adresa ubytování (od 30. 9. 2026). Zvlášť a s vlastním ošetřením —
           // bez ní se stránka obejde. Starší sloupec ubytovani_adresa nemusí
           // existovat, proto záloha jen s hlavním. KÓDY SE NEČTOU NIKDY.
@@ -1095,7 +1120,7 @@ module.exports = async (req, res) => {
           // sazbou a provize se počítá její provizí. Stejně jako Provize,
           // report firmy i faktura firmy v appce.
           db(`profiles?select=id,zamestnavatel_id&id=in.(${seznamIds})`, klic)
-            .catch(tise('zařazení pod firmu se nenačetlo')),
+            .catch(tisePenize('zařazení pod firmu se nenačetlo')),
           // Fotka pracovníka z appky (majitel 1. 10. 2026: „aby se ty fotky
           // propsaly i do toho odkazu"). Zvlášť a potichu — bez fotky se
           // stránka obejde. Ven jde jen odkaz do našeho úložiště fotek.
@@ -1105,7 +1130,7 @@ module.exports = async (req, res) => {
           // kdo ji má zapnutou a vyplněnou, počítá se jeho sazbou místo šéfovy.
           // Bez migrace sloupec není → nikdo, jako dosud.
           db(`worker_commissions?select=worker_id&vlastni_provize_zamestnance=is.true&worker_id=in.(${seznamIds})`, klic)
-            .catch(tise('vlastní provize zaměstnanců se nenačetly')),
+            .catch(tisePenize('vlastní provize zaměstnanců se nenačetly')),
         ]);
         for (const p of (vlastni || [])) vlastniProvize.add(p.worker_id);
         for (const p of (zam || [])) {
@@ -1118,9 +1143,9 @@ module.exports = async (req, res) => {
         if (sefove.length) {
           const seznamSefu = sefove.map(encodeURIComponent).join(',');
           [sefLidi, sefProv, sefHist] = await Promise.all([
-            db(`profiles?select=id,hourly_rate_worker&id=in.(${seznamSefu})`, klic).catch(tise('sazba firmy se nenačetla')),
-            db(`worker_commissions?select=worker_id,provize,bez_provize&worker_id=in.(${seznamSefu})`, klic).catch(tise('provize firmy se nenačetla')),
-            db(`worker_rate_history?select=worker_id,druh,hodnota,valid_from&worker_id=in.(${seznamSefu})&order=valid_from.asc`, klic).catch(tise('historie firmy se nenačetla')),
+            db(`profiles?select=id,hourly_rate_worker&id=in.(${seznamSefu})`, klic).catch(tisePenize('sazba firmy se nenačetla')),
+            db(`worker_commissions?select=worker_id,provize,bez_provize&worker_id=in.(${seznamSefu})`, klic).catch(tisePenize('provize firmy se nenačetla')),
+            db(`worker_rate_history?select=worker_id,druh,hodnota,valid_from&worker_id=in.(${seznamSefu})&order=valid_from.asc`, klic).catch(tisePenize('historie firmy se nenačetla')),
           ]);
         }
         for (const p of (sefLidi || [])) sazbaTed[p.id] = Number(p.hourly_rate_worker) || 0;
@@ -1145,7 +1170,11 @@ module.exports = async (req, res) => {
           // Kdyby jich měl víc, platí ten s nejdelší platností. Doklad bez
           // data je slabší než doklad s datem v budoucnu, ale silnější než
           // propadlý — proto se prázdno řadí doprostřed, ne na konec.
-          if (!stav || doKdy > (stav.do || '')) ridicaky[d.worker_id] = { do: doKdy };
+          // Pořadí: platný v budoucnu (později končící výš) > bez data > propadlý.
+          const poradi = (x) => x === '' ? 1 : (x >= dnesIso ? 2 : 0);
+          const lepsi = !stav || poradi(doKdy) > poradi(stav.do) ||
+            (poradi(doKdy) === poradi(stav.do) && doKdy > stav.do);
+          if (lepsi) ridicaky[d.worker_id] = { do: doKdy };
         }
         for (const p of (prov || []).concat(sefProv || [])) {
           if (p.provize != null) provizeZadana.add(p.worker_id);
@@ -1237,13 +1266,28 @@ module.exports = async (req, res) => {
     // klient okno otevřené, ne kolikrát se přišel podívat. Proto se zvyšuje
     // jen při skutečném otevření — stránka to pozná a pošle `prvni=1`.
     // Čas poslední návštěvy se naopak zapisuje vždycky.
-    const zmena = { posledni_navsteva: new Date().toISOString() };
-    if (prvniOtevreni) zmena.pocet_navstev = (odkaz.pocet_navstev || 0) + 1;
-    fetch(`${SUPABASE_URL}/rest/v1/client_links?id=eq.${odkaz.id}`, {
-      method: 'PATCH',
-      headers: { apikey: klic, Authorization: `Bearer ${klic}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify(zmena),
-    }).catch(() => {});
+    // Zápis se spustí hned a počká se na něj až před odpovědí (serverová funkce by jinak
+    // mohla skončit dřív, než zápis doběhne). Čas jen dopředu (opožděný zápis nepřepíše
+    // novější návštěvu); počet jen z přečené hodnoty (souběžný zápis ji nepřepíše starším).
+    const nyniIso = new Date().toISOString();
+    const zapisNavstevu = (async () => {
+      try {
+        let filtr = `id=eq.${odkaz.id}` +
+          `&or=(posledni_navsteva.is.null,posledni_navsteva.lt.${encodeURIComponent(nyniIso)})`;
+        const zmena = { posledni_navsteva: nyniIso };
+        if (prvniOtevreni) {
+          filtr += `&pocet_navstev=eq.${Number(odkaz.pocet_navstev || 0)}`;
+          zmena.pocet_navstev = (odkaz.pocet_navstev || 0) + 1;
+        }
+        const rz = await fetch(`${SUPABASE_URL}/rest/v1/client_links?${filtr}`, {
+          method: 'PATCH',
+          headers: { apikey: klic, Authorization: `Bearer ${klic}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify(zmena),
+          signal: AbortSignal.timeout(4000),
+        });
+        if (!rz.ok) console.warn('[klient] návštěva se nezapsala:', rz.status);
+      } catch (e) { console.warn('[klient] návštěva se nezapsala:', (e && e.name) || e); }
+    })();
 
     // Dovolené — dotaz odešel výš, souběžně se jmény a sazbami.
     let dovolene = {};
@@ -1302,6 +1346,7 @@ module.exports = async (req, res) => {
       } catch (e) { console.warn('[klient] seznam týdnů:', e.message); }
     }
 
+    await zapisNavstevu;
     res.status(200).json({ ok: true, nazev: odkaz.nazev, kw, rok, od, do: doDne,
                            radky, tydny, poznamky, dovolene, uhrazeno, lide });
   } catch (e) {

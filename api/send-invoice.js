@@ -140,6 +140,7 @@ module.exports = async function handler(req, res) {
   try {
     const callerResp = await fetch(`${SUPABASE_URL}/auth/v1/user`, {
       headers: { apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${callerToken}` },
+      signal: AbortSignal.timeout(8000),
     });
     if (!callerResp.ok) {
       res.status(401).json({ sent: false, reason: 'invalid_session' });
@@ -155,6 +156,7 @@ module.exports = async function handler(req, res) {
     const profResp = await fetch(`${SUPABASE_URL}/rest/v1/profiles` +
       `?select=id,role,is_active,email&id=eq.${encodeURIComponent(caller.id)}&limit=1`, {
       headers: { apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${callerToken}`, Accept: 'application/json' },
+      signal: AbortSignal.timeout(8000),
     });
     const radky = profResp.ok ? await profResp.json() : null;
     profil = Array.isArray(radky) ? radky[0] : null;
@@ -178,7 +180,12 @@ module.exports = async function handler(req, res) {
   }
 
   // 2) Data faktury
-  const body = typeof req.body === 'string' ? JSON.parse(req.body || '{}') : (req.body || {});
+  let body;
+  try { body = typeof req.body === 'string' ? JSON.parse(req.body || '{}') : (req.body || {}); } catch (e) { body = null; }
+  if (!body || typeof body !== 'object' || Array.isArray(body)) {
+    res.status(400).json({ sent: false, reason: 'bad_json' });
+    return;
+  }
   const pdfBase64 = String(body.pdfBase64 || '');
   if (!pdfBase64) {
     res.status(400).json({ sent: false, reason: 'missing_pdf' });
@@ -225,6 +232,7 @@ module.exports = async function handler(req, res) {
       method: 'POST',
       headers: { 'api-key': apiKey, 'content-type': 'application/json', accept: 'application/json' },
       body: JSON.stringify(payload),
+      signal: AbortSignal.timeout(25000),
     });
     if (!resp.ok) {
       const text = await resp.text().catch(() => '');

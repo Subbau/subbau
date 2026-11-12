@@ -181,11 +181,14 @@ select p.id, p.ubytovani_poznamka
 on conflict (worker_id) do nothing;
 
 -- A z profilu pryč, ať kódy nezůstanou čitelné pro každého přihlášeného.
--- Maže se jen tam, kde je kopie v nové tabulce — jinak by šlo o data přijít.
+-- Maže se jen tam, kde je v nové tabulce STEJNÝ obsah — kdo tam má jiný (starší, prázdný)
+-- kód, tomu zůstane poznámka v profilu, ať se o novější pokyny nepřijde.
 update public.profiles p
    set ubytovani_poznamka = null
  where coalesce(btrim(p.ubytovani_poznamka), '') <> ''
-   and exists (select 1 from public.ubytovani_kody k where k.worker_id = p.id);
+   and exists (select 1 from public.ubytovani_kody k
+                where k.worker_id = p.id
+                  and btrim(coalesce(k.kody, '')) = btrim(p.ubytovani_poznamka));
 
 comment on column public.profiles.ubytovani_poznamka is
   'NEPOUŽÍVÁ SE. Kódy k ubytování jsou v tabulce ubytovani_kody.';

@@ -149,9 +149,9 @@ begin
     new.detail := jsonb_strip_nulls(jsonb_build_object(
       'zkraceno', left(new.detail::text, 4000),
       'bajtu', octet_length(new.detail::text),
-      'zdroj', case when jsonb_typeof(new.detail) = 'object' then new.detail ->> 'zdroj' end,
-      't', case when jsonb_typeof(new.detail) = 'object' then new.detail ->> 't' end,
-      '_id', case when jsonb_typeof(new.detail) = 'object' then new.detail ->> '_id' end));
+      'zdroj', case when jsonb_typeof(new.detail) = 'object' then left(new.detail ->> 'zdroj', 100) end,
+      't', case when jsonb_typeof(new.detail) = 'object' then left(new.detail ->> 't', 100) end,
+      '_id', case when jsonb_typeof(new.detail) = 'object' then left(new.detail ->> '_id', 100) end));
   end if;
   v_auto := coalesce(jsonb_typeof(new.detail) = 'object' and new.detail ->> 'zdroj' = 'auto', false);
 

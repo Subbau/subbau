@@ -35,12 +35,51 @@ begin
   end if;
 end $$;
 
-alter table public.vacations
-  add column if not exists videno_spravcem boolean not null default false;
+-- Sloupec i počáteční „viděno" jen při PRVNÍM přidání: opakované spuštění nesmí označit
+-- jako viděné nepřítomnosti, které správce ještě nezkontroloval.
+do $$
+begin
+  if not exists (select 1 from information_schema.columns
+                  where table_schema = 'public' and table_name = 'vacations'
+                    and column_name = 'videno_spravcem') then
+    alter table public.vacations
+      add column videno_spravcem boolean not null default false;
+    -- Dosavadní záznamy (před touhle migrací) rovnou jako viděné — rámeček má
+    -- platit jen pro nové, ne zahltit kalendář starými.
+    update public.vacations set videno_spravcem = true where videno_spravcem = false;
+  end if;
+end $$;
 
--- Dosavadní záznamy (před touhle migrací) rovnou jako viděné — rámeček má
--- platit jen pro nové, ne zahltit kalendář starými.
-update public.vacations set videno_spravcem = true where videno_spravcem = false;
+-- Pracovník si vlastní nepřítomnost nesmí označit jako viděnou: při jeho zápisu se vynutí
+-- false (INSERT) nebo zůstane původní hodnota (UPDATE). Správce a server (bez přihlášení
+-- z appky) smějí.
+create or replace function public.vacations_zamek_videno()
+returns trigger
+language plpgsql
+security definer
+set search_path = public
+as $$
+begin
+  if auth.uid() is null then
+    return new;
+  end if;
+  if exists (select 1 from public.profiles p where p.id = auth.uid() and p.role = 'admin') then
+    return new;
+  end if;
+  if tg_op = 'INSERT' then
+    new.videno_spravcem := false;
+  else
+    new.videno_spravcem := old.videno_spravcem;
+  end if;
+  return new;
+end $$;
+
+revoke all on function public.vacations_zamek_videno() from public, anon, authenticated;
+
+drop trigger if exists vacations_zamek_videno on public.vacations;
+create trigger vacations_zamek_videno
+  before insert or update on public.vacations
+  for each row execute function public.vacations_zamek_videno();
 
 commit;
 

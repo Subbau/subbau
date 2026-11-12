@@ -57,12 +57,12 @@ module.exports = async function handler(req, res) {
   if (!callerToken) { res.status(401).json({ sent: false, reason: 'missing_token' }); return; }
   let caller = null, profil = null;
   try {
-    const r1 = await fetch(`${SUPABASE_URL}/auth/v1/user`, { headers: { apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${callerToken}` } });
+    const r1 = await fetch(`${SUPABASE_URL}/auth/v1/user`, { headers: { apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${callerToken}` }, signal: AbortSignal.timeout(8000) });
     if (!r1.ok) { res.status(401).json({ sent: false, reason: 'invalid_session' }); return; }
     caller = await r1.json();
     if (!caller?.id) { res.status(401).json({ sent: false, reason: 'invalid_session' }); return; }
     const r2 = await fetch(`${SUPABASE_URL}/rest/v1/profiles?select=id,role,is_active,email&id=eq.${encodeURIComponent(caller.id)}&limit=1`,
-      { headers: { apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${callerToken}`, Accept: 'application/json' } });
+      { headers: { apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${callerToken}`, Accept: 'application/json' }, signal: AbortSignal.timeout(8000) });
     const radky = r2.ok ? await r2.json() : null;
     profil = Array.isArray(radky) ? radky[0] : null;
   } catch (e) {
@@ -76,6 +76,7 @@ module.exports = async function handler(req, res) {
 
   let body = {};
   try { body = typeof req.body === 'string' ? JSON.parse(req.body || '{}') : (req.body || {}); } catch { res.status(400).json({ sent: false, reason: 'bad_json' }); return; }
+  if (!body || typeof body !== 'object' || Array.isArray(body)) { res.status(400).json({ sent: false, reason: 'bad_json' }); return; }
   const komu = String(body.to || '').trim();
   if (!jeEmail(komu)) { res.status(400).json({ sent: false, reason: 'bad_recipient' }); return; }
   const pdfBase64 = String(body.pdfBase64 || '');
@@ -89,7 +90,7 @@ module.exports = async function handler(req, res) {
   try {
     const rd = await fetch(`${SUPABASE_URL}/rest/v1/rpc/faktury_zacit_odesilani`, { method: 'POST',
       headers: { apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${callerToken}`, 'content-type': 'application/json', Accept: 'application/json' },
-      body: JSON.stringify({ p_invoice: invoiceId, p_pokus: pokus }) });
+      body: JSON.stringify({ p_invoice: invoiceId, p_pokus: pokus }), signal: AbortSignal.timeout(8000) });
     const dj = rd.ok ? await rd.json().catch(() => null) : null;
     if (dj !== true) { res.status(200).json({ sent: false, reason: 'rezervace už nepatří tomuto pokusu — neposílám' }); return; }
   } catch (e) { res.status(200).json({ sent: false, reason: 'rezervaci se nepodařilo ověřit — neposílám' }); return; }

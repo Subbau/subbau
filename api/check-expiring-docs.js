@@ -79,6 +79,7 @@ async function sb(path, serviceKey, options = {}) {
       'Content-Type': 'application/json',
       ...(options.headers || {}),
     },
+    signal: AbortSignal.timeout(15000),
   });
   if (!resp.ok) {
     const body = await resp.text().catch(() => '');
@@ -87,6 +88,18 @@ async function sb(path, serviceKey, options = {}) {
   // DELETE/PATCH bez Prefer:return=representation vrací prázdné tělo
   const text = await resp.text();
   return text ? JSON.parse(text) : null;
+}
+
+// Načte VŠECHNY řádky (Supabase vrací nanejvýš max-rows na dotaz). Cesta musí mít
+// jednoznačné řazení (order=…,id.asc), jinak by stránky mohly přeskakovat řádky.
+async function sbVse(path, serviceKey) {
+  const vse = [];
+  for (let strana = 0; strana < 200; strana++) {
+    const dalsi = await sb(`${path}&limit=1000&offset=${vse.length}`, serviceKey);
+    if (!Array.isArray(dalsi) || !dalsi.length) break;
+    vse.push(...dalsi);
+  }
+  return vse;
 }
 
 const BREVO_API_URL = 'https://api.brevo.com/v3/smtp/email';
@@ -109,6 +122,7 @@ async function sendEmail({ to, name, subject, html }) {
         subject,
         htmlContent: html,
       }),
+      signal: AbortSignal.timeout(15000),
     });
     if (!resp.ok) {
       const body = await resp.text().catch(() => '');
@@ -171,29 +185,30 @@ async function upomenChybejiciDoklady(serviceKey, dnesIso) {
   const den = new Date(dnesIso + 'T00:00:00').getDay();   // 0 = neděle
   if (den !== 1 && den !== 4) return { preskoceno: 'není pondělí ani čtvrtek' };
 
-  const lide = await sb(
-    `profiles?select=id,full_name,bez_ridicaku&role=in.(osvec,partak)&is_active=eq.true`,
+  const lide = await sbVse(
+    `profiles?select=id,full_name,bez_ridicaku&role=in.(osvec,partak)&is_active=eq.true&order=id.asc`,
     serviceKey
-  ).catch(async () => await sb(
+  ).catch(async () => await sbVse(
     // Bez migrace sloupec bez_ridicaku není — načti to aspoň bez něj.
-    `profiles?select=id,full_name&role=in.(osvec,partak)&is_active=eq.true`,
+    `profiles?select=id,full_name&role=in.(osvec,partak)&is_active=eq.true&order=id.asc`,
     serviceKey
   ));
   if (!lide?.length) return { poslano: 0 };
 
   const ids = lide.map((w) => w.id);
-  const doklady = await sb(
-    `documents?select=worker_id,doc_type,status&worker_id=in.(${ids.join(',')})`,
+  const doklady = await sbVse(
+    `documents?select=worker_id,doc_type,status&worker_id=in.(${ids.join(',')})&order=id.asc`,
     serviceKey
   );
 
   // Co už dneska odešlo — ať se při dvojím spuštění neposílá dvakrát.
   // Poznáváme to podle nadpisu, ne podle vlastního typu: sloupec `type` může
   // mít v databázi omezený výčet hodnot a nová hodnota by zápis tiše shodila.
-  const jizPoslano = await sb(
-    `notifications?select=worker_id&title=eq.${encodeURIComponent(UPOMINKA_NADPIS)}&created_at=gte.${dnesIso}T00:00:00`,
+  // Když se to nepovede načíst, upomínky se neposílají (neověřený stav = riziko dvojí zprávy).
+  const jizPoslano = await sbVse(
+    `notifications?select=worker_id&title=eq.${encodeURIComponent(UPOMINKA_NADPIS)}&created_at=gte.${dnesIso}T00:00:00&order=id.asc`,
     serviceKey
-  ).catch(() => []);
+  );
   const dnesUz = new Set((jizPoslano || []).map((n) => n.worker_id));
 
   let poslano = 0;
@@ -205,7 +220,9 @@ async function upomenChybejiciDoklady(serviceKey, dnesIso) {
       ? POVINNE_DOKLADY.filter((t) => t !== 'ridicak')
       : POVINNE_DOKLADY;
     const chybi = chceme.filter((typ) => !moje.some((d) => {
-      const sedi = typ === 'op' ? (d.doc_type === 'op' || d.doc_type === 'pas') : d.doc_type === typ;
+      // Starší typ gewerbeschein je pro appku totéž co zivnost.
+      const dt = d.doc_type === 'gewerbeschein' ? 'zivnost' : d.doc_type;
+      const sedi = typ === 'op' ? (dt === 'op' || dt === 'pas') : dt === typ;
       return sedi && d.status !== 'rejected' && d.status !== 'unreadable';
     }));
     if (!chybi.length) continue;
@@ -295,6 +312,7 @@ module.exports = async function handler(req, res) {
       method: 'POST',
       headers: { apikey: serviceKey, Authorization: `Bearer ${serviceKey}`, 'Content-Type': 'application/json' },
       body: '{}',
+      signal: AbortSignal.timeout(15000),
     });
     presuny = r.ok ? { provedeno: await r.json() } : { chyba: r.status };
   } catch (e) {
@@ -309,10 +327,10 @@ module.exports = async function handler(req, res) {
     // 1) Doklady, kterým do měsíce končí platnost (a propadlé za poslední půlrok —
     //    starší už nemá cenu připomínat, tam se řeší rovnou nový doklad).
     const past = new Date(today.getTime() - 180 * 86400000);
-    const docs = await sb(
+    const docs = await sbVse(
       `documents?select=*` +
         `&valid_until=gte.${toIso(past)}&valid_until=lte.${toIso(limit)}` +
-        `&status=not.in.(rejected,unreadable)&order=valid_until.asc`,
+        `&status=not.in.(rejected,unreadable)&order=valid_until.asc,id.asc`,
       serviceKey
     );
 
@@ -329,8 +347,8 @@ module.exports = async function handler(req, res) {
 
     // 2) Načti pracovníky (jen aktivní — odebraným nemá smysl psát)
     const ids = [...new Set(docs.map((d) => d.worker_id))].filter(Boolean);
-    const workers = await sb(
-      `profiles?select=id,full_name,email,is_active&id=in.(${ids.join(',')})`,
+    const workers = await sbVse(
+      `profiles?select=id,full_name,email,is_active&id=in.(${ids.join(',')})&order=id.asc`,
       serviceKey
     );
     const workerById = new Map((workers || []).map((w) => [w.id, w]));
@@ -340,12 +358,14 @@ module.exports = async function handler(req, res) {
     // neoznačí jako nahrazený, takže upomínka na něj jela dál vedle nového
     // dokladu (audit 16. 10. 2026). „op" a „pas" počítáme jako stejný typ
     // dokladu, stejně jako chybějící doklady výš.
-    const vsechnyDoklady = await sb(
+    // Když se kontrola nepovede načíst, běh skončí chybou (do deníku) — bez ní by se
+    // připomínaly doklady, které už pracovník nahradil novým.
+    const vsechnyDoklady = await sbVse(
       `documents?select=worker_id,doc_type,status,uploaded_at&worker_id=in.(${ids.join(',')})` +
-        `&status=not.in.(rejected,unreadable)`,
+        `&status=not.in.(rejected,unreadable)&order=id.asc`,
       serviceKey
-    ).catch(() => []);
-    const typovaSkupina = (t) => (t === 'op' || t === 'pas') ? 'op' : t;
+    );
+    const typovaSkupina = (t) => (t === 'op' || t === 'pas') ? 'op' : (t === 'gewerbeschein' ? 'zivnost' : t);
     const nejnovejsi = new Map();
     for (const d of (vsechnyDoklady || [])) {
       const klic = d.worker_id + '|' + typovaSkupina(d.doc_type);
@@ -377,6 +397,26 @@ module.exports = async function handler(req, res) {
       if (doc.expiry_notified_at) {
         const since = daysBetween(new Date(doc.expiry_notified_at), today);
         if (since < REMIND_AFTER_DAYS) continue;
+      }
+
+      // Rezervace upomínky: podmíněný zápis značky PŘED odesláním. Druhý souběžný běh
+      // (ruční spuštění přes cron) už nic nenajde a neposílá znovu.
+      const puvodniZnacka = doc.expiry_notified_at || null;
+      const zacatekRezervace = new Date(Date.now() - 10 * 60000).toISOString();
+      const mojeRezervace = new Date().toISOString();
+      try {
+        const vzato = await sb(`documents?id=eq.${doc.id}` +
+          `&or=(expiry_notified_at.is.null,expiry_notified_at.lt.${encodeURIComponent(zacatekRezervace)})&select=id`, serviceKey, {
+          method: 'PATCH',
+          headers: { Prefer: 'return=representation' },
+          body: JSON.stringify({ expiry_notified_at: mojeRezervace }),
+        });
+        if (!Array.isArray(vzato) || !vzato.length) continue;
+      } catch (e) {
+        // Když sloupec ještě neexistuje (neproběhla migrace), upozornění by
+        // chodilo denně — radši to ohlásíme v odpovědi, ať je to vidět.
+        results.push({ worker: worker.full_name, doc: (DOC_LABELS[doc.doc_type] || doc.doc_type || 'Dokument'), error: 'expiry_notified_at: ' + e.message });
+        continue;
       }
 
       const label = DOC_LABELS[doc.doc_type] || doc.doc_type || 'Dokument';
@@ -421,17 +461,18 @@ module.exports = async function handler(req, res) {
         });
       }
 
-      // 4) Zapiš, že jsme upozornili — ať se to zítra neopakuje
-      try {
-        await sb(`documents?id=eq.${doc.id}`, serviceKey, {
-          method: 'PATCH',
-          body: JSON.stringify({ expiry_notified_at: new Date().toISOString() }),
-        });
-      } catch (e) {
-        // Když sloupec ještě neexistuje (neproběhla migrace), upozornění by
-        // chodilo denně — radši to ohlásíme v odpovědi, ať je to vidět.
-        results.push({ worker: worker.full_name, doc: label, error: 'expiry_notified_at: ' + e.message });
-        continue;
+      // 4) Značka „upozorněno" zůstane jen při doručení aspoň jedním kanálem; jinak se
+      //    rezervace vrátí a další běh to zkusí znovu (ne až za 14 dní).
+      if (!inApp && !mail.sent) {
+        try {
+          await sb(`documents?id=eq.${doc.id}&expiry_notified_at=gte.${encodeURIComponent(zacatekRezervace)}`, serviceKey, {
+            method: 'PATCH',
+            body: JSON.stringify({ expiry_notified_at: puvodniZnacka }),
+          });
+        } catch (e) {
+          results.push({ worker: worker.full_name, doc: label, error: 'expiry_notified_at: ' + e.message });
+          continue;
+        }
       }
 
       results.push({
@@ -450,7 +491,7 @@ module.exports = async function handler(req, res) {
     // 5) Souhrn pro SubBau (nepovinné)
     const adminMail = process.env.DOC_EXPIRY_ADMIN_EMAIL;
     if (adminMail && adminSummary.length) {
-      await sendEmail({
+      const souhrn = await sendEmail({
         to: adminMail,
         subject: `Doklady ke kontrole: ${adminSummary.length}`,
         html:
@@ -459,6 +500,7 @@ module.exports = async function handler(req, res) {
           adminSummary.map((s) => '• ' + escapeHtml(s)).join('<br>') +
           '</div>',
       });
+      if (!souhrn.sent) results.push({ error: 'souhrn pro správce neodeslán (' + String(souhrn.reason || '').slice(0, 60) + ')' });
     }
 
     // V odpovědi schválně nejsou jména pracovníků ani jejich doklady — kdyby se
