@@ -9421,9 +9421,8 @@ function _onAdminDbChange(table, payload) {
       if (view === 'smlouvy') _debouncedRefresh('contracts', loadAdminContracts)
       break
     case 'attendance':
+      // Denní tabulku i týdenní přehled obnoví obnovOtevrenouSekci() dole (dřív se tu volaly ještě jednou — 2× pět a 2× čtyři dotazy).
       if (view === 'dochazka') _debouncedRefresh('dochazka', () => {
-        if (typeof loadTodayTimeline === 'function') loadTodayTimeline()
-        if (typeof loadKWData === 'function') loadKWData()
         if (typeof loadWdAttendance === 'function' && typeof currentWorkerId !== 'undefined' && currentWorkerId) loadWdAttendance()
       })
       break
@@ -9452,11 +9451,24 @@ function _onAdminDbChange(table, payload) {
 // Načte znovu data té sekce, kterou má správce právě otevřenou. Nic nepřepisuje
 // naslepo — když zrovna něco píše do políčka nebo má otevřené okno úpravy,
 // obnovu o kolo odloží, ať mu text nezmizí pod rukama.
-function obnovOtevrenouSekci() {
+// VÝKON PŘI 200 LIDECH (12. 11. 2026): každý příchod/odchod/pauza kohokoli přenačetl celou otevřenou sekci
+// (Docházka 22 dotazů a 1,7 MB, Kalendář 0,8 MB, Pracovníci 1 MB, Týmy 44 dotazů) — ráno desítky
+// takových přenačtení po sobě. Obnova na pozadí téže sekce teď nejde častěji než jednou za pár vteřin
+// (zbylé změny se dorovnají v tom jednom kole); obnova po VLASTNÍ úpravě správce (hned = true) čeká jako dřív.
+const _SEKCE_ODSTUP = { dochazka: 2000, kalendar: 3000, pracovnici: 3000, tymy: 3000 }
+const _sekceNaposled = {}, _sekceOdlozeno = {}
+function obnovOtevrenouSekci(hned) {
   const sekce = _activeAdminView()
   if (!sekce) return
+  if (hned) { _sekceNaposled[sekce] = 0; if (_sekceOdlozeno[sekce]) { clearTimeout(_sekceOdlozeno[sekce]); _sekceOdlozeno[sekce] = 0 } }
   _debouncedRefresh('sekce:' + sekce, () => {
     if (_adminEditInProgress()) { setTimeout(obnovOtevrenouSekci, 4000); return }
+    const odstup = _SEKCE_ODSTUP[sekce] || 0, uplynulo = Date.now() - (_sekceNaposled[sekce] || 0)
+    if (uplynulo < odstup) {
+      if (!_sekceOdlozeno[sekce]) _sekceOdlozeno[sekce] = setTimeout(() => { _sekceOdlozeno[sekce] = 0; obnovOtevrenouSekci() }, odstup - uplynulo + 20)
+      return
+    }
+    _sekceNaposled[sekce] = Date.now()
     try { loadAdminViewData(sekce) } catch (e) { console.warn('[obnova sekce]', sekce, e?.message) }
   }, sekce === 'dashboard' ? 1500 : 400, sekce === 'dashboard' ? 5000 : 0)   // ranní vlna příchodů = pár obnov, ne desítky
 }
@@ -9484,7 +9496,7 @@ async function refreshAttendanceEverywhere(workerId) {
   }
   // Sekce, kterou má správce zrovna otevřenou (kalendář, Provize, nástěnka…).
   // Realtime na to nespoléháme — na pomalém připojení dorazí pozdě, nebo vůbec.
-  pust('sekce', () => obnovOtevrenouSekci())
+  pust('sekce', () => obnovOtevrenouSekci(true))
   await Promise.all(bezi)
 }
 // ============ ADMIN ZVUKOVÉ UPOZORNĚNÍ ============
@@ -14404,26 +14416,64 @@ function attDateTime(dateStr, timeStr) {
   return isNaN(d) ? null : d
 }
 
+// Dotáhne VŠECHNY řádky dotazu po stránkách (server vrací nejvýš 1000 řádků na dotaz).
+// fab(od0) = dotaz s .range(od0, od0 + 999). Stránky se berou NARÁZ: kolik jich bylo potřeba naposled
+// (stejný klíč), tolik se jich ptá hned od začátku (výkon při 200 lidech: dřív jedna po druhé, a po
+// první stránce se teprve zjišťovalo, že jsou další), pak po čtyřech. Při chybě vrací načtené + error.
+const _strankyOdhad = {}
+async function stahniStrankyOdhad(klic, fab) {
+  let n0 = Math.min(4, Math.max(1, _strankyOdhad[klic] || 1))
+  const vse = []
+  let error = null, plna = true, od0 = 0, davka = n0
+  while (plna && od0 < 200000) {
+    const odp = await Promise.all(Array.from({ length: davka }, (_, i) => fab(od0 + i * 1000)))
+    for (const r of odp) {
+      if (r.error) { error = r.error; plna = false; break }
+      vse.push(...(r.data || []))
+      if (!r.data || r.data.length < 1000) { plna = false; break }
+    }
+    od0 += davka * 1000; davka = 4
+  }
+  if (!error) _strankyOdhad[klic] = Math.max(1, Math.ceil(vse.length / 1000))
+  return { data: error && !vse.length ? null : vse, error }
+}
+
 // Najde dny, které přesáhly 20:30 — buď pracovník skončil až po 20:30
 // (dlouhá pracovní doba), nebo den vůbec neukončil (zapomenutý odchod).
 // Zároveň naplní window.unclosedWorkerIds pro odznak v tabulce Pracovníci.
-async function computeLongDayAlerts() {
+// VÝKON PŘI 200 LIDECH (12. 11. 2026): volá to nástěnka i Pracovníci (při startu a při každé obnově naráz),
+// a každé volání stahovalo ~0,8 MB (všechny sloupce + celý profil u každého záznamu) a u 200 lidí
+// i ořezávalo týden na 1000 řádků. Teď: souběžná volání sdílejí jeden výsledek, vybírají se jen
+// sloupce, které se používají, a zavřené dny se dotahují po stránkách.
+let _longDayBeh = null
+function computeLongDayAlerts() {
+  if (_longDayBeh) return _longDayBeh
+  const p = _computeLongDayAlertsTelo().finally(() => { if (_longDayBeh === p) _longDayBeh = null })
+  return (_longDayBeh = p)
+}
+async function _computeLongDayAlertsTelo() {
   const now = new Date()
   const since = new Date(now); since.setDate(since.getDate() - 7)
 
-  const sel = '*, worker:profiles(full_name,profession,team_id,avatar_url)'
+  // Bez dlouhy_den_potvrzen (migrace den-bez-vyplaty) by užší výběr spadl — pak se použije původní '*'.
+  let sel = 'id, worker_id, work_date, check_in, check_out, total_hours, kw, kw_year, dlouhy_den_potvrzen, worker:profiles(full_name,team_id)'
   // Neukončené dny hledáme bez omezení data — zapomenutý odchod je potřeba
   // dořešit i po týdnu. Uzavřené dlouhé dny stačí za poslední týden, ať
   // upozornění na dashboardu nezůstává viset donekonečna.
-  const [openRes, closedRes] = await Promise.all([
-    sb.from('attendance').select(sel)
-      .not('check_in', 'is', null).is('check_out', null)
-      .order('work_date', { ascending: false }),
-    sb.from('attendance').select(sel)
-      .not('check_in', 'is', null).not('check_out', 'is', null)
-      .gte('work_date', localDateStr(since))
-      .order('work_date', { ascending: false })
-  ])
+  const dotazOpen = () => sb.from('attendance').select(sel)
+    .not('check_in', 'is', null).is('check_out', null)
+    .order('work_date', { ascending: false })
+  const dotazClosed = (od0) => sb.from('attendance').select(sel)
+    .not('check_in', 'is', null).not('check_out', 'is', null)
+    .gte('work_date', localDateStr(since))
+    .order('work_date', { ascending: false }).order('id', { ascending: true })
+    .range(od0, od0 + 999)
+  let [openRes, closedRes] = await Promise.all([dotazOpen(), stahniStrankyOdhad('dlouhe-dny', dotazClosed)])
+  if ((openRes.error || closedRes.error) && sel !== '*, worker:profiles(full_name,profession,team_id,avatar_url)'
+      && [openRes.error, closedRes.error].some(e => e && (e.code === '42703' || /column .* does not exist|schema cache/i.test(e.message || '')))) {
+    sel = '*, worker:profiles(full_name,profession,team_id,avatar_url)'
+    ;[openRes, closedRes] = await Promise.all([dotazOpen(), stahniStrankyOdhad('dlouhe-dny', dotazClosed)])
+  }
 
   // Prošly oba dotazy? Bez toho by se prázdný výsledek po výpadku sítě
   // tvářil jako „žádný dlouhý den" a úklid skrytých by je vrátil zpátky.
@@ -17345,6 +17395,13 @@ async function loadKWData() {
   const _wkEnd = new Date(_wkStart); _wkEnd.setDate(_wkStart.getDate() + 6)
   const _wkStartStr = localDateStr(_wkStart), _wkEndStr = localDateStr(_wkEnd)
 
+  // Docházka týdne: server vrací nejvýš 1000 řádků na dotaz a 200 lidí jich za týden má víc —
+  // další stránky se (jen když je první plná) berou po čtyřech naráz.
+  const dotazAttKW = (od0) => sb.from('attendance')
+    .select('*, worker:profiles(full_name,profession,is_active,team_id,avatar_url)')
+    .eq('kw', week).eq('kw_year', year)
+    .order('work_date', { ascending: true }).order('check_in', { ascending: true }).order('id', { ascending: true })   // stálé pořadí kvůli stránkování
+    .range(od0, od0 + 999)
   // Všichni aktivní pracovníci — i ti se zablokovanou docházkou.
   // (Jinak by z přehledu zmizely i hodiny, které stihli odpracovat před zablokováním.)
   const [
@@ -17363,9 +17420,7 @@ async function loadKWData() {
     sb.from('subteams').select('id, name, team_id'),
     // is_active z profilu tu potřebujeme kvůli řádkům lidí, kterým jsme mezitím
     // odebrali přístup — v seznamu výš nejsou, ale jejich hodiny se dál musí ukázat.
-    sb.from('attendance')
-      .select('*, worker:profiles(full_name,profession,is_active,team_id,avatar_url)')
-      .eq('kw', week).eq('kw_year', year),
+    stahniStrankyOdhad('kw', dotazAttKW),
     // Dovolené v tomhle týdnu — ať se u dnů bez docházky ukáže „Dovolená/volno" místo 0h.
     // Tabulka nemusí být dostupná; chybu proto spolkneme a vrátíme prázdno,
     // jinak by Promise.all shodil celý přehled kvůli vedlejšímu údaji.
@@ -18136,7 +18191,14 @@ async function renderCalendar(tichy) {
   // ptáme na všechno naráz. Dřív se čekalo na každý dotaz zvlášť — čtyři cesty
   // na server za sebou, každá čtvrt vteřiny, a kalendář se rozjížděl přes vteřinu
   // ještě předtím, než se vůbec sáhlo na docházku.
-  const [rWorkers, rCalTeams, rCompanies, rSubteams] = await Promise.all([
+  // Docházka a nepřítomnosti v rozsahu na lidech, firmách ani podskupinách nezávisí — jdou
+  // do stejné dávky (dřív 3 obrátky za sebou + stránky docházky jedna po druhé).
+  const dotazAtt = (od0) => sb.from('attendance')
+    .select('id, worker_id, work_date, check_in, check_out, break_start, break_end, total_hours')
+    .gte('work_date', od).lte('work_date', doo)
+    .order('work_date', { ascending: true }).order('id', { ascending: true })   // stálé pořadí kvůli stránkování
+    .range(od0, od0 + 999)
+  const [rWorkers, rCalTeams, rCompanies, rSubteams, , rAtt0, rVacs] = await Promise.all([
     sb.from('profiles')
       .select('id, full_name, profession, turnus_work_weeks, turnus_off_weeks, turnus_start, turnus_weekends, team_id, subteam_id')
       .in('role', ['osvec','partak']).eq('is_active', true).order('full_name'),
@@ -18144,7 +18206,10 @@ async function renderCalendar(tichy) {
     sb.from('companies').select('id, name'),
     sb.from('subteams').select('id, name, team_id').eq('is_active', true),
     // Vlaječky za jménem (majitel 2. 10. 2026). Ozdoba: na ně se čeká nejvýš chvilku.
-    vlajkyNejdyl(nactiVlajky())
+    vlajkyNejdyl(nactiVlajky()),
+    stahniStrankyOdhad('kalendar' + Math.round((new Date(doo) - new Date(od)) / 86400000), dotazAtt),
+    // select('*') schválně: viz níž u nepřítomností.
+    sb.from('vacations').select('*').lte('date_from', doo).gte('date_to', od)
   ])
 
   let allWorkers = rWorkers.data
@@ -18220,16 +18285,9 @@ async function renderCalendar(tichy) {
   // (audit 16. 10. 2026).
   const att = []
   let attErr = null
-  for (let stranka = 0; stranka < 200000; stranka += 1000) {
-    const { data: kus, error: chybaKusu } = await sb.from('attendance')
-      .select('id, worker_id, work_date, check_in, check_out, break_start, break_end, total_hours')
-      .gte('work_date', od).lte('work_date', doo)
-      .order('work_date', { ascending: true })
-      .range(stranka, stranka + 999)
-    if (chybaKusu) { attErr = chybaKusu; break }
-    att.push(...(kus || []))
-    if (!kus || kus.length < 1000) break
-  }
+  // Všechny stránky docházky už dorazily v dávce výše (po stránkách, souběžně).
+  att.push(...(rAtt0.data || []))
+  attErr = rAtt0.error || null
   // Novější kreslení už běží — tohle nesmí přepsat jeho _calAttMap (čte ho
   // dayStatusFor i okno s detailem dne).
   if (poradi !== calPoradi) return
@@ -18268,9 +18326,7 @@ async function renderCalendar(tichy) {
   // select('*') schválně: druh je ve sloupci `type`, a u starších záznamů se pozná
   // z poznámky. Kdybychom vyjmenovali sloupce a `type` v databázi ještě nebyl,
   // celý dotaz by spadl a v kalendáři by zmizely i dovolené.
-  const { data: vacs } = await sb.from('vacations').select('*')
-    .lte('date_from', doo).gte('date_to', od)
-  const vacList = vacs || []
+  const vacList = rVacs.data || []
   // Mezitím se začalo kreslit něco novějšího — tohle už nikoho nezajímá.
   if (poradi !== calPoradi) return
 
@@ -25334,7 +25390,7 @@ function poZmeneSkrytych() {
   _skrytiCache.klic = ''   // seznam schovaných lidí se změnil, zahoď zapamatovaný
   aktualizujPruhSkrytych()
   try { renderTeams() } catch (e) {}
-  try { if (typeof obnovOtevrenouSekci === 'function') obnovOtevrenouSekci() } catch (e) {}
+  try { if (typeof obnovOtevrenouSekci === 'function') obnovOtevrenouSekci(true) } catch (e) {}
 }
 
 // Malá plovoucí značka vlevo dole, dokud je něco schované. Schválně NEVYPISUJE
@@ -26125,35 +26181,76 @@ async function dochazkaTymuZaObdobi(teamId, clenoveTed, od, doo, sloupce) {
   return vse
 }
 
+// VÝKON PŘI 200 LIDECH (12. 11. 2026): nabídka týdnů pro PDF týmu dřív po KAŽDÉM překreslení Týmů
+// (start appky, písmeno v hledání, zaškrtnutí člověka) stahovala po stránkách CELOU historii docházky
+// každého týmu, tým po týmu za sebou — desítky dotazů a několik MB. Teď: (1) když Týmy nejsou vidět,
+// nedělá se nic (doplní se při otevření sekce), (2) výsledek se drží 2 minuty, (3) jedním dotazem
+// funkce tymy_tydny_pdf (supabase-migrace-tymy-tydny-pdf.sql), (4) bez ní se týmy ptají souběžně.
+const _tydnyPdf = { rpcRows: null, rpcKdy: 0, rpcBeh: null, rpcChybi: false, tymy: new Map() }
+function _tydnyPdfVymaz() { _tydnyPdf.rpcRows = null; _tydnyPdf.rpcKdy = 0; _tydnyPdf.rpcBeh = null; _tydnyPdf.tymy.clear() }
+async function _tydnyPdfRpc() {
+  if (_tydnyPdf.rpcChybi) return null
+  if (_tydnyPdf.rpcRows && Date.now() - _tydnyPdf.rpcKdy < 120000) return _tydnyPdf.rpcRows
+  if (_tydnyPdf.rpcBeh) return _tydnyPdf.rpcBeh
+  const beh = (async () => {
+    try {
+      const vse = []
+      for (let od = 0; od < 200000; od += 1000) {
+        const { data, error } = await sb.rpc('tymy_tydny_pdf').order('kw_year', { ascending: false }).order('kw', { ascending: false }).order('team_id', { ascending: true }).range(od, od + 999)
+        if (error) {
+          // Funkce v databázi není (migrace neproběhla) → dál se použije původní cesta
+          if (error.code === 'PGRST202' || error.code === '42883' || /could not find the function|does not exist/i.test(error.message || '')) _tydnyPdf.rpcChybi = true
+          return null
+        }
+        if (!Array.isArray(data)) { _tydnyPdf.rpcChybi = true; return null }
+        vse.push(...data)
+        if (data.length < 1000) break
+      }
+      _tydnyPdf.rpcRows = vse; _tydnyPdf.rpcKdy = Date.now()
+      return vse
+    } catch (e) { _tydnyPdf.rpcChybi = true; return null }
+  })().finally(() => { if (_tydnyPdf.rpcBeh === beh) _tydnyPdf.rpcBeh = null })
+  _tydnyPdf.rpcBeh = beh
+  return beh
+}
 async function populateTeamPdfWeeks() {
   const selects = [...document.querySelectorAll('.team-pdf-week')]
   if (!selects.length) return
+  // Týmy nejsou vidět (start appky, změna na pozadí): nabídky se doplní, až se sekce otevře (sv → loadTeams).
+  if (_activeAdminView() !== 'tymy') return
   const teams = _teamsCache || []
   const workers = _workersCache || []
-  for (const sel of selects) {
-    const teamId = sel.getAttribute('data-team-id')
-    // Odškrtnutí lidé (Týmy → „mimo výkaz") se do výkazu nepočítají.
-    const memberIds = workers.filter(w => w.team_id === teamId && patriDoVykazu(w)).map(w => w.id)
-    try {
-      // Týdny podle skupiny ZAPSANÉ u docházky (i lidé, co jsou dnes jinde),
-      // plus dny bez zapsané skupiny u dnešních členů. NEJNOVĚJŠÍ NAPŘED:
-      // databáze vrací nejvýš 1000 řádků (1. 10. 2026).
-      // Po stránkách (server vrací nejvýš ~1000 řádků naráz) — starší týdny se jinak nevešly do nabídky.
-      const strankuj = async (fab) => {
-        const vse = []
-        for (let od = 0; od < 200000; od += 1000) {
-          const { data, error } = await fab().order('id', { ascending: true }).range(od, od + 999)
-          if (error) return { data: null, error }
-          vse.push(...(data || []))
-          if (!data || data.length < 1000) break
-        }
-        return { data: vse, error: null }
+  const workerById = new Map(workers.map(w => [String(w.id), w]))
+  const veVykazu = id => patriDoVykazu(workerById.get(String(id)))
+  const mimoVykaz = workers.filter(w => !patriDoVykazu(w)).map(w => String(w.id)).sort().join(',')   // změna zaškrtnutí = nový klíč
+  const rpcRows = await _tydnyPdfRpc()
+  // Strankuj: po stránkách (server vrací nejvýš ~1000 řádků naráz) — starší týdny se jinak nevešly do nabídky.
+  const strankuj = async (fab) => {
+    const vse = []
+    for (let od = 0; od < 200000; od += 1000) {
+      const { data, error } = await fab().order('id', { ascending: true }).range(od, od + 999)
+      if (error) return { data: null, error }
+      vse.push(...(data || []))
+      if (!data || data.length < 1000) break
+    }
+    return { data: vse, error: null }
+  }
+  // Týdny jedné skupiny: [{kw, year}] nejnovější napřed; hází při chybě načtení.
+  const tydnyTymu = async (teamId, memberIds) => {
+    let rows
+    if (rpcRows) {
+      const clenove = new Set(memberIds.map(String))
+      rows = []
+      for (const r of rpcRows) {
+        const ids = r.worker_ids || []
+        if (r.team_id != null && String(r.team_id) === String(teamId)) { if (ids.some(veVykazu)) rows.push(r) }
+        else if (r.team_id == null) { if (ids.some(id => clenove.has(String(id)) && veVykazu(id))) rows.push(r) }
       }
+    } else {
       const [z1, z2] = await Promise.all([
         strankuj(() => sb.from('attendance').select('kw, kw_year, worker_id').eq('team_id', teamId).not('kw', 'is', null)),
         memberIds.length ? strankuj(() => sb.from('attendance').select('kw, kw_year, worker_id').in('worker_id', memberIds).is('team_id', null).not('kw', 'is', null)) : Promise.resolve({ data: [] })
       ])
-      const veVykazu = id => patriDoVykazu(workers.find(w => String(w.id) === String(id)))
       // Náhradní cesta jen při chybějícím sloupci (neproběhlá migrace); jiná chyba = načtení selhalo.
       const chybiSloupecTeam = !!z1.error && (z1.error.code === '42703' || /team_id|column .* does not exist|schema cache/i.test(z1.error.message || ''))
       let z3 = null
@@ -26164,16 +26261,34 @@ async function populateTeamPdfWeeks() {
         if (z1.error) throw z1.error
         if (z2.error) throw z2.error
       }
-      const rows = (z3 ? (z3.data || []) : [...(z1.data || []), ...(z2.data || [])]).filter(r => veVykazu(r.worker_id))
-      const map = new Map()
-      ;(rows || []).forEach(r => {
-        if (r.kw == null || r.kw_year == null) return
-        map.set(r.kw + '/' + r.kw_year, { kw: r.kw, year: r.kw_year })
-      })
-      const weeks = [...map.values()].sort((a, b) => (b.year - a.year) || (b.kw - a.kw))
+      rows = (z3 ? (z3.data || []) : [...(z1.data || []), ...(z2.data || [])]).filter(r => veVykazu(r.worker_id))
+    }
+    const map = new Map()
+    rows.forEach(r => {
+      if (r.kw == null || r.kw_year == null) return
+      map.set(r.kw + '/' + r.kw_year, { kw: r.kw, year: r.kw_year })
+    })
+    return [...map.values()].sort((a, b) => (b.year - a.year) || (b.kw - a.kw))
+  }
+  const zpracuj = async (sel) => {
+    const teamId = sel.getAttribute('data-team-id')
+    // Odškrtnutí lidé (Týmy → „mimo výkaz") se do výkazu nepočítají.
+    const memberIds = workers.filter(w => w.team_id === teamId && patriDoVykazu(w)).map(w => w.id)
+    try {
+      // Týdny podle skupiny ZAPSANÉ u docházky (i lidé, co jsou dnes jinde),
+      // plus dny bez zapsané skupiny u dnešních členů. NEJNOVĚJŠÍ NAPŘED:
+      // databáze vrací nejvýš 1000 řádků (1. 10. 2026).
+      const klic = teamId + '|' + memberIds.map(String).sort().join(',') + '|' + (rpcRows ? 'r' : 'p') + '|' + mimoVykaz
+      let z = _tydnyPdf.tymy.get(klic)
+      if (!z || Date.now() - z.kdy > 120000) {
+        z = { kdy: Date.now(), p: tydnyTymu(teamId, memberIds) }
+        _tydnyPdf.tymy.set(klic, z)
+        z.p.catch(() => { if (_tydnyPdf.tymy.get(klic) === z) _tydnyPdf.tymy.delete(klic) })   // chyba se nepamatuje
+      }
+      const weeks = await z.p
       if (!weeks.length) {
         sel.innerHTML = '<option value="">— žádná docházka —</option>'
-        continue
+        return
       }
       sel.innerHTML = weeks.map(w => {
         const sd = getWeekStartDate(w.kw, w.year)
@@ -26188,6 +26303,9 @@ async function populateTeamPdfWeeks() {
       try { if (typeof _dnPanel === 'function') _dnPanel('tymy-pdf', 'Týdny pro PDF týmu se nepodařilo načíst: ' + String((e && e.message) || e).slice(0, 200), { nazev: e && e.name }) } catch (x) { console.warn('[deník chyb]', x) } // eslint-disable-line no-undef
     }
   }
+  // Skupiny se ptají souběžně (po čtyřech), ne jedna za druhou.
+  const fronta = selects.slice()
+  await Promise.all(Array.from({ length: rpcRows ? 1 : Math.min(4, fronta.length) }, async () => { while (fronta.length) await zpracuj(fronta.shift()) }))
 }
 
 // Vygeneruje PDF docházky všech členů týmu za zvolený týden (KW).
@@ -34526,6 +34644,7 @@ function sv(name, navEl) {
   // FOTKY PO FIRMÁCH (4. 11. 2026): „Fotky stavby" z menu začínají vždy u složek
   // firem. Obnova na pozadí (loadAdminViewData bez sv) otevřenou složku nechává.
   if (name === 'fotky') zavriSlozkuFotek(true)
+  if (name === 'tymy') _tydnyPdfVymaz()   // otevření Týmů = čerstvé týdny pro PDF
   loadAdminViewData(name)
   const titles={dashboard:'Dashboard',tymy:'Skupiny / Týmy',dochazka:'Docházka','cekajici-registrace':'Čekající registrace',kalendar:'Kalendář',pracovnici:'Pracovníci',ubytovani:'Ubytování','historie-uprav':'Historie úprav','denik-chyb':'Deník chyb','plan-mmi':'Plán MMI',dokumenty:'Dokumenty',fotky:'Fotky ze stavby',odkazy:'Odkazy pro odběratele',smlouvy:'Smlouvy',faktury:'Firmy','faktury-archiv':'Faktury od pracovníků',zpravy:'Zprávy',chat:'Chat',oznameni:'Oznámení',pristupy:'Přístupy',provize:'Provize','provize-pristup':'Přístup/provize','zalohove-faktury':'Zálohové faktury'}
   const pt = document.getElementById('pt')
@@ -39719,9 +39838,12 @@ async function _saveManualAttendanceImpl() {
 
 // ============ DOCUMENT ALERTS ADMIN ============
 // Souběžná volání se slučují: běží-li výpočet, jen se poznamená „ještě jednou".
-let _ldasBezi = null, _ldasZnovu = false
+let _ldasBezi = null, _ldasZnovu = false, _ldasStart = 0
 function loadDocumentAlertsStat() {
-  if (_ldasBezi) { _ldasZnovu = true; return _ldasBezi }
+  // Volání těsně po startu běžícího výpočtu (start appky volá nástěnku, checkDocumentAlerts i tohle v jednom tiku)
+  // nic nového nepřináší — druhý celý výpočet (300 kB dokladů) se pro ně nespouští.
+  if (_ldasBezi) { if (Date.now() - _ldasStart > 50) _ldasZnovu = true; return _ldasBezi }
+  _ldasStart = Date.now()
   _ldasBezi = (async () => {
     try { do { _ldasZnovu = false; await _loadDocumentAlertsStatTelo() } while (_ldasZnovu) }
     finally { _ldasBezi = null }
@@ -39737,6 +39859,8 @@ async function _loadDocumentAlertsStatTelo() {
 
   // Načti všechny AKTIVNÍ OSVČ pracovníky (neaktivní/odebrané neřešíme).
   // bez_ridicaku říká, kdo prohlásil, že řidičák nemá — po tom se nechce.
+  // Odložená upozornění se čtou souběžně s lidmi (dřív až po dokladech — o obrátku víc).
+  const pDismissals = Promise.resolve(sb.from('doc_alert_dismissals').select('dismiss_key')).catch(e => ({ data: null, error: e || { message: 'chyba' } }))
   let { data: workers, error: chybaLidi } = await sb.from('profiles')
     .select('id, full_name, profession, bez_ridicaku, team_id')
     .in('role', ['osvec', 'partak'])
@@ -39766,16 +39890,18 @@ async function _loadDocumentAlertsStatTelo() {
 
   // Načti všechny dokumenty těchto pracovníků
   const workerIds = workers.map(w => w.id)
-  const { data: allDocs } = await sb.from('documents')
-    .select('*')
-    .in('worker_id', workerIds)
+  // Jen používané sloupce a po stránkách (200 lidí = přes 1000 dokladů); bez některého sloupce (migrace) se vezme '*'.
+  const dotazDoklady = (sl) => (od0) => sb.from('documents').select(sl).in('worker_id', workerIds).order('id', { ascending: true }).range(od0, od0 + 999)
+  let rDocs = await stahniStrankyOdhad('doklady', dotazDoklady('id, worker_id, doc_type, status, valid_until, no_expiry'))
+  if (rDocs.error && (rDocs.error.code === '42703' || /column .* does not exist|schema cache/i.test(rDocs.error.message || ''))) rDocs = await stahniStrankyOdhad('doklady', dotazDoklady('*'))
+  const allDocs = rDocs.data
 
   // Načti "vykřížkované" (skryté) položky upozornění — aby nepřekážely.
   // Perzistentně přes tabulku doc_alert_dismissals; fallback = session (okno).
   let dismissed = new Set()
   try {
     // Ve stejné tabulce jsou i odložené registrace (prefix "preg|") — ty sem nepatří
-    const { data: dis, error: disErr } = await sb.from('doc_alert_dismissals').select('dismiss_key')
+    const { data: dis, error: disErr } = await pDismissals
     if (!disErr && dis) dismissed = new Set(dis.map(x => x.dismiss_key).filter(k => !String(k).startsWith(PREG_KEY_PREFIX) && !String(k).startsWith(LONG_KEY_PREFIX) && !String(k).startsWith(CHAT_KEY_PREFIX) && !String(k).startsWith(VAC_KEY_PREFIX)))
     else if (disErr) dismissed = window._docAlertDismissed || new Set()
   } catch(e) { dismissed = window._docAlertDismissed || new Set() }
@@ -50755,10 +50881,16 @@ async function fialovaPoleZHistorie(ids) {
     if (!ids || !ids.length) return {}
     const seznam = ids.map(String)
     const poZaznamu = {}
-    // po dávkách — dlouhý seznam id by přetekl délku adresy dotazu
+    // po dávkách — dlouhý seznam id by přetekl délku adresy dotazu.
+    // Dávky se ptají NARÁZ (výkon při 200 lidech: dřív 3+ obrátky za sebou); zpracují se
+    // pak ve stejném pořadí jako dřív, takže výsledek je totožný.
+    const davky = []
     for (let i = 0; i < seznam.length; i += 80) {
-      const { data: radky, error } = await sb.from('historie_uprav').select('zaznam_id, kdo, komu, akce, zmeny, kdy')
-        .eq('tabulka', 'attendance').in('zaznam_id', seznam.slice(i, i + 80)).in('akce', ['INSERT', 'UPDATE'])
+      davky.push(sb.from('historie_uprav').select('zaznam_id, kdo, komu, akce, zmeny, kdy')
+        .eq('tabulka', 'attendance').in('zaznam_id', seznam.slice(i, i + 80)).in('akce', ['INSERT', 'UPDATE']))
+    }
+    const odpovedi = await Promise.all(davky)
+    for (const { data: radky, error } of odpovedi) {
       if (error || !radky) { if (error) console.warn('[fialová] historie se nenačetla:', error.message); return null }
       // od nejstarší úpravy — z té se bere, co tam bylo PŮVODNĚ (před prvním zásahem správce)
       radky.slice().sort((a, b) => String(a.kdy || '').localeCompare(String(b.kdy || ''))).forEach(h => {
@@ -51515,6 +51647,8 @@ async function adminNastavBezRidicaku(wid, el) {
 
 async function loadWdDocs(id) {
   const widDocs = id || currentWorkerId
+  // Doklady a stav řidičáku se ptají SOUČASNĚ (dřív druhý dotaz až po prvním — o obrátku víc při otevření karty).
+  const pRidicak = Promise.resolve(sb.from('profiles').select('bez_ridicaku').eq('id', widDocs).maybeSingle()).catch(e => ({ data: null, error: e || { message: 'chyba' }, vyjimka: e }))
   const { data, error: chybaDocs } = await sb.from('documents').select('*').eq('worker_id', widDocs)
   if (String(widDocs) !== String(currentWorkerId)) return   // mezitím se otevřel jiný pracovník
   if (chybaDocs) { showToast('❌ Doklady se nepodařilo načíst — zkuste to prosím znovu'); return }
@@ -51535,7 +51669,9 @@ async function loadWdDocs(id) {
   const wCache = (_workersCache || []).find(x => String(x.id) === String(wid))
   let bezRid = !!(wCache && wCache.bez_ridicaku === true)
   try {
-    const { data: pr, error: prErr } = await sb.from('profiles').select('bez_ridicaku').eq('id', wid).maybeSingle()
+    const rRid = await pRidicak
+    if (rRid.vyjimka) throw rRid.vyjimka
+    const { data: pr, error: prErr } = rRid
     if (!prErr && pr) { bezRid = pr.bez_ridicaku === true; if (wCache) wCache.bez_ridicaku = bezRid }
   } catch (e) { console.warn('[řidičák] stav se nenačetl, platí paměť:', (e && e.message) || e) }
   if (String(widDocs) !== String(currentWorkerId)) return
