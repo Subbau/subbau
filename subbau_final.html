@@ -25757,16 +25757,33 @@ async function populateTeamPdfWeeks() {
       // Týdny podle skupiny ZAPSANÉ u docházky (i lidé, co jsou dnes jinde),
       // plus dny bez zapsané skupiny u dnešních členů. NEJNOVĚJŠÍ NAPŘED:
       // databáze vrací nejvýš 1000 řádků (1. 10. 2026).
+      // Po stránkách (server vrací nejvýš ~1000 řádků naráz) — starší týdny se jinak nevešly do nabídky.
+      const strankuj = async (fab) => {
+        const vse = []
+        for (let od = 0; od < 200000; od += 1000) {
+          const { data, error } = await fab().order('id', { ascending: true }).range(od, od + 999)
+          if (error) return { data: null, error }
+          vse.push(...(data || []))
+          if (!data || data.length < 1000) break
+        }
+        return { data: vse, error: null }
+      }
       const [z1, z2] = await Promise.all([
-        sb.from('attendance').select('kw, kw_year, worker_id').eq('team_id', teamId)
-          .not('kw', 'is', null).order('work_date', { ascending: false }),
-        memberIds.length ? sb.from('attendance').select('kw, kw_year, worker_id').in('worker_id', memberIds).is('team_id', null)
-          .not('kw', 'is', null).order('work_date', { ascending: false }) : Promise.resolve({ data: [] })
+        strankuj(() => sb.from('attendance').select('kw, kw_year, worker_id').eq('team_id', teamId).not('kw', 'is', null)),
+        memberIds.length ? strankuj(() => sb.from('attendance').select('kw, kw_year, worker_id').in('worker_id', memberIds).is('team_id', null).not('kw', 'is', null)) : Promise.resolve({ data: [] })
       ])
       const veVykazu = id => patriDoVykazu(workers.find(w => String(w.id) === String(id)))
-      const rows = (z1.error && memberIds.length
-        ? ((await sb.from('attendance').select('kw, kw_year, worker_id').in('worker_id', memberIds).not('kw', 'is', null).order('work_date', { ascending: false })).data || [])
-        : [...(z1.data || []), ...(z2.data || [])]).filter(r => veVykazu(r.worker_id))
+      // Náhradní cesta jen při chybějícím sloupci (neproběhlá migrace); jiná chyba = načtení selhalo.
+      const chybiSloupecTeam = !!z1.error && (z1.error.code === '42703' || /team_id|column .* does not exist|schema cache/i.test(z1.error.message || ''))
+      let z3 = null
+      if (z1.error && chybiSloupecTeam && memberIds.length) {
+        z3 = await strankuj(() => sb.from('attendance').select('kw, kw_year, worker_id').in('worker_id', memberIds).not('kw', 'is', null))
+        if (z3.error) throw z3.error
+      } else {
+        if (z1.error) throw z1.error
+        if (z2.error) throw z2.error
+      }
+      const rows = (z3 ? (z3.data || []) : [...(z1.data || []), ...(z2.data || [])]).filter(r => veVykazu(r.worker_id))
       const map = new Map()
       ;(rows || []).forEach(r => {
         if (r.kw == null || r.kw_year == null) return
@@ -25988,9 +26005,11 @@ async function generateTeamAttendancePdf(teamId, teamName) {
   if (smiVidetProvize()) {
     try {
       const vl = await nactiVlastniProvizeZamestnancu()
+      if (vl.chyba) throw vl.chyba
       if (vl.set) _vlastniProvize = vl.set
       let pv = await sb.from('worker_commissions').select('worker_id, provize, bez_provize')
       if (pv.error) pv = await sb.from('worker_commissions').select('worker_id, provize')
+      if (pv.error) throw pv.error
       ;(pv.data || []).forEach(p => {
         if (p.bez_provize) _bezProvizeLidi.add(p.worker_id)
         if (p.provize != null) _provMap[p.worker_id] = Number(p.provize)
@@ -25999,11 +26018,19 @@ async function generateTeamAttendancePdf(teamId, teamName) {
         sb.from('worker_rate_history').select('worker_id, hodnota, valid_from').eq('druh', 'provize').order('valid_from', { ascending: true }),
         sb.from('profiles').select('id, zamestnavatel_id').in('id', ids)
       ])
+      // Chyba načtení se nesmí tvářit jako „nulové provize / žádná historie / bez zaměstnavatele".
+      if (hist.error && !/42P01|42703|PGRST20[245]|does not exist|schema cache/i.test((hist.error.code || '') + ' ' + (hist.error.message || ''))) throw hist.error
+      if (zam.error && !/42703|PGRST204|zamestnavatel_id|schema cache/i.test((zam.error.code || '') + ' ' + (zam.error.message || ''))) throw zam.error
       ;(hist.data || []).forEach(h => {
         ;(_histProv[h.worker_id] = _histProv[h.worker_id] || []).push({ od: String(h.valid_from).slice(0, 10), hodnota: Number(h.hodnota) || 0 })
       })
       ;(zam.data || []).forEach(z => { if (z.zamestnavatel_id && z.zamestnavatel_id !== z.id) _sefPodle[z.id] = z.zamestnavatel_id })
-    } catch(e) { console.warn('[team-pdf] provize:', e?.message) }
+    } catch(e) {
+      // Bez spolehlivých podkladů provizní část nevytvářet — výkaz s nulovou či špatnou provizí je horší než žádný.
+      console.warn('[team-pdf] provize:', e?.message)
+      showToast('❌ Provize se nepodařilo načíst — PDF nevytvořeno, zkuste to znovu')
+      return
+    }
   }
   // Provize za hodinu v konkrétní den — komu (zaměstnanec → firma), „bez provize", historie.
   const _provizeDne = (wid, den) => {
