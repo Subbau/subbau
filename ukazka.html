@@ -38542,33 +38542,41 @@ function cenaUbytovaniZPole(id) {
 }
 async function saveMobAccommodation() {
   if (!currentUser) return
+  const hodn = (id) => document.getElementById(id)?.value.trim() || null
   const addr = document.getElementById('mob-acc-address')?.value.trim()
   if (!addr) { showToast('Zadejte adresu ubytování'); return }
-  const { data: updMobAcc, error } = await sb.from('profiles').update({
+  // Hodnoty se zachytí PŘED čekáním na databázi: co člověk dopíše během ukládání, uložené není
+  // a nesmí se tvářit jako uložené (Codex 12. 11. 2026).
+  const ulozeno = {
     accommodation_address: addr,
     accommodation_price_night: cenaUbytovaniZPole('mob-acc-night'),
     accommodation_parking_price: cenaUbytovaniZPole('mob-acc-parking'),
-    accommodation_notes: document.getElementById('mob-acc-notes')?.value.trim() || null,
-    accommodation_phone: document.getElementById('mob-acc-phone')?.value.trim() || null,
-    accommodation_email: document.getElementById('mob-acc-email')?.value.trim() || null
-  }).eq('id', currentUser.id).select()
+    accommodation_notes: hodn('mob-acc-notes'),
+    accommodation_phone: hodn('mob-acc-phone'),
+    accommodation_email: hodn('mob-acc-email')
+  }
+  const { data: updMobAcc, error } = await sb.from('profiles').update(ulozeno).eq('id', currentUser.id).select()
   if (error) { showToast('Chyba: ' + error.message); return }
   if (!updMobAcc?.length) {
     showToast('⚠️ Nepodařilo se uložit — zkontrolujte oprávnění')
     return
   }
   showToast('🏠 Ubytování uloženo!')
-  document.querySelectorAll('[id^="mob-acc-"]').forEach(el => { delete el.dataset.uprav })   // uloženo = zase se smí načítat z profilu
-  // Aktualizuj currentProfile
-  if (currentProfile) {
-    currentProfile.accommodation_address = addr
-    currentProfile.accommodation_price_night = cenaUbytovaniZPole('mob-acc-night')
-    currentProfile.accommodation_parking_price = cenaUbytovaniZPole('mob-acc-parking')
-    // Poznámka, telefon a e-mail se ukládají taky — bez toho by je odložené načtení z profilu přepsalo starou hodnotou
-    currentProfile.accommodation_notes = document.getElementById('mob-acc-notes')?.value.trim() || null
-    currentProfile.accommodation_phone = document.getElementById('mob-acc-phone')?.value.trim() || null
-    currentProfile.accommodation_email = document.getElementById('mob-acc-email')?.value.trim() || null
+  // Ochrana „rozepsáno" se zruší jen u polí, která se od uložení nezměnila.
+  const jeBezZmeny = (id, v) => {
+    const el = document.getElementById(id)
+    if (!el) return
+    const ted = id.indexOf('night') >= 0 || id.indexOf('parking') >= 0 ? cenaUbytovaniZPole(id) : (el.value.trim() || null)
+    if (ted === v) delete el.dataset.uprav
   }
+  jeBezZmeny('mob-acc-address', ulozeno.accommodation_address)
+  jeBezZmeny('mob-acc-night', ulozeno.accommodation_price_night)
+  jeBezZmeny('mob-acc-parking', ulozeno.accommodation_parking_price)
+  jeBezZmeny('mob-acc-notes', ulozeno.accommodation_notes)
+  jeBezZmeny('mob-acc-phone', ulozeno.accommodation_phone)
+  jeBezZmeny('mob-acc-email', ulozeno.accommodation_email)
+  // Aktualizuj currentProfile tím, co se skutečně uložilo (jinak by odložené načtení z profilu přepsalo pole starou hodnotou)
+  if (currentProfile) Object.assign(currentProfile, ulozeno)
 }
 
 // Pole, do kterých už člověk začal psát, se při (odloženém) načtení ubytování nepřepisují (Codex 12. 11. 2026).
