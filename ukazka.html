@@ -21450,7 +21450,7 @@ function loadAdminChatList() {
 }
 async function _poslednizpravyPracovniku(workers) {
   const uid = currentUser?.id || null
-  if (_chatPosledniMezi.uid !== uid) _chatPosledniMezi = { uid, mapa: {}, od: '' }
+  if (_chatPosledniMezi.uid !== uid) _chatPosledniMezi = { uid, mapa: {}, od: '', zkuseno: new Set() }
   const C = _chatPosledniMezi
   const prvni = !C.od
   // První načtení: nejnovějších max. 3000 zpráv (zbytek lidí je neaktivní — ukáže se jejich profese);
@@ -21471,19 +21471,18 @@ async function _poslednizpravyPracovniku(workers) {
     if (prvni && workers.every(w => C.mapa[w.id])) break
   }
   if (nejnovejsi) C.od = nejnovejsi
-  // Kdo po prvním načtení poslední zprávu nemá (jeho zprávy jsou starší než posledních 3000), se doplní jednotlivě —
-  // jinak by ho přírůstkové načítání už nikdy nedoplnilo. Nejvýš 60 lidí naráz, zbytek příště.
-  if (prvni) {
-    const chybi = workers.filter(w => !C.mapa[w.id]).slice(0, 60)
-    for (let i = 0; i < chybi.length; i += 10) {
-      await Promise.all(chybi.slice(i, i + 10).map(async w => {
-        try {
-          const { data, error } = await sb.from('chat_messages').select('worker_id, message, created_at, sender_role')
-            .eq('worker_id', w.id).order('created_at', { ascending: false }).limit(1)
-          if (!error && data && data[0]) C.mapa[w.id] = data[0]
-        } catch (e) { console.warn('[chat] poslední zpráva:', e && e.message) }
-      }))
-    }
+  // Kdo po načtení poslední zprávu nemá (jeho zprávy jsou starší než posledních 3000), se doplní jednotlivě
+  // (každý jednou za relaci, při chybě se zkusí znovu) — přírůstkové načítání by ho samo nikdy nedoplnilo.
+  C.zkuseno = C.zkuseno || new Set()
+  const chybi = workers.filter(w => !C.mapa[w.id] && !C.zkuseno.has(w.id))
+  for (let i = 0; i < chybi.length; i += 10) {
+    await Promise.all(chybi.slice(i, i + 10).map(async w => {
+      try {
+        const { data, error } = await sb.from('chat_messages').select('worker_id, message, created_at, sender_role')
+          .eq('worker_id', w.id).order('created_at', { ascending: false }).limit(1)
+        if (!error) { C.zkuseno.add(w.id); if (data && data[0]) C.mapa[w.id] = data[0] }
+      } catch (e) { console.warn('[chat] poslední zpráva:', e && e.message) }
+    }))
   }
   return C.mapa
 }
@@ -53502,6 +53501,7 @@ async function loadWdInvoiceForm(profile) {
   const ib = document.getElementById('wd-inv-iban'); if (ib) ib.value = profile?.invoice_iban || ''
   const sw = document.getElementById('wd-inv-swift'); if (sw) sw.value = profile?.invoice_swift || ''
   adresaDoPoli('wd-inv', invoiceSupplierAddress(profile || {}))
+  { const u = document.getElementById('wd-inv-ulice'); if (u) u.dataset.puvodni = adresaZPoli('wd-inv').text }   // co bylo předvyplněno — jen skutečná úprava se bere jako přepsání
   const rt = document.getElementById('wd-inv-rate'); if (rt) rt.value = profile?.hourly_rate_worker ?? ''
   const vz = document.getElementById('wd-inv-design')
   if (vz) naplnVyberVzhledu(vz, (profile || currentWorkerProfile || {}).invoice_design || 1)
@@ -53838,7 +53838,7 @@ async function generateInvoiceAdmin() {
   const adrA = adresaZPoli('wd-inv')
   if (adrA.stav === 'castecna') { showToast('⚠️ Adresa sídla musí mít ulici, číslo popisné i město'); return }
   const zadani = {
-    adresa: adrA.stav === 'cela' ? adrA.text : '',
+    adresa: (adrA.stav === 'cela' && adrA.text !== (document.getElementById('wd-inv-ulice')?.dataset.puvodni || '')) ? adrA.text : '',
     iban: document.getElementById('wd-inv-iban')?.value.trim() || '',
     swift: document.getElementById('wd-inv-swift')?.value.trim() || '',
     rate: document.getElementById('wd-inv-rate')?.value,
