@@ -12385,7 +12385,7 @@ async function generateProvizeFirmReport(firmName, mode) {
       if (a.total_hours) return a.total_hours
       // Starý neuzavřený den se nesmí počítat „do teď“ — provize by vyšla z vymyšleného
       // čísla. Stejně to řeší týdenní přehled i výkaz: nedokončený minulý den = 0 h.
-      if (a.check_in && !a.check_out && a.work_date === dnesStr2) return calcHours(a.check_in, nowStr2, a.break_start, a.break_end)
+      if (a.check_in && !a.check_out && a.work_date === dnesStr2) return runningHours(a, nowStr2)
       return 0
     }
     // Historie sazeb — provize se sčítá den po dni, každý den svou sazbou.
@@ -12734,7 +12734,7 @@ async function renderProvizeContent() {
   function hoursOf(a) {
     if (a.total_hours) return a.total_hours
     // Neuzavřený den z minulosti = 0 h (jinak by statistika rostla sama od sebe)
-    if (a.check_in && !a.check_out && a.work_date === dnesStrStat) return calcHours(a.check_in, nowStr, a.break_start, a.break_end)
+    if (a.check_in && !a.check_out && a.work_date === dnesStrStat) return runningHours(a, nowStr)
     return 0
   }
 
@@ -13930,7 +13930,7 @@ async function loadDashboard() {
       <td>${r.work_date ? new Date(r.work_date).toLocaleDateString('cs-CZ') : '—'}</td>
       <td>${r.check_in?.slice(0,5)||'—'}</td>
       <td>${r.check_out?.slice(0,5)||'—'}</td>
-      <td><b>${r.check_out ? (r.total_hours||0)+'h' : (r.check_in && r.work_date === todayStrDash) ? calcHours(r.check_in, new Date().toTimeString().slice(0,8), r.break_start, r.break_end)+'h ▶' : r.check_in ? '—' : '—'}</b></td>
+      <td><b>${r.check_out ? (r.total_hours||0)+'h' : (r.check_in && r.work_date === todayStrDash) ? runningHours(r, new Date().toTimeString().slice(0,8))+'h ▶' : r.check_in ? '—' : '—'}</b></td>
       <td style="font-size:12px">${r.location_address ? (r.address_source === 'manual' ? '✍️ ' : '📍 ') + escAttr(r.location_address) : '—'}</td>
     </tr>`).join('')
   // Klik na řádek otevře detail pracovníka (docházka, smlouvy, dokumenty)
@@ -17095,7 +17095,7 @@ async function loadKWData() {
     let h = r.total_hours || 0
     if (!r.check_out && r.check_in) {
       if (r.work_date === todayStrAdmin) {
-        h = calcHours(r.check_in, nowStrAdmin, r.break_start, r.break_end)
+        h = runningHours(r, nowStrAdmin)
       } else {
         h = 0
       }
@@ -17449,7 +17449,7 @@ function calProcProblem(rec) {
 // rozdělaná z minulých dnů = 0 (a den svítí žlutě, protože chybí odchod).
 function hodinyZaznamu(r, dnes, ted) {
   if (r.check_in && !r.check_out) {
-    return r.work_date === dnes ? calcHours(r.check_in, ted, r.break_start, r.break_end) : 0
+    return r.work_date === dnes ? runningHours(r, ted) : 0
   }
   return Number(r.total_hours) || 0
 }
@@ -28542,7 +28542,7 @@ async function loadMobWeek() {
     if (r.check_in && !r.check_out) {
       if (r.work_date === todayStr) {
         // Dnešní aktivní směna — počítej do teď
-        return calcHours(r.check_in, nowStr, r.break_start, r.break_end)
+        return runningHours(r, nowStr)
       } else {
         // Stará nezavřená směna — ignoruj
         return 0
@@ -49710,7 +49710,7 @@ async function loadWdAttendance() {
     const raw = new Date(r.work_date).getDay()
     const dIdx = raw === 0 ? 7 : raw   // neděle → 7
     let h = r.total_hours || 0
-    if (!r.check_out && r.check_in && r.work_date === todayStrWd) h = calcHours(r.check_in, nowForAtt, r.break_start, r.break_end)
+    if (!r.check_out && r.check_in && r.work_date === todayStrWd) h = runningHours(r, nowForAtt)
     if (dayHours[dIdx] !== undefined) dayHours[dIdx] += h
   })
   const wdWeekStart = getWeekStartDate(week, year)
@@ -49758,7 +49758,7 @@ async function loadWdAttendance() {
     } else if (r.check_in && !r.check_out) {
       const isToday = r.work_date === localDateStr()
       if (isToday) {
-        const running = calcHours(r.check_in, nowForAtt, r.break_start, r.break_end)
+        const running = runningHours(r, nowForAtt)
         hoursDisplay = `<b style="color:var(--amber)">${running.toFixed(1)}h ▶</b>`
       } else {
         hoursDisplay = `<b style="color:var(--red)" title="Nezavřená směna">⚠️ nezavřeno</b>`
@@ -49822,7 +49822,7 @@ async function loadWdAttendance() {
   const total = data.reduce((s,r) => {
     if (r.total_hours) return s + r.total_hours
     if (r.check_in && !r.check_out && r.work_date === todayDateStr) {
-      return s + calcHours(r.check_in, nowStr2, r.break_start, r.break_end)
+      return s + runningHours(r, nowStr2)
     }
     return s  // Nezavřené staré záznamy se nepočítají
   }, 0)
@@ -50494,7 +50494,7 @@ async function loadWdFinance() {
   const hoursWorked = att?.reduce((s,r) => {
     if (r.total_hours) return s + r.total_hours
     // Neuzavřený den z minulosti = 0 h, ať výdělek nesedí na vymyšleném čísle
-    if (r.check_in && !r.check_out && r.work_date === dnesStrFin) return s + calcHours(r.check_in, nowStrFin, r.break_start, r.break_end)
+    if (r.check_in && !r.check_out && r.work_date === dnesStrFin) return s + runningHours(r, nowStrFin)
     return s
   }, 0) || 0
 
