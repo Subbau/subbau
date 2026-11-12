@@ -21723,6 +21723,10 @@ async function stornoZalohy(id) {
     return
   }
   if (!confirm('Stornovat zálohovou fakturu ' + z.cislo + '?\n\nPřestane se odečítat z faktur, doklad zůstane uložený.')) return
+  const cerstve2 = await odectenoZeZaloh([z.worker_id])
+  if (cerstve2 === null || ((cerstve2[z.worker_id + '|' + String(z.cislo || '')] || {}).castka || 0) > 0) {
+    showToast('⚠️ Záloha se mezitím odečetla nebo ji nejde ověřit — storno zastaveno'); await loadZalohoveFaktury(); return
+  }
   const { error } = await sb.from('zalohove_faktury')
     .update({ stav: 'stornovana', updated_at: new Date().toISOString() }).eq('id', id)
   if (error) { showToast('❌ Storno selhalo: ' + error.message); return }
@@ -21747,6 +21751,11 @@ async function smazZalohu(id) {
     return
   }
   if (!confirm('Opravdu smazat zálohovou fakturu ' + z.cislo + '?\n\nTato akce je nevratná.')) return
+  // Přehled mohl zestárnout (pracovník mezitím odeslal fakturu s odečtem) — čerstvě těsně před smazáním.
+  const cerstve = await odectenoZeZaloh([z.worker_id])
+  if (cerstve === null || ((cerstve[z.worker_id + '|' + String(z.cislo || '')] || {}).castka || 0) > 0) {
+    showToast('⚠️ Záloha se mezitím odečetla nebo ji nejde ověřit — smazání zastaveno'); await loadZalohoveFaktury(); return
+  }
   // Nejdřív řádek, AŽ POTOM soubor — dřív se mazal soubor první a když řádek
   // smazat nešel, zůstala záloha bez PDF.
   const { data: smazano, error } = await sb.from('zalohove_faktury').delete().eq('id', id).select('id')
@@ -21761,6 +21770,20 @@ async function smazZalohu(id) {
 // Když má pracovník otevřenou zálohovou fakturu, odečte se mu z faktury,
 // kterou si vystaví. Bere se i záloha, která už byla zúčtovaná PRÁVĚ TOUHLE
 // fakturou — jinak by při opravě a znovuodeslání téhož dokladu odečet zmizel.
+// Faktury s odečty po stránkách (server vrací nejvýš ~1000 řádků naráz) — jinak by
+// po dosažení limitu část odečtů nebyla započítaná a záloha by se použila znovu.
+async function fakturyOdectyVse(workerIds) {
+  const vse = []
+  for (let od = 0; od < 200000; od += 1000) {
+    const { data, error } = await sb.from('worker_invoices')
+      .select('id, worker_id, invoice_number, zalohy_pouzite').in('worker_id', workerIds)
+      .order('id', { ascending: true }).range(od, od + 999)
+    if (error) return { data: null, error }
+    vse.push(...(data || []))
+    if (!data || data.length < 1000) break
+  }
+  return { data: vse, error: null }
+}
 async function zalohyKOdecteni(workerId, invoiceNum, celkem, bezHlasky) {
   const prazdno = { castka: 0, popis: '', pouzite: [], chyba: false }
   if (!workerId) return prazdno
@@ -21768,7 +21791,7 @@ async function zalohyKOdecteni(workerId, invoiceNum, celkem, bezHlasky) {
     const [{ data: zalohy, error: chybaZ }, { data: faktury, error: chybaF }] = await Promise.all([
       sb.from('zalohove_faktury').select('id, cislo, castka, stav')
         .eq('worker_id', workerId).order('issue_date', { ascending: true }),
-      sb.from('worker_invoices').select('invoice_number, zalohy_pouzite').eq('worker_id', workerId),
+      fakturyOdectyVse([workerId]),
     ])
     if (chybaZ) throw chybaZ
     if (chybaF) throw chybaF
@@ -21832,8 +21855,7 @@ async function odectenoZeZaloh(workerIds) {
   const ids = [...new Set((workerIds || []).filter(Boolean))]
   if (!ids.length) return mapa
   try {
-    const { data, error } = await sb.from('worker_invoices')
-      .select('worker_id, invoice_number, zalohy_pouzite').in('worker_id', ids)
+    const { data, error } = await fakturyOdectyVse(ids)
     if (error) throw error
     ;(data || []).forEach(f => {
       const seznam = Array.isArray(f.zalohy_pouzite) ? f.zalohy_pouzite : []
