@@ -3735,7 +3735,10 @@ setTimeout(function brzda() {
 
         <div class="fg" style="margin-bottom:10px">
           <label style="font-size:12px">Adresa sídla</label>
-          <input type="text" id="fkt-addr" oninput="fktTouched()" onblur="fktBlur()" placeholder="Ulice 1, 110 00 Praha" style="width:100%;padding:10px;border:1.5px solid var(--brd);border-radius:8px;font-size:16px;box-sizing:border-box;font-family:inherit">
+          <textarea id="fkt-addr" style="display:none" aria-hidden="true" tabindex="-1"></textarea>
+          <input type="text" id="fkt-ulice" oninput="fktAdresaZmena()" onblur="fktBlur()" placeholder="Ulice" autocomplete="address-line1" style="width:100%;padding:10px;border:1.5px solid var(--brd);border-radius:8px;font-size:16px;box-sizing:border-box;font-family:inherit;margin-bottom:6px">
+          <input type="text" id="fkt-cp" oninput="fktAdresaZmena()" onblur="fktBlur()" placeholder="Číslo popisné" style="width:100%;padding:10px;border:1.5px solid var(--brd);border-radius:8px;font-size:16px;box-sizing:border-box;font-family:inherit;margin-bottom:6px">
+          <input type="text" id="fkt-mesto" oninput="fktAdresaZmena()" onblur="fktBlur()" placeholder="PSČ a město" autocomplete="address-level2" style="width:100%;padding:10px;border:1.5px solid var(--brd);border-radius:8px;font-size:16px;box-sizing:border-box;font-family:inherit">
         </div>
 
         <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:10px">
@@ -4264,6 +4267,12 @@ setTimeout(function brzda() {
             <div class="fg" style="margin-bottom:8px">
               <label style="font-size:11px">IBAN</label>
               <input type="text" id="wd-inv-iban" placeholder="CZ00 0000 0000 0000 0000 0000" style="width:100%;font-size:12px;padding:8px;border:1.5px solid var(--brd);border-radius:8px;font-family:inherit">
+            </div>
+            <div class="fg" style="margin-bottom:8px">
+              <label style="font-size:11px">Adresa sídla na faktuře <span style="color:var(--text3)">(přepsání se uloží i do profilu)</span></label>
+              <input type="text" id="wd-inv-ulice" placeholder="Ulice" style="width:100%;font-size:12px;padding:8px;border:1.5px solid var(--brd);border-radius:8px;font-family:inherit;margin-bottom:4px">
+              <input type="text" id="wd-inv-cp" placeholder="Číslo popisné" style="width:100%;font-size:12px;padding:8px;border:1.5px solid var(--brd);border-radius:8px;font-family:inherit;margin-bottom:4px">
+              <input type="text" id="wd-inv-mesto" placeholder="PSČ a město" style="width:100%;font-size:12px;padding:8px;border:1.5px solid var(--brd);border-radius:8px;font-family:inherit;margin-bottom:4px">
             </div>
             <div class="fg" style="margin-bottom:8px">
               <label style="font-size:11px">SWIFT / BIC</label>
@@ -23959,6 +23968,8 @@ function openInvoiceEdit(id) {
   document.getElementById('invedit-iban').value = r.iban || ''
   document.getElementById('invedit-swift').value = r.swift || ''
   document.getElementById('invedit-iban-do-profilu').checked = false
+  adresaDoPoli('invedit', r.supplier_address || '')
+  { const ad = document.getElementById('invedit-adresa-do-profilu'); if (ad) ad.checked = false }
   const cisloEl = document.getElementById('invedit-number')
   if (cisloEl) cisloEl.value = String(r.invoice_number || '')
   const kwEl = document.getElementById('invedit-kw')
@@ -24075,6 +24086,11 @@ async function saveInvoiceEditVnitrni() {
     .replace(/\s+/g, '').toUpperCase().slice(0, 15)
   const ibanDoProfilu = !!document.getElementById('invedit-iban-do-profilu')?.checked
   if (!ibanNovy) { showToast('⚠️ Doplňte účet (IBAN) — bez něj nemá kdo zaplatit'); return }
+  // Adresa sídla: úplná (3 řádky) se přepíše, prázdná nechá původní, nedopsaná se odmítne.
+  const adrA = adresaZPoli('invedit')
+  if (adrA.stav === 'castecna') { showToast('⚠️ Adresa sídla musí mít ulici, číslo popisné i město'); return }
+  const adresaNova = adrA.stav === 'cela' ? adrA.text : null
+  const adresaDoProfilu = !!document.getElementById('invedit-adresa-do-profilu')?.checked
 
   const btn = document.getElementById('invedit-save-btn')
   if (btn) { btn.disabled = true; btn.textContent = 'Přepisuji fakturu…' }
@@ -24153,6 +24169,7 @@ async function saveInvoiceEditVnitrni() {
   const dataForRender = invoiceDataFromRow({ ...r, items: polozky, total_amount: total,
     cash_paid: cash, cash_paid_note: note, cash_paid_typ: cashTyp,
     iban: ibanNovy, swift: swiftNovy,
+    ...(adresaNova ? { supplier_address: adresaNova } : {}),
     design_idx: vzhledZvoleny, invoice_number: cisloNove,
     kw: kwNovy, kw_year: kwRokNovy,
     ...(noveObdobi || {}) }, extra)
@@ -24186,6 +24203,7 @@ async function saveInvoiceEditVnitrni() {
     edited_at: new Date().toISOString(),
     items: polozky, total_amount: total,
     iban: ibanNovy, swift: swiftNovy || null,
+    ...(adresaNova ? { supplier_address: adresaNova } : {}),
     design_idx: vzhledZvoleny,
     invoice_number: cisloNove,
     kw: kwNovy, kw_year: kwRokNovy,
@@ -24315,6 +24333,13 @@ async function saveInvoiceEditVnitrni() {
     }
   }
 
+  // Adresa i do profilu jen na výslovné přání (jako účet).
+  let adresaDoProfiluNeulozena = false
+  if (adresaDoProfilu && adresaNova && r.worker_id) {
+    const { data: adrZ, error: chybaAdresy } = await sb.from('profiles').update({ invoice_address: adresaNova }).eq('id', r.worker_id).select('id')
+    if (chybaAdresy || !adrZ || !adrZ.length) { adresaDoProfiluNeulozena = true; console.warn('[faktura] adresa se do profilu neuložila:', chybaAdresy?.message) }
+  }
+
   // Vzhled do profilu jen na výslovné přání — jinak by přepnutí u jedné faktury
   // tiše změnilo podobu i všech dalších, které ten člověk teprve vystaví.
   let vzhledDoProfiluNeulozen = false
@@ -24349,6 +24374,10 @@ async function saveInvoiceEditVnitrni() {
   }
   if (profilNeulozen) {
     finish('⚠️ Faktura přepsaná, ale do profilu pracovníka se účet neuložil — opravte ho prosím na jeho kartě')
+    return
+  }
+  if (adresaDoProfiluNeulozena) {
+    finish('⚠️ Faktura přepsaná, ale adresa se do profilu pracovníka neuložila — opravte ji prosím na jeho kartě')
     return
   }
   if (bezPuvodni) {
@@ -31331,7 +31360,44 @@ function isRateFromProvize(profile) {
 // město. Nově je na to sloupec `invoice_address`; `locality` slouží jako
 // záloha pro profily založené dřív, než sloupec vznikl.
 function invoiceSupplierAddress(p) {
-  return (p?.invoice_address || '').trim() || (p?.locality || '').trim() || ''
+  const a = String(p?.invoice_address || '').replace(/\s+$/, '')
+  return a.trim() ? a : (p?.locality || '').trim() || ''
+}
+// ADRESA SÍDLA = TŘI ŘÁDKY (12. 11. 2026, majitel: „musí být zvlášť ulice, číslo popisné a město ve 3 řádcích"):
+// ulice, číslo popisné, PSČ a město. Ukládá se do invoice_address oddělená zalomením řádku; šablony faktur
+// zalomení vykreslují jako řádky. Starý jednořádkový zápis („Ulice 12, 110 00 Praha") se při čtení rozloží.
+function adresaRozloz(text) {
+  const t = String(text == null ? '' : text)
+  if (!t.trim()) return { ulice: '', cp: '', mesto: '' }
+  if (t.indexOf('\n') >= 0) {
+    const r = t.split('\n').map(x => x.trim())
+    return { ulice: r[0] || '', cp: r[1] || '', mesto: r.slice(2).filter(Boolean).join(' ') }
+  }
+  const c = t.split(',').map(x => x.trim()).filter(Boolean)
+  if (c.length >= 2) {
+    const m = c[0].match(/^(.*\S)\s+(\d[\w\/.\-]*)$/)
+    return m ? { ulice: m[1], cp: m[2], mesto: c.slice(1).join(', ') } : { ulice: c[0], cp: '', mesto: c.slice(1).join(', ') }
+  }
+  return { ulice: '', cp: '', mesto: t.trim() }   // jen město (např. z „lokality" při registraci)
+}
+const adresaSloz = (u, c, m) => [u, c, m].map(x => String(x || '').trim()).join('\n')
+function adresaKompletni(text) { const a = adresaRozloz(text); return !!(a.ulice && a.cp && a.mesto) }
+// Tři pole adresy (předpona id: fkt, wd-inv, invedit) → { stav: 'prazdna'|'castecna'|'cela', text }
+function adresaZPoli(pred) {
+  const g = k => (document.getElementById(pred + '-' + k)?.value || '').trim()
+  const u = g('ulice'), c = g('cp'), m = g('mesto')
+  if (!u && !c && !m) return { stav: 'prazdna', text: '' }
+  return { stav: (u && c && m) ? 'cela' : 'castecna', text: adresaSloz(u, c, m) }
+}
+function adresaDoPoli(pred, text) {
+  const a = adresaRozloz(text)
+  ;[['ulice', a.ulice], ['cp', a.cp], ['mesto', a.mesto]].forEach(([k, v]) => { const el = document.getElementById(pred + '-' + k); if (el) el.value = v })
+}
+// Formulář pracovníka: skrytý fkt-addr drží celou adresu (jen je-li úplná), ať ostatní kontroly dál fungují.
+function fktAdresaZmena() {
+  const A = adresaZPoli('fkt')
+  const h = document.getElementById('fkt-addr'); if (h) h.value = A.stav === 'cela' ? A.text : ''
+  fktTouched()
 }
 
 // Kontrolní číslice IBANu (ISO 7064 MOD 97-10) — zachytí drtivou většinu
@@ -31423,7 +31489,7 @@ function fktRenderSummary() {
     : ''
   box.innerHTML =
     (jmeno ? '<div style="font-weight:800;color:var(--text);font-size:14px;margin-bottom:2px">' + escAttr(jmeno) + '</div>' : '') +
-    radek('Sídlo', v('fkt-addr')) +
+    radek('Sídlo', v('fkt-addr').split('\n').join(', ')) +
     radek('IČO', v('fkt-ic')) +
     radek('IBAN', v('inv-iban')) +
     '<div style="font-size:11.5px;color:var(--text3);margin-top:4px">' +
@@ -31477,7 +31543,15 @@ async function loadInvoiceForm() {
   }
   set('fkt-name', p.full_name)
   set('fkt-company', p.company_name)
-  set('fkt-addr', invoiceSupplierAddress(p))
+  {
+    // Adresa: tři pole; nepřepisuje se, co si pracovník právě píše (stejně jako u ostatních polí).
+    const aktivni = ['fkt-ulice', 'fkt-cp', 'fkt-mesto'].some(i => document.activeElement === document.getElementById(i))
+    const A = adresaZPoli('fkt'), profilAdr = invoiceSupplierAddress(p)
+    if (!aktivni && (!_fktDirty || A.stav === 'prazdna')) {
+      adresaDoPoli('fkt', profilAdr)
+      const B = adresaZPoli('fkt'), h = document.getElementById('fkt-addr'); if (h) h.value = B.stav === 'cela' ? B.text : ''
+    }
+  }
   set('fkt-ic', p.ic)
   set('fkt-dic', p.dic)
   set('inv-iban', p.invoice_iban)
@@ -31592,12 +31666,19 @@ async function _saveInvoiceProfileFieldsCore(silent) {
     supplier_type: _fktType,
     full_name: val('fkt-name') || currentProfile?.full_name || null,
     company_name: _fktType === 'sro' ? val('fkt-company') : null,
-    invoice_address: val('fkt-addr'),
+    invoice_address: val('fkt-addr'),   // dole se podle tří polí upraví (úplná / prázdná / nedotčená)
     ic: val('fkt-ic'),
     dic: val('fkt-dic'),
     is_vat_payer: _fktVat,
     invoice_iban: val('inv-iban'),
     invoice_swift: val('inv-swift')
+  }
+  // Adresa sídla: úplná se uloží, úplně prázdná se smaže, nedopsaná (3 řádky) se NEUKLÁDÁ — dosavadní hodnota zůstane.
+  {
+    const A = adresaZPoli('fkt')
+    if (A.stav === 'cela') upd.invoice_address = A.text
+    else if (A.stav === 'prazdna') upd.invoice_address = null
+    else delete upd.invoice_address
   }
   // Sazbu z tohohle formuláře NEUKLÁDÁME. Nastavuje ji výhradně SubBau
   // v Provizích — pracovník ji jen vidí. Dřív si ji tady mohl vyplnit sám,
@@ -40044,7 +40125,7 @@ async function generateInvoiceMobImpl(lang = 'en', override = null) {
     const chybi = []
     const vv = id => (document.getElementById(id)?.value || '').trim()
     if (!(_fktType === 'sro' ? (vv('fkt-company') || vv('fkt-name')) : vv('fkt-name'))) chybi.push('jméno')
-    if (!vv('fkt-addr')) chybi.push('adresu sídla')
+    if (!vv('fkt-addr')) chybi.push('adresu sídla (ulice, číslo popisné, město)')
     if (!vv('fkt-ic')) chybi.push('IČO')
     if (chybi.length) { showToast('⚠️ Doplňte prosím ' + chybi.join(', ')); return }
   }
@@ -40321,7 +40402,7 @@ async function generateInvoiceMobImpl(lang = 'en', override = null) {
   // Jméno na faktuře: u s.r.o. název firmy, jinak jméno osoby
   const isSroSupplier = prof.supplier_type === 'sro'
   const workerName = (isSroSupplier && prof.company_name) ? prof.company_name : (prof.full_name || '')
-  const workerAddr = invoiceSupplierAddress(prof)
+  const workerAddr = (override && override.adresa) ? override.adresa : invoiceSupplierAddress(prof)
   const workerIC = prof.ic || ''
   const workerVat = prof.is_vat_payer ? (prof.dic || '') : ''
   const isVatPayer = !!prof.is_vat_payer
@@ -43708,7 +43789,7 @@ function renderInvoice(d, lang = 'en') {
         <td style="width:50%;vertical-align:top;padding:15px 16px 15px 30px">
           <div style="font-size:7pt;font-weight:700;text-transform:uppercase;color:#C4573A;letter-spacing:1px;margin-bottom:6px">${L.supplier}</div>
           <div style="font-size:12pt;font-weight:800;margin-bottom:3px">${escHtml(d.workerName || '')}</div>
-          ${d.workerAddr ? `<div style="font-size:9pt;color:#5a5a5a;margin-bottom:2px">${escHtml(d.workerAddr)}</div>` : ''}
+          ${d.workerAddr ? `<div style="font-size:9pt;color:#5a5a5a;margin-bottom:2px">${escHtml(d.workerAddr).replace(/\n/g, '<br>')}</div>` : ''}
           ${d.workerIC ? `<div style="font-size:9pt;color:#5a5a5a">${L.id}: <b style="color:#211D1A">${escHtml(d.workerIC)}</b></div>` : ''}
           ${d.workerVat ? `<div style="font-size:9pt;color:#5a5a5a">${L.vatId}: <b style="color:#211D1A">${escHtml(d.workerVat)}</b></div>` : ''}
           <div style="display:inline-block;font-size:8pt;font-weight:700;margin-top:6px;padding:3px 10px;border-radius:20px;${barvaF
@@ -52170,6 +52251,7 @@ async function loadWdInvoiceForm(profile) {
   // Předvyplň bankovní údaje a sazbu z profilu pracovníka (admin je může přepsat)
   const ib = document.getElementById('wd-inv-iban'); if (ib) ib.value = profile?.invoice_iban || ''
   const sw = document.getElementById('wd-inv-swift'); if (sw) sw.value = profile?.invoice_swift || ''
+  adresaDoPoli('wd-inv', invoiceSupplierAddress(profile || {}))
   const rt = document.getElementById('wd-inv-rate'); if (rt) rt.value = profile?.hourly_rate_worker ?? ''
   const vz = document.getElementById('wd-inv-design')
   if (vz) naplnVyberVzhledu(vz, (profile || currentWorkerProfile || {}).invoice_design || 1)
@@ -52503,7 +52585,10 @@ async function generateInvoiceAdmin() {
   const wid = currentWorkerId, selValue = sel.value
   // Položky, které patří jinému člověku nebo týdnu, na tuhle fakturu nesmí.
   hlidejDalsiPolozky('wd-inv', wid + '|' + selValue)
+  const adrA = adresaZPoli('wd-inv')
+  if (adrA.stav === 'castecna') { showToast('⚠️ Adresa sídla musí mít ulici, číslo popisné i město'); return }
   const zadani = {
+    adresa: adrA.stav === 'cela' ? adrA.text : '',
     iban: document.getElementById('wd-inv-iban')?.value.trim() || '',
     swift: document.getElementById('wd-inv-swift')?.value.trim() || '',
     rate: document.getElementById('wd-inv-rate')?.value,
@@ -52518,6 +52603,12 @@ async function generateInvoiceAdmin() {
   const { data: prof } = await sb.from('profiles').select('*').eq('id', wid).maybeSingle()
   if (!prof) { showToast('❌ Profil pracovníka se nepodařilo načíst'); return }
   if (wid !== currentWorkerId) { showToast('⚠️ Mezitím jste otevřel jiného pracovníka — fakturu spusťte znovu'); return }
+  // Přepsaná adresa sídla se uloží i do profilu (ať ji příště nemusí správce ani pracovník opravovat znovu).
+  if (zadani.adresa && zadani.adresa !== invoiceSupplierAddress(prof)) {
+    const { data: adrZapsana, error: adrChyba } = await sb.from('profiles').update({ invoice_address: zadani.adresa }).eq('id', wid).select('id')
+    if (adrChyba || !adrZapsana || !adrZapsana.length) showToast('⚠️ Adresa je na faktuře, ale do profilu se neuložila')
+    else { prof.invoice_address = zadani.adresa; if (currentWorkerProfile && String(currentWorkerProfile.id) === String(wid)) currentWorkerProfile.invoice_address = zadani.adresa }
+  }
   // Zaměstnanec firmy sám nefakturuje — jeho hodiny jsou na faktuře firmy.
   // Faktura tady by ty hodiny zaplatila podruhé (a jeho starou sazbou).
   if (jeZamestnanecFirmy(prof)) {
@@ -54130,6 +54221,19 @@ window.__hlavniSkriptDobehl = true
     <label style="display:flex;align-items:center;gap:8px;margin-top:9px;font-size:13px;color:#7a7168;cursor:pointer">
       <input type="checkbox" id="invedit-iban-do-profilu" style="width:17px;height:17px;flex:none">
       Uložit účet i do profilu pracovníka <span style="color:#9a9a9a">(ať ho příště nemusí opravovat znovu)</span>
+    </label>
+
+    <!-- Adresa sídla dodavatele na faktuře: ulice, číslo popisné, město (3 řádky). Správce ji vidí a může přepsat. -->
+    <label style="display:block;font-size:12px;color:#7a7168;font-weight:700;margin:14px 0 5px">Adresa sídla (dodavatel)</label>
+    <input type="text" id="invedit-ulice" placeholder="Ulice"
+           style="width:100%;padding:10px;border:1.5px solid #d8cfc0;border-radius:9px;font-size:14px;font-family:inherit;box-sizing:border-box;margin-bottom:6px">
+    <input type="text" id="invedit-cp" placeholder="Číslo popisné"
+           style="width:100%;padding:10px;border:1.5px solid #d8cfc0;border-radius:9px;font-size:14px;font-family:inherit;box-sizing:border-box;margin-bottom:6px">
+    <input type="text" id="invedit-mesto" placeholder="PSČ a město"
+           style="width:100%;padding:10px;border:1.5px solid #d8cfc0;border-radius:9px;font-size:14px;font-family:inherit;box-sizing:border-box;margin-bottom:6px">
+    <label style="display:flex;align-items:center;gap:8px;margin-top:3px;font-size:13px;color:#7a7168;cursor:pointer">
+      <input type="checkbox" id="invedit-adresa-do-profilu" style="width:17px;height:17px;flex:none">
+      Uložit adresu i do profilu pracovníka
     </label>
 
     <label style="display:block;font-size:12px;color:#7a7168;font-weight:700;margin:14px 0 5px">Vzhled faktury</label>
