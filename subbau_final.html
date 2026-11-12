@@ -25818,12 +25818,17 @@ async function generateTeamAttendancePdf(teamId, teamName) {
   // se počítá provizí své firmy.
   const _provMap = {}, _bezProvizeLidi = new Set(), _histProv = {}, _sefPodle = {}
   let _vlastniProvize = new Set()
+  // Chyba načtení podkladů provizí: přehled peněz se pak nevytvoří (jinak by vyšel s nulovými či cizími provizemi).
+  let _provizeChyba = null
+  const _chybiTab = (e) => !!e && /42P01|42703|PGRST20\d|schema cache|does not exist/i.test((e.code || '') + ' ' + (e.message || ''))
   if (smiVidetProvize()) {
     try {
       const vl = await nactiVlastniProvizeZamestnancu()
+      if (vl.chyba) _provizeChyba = vl.chyba
       if (vl.set) _vlastniProvize = vl.set
       let pv = await sb.from('worker_commissions').select('worker_id, provize, bez_provize')
       if (pv.error) pv = await sb.from('worker_commissions').select('worker_id, provize')
+      if (pv.error) _provizeChyba = pv.error
       ;(pv.data || []).forEach(p => {
         if (p.bez_provize) _bezProvizeLidi.add(p.worker_id)
         if (p.provize != null) _provMap[p.worker_id] = Number(p.provize)
@@ -25832,11 +25837,14 @@ async function generateTeamAttendancePdf(teamId, teamName) {
         sb.from('worker_rate_history').select('worker_id, hodnota, valid_from').eq('druh', 'provize').order('valid_from', { ascending: true }),
         sb.from('profiles').select('id, zamestnavatel_id').in('id', ids)
       ])
+      if (hist.error && !_chybiTab(hist.error)) _provizeChyba = hist.error
+      if (zam.error) _provizeChyba = zam.error
       ;(hist.data || []).forEach(h => {
         ;(_histProv[h.worker_id] = _histProv[h.worker_id] || []).push({ od: String(h.valid_from).slice(0, 10), hodnota: Number(h.hodnota) || 0 })
       })
       ;(zam.data || []).forEach(z => { if (z.zamestnavatel_id && z.zamestnavatel_id !== z.id) _sefPodle[z.id] = z.zamestnavatel_id })
-    } catch(e) { console.warn('[team-pdf] provize:', e?.message) }
+    } catch(e) { _provizeChyba = e; console.warn('[team-pdf] provize:', e?.message) }
+    if (_provizeChyba) showToast('⚠️ Podklady provizí se nenačetly — přehled provizí ve výkazu chybí. Zkuste to prosím znovu.')
   }
   // Provize za hodinu v konkrétní den — komu (zaměstnanec → firma), „bez provize", historie.
   const _provizeDne = (wid, den) => {
@@ -25888,7 +25896,7 @@ async function generateTeamAttendancePdf(teamId, teamName) {
   // odpracované hodiny (provize × hodiny) a dole součet všech provizí.
   // Značky COMM-START/END — v liště náhledu se dá zaškrtávátkem vynechat.
   let commSummary = ''
-  if (smiVidetProvize()) {
+  if (smiVidetProvize() && !_provizeChyba) {
     const _commMap = new Map()
     Object.entries(byWorker).forEach(([wid, w]) => {
       // Po dnech: hodiny dne × provize platná ten den. Den „bez provize" a člověk
@@ -26203,10 +26211,11 @@ async function addToTeam(workerId, teamId) {
 }
 
 async function removeFromTeam(workerId) {
-  await closeTeamAssignment(workerId)
+  // Historii uzavřít až po úspěšném odebrání — jinak by tvrdila, že přiřazení skončilo, i když člověk ve skupině zůstal.
   const { error, data } = await updateWorkerTeam(workerId, null)
   if (error) { showToast('Chyba: ' + error.message); return }
   if (!data || !data.length) { showToast('❌ Odebrání se neuložilo — zkontrolujte oprávnění'); return }
+  await closeTeamAssignment(workerId)
   showToast('Odebrano ze skupiny')
   loadTeams()
 }
@@ -26225,7 +26234,7 @@ async function updateWorkerTeam(workerId, teamId) {
     await sb.from('profiles').update({ subteam_id: null }).eq('id', workerId)
   }
   // Lokální cache, ať překreslení ukáže správný stav i bez znovunačtení z databáze
-  if (!res.error) {
+  if (!res.error && row) {
     const w = (_workersCache || []).find(x => String(x.id) === String(workerId))
     if (w) { w.team_id = teamId; w.subteam_id = null }
   }
@@ -26234,8 +26243,10 @@ async function updateWorkerTeam(workerId, teamId) {
 
 async function assignToTeam(workerId, teamId) {
   if (!teamId) return
-  const { error } = await updateWorkerTeam(workerId, teamId)
+  const { error, data: zmeneno } = await updateWorkerTeam(workerId, teamId)
   if (error) { showToast('Chyba: ' + error.message); return }
+  // Zápis, který nezměnil žádný profil, nesmí hlásit přiřazení ani zapsat historii.
+  if (!zmeneno || !zmeneno.length) { showToast('❌ Přiřazení se neuložilo — zkontrolujte oprávnění'); return }
   await logTeamAssignment(workerId, teamId)
   const odberatelOk = await fillInvoiceCustomerFromTeam(workerId, teamId)
   const splatnostOk = await propisSplatnostPodleFirmy(workerId, teamId)
@@ -26247,19 +26258,23 @@ async function assignToTeam(workerId, teamId) {
 // Historie přiřazení ke skupinám (firmám)
 async function logTeamAssignment(workerId, teamId) {
   try {
-    // Uzavři případné předchozí otevřené přiřazení
-    await closeTeamAssignment(workerId)
+    // Uzavři případné předchozí otevřené přiřazení — nepovedené uzavření nové nezakládá (zůstaly by dvě otevřená).
+    if (!(await closeTeamAssignment(workerId))) return false
     const { data: t } = await sb.from('teams').select('name').eq('id', teamId).maybeSingle()
-    await sb.from('team_assignments').insert({
+    const { error } = await sb.from('team_assignments').insert({
       worker_id: workerId, team_id: teamId, team_name: t?.name || null, assigned_at: new Date().toISOString()
     })
-  } catch(e) { console.warn('logTeamAssignment:', e?.message) }
+    if (error) { console.warn('logTeamAssignment:', error.message); try { zapisChybuAppky('historie-skupin', 'zápis přiřazení: ' + error.message) } catch (x) {} return false }
+    return true
+  } catch(e) { console.warn('logTeamAssignment:', e?.message); return false }
 }
 async function closeTeamAssignment(workerId) {
   try {
-    await sb.from('team_assignments').update({ removed_at: new Date().toISOString() })
+    const { error } = await sb.from('team_assignments').update({ removed_at: new Date().toISOString() })
       .eq('worker_id', workerId).is('removed_at', null)
-  } catch(e) { console.warn('closeTeamAssignment:', e?.message) }
+    if (error) { console.warn('closeTeamAssignment:', error.message); try { zapisChybuAppky('historie-skupin', 'uzavření přiřazení: ' + error.message) } catch (x) {} return false }
+    return true
+  } catch(e) { console.warn('closeTeamAssignment:', e?.message); return false }
 }
 
 // Když pracovníka přiřadíme do týmu, předvyplní se mu odběratel faktury
@@ -26442,6 +26457,9 @@ function initCheckoutSwipe() {
 }
 
 function cancelCheckout() {
+  // Odeslaný zápis odchodu (nebo popisu) už letí — zrušení by oznámilo „Směna
+  // pokračuje“, a přitom by se směna vzápětí uzavřela (audit 11. 11. 2026).
+  if (window.zapisProbiha) { showToast('⏳ Ukládám…'); return }
   const inner = document.getElementById('checkout-sheet-inner')
   if (inner) { inner.style.transition = 'transform .22s ease'; inner.style.transform = '' }
   // ZPÁTKY SE JÍT MUSÍ. Do 29. 9. 2026 se tenhle dialog u konce směny nezavřel,
@@ -26454,6 +26472,10 @@ function cancelCheckout() {
   // Vyplnění stavby a práce hlídá confirmCheckout() — tam, kde se opravdu
   // zapisuje, ne u dveří ven.
   const koncilSmenu = checkoutIsMandatory()
+  // Pauzu, kterou odchod uzavřel dopředu, vrať — směna pokračuje a pauza s ní.
+  const _vratPauzu = pendingCheckout && pendingCheckout.otevrenaPauza
+  const _vratId = pendingCheckout && pendingCheckout.attId
+  if (_vratPauzu && _vratId) vratOtevrenouPauzu(_vratId, _vratPauzu)
   document.getElementById('checkout-dialog').style.display = 'none'
   disarmCheckoutBackGuard()
   pendingCheckout = null
@@ -26464,6 +26486,28 @@ function cancelCheckout() {
   // Řekni to. Tiché zavření by vypadalo jako „ukončeno" a člověk by si myslel,
   // že má po směně.
   if (koncilSmenu) showToast('↩️ Směna pokračuje — konec směny se nezapsal')
+}
+
+// Zrušený odchod: pauza uzavřená kvůli němu se znovu otevře (podmíněně — jen
+// když v databázi pořád stojí konec, který jsme zapsali, a směna je otevřená).
+async function vratOtevrenouPauzu(attId, p) {
+  try {
+    const zapis = async (upd) => {
+      let q = sb.from('attendance').update(upd).eq('id', attId).is('check_out', null)
+      if (p.bs) q = q.eq('break_start', p.bs).eq('break_end', p.konec)
+      else if (p.bs2) q = q.eq('break2_start', p.bs2).eq('break2_end', p.konec)
+      else return { data: null, error: null }
+      return await q.select('*')
+    }
+    const upd = {}
+    if (p.bs) upd.break_end = null
+    if (p.bs2) upd.break2_end = null
+    upd.breaks = p.breaks
+    let r = await zapis(upd)
+    if (r.error && chybiSloupec(r.error)) { delete upd.breaks; r = await zapis(upd) }
+    if (r.error) { console.warn('[pauza] návrat pauzy selhal:', r.error.message); return }
+    if (r.data && r.data[0]) { if (todayRecord && todayRecord.id === attId) todayRecord = { ...r.data[0] }; getTodayRecord() }
+  } catch (e) { console.warn('[pauza] návrat pauzy:', e) }
 }
 
 async function confirmCheckout() {
@@ -26546,21 +26590,22 @@ async function confirmCheckout() {
     if (adminOwnsField(rec, 'work_description')) keptByAdmin = true
     else payload.work_description = desc
 
-    ;({ data: savedRows, error } = await _attMerFaze(_mer, 'zapis', withTimeout(sb.from('attendance').update(payload).eq('id', attId).select(), 15000)))
+    ;({ data: savedRows, error } = await _attMerFaze(_mer, 'zapis', withTimeout(sb.from('attendance').update(payload).eq('id', attId).is('check_out', null).select(), 15000)))
     // Kdyby v databázi chyběl sloupec s popisem, pracovník by směnu neuzavřel vůbec —
     // ulož aspoň čas odchodu a hodiny a řekni to nahlas.
     if (error && /column|schema cache/i.test(error.message || '')) {
       console.warn('[checkout] popis se neuložil, chybí sloupec:', error.message)
       const r2 = await _attMerFaze(_mer, 'zapis', withTimeout(sb.from('attendance').update({
         check_out: payload.check_out, total_hours: payload.total_hours
-      }).eq('id', attId).select(), 15000))
+      }).eq('id', attId).is('check_out', null).select(), 15000))
       savedRows = r2.data; error = r2.error
       if (!error) showToast('⚠️ Hodiny uloženy, popis ne — v databázi chybí sloupec work_description')
     }
   } catch (e) {
     error = e
   } finally {
-    window.zapisProbiha = false
+    // Po úspěšném zápisu držíme zámek i přes nahrávání fotek (uvolní se níž).
+    if (error || !savedRows || !savedRows.length) window.zapisProbiha = false
   }
   if (error) {
     console.error('[checkout] update error:', error)
@@ -26585,17 +26630,26 @@ async function confirmCheckout() {
     return
   }
   _attMerHotovo(_mer)   // zápis prošel — fotky níž se do doby zápisu nepočítají
+  window._mobZapisKdy = Date.now()   // starší čtení stavu nesmí vrátit „V práci“
   // Poloha při odchodu — až po jistém zápisu a jen na pozadí. Odchod na ni
   // nečeká. Vidí ji pouze správce v docházce, do dokladů nejde.
   zachytPolohuOdchodu(attId)
   if (keptByAdmin) showToast('ℹ️ Stavbu a popis u tohoto dne vyplnil SubBau — jeho zápis zůstává')
 
   // Nepovinné fotky ze stavby
+  let _fotkyChyba = ''
   if (_checkoutPhotoQueue.length > 0) {
     showToast('⏳ Nahrávám fotky…')
-    await uploadCheckoutPhotos(attId)
+    try {
+      const _fotekPred = _checkoutPhotoQueue.length
+      const _nahrane = await uploadCheckoutPhotos(attId)
+      if (_nahrane.length < _fotekPred) _fotkyChyba = '⚠️ Nahrálo se jen ' + _nahrane.length + ' z ' + _fotekPred + ' fotek'
+    } finally {
+      window.zapisProbiha = false
+    }
     clearCheckoutPhotos()
   }
+  window.zapisProbiha = false
 
   document.getElementById('checkout-dialog').style.display = 'none'
   disarmCheckoutBackGuard()
@@ -26604,6 +26658,7 @@ async function confirmCheckout() {
   todayAttId = null
   todayRecord = null
   showToast('✅ Směna ukončena a zapsána')
+  if (_fotkyChyba) setTimeout(() => showToast(_fotkyChyba), 1800)
   // DENÍK CHYB (2. 11. 2026): odchod se zapsal — šel-li dnes předtím nezdar, deník zapíše „po chybě" s počtem pokusů.
   try { if (typeof _dnDochazkaOk === 'function') _dnDochazkaOk('out') } catch (x) { console.warn('[deník chyb]', x) } // eslint-disable-line no-undef
   // 2. 11. 2026: dialog zmizel a pod prstem je zase docházka — 2 s klid, a znovu,
@@ -26710,7 +26765,9 @@ async function uploadCheckoutPhotos(attId) {
   if (uploaded.length > 0) {
     try {
       // Připoj i k záznamu docházky (pokud sloupec photo_urls existuje)
-      const { data: cur } = await sb.from('attendance').select('photo_urls').eq('id', attId).single()
+      const { data: cur, error: curErr } = await sb.from('attendance').select('photo_urls').eq('id', attId).single()
+      // Chyba čtení není „žádné dosavadní fotky“ — update prázdným polem by je smazal.
+      if (curErr) { console.warn('[fotky] čtení photo_urls selhalo:', curErr.message); return uploaded }
       const existing = Array.isArray(cur?.photo_urls) ? cur.photo_urls : []
       const merged = existing.concat(uploaded)
       // DENÍK CHYB (2. 11. 2026, kritika bod 15): `.select('id')` jen kvůli
@@ -26773,7 +26830,7 @@ async function onSitePhotos(input) {
       if (metaErr) {
         console.warn('[site-photo] metadata:', metaErr.message)
         lastError = 'Fotka se nahrála, ale neuložila se k pracovníkovi: ' + (metaErr.message || '')
-        // i tak ji počítáme jako nahranou do úložiště
+        continue
       }
       okCount++
     } catch (e) {
@@ -26844,6 +26901,10 @@ function openDayWorkLog() {
 
 async function saveDayWorkLog() {
   if (!todayAttId) return
+  // Id směny a uživatele si zachytíme hned — přes await se globální todayAttId
+  // může po obnově docházky přepnout na jinou směnu (audit 11. 11. 2026).
+  const attId = todayAttId
+  const uidStart = currentUser && currentUser.id
   // Druhé klepnutí během nahrávání fotek (pár vteřin na slabém signálu) by
   // znovu spustilo funkci, ta by zavolala clearCheckoutPhotos() a nedokončený
   // upload prvního běhu by přišel o zbytek fronty — stejná chyba, jaká se už
@@ -26861,11 +26922,15 @@ async function saveDayWorkLog() {
   window.zapisProbiha = true
   try {
     // Co vyplnil SubBau, to platí — jeho stavbu ani popis pracovník nepřepíše
-    let rec = null
+    let rec = null, chybaCteni = null
     try {
-      const { data: fresh } = await sb.from('attendance').select('*').eq('id', todayAttId).single()
+      const { data: fresh, error: eFresh } = await sb.from('attendance').select('*').eq('id', attId).single()
       rec = fresh || null
-    } catch (e) { console.warn('[worklog] záznam se nepodařilo načíst:', e?.message) }
+      chybaCteni = eFresh || null
+    } catch (e) { chybaCteni = e; console.warn('[worklog] záznam se nepodařilo načíst:', e?.message) }
+    // Bez čerstvého záznamu se nedá poznat, co už vyplnil SubBau — nezapisovat.
+    if (chybaCteni || !rec) { showToast('⚠️ Nepodařilo se ověřit dnešní záznam — nic se neuložilo. Zkuste to prosím znovu.'); return }
+    if (!currentUser || currentUser.id !== uidStart) return
     const upd = {}
     let keptByAdmin = false
     if (adminOwnsSite(rec)) keptByAdmin = true; else upd.construction_site = site
@@ -26875,12 +26940,12 @@ async function saveDayWorkLog() {
       // deníku. Zápis, který nezmění ani řádek, dřív skončil „✅ Zapsáno" a
       // stavba s popisem se nikam neuložily. Hláška ani postup se NEMĚNÍ
       // (majitel dostane zvlášť zprávu o špatných „Uloženo"), jen se to zapíše.
-      const { data: radkyLog, error } = await sb.from('attendance').update(upd).eq('id', todayAttId).select('id')
+      const { data: radkyLog, error } = await sb.from('attendance').update(upd).eq('id', attId).select('id')
       if (error) { showToast(chybaText(error, 'Zápis se neuložil')); return }
-      if (!radkyLog || !radkyLog.length) { try { if (typeof denikChybZapis === 'function') denikChybZapis('db-zapis-nic|rest/attendance', 'Stavba a popis práce se neuložily — zápis nezměnil žádný řádek', { misto: 'saveDayWorkLog', pole: Object.keys(upd).join(','), attId: todayAttId }) } catch (x) { console.warn('[deník chyb]', x) } } // eslint-disable-line no-undef
+      if (!radkyLog || !radkyLog.length) { showToast('❌ Zápis se neuložil — zkuste to prosím znovu.'); try { if (typeof denikChybZapis === 'function') denikChybZapis('db-zapis-nic|rest/attendance', 'Stavba a popis práce se neuložily — zápis nezměnil žádný řádek', { misto: 'saveDayWorkLog', pole: Object.keys(upd).join(','), attId }) } catch (x) { console.warn('[deník chyb]', x) } return } // eslint-disable-line no-undef
     }
     // Aktualizuj lokální kopii
-    if (todayRecord) {
+    if (todayRecord && todayRecord.id === attId) {
       if (upd.construction_site !== undefined) todayRecord.construction_site = site
       if (upd.work_description !== undefined) todayRecord.work_description = desc
     }
@@ -26888,7 +26953,7 @@ async function saveDayWorkLog() {
     // Nepovinné fotky ze stavby
     if (_checkoutPhotoQueue.length > 0) {
       showToast('⏳ Nahrávám fotky…')
-      await uploadCheckoutPhotos(todayAttId)
+      await uploadCheckoutPhotos(attId)
       clearCheckoutPhotos()
     }
     // Vrať dialog do původního stavu (checkout)
@@ -26921,11 +26986,13 @@ async function getTodayRecord() {
   if (!currentUser) return
   const today = localDateStr()
   const _ctuOd = Date.now()
+  const _ctuUid = currentUser.id   // pozdní odpověď předchozího účtu se zahodí (audit 11. 11. 2026)
   // Načti VŠECHNY záznamy pro dnešek (může být více směn)
   const { data, error } = await sb.from('attendance').select('*')
     .eq('worker_id', currentUser.id)
     .eq('work_date', today)
     .order('check_in', {ascending: false})
+  if (!currentUser || currentUser.id !== _ctuUid) return
 
   // Zápis, který doběhl, zatímco čtení čekalo, je novější než tahle odpověď —
   // ta ukazuje stav před ním (např. před pauzou) a nesmí ho přepsat (audit
@@ -26941,20 +27008,25 @@ async function getTodayRecord() {
   // Směna přes půlnoc: kdo nastoupil včera večer a ještě neodešel, má záznam
   // pod VČEREJŠÍM datem. Bez tohohle dohledání by mu karta po půlnoci spadla
   // na „Začít směnu“ a rozdělanou směnu by už neměl jak ukončit.
-  let vceraOtevrena = null
+  let vceraOtevrena = null, vceraChyba = false
   if (!(data || []).some(r => r.check_in && !r.check_out)) {
     try {
       const v = new Date(); v.setDate(v.getDate() - 1)
-      const { data: vc } = await sb.from('attendance').select('*')
+      const { data: vc, error: vcErr } = await sb.from('attendance').select('*')
         .eq('worker_id', currentUser.id)
         .eq('work_date', localDateStr(v))
         .is('check_out', null)
         .not('check_in', 'is', null)
         .order('check_in', {ascending: false})
         .limit(1)
-      if (vc && vc[0]) vceraOtevrena = vc[0]
-    } catch(e) { /* bez dohledání se chová jako dřív */ }
+      if (vcErr) vceraChyba = true
+      else if (vc && vc[0]) vceraOtevrena = vc[0]
+    } catch(e) { vceraChyba = true }
   }
+  if (!currentUser || currentUser.id !== _ctuUid) return
+  // Selhané dohledání včerejška není „včera nic neběží": běžící směna zůstává,
+  // jak ji telefon zná (stejně jako při chybě čtení dneška výš).
+  if (vceraChyba && !vceraOtevrena && todayRecord && todayRecord.check_in && !todayRecord.check_out) return
   // Příchod uložený během dohledávání včerejška je novější než obě odpovědi.
   if ((window._mobZapisKdy || 0) > _ctuOd) return
   if (vceraOtevrena) {
@@ -26999,7 +27071,9 @@ async function getTodayRecord() {
     if (!active && todayRecord && todayRecord.check_in && !todayRecord.check_out) {
       const stillThere = data.find(r => r.id === todayRecord.id)
       if (stillThere) active = stillThere
-      else active = todayRecord
+      // Lokální příchod bez potvrzení serverem držíme jen krátce po zápisu —
+      // jinak by smazaná směna zůstala „běžící" donekonečna.
+      else if (Date.now() - (window._mobZapisKdy || 0) < 30000) active = todayRecord
     }
     if (active) {
       todayAttId = active.id
@@ -27521,6 +27595,17 @@ async function skupinaPracovnika(workerId) {
 // 3) dnešní zařazení.
 async function skupinaPracovnikaVDen(workerId, den) {
   if (!workerId || !den || String(den) >= localDateStr()) return skupinaPracovnika(workerId)
+  // Historie zařazení má přednost před okolními dny týdne: přestup uprostřed
+  // týdne by jinak dal pátku firmu z pondělka (audit 11. 11. 2026).
+  try {
+    // Konec MÍSTNÍHO dne převedený na okamžik; časy se porovnávají jako časy, ne jako řetězce.
+    const konecDne = new Date(den + 'T23:59:59').toISOString()
+    const konecMs = Date.parse(konecDne)
+    const { data } = await sb.from('team_assignments').select('team_id, assigned_at, removed_at')
+      .eq('worker_id', workerId).lte('assigned_at', konecDne).order('assigned_at', { ascending: false }).limit(5)
+    const h = (data || []).find(x => !x.removed_at || Date.parse(x.removed_at) > konecMs)
+    if (h && h.team_id) return h.team_id
+  } catch (e) { /* zkusí se okolní dny */ }
   try {
     const k = getKW(new Date(den + 'T12:00:00'))
     const { data } = await sb.from('attendance').select('team_id, work_date')
@@ -27530,13 +27615,6 @@ async function skupinaPracovnikaVDen(workerId, den) {
       data.sort((a, b) => Math.abs(Date.parse(a.work_date + 'T12:00:00') - cil) - Math.abs(Date.parse(b.work_date + 'T12:00:00') - cil))
       return data[0].team_id
     }
-  } catch (e) { /* zkusí se historie */ }
-  try {
-    const konecDne = den + 'T23:59:59'
-    const { data } = await sb.from('team_assignments').select('team_id, assigned_at, removed_at')
-      .eq('worker_id', workerId).lte('assigned_at', konecDne).order('assigned_at', { ascending: false }).limit(5)
-    const h = (data || []).find(x => !x.removed_at || String(x.removed_at) > konecDne)
-    if (h && h.team_id) return h.team_id
   } catch (e) { /* zůstane dnešní zařazení */ }
   return skupinaPracovnika(workerId)
 }
@@ -27813,7 +27891,7 @@ async function mobCheckin(type) {
       try {
         const res = await _attMerFaze(_mer, 'kontrola', withTimeout(sb.from('attendance').select('id,check_in')
           .eq('worker_id', currentUser.id)
-          .eq('work_date', today)
+          .in('work_date', [today, localDateStr(new Date(now.getTime() - 86400000))])
           .is('check_out', null)
           .not('check_in', 'is', null)
           .order('check_in', { ascending: false })
@@ -27951,6 +28029,14 @@ async function mobCheckin(type) {
           todayAttId = null; todayRecord = null
           _pustZamek()
           getTodayRecord(); loadMobWeek()
+          return
+        }
+        // Pauzy se zapisují jako celé pole `breaks`: bez čerstvého čtení by stará
+        // kopie mohla zahodit pauzu doplněnou kanceláří nebo druhým telefonem.
+        if (!_cerstvePauzy && (type === 'break-fix' || type === 'break-end')) {
+          showToast('⚠️ Slabý signál — pauza se nezapsala, zkuste to prosím znovu')
+          _pustZamek()
+          try { if (typeof _dnDochazka === 'function') _dnDochazka(type, 'signal', 'Pauza se nezapsala — čerstvé pauzy se nenačetly', {}, 'chyba') } catch (x) { console.warn('[deník chyb]', x) } // eslint-disable-line no-undef
           return
         }
       }
@@ -28208,6 +28294,7 @@ async function mobCheckin(type) {
         } catch (e) { console.warn('[pauza] srovnání s odchodem:', e) }
 
         // Neukončená pauza? (pauza běží — má začátek, ale ne konec)
+        let _pauzaPred = null
         const openBreak = (current.break_start && !current.break_end) ||
                           (current.break2_start && !current.break2_end)
         if (openBreak) {
@@ -28258,6 +28345,10 @@ async function mobCheckin(type) {
             return (!r2.error && r2.data && r2.data.length) ? 'zaloha' : null
           }
           let pauzaUzavrena = true
+          // Co bylo před uzavřením — kdyby pracovník dialog odchodu zrušil, pauza se vrátí.
+          _pauzaPred = { bs: current.break_start && !current.break_end ? current.break_start : null,
+            bs2: current.break2_start && !current.break2_end ? current.break2_start : null,
+            breaks: Array.isArray(current.breaks) ? current.breaks.slice() : null, konec: timeStr }
           try {
             if (current.break_start && !current.break_end) {
               const bl = Array.isArray(current.breaks) ? current.breaks.slice() : []
@@ -28372,6 +28463,7 @@ async function mobCheckin(type) {
         // vrátí i s původním časem odchodu a pracovník nepřijde o minuty.
         pendingCheckout = { timeStr, hours: h, attId: todayAttId }
         ulozRozdelanyOdchod(pendingCheckout)
+        if (_pauzaPred) pendingCheckout.otevrenaPauza = _pauzaPred
         let freshRec = updated
         try {
           const { data: fr } = await withTimeout(sb.from('attendance').select('*').eq('id', todayAttId).single(), 8000)
@@ -28532,7 +28624,9 @@ async function loadMobWeek() {
     if (r.check_in && !r.check_out) {
       if (r.work_date === todayStr) {
         // Dnešní aktivní směna — počítej do teď
-        return calcHours(r.check_in, nowStr, r.break_start, r.break_end)
+        // Všechny pauzy (i pole breaks); běžící pauze se čas počítá do teď.
+        const _pauzyTed = attAllBreaks(r).map(b => ({ bs: b.bs, be: b.be || nowStr.slice(0, 5) }))
+        return calcHours(r.check_in, nowStr, r.break_start, r.break_end, r.break2_start, r.break2_end, _pauzyTed.length ? _pauzyTed : undefined)
       } else {
         // Stará nezavřená směna — ignoruj
         return 0
@@ -28611,8 +28705,10 @@ async function loadMobWeek() {
         : (isToday ? hVal.toFixed(1) + 'h ▶' : 'nezavřeno')
       const site = attDisplaySite(r, '')
       const desc = r.work_description || ''
-      let breakStr = bs ? (bs + (be ? ' – ' + be : ' (probíhá)')) : 'bez pauzy'
-      if (bs2 && be2) breakStr += ` + ${bs2} – ${be2}`
+      const _vsePauzy = attAllBreaks(r)
+      let breakStr = _vsePauzy.length
+        ? _vsePauzy.map(b => b.bs + (b.be ? ' – ' + b.be : ' (probíhá)')).join(' + ')
+        : 'bez pauzy'
       const rowDetailId = 'mobday-' + r.id
       return `<div style="border-bottom:1px solid var(--brd)">
         <div onclick="(function(e){var d=document.getElementById('${rowDetailId}');d.style.display=d.style.display==='none'?'block':'none';})()" style="padding:10px 2px;cursor:pointer;display:flex;justify-content:space-between;align-items:center">
@@ -28754,16 +28850,18 @@ async function upomenChybejiciDoklady(rucne) {
     if (!lide.length) return
 
     const ids = lide.map(w => w.id)
-    const [{ data: doklady, error: chybaDok }, { data: dnesniUpominky }] = await Promise.all([
+    const [{ data: doklady, error: chybaDok }, { data: dnesniUpominky, error: chybaUpom }] = await Promise.all([
       sb.from('documents').select('worker_id, doc_type, status').in('worker_id', ids),
       // Co už dneska odešlo. Pozná se to podle NADPISU, ne podle typu zprávy —
       // sloupec `type` má v databázi omezený výčet hodnot a nová hodnota by
       // zápis tiše shodila.
       sb.from('notifications').select('worker_id')
         .eq('title', UPOMINKA_NADPIS).gte('created_at', dnes + 'T00:00:00')
-        .then(r => r, () => ({ data: [] }))
+        .then(r => r, () => ({ data: null, error: { message: 'čtení dnešních upomínek selhalo' } }))
     ])
     if (chybaDok) throw chybaDok
+    // Bez vědomí, co už dnes odešlo, by se upomínka mohla poslat podruhé.
+    if (chybaUpom) throw chybaUpom
     const uzDnes = new Set((dnesniUpominky || []).map(n => n.worker_id))
 
     const radky = []
@@ -28815,13 +28913,16 @@ async function checkMissingDocsAlert() {
     // Jednou za den stačí – ať to není otravné při každém otevření.
     // localStorage, ne sessionStorage — jinak okno vyskočí při každém studeném
     // startu PWA, klidně pětkrát denně, a pracovník ho začne odklikávat naslepo.
-    const todayKey = 'docs-alert-' + new Date().toISOString().slice(0, 10)
+    // Klíč s id pracovníka a MÍSTNÍM datem (na jednom telefonu se střídají lidé).
+    const uidStart = currentUser.id
+    const todayKey = 'docs-alert-' + uidStart + '-' + localDateStr()
     if (lsGet(todayKey) === 'zavreno') return
     // „Dohraju dokument později" — dnes už se neptat.
     if (dokladyOdlozeneDnes()) return
 
     const { data, error } = await sb.from('documents').select('doc_type,status').eq('worker_id', currentUser.id)
     if (error) return
+    if (!currentUser || currentUser.id !== uidStart) return
 
     // Jen to, co opravdu chybí — co nahrál správce, se po něm nechce.
     const missing = chybejiciDoklady(currentProfile, data || [])
@@ -28846,7 +28947,7 @@ async function checkMissingDocsAlert() {
 function closeDocsAlert() {
   const overlay = document.getElementById('docs-alert-overlay')
   if (overlay) overlay.style.display = 'none'
-  try { lsSet('docs-alert-' + new Date().toISOString().slice(0, 10), 'zavreno') } catch (e) {}
+  try { lsSet('docs-alert-' + (currentUser ? currentUser.id : '') + '-' + localDateStr(), 'zavreno') } catch (e) {}
 }
 
 // „Nahrát teď" – zavře okno a hodí člověka rovnou do sekce Dokumenty.
@@ -28858,7 +28959,11 @@ function goUploadFromAlert() {
 
 async function loadMobDocs() {
   if (!currentUser) return
-  const { data } = await sb.from('documents').select('*').eq('worker_id', currentUser.id).order('uploaded_at', {ascending: false})
+  const _docsUid = currentUser.id
+  const { data, error: _docsErr } = await sb.from('documents').select('*').eq('worker_id', currentUser.id).order('uploaded_at', {ascending: false})
+  // Pozdní odpověď předchozího účtu se zahodí; chyba čtení není „žádné doklady“ — zůstane poslední zobrazení.
+  if (!currentUser || currentUser.id !== _docsUid) return
+  if (_docsErr) { console.warn('[doklady] načtení selhalo:', _docsErr.message); return }
   const div = document.getElementById('mob-docs')
   const today = new Date()
 
@@ -36828,13 +36933,16 @@ function openPrintWindow(html) {
       function doPrint(){
         var imgs = Array.prototype.slice.call(document.images);
         var pending = imgs.filter(function(i){ return !i.complete; });
-        if (pending.length === 0) { window.focus(); window.print(); return; }
+        // Jednorázový tisk: obrázky i pojistka vedou sem, druhé volání se ignoruje.
+        var vytisteno = false, casovac = null;
+        function jednou(){ if (vytisteno) return; vytisteno = true; clearTimeout(casovac); window.focus(); window.print(); }
+        if (pending.length === 0) { jednou(); return; }
         var done = 0;
         pending.forEach(function(i){
           i.addEventListener('load', check); i.addEventListener('error', check);
         });
-        function check(){ done++; if (done >= pending.length) { window.focus(); window.print(); } }
-        setTimeout(function(){ window.focus(); window.print(); }, 2000); // pojistka
+        function check(){ done++; if (done >= pending.length) jednou(); }
+        casovac = setTimeout(jednou, 2000); // pojistka
       }
       window.addEventListener('DOMContentLoaded', function(){
         var b = document.getElementById('__printbtn');
@@ -37402,13 +37510,17 @@ async function saveForemanSignToDb(name, dataUrl) {
   ])
   try {
     // Je už pro tento týden záznam? Pokud ano, aktualizuj; jinak vlož nový.
-    const { data: existing } = await withTimeout(sb.from('weekly_hour_sheets')
+    const { data: existing, error: existErr } = await withTimeout(sb.from('weekly_hour_sheets')
       .select('id').eq('worker_id', currentUser.id).eq('kw', week).eq('kw_year', year)
       .order('created_at', { ascending: false }).limit(1), 15000)
+    // Chyba čtení není „výkaz neexistuje“ — vkládat náhradní řádek by založilo duplicitu.
+    if (existErr) throw existErr
     let err
     if (existing && existing[0]) {
-      const r = await withTimeout(sb.from('weekly_hour_sheets').update({ foreman_name: name, foreman_signature: dataUrl }).eq('id', existing[0].id), 15000)
+      // pdf_url se zneplatní: starý soubor nese předchozí podpis a jméno vedoucího.
+      const r = await withTimeout(sb.from('weekly_hour_sheets').update({ foreman_name: name, foreman_signature: dataUrl, pdf_url: null }).eq('id', existing[0].id).select('id'), 15000)
       err = r.error
+      if (!err && (!r.data || !r.data.length)) err = { message: 'výkaz se nepodařilo aktualizovat (neexistuje nebo chybí oprávnění)' }
     } else {
       const r = await withTimeout(sb.from('weekly_hour_sheets').insert({
         worker_id: currentUser.id, kw: week, kw_year: year,
@@ -37446,6 +37558,8 @@ async function onExportWeekChange() {
       .select('foreman_name, foreman_signature, created_at')
       .eq('worker_id', currentUser.id).eq('kw', week).eq('kw_year', year)
       .order('created_at', { ascending: false }).limit(1)
+    // Mezitím se přepnul jiný týden — pozdní odpověď tohohle týdne se zahodí.
+    if (sel.value !== week + '/' + year) return
     const sheet = data && data[0]
     if (sheet && sheet.foreman_signature) {
       foremanSignData = { name: sheet.foreman_name || '', dataUrl: sheet.foreman_signature }
@@ -37594,7 +37708,8 @@ function parseTimeStr(raw) {
   }
   if (isNaN(h)) return ''
   if (isNaN(m)) m = 0
-  h = Math.min(23, h); m = Math.min(59, m)
+  // Neplatný čas se odmítne (prázdné pole), neořezává se na 23:xx / xx:59.
+  if (h > 23 || m > 59) return ''
   return String(h).padStart(2,'0') + ':' + String(m).padStart(2,'0')
 }
 
@@ -37609,7 +37724,9 @@ function maskTimeLive(el) {
   // auto-dvojtečka: 3+ číslice bez dvojtečky → vlož po 2. číslici
   if (firstColon === -1) {
     const d = v.replace(/\D/g,'')
-    if (d.length >= 3) v = d.slice(0,2) + ':' + d.slice(2,4)
+    // „930“ = 9:30 (hodina 93 neexistuje) — jinak by se z něj stalo 23:00
+    if (d.length === 3 && parseInt(d.slice(0,2), 10) > 23) v = d.slice(0,1) + ':' + d.slice(1,3)
+    else if (d.length >= 3) v = d.slice(0,2) + ':' + d.slice(2,4)
   } else {
     // omez minuty na 2 číslice
     const [hh, mm=''] = v.split(':')
@@ -37734,6 +37851,8 @@ function editAttRecord(id, date, ci, co, bs, be) {
   if (ulozBtn) { ulozBtn.disabled = true; ulozBtn.dataset.puvodni = ulozBtn.textContent; ulozBtn.textContent = 'Načítám…' }
   sb.from('attendance').select('*').eq('id',id).single()
     .then(({data:attData, error:attErr}) => {
+      // Správce mezitím otevřel jiný den — pozdní odpověď tohohle nesmí přepsat jeho formulář.
+      if (String(document.getElementById('edit-att-id').value) !== String(id)) return
       if (attErr || !attData) {
         showToast('❌ Záznam se nepodařilo načíst — zavřete okno a zkuste to znovu')
         return   // tlačítko zůstane zamčené, ať se nepřepíše, co se nenačetlo
@@ -37839,7 +37958,12 @@ async function openWeekEdit(workerId, week, year, workerName, focusDate) {
   if (beh !== _weekEditBeh) return
   if (document.getElementById('edit-att-modal').style.display === 'none') { nacitaniTydne(false); return }
   nacitaniTydne(false)
-  if (weekErr) showToast('⚠️ Docházku týdne se nepodařilo načíst')
+  if (weekErr) {
+    // Bez načteného týdne by okno nabízelo založit dny, které už existují.
+    showToast('⚠️ Docházku týdne se nepodařilo načíst — zkuste to prosím znovu')
+    closeEditAttModal()
+    return
+  }
   _weekEditRecords = {}
   _weekEditVybrany = {}
   ;(data||[]).forEach(r => {
@@ -38051,8 +38175,14 @@ function nastavVyplatuDne(rec) {
 // Přestávky toho dne, které se do okna úpravy nevešly (třetí a další).
 // Drží se stranou, ukážou se správci a při uložení se zase přidají zpátky.
 let _editDalsiPauzy = []
+// Rozběhnutá pauza vedená jen v break_start, když pole `breaks` už obsahuje jiné (hotové) pauzy —
+// bez ní by ji uložení dne přepsalo první hotovou pauzou.
+let _editOtevrenaPauza = null
 
 function nactiDalsiPauzy(zaznam) {
+  _editOtevrenaPauza = (zaznam && Array.isArray(zaznam.breaks) && zaznam.breaks.length && zaznam.break_start && !zaznam.break_end
+    && !zaznam.breaks.some(b => b && String(b.bs).slice(0, 5) === String(zaznam.break_start).slice(0, 5)))
+    ? zaznam.break_start : null
   // Stejné pořadí jako naplnPauzyDoFormulare — první dvě jsou v okně, zbytek tady.
   const vse = zaznam ? attAllBreaks(zaznam).filter(b => b.bs) : []
   _editDalsiPauzy = vse.slice(2).filter(b => b.be)
@@ -38228,7 +38358,27 @@ function denProPravidloUpravy() {
   return (id && _editAttDen) || (document.getElementById('edit-att-date') || {}).value || null
 }
 
+// Zámek proti dvojímu spuštění (dvě klepnutí na pomalém spojení by uložila den dvakrát).
+let _editAttUklada = false
 async function saveEditAttRecord() {
+  if (_editAttUklada) return
+  _editAttUklada = true
+  try { return await _saveEditAttRecordImpl() } finally { _editAttUklada = false }
+}
+async function _saveEditAttRecordImpl() {
+  // Celý formulář se zachytí hned, před prvním await — okno zůstává ovladatelné
+  // a správce mohl mezitím přepnout na jiný den (audit 11. 11. 2026).
+  const otisk0 = _editAttOtisk, den0 = _editAttDen, dalsi0 = _editDalsiPauzy.map(b => ({ ...b })), otevrena0 = _editOtevrenaPauza
+  const site0 = document.getElementById('edit-att-site')?.value.trim() || null
+  const desc0 = document.getElementById('edit-att-desc')?.value.trim() || null
+  const castkaRaw0 = String(document.getElementById('edit-att-castka')?.value || '').replace(',', '.').trim()
+  const vyjimka0 = {
+    bez_vyplaty: !!document.getElementById('edit-att-bez-vyplaty')?.checked,
+    bez_provize_den: !!document.getElementById('edit-att-bez-provize')?.checked,
+    vyplata_castka: null,
+    vyplata_poznamka: document.getElementById('edit-att-vyplata-pozn')?.value.trim() || null,
+  }
+  const caData0 = (() => { const e = document.getElementById('edit-att-castka'); return e ? { hodiny: e.dataset.hodiny, puvodni: e.dataset.puvodni, pracovnik: e.dataset.pracovnik } : null })()
   const id = document.getElementById('edit-att-id').value
   const ci = document.getElementById('edit-att-ci').value
   const co = document.getElementById('edit-att-co').value
@@ -38247,13 +38397,13 @@ async function saveEditAttRecord() {
   // Pracovník mohl mezitím ťuknout Odchod nebo pauzu. Okno ukazuje stav
   // z otevření — bez kontroly by uložení jeho zápis tiše přepsalo.
   let puvodniRadek = null   // den, jak je teď v databázi (pro kontrolu faktury níž)
-  if (id && _editAttOtisk && _editAttOtisk.id === String(id)) {
+  if (id && otisk0 && otisk0.id === String(id)) {
     const { data: tedRadky, error: tedErr } = await sb.from('attendance').select('*').eq('id', id)
     if (tedErr) { showToast('❌ Nepodařilo se ověřit, jestli se den mezitím nezměnil — zkuste Uložit znovu'); return }
     const ted = tedRadky && tedRadky[0]
     puvodniRadek = ted || null
     if (ted) {
-      const nove = otiskDneProUpravu(ted), stare = _editAttOtisk
+      const nove = otiskDneProUpravu(ted), stare = otisk0
       const popisky = { prichod: 'Příchod', odchod: 'Odchod', pauzy: 'Přestávky', hodiny: 'Hodiny', stavba: 'Stavba', popis: 'Popis práce' }
       const kratce = s => s ? (s.length > 60 ? s.slice(0, 60) + '…' : s) : 'prázdné'
       const zmeny = Object.keys(popisky).filter(k => nove[k] !== stare[k])
@@ -38277,42 +38427,49 @@ async function saveEditAttRecord() {
   const pauzyProVypocet = []
   if (bs && be) pauzyProVypocet.push({ bs, be })
   if (bs2 && be2) pauzyProVypocet.push({ bs: bs2, be: be2 })
-  _editDalsiPauzy.forEach(b => { if (b && b.bs && b.be) pauzyProVypocet.push({ bs: b.bs, be: b.be }) })
+  dalsi0.forEach(b => { if (b && b.bs && b.be) pauzyProVypocet.push({ bs: b.bs, be: b.be }) })
+  // Třetí a další přestávky se validují spolu s ostatními: uvnitř směny, bez překryvů.
+  if (co && co > ci) {
+    const vsechny = pauzyProVypocet.slice().sort((a, b) => a.bs.localeCompare(b.bs))
+    for (let i = 0; i < vsechny.length; i++) {
+      const b = vsechny[i]
+      if (b.bs >= b.be || b.bs < ci || b.be > co || (i > 0 && b.bs < vsechny[i - 1].be)) {
+        showToast('⚠️ Přestávka ' + b.bs + '–' + b.be + ' neleží uvnitř směny nebo se překrývá s jinou — upravte nebo odeberte ji')
+        return
+      }
+    }
+  }
 
   const hours = (ci && co) ? applyAttendanceRules({
     // Starý den se při úpravě počítá postaru (3. 11. 2026). U existujícího záznamu
     // rozhoduje jeho skutečný den — pole Datum se u opravy neukládá.
-    work_date: (puvodniRadek && puvodniRadek.work_date) || (id && _editAttDen) || dateStr,
+    work_date: (puvodniRadek && puvodniRadek.work_date) || (id && den0) || dateStr,
     check_in: ci+':00', check_out: co+':00',
     break_start: bs?bs+':00':null, break_end: be?be+':00':null,
     break2_start: bs2?bs2+':00':null, break2_end: be2?be2+':00':null,
     breaks: pauzyProVypocet
   }).hours : null
 
-  const site = document.getElementById('edit-att-site')?.value.trim() || null
-  const desc = document.getElementById('edit-att-desc')?.value.trim() || null
+  const site = site0
+  const desc = desc0
 
   // Výjimka u dne. Prázdná částka = počítá se normálně z hodin.
-  const castkaRaw = String(document.getElementById('edit-att-castka')?.value || '').replace(',', '.').trim()
+  const castkaRaw = castkaRaw0
   const castkaDne = castkaRaw === '' ? null : Math.max(0, Number(castkaRaw) || 0)
-  const vyjimka = {
-    bez_vyplaty: !!document.getElementById('edit-att-bez-vyplaty')?.checked,
-    bez_provize_den: !!document.getElementById('edit-att-bez-provize')?.checked,
-    vyplata_castka: castkaDne,
-    vyplata_poznamka: document.getElementById('edit-att-vyplata-pozn')?.value.trim() || null,
-  }
+  const vyjimka = { ...vyjimka0, vyplata_castka: castkaDne }
   // Srážka za puntíky a změněné hodiny: částku, kterou správce v okně nechal
   // beze změny, přepočítat z nových hodin. Kterou přepsal sám, ta platí.
   const caEl = document.getElementById('edit-att-castka')
   let srazkaOtazka = null   // položí se spolu s kontrolou faktury — jedna otázka na uložení
   const srHDne = srazkaZaPuntikyHodin(vyjimka)
-  if (id && hours != null && caEl && srHDne && caEl.dataset.hodiny !== ''
-      && castkaRaw === String(caEl.dataset.puvodni || '').replace(',', '.').trim()
-      && Math.abs((Number(caEl.dataset.hodiny) || 0) - hours) >= 0.005) {
+  if (id && hours != null && caEl && caData0 && srHDne && caData0.hodiny !== ''
+      && castkaRaw === String(caData0.puvodni || '').replace(',', '.').trim()
+      && Math.abs((Number(caData0.hodiny) || 0) - hours) >= 0.005) {
     let nova
-    try { nova = await castkaSrazkyDne(caEl.dataset.pracovnik || workerId, dateStr, srHDne, hours) }
+    // Srážka se počítá z uloženého dne záznamu, ne z přepsaného pole data.
+    try { nova = await castkaSrazkyDne(caData0.pracovnik || workerId, (puvodniRadek && String(puvodniRadek.work_date || '').slice(0, 10)) || den0 || dateStr, srHDne, hours) }
     catch (e) { showToast('❌ Den má srážku za puntíky a sazbu se nepodařilo načíst — nic se neuložilo. Zkuste to prosím znovu.'); return }
-    srazkaOtazka = ('Den má srážku ' + srHDne + ' h za černé puntíky a mění se mu hodiny (' + caEl.dataset.hodiny + ' h → ' + hours + ' h).\n\n'
+    srazkaOtazka = ('Den má srážku ' + srHDne + ' h za černé puntíky a mění se mu hodiny (' + caData0.hodiny + ' h → ' + hours + ' h).\n\n'
         + 'Částka dne se přepočítá: ' + castkaDne + ' € → ' + nova.castka + ' € (' + nova.hPo + ' h × ' + nova.sazba + ' €).\n\nUložit?')
     vyjimka.vyplata_castka = nova.castka
   }
@@ -38350,7 +38507,7 @@ async function saveEditAttRecord() {
   if (bs2 && be2) breaksArr.push({ bs: bs2, be: be2 })
   // Přestávky, které se do okna nevešly (třetí a další). Bez nich by den při
   // pouhém otevření a uložení tiše vyskočil o jejich délku nahoru.
-  _editDalsiPauzy.forEach(b => { if (b && b.bs && b.be) breaksArr.push({ bs: b.bs, be: b.be }) })
+  dalsi0.forEach(b => { if (b && b.bs && b.be) breaksArr.push({ bs: b.bs, be: b.be }) })
 
   // Formulář zná jen hodiny a minuty. Čas, který správce nezměnil, se proto
   // nesmí přepsat zkrácenou hodnotou (07:03:21 → 07:03:00) — historie úprav
@@ -38371,8 +38528,10 @@ async function saveEditAttRecord() {
     break2_end: cas(be2, pr0.break2_end),
     breaks: breaksArr,
     total_hours: hours,
+    ...(otevrena0 ? { break_start: otevrena0, break_end: null } : {}),   // rozběhnutá další pauza se nesmí přepsat
     is_manual: true,
-    is_saturday: isSaturdayDate(dateStr),
+    // U existujícího záznamu rozhoduje jeho uložený den, ne přepsané pole data (to se neukládá).
+    is_saturday: isSaturdayDate((id && ((puvodniRadek && String(puvodniRadek.work_date || '').slice(0, 10)) || den0)) || dateStr),
     construction_site: site || null,
     work_description: desc || null
   }
@@ -38395,16 +38554,22 @@ async function saveEditAttRecord() {
   let bezVyjimky = false
   try {
     if (id) {
-      // Úprava existujícího záznamu
-      ;({ data: updData, error } = await sb.from('attendance').update(payloadSVyjimkou).eq('id', id).select())
+      // Úprava existujícího záznamu. Zápis platí jen, když je v databázi pořád odchod a
+      // pauza, jaké jsme četli těsně před uložením (pracovník mezitím mohl zapsat odchod).
+      const podm = (q) => {
+        if (!puvodniRadek) return q
+        for (const k of ['check_out', 'break_start', 'break_end']) q = puvodniRadek[k] == null ? q.is(k, null) : q.eq(k, puvodniRadek[k])
+        return q
+      }
+      ;({ data: updData, error } = await podm(sb.from('attendance').update(payloadSVyjimkou).eq('id', id)).select())
       // Chybí-li jen sloupec odchylka_ok, výjimky výplaty se tím neztratí.
       if (error && /odchylka_ok/i.test(error.message || '') && !/bez_vyplaty|bez_provize_den|vyplata_castka|vyplata_poznamka|dlouhy_den_potvrzen/i.test(error.message || '')) {
         delete payloadSVyjimkou.odchylka_ok
-        ;({ data: updData, error } = await sb.from('attendance').update(payloadSVyjimkou).eq('id', id).select())
+        ;({ data: updData, error } = await podm(sb.from('attendance').update(payloadSVyjimkou).eq('id', id)).select())
       }
       if (error && /bez_vyplaty|bez_provize_den|vyplata_castka|vyplata_poznamka|dlouhy_den_potvrzen/i.test(error.message || '')) {
         bezVyjimky = true
-        ;({ data: updData, error } = await sb.from('attendance').update(payload).eq('id', id).select())
+        ;({ data: updData, error } = await podm(sb.from('attendance').update(payload).eq('id', id)).select())
       }
     } else {
       // Nový den (z týdenního přehledu) — vlož nový záznam
@@ -38432,17 +38597,23 @@ async function saveEditAttRecord() {
     showToast('⚠️ Den uložen, ale výjimka u výplaty se neuložila — spusťte migraci supabase-migrace-den-bez-vyplaty.sql')
   }
   if (!updData || updData.length === 0) {
-    showToast('❌ Záznam nelze uložit — zkontrolujte oprávnění v Supabase (RLS)')
+    showToast(id && puvodniRadek
+      ? '❌ Den se mezitím změnil (nebo nemáte oprávnění) — nic se neuložilo. Zavřete okno a otevřete den znovu.'
+      : '❌ Záznam nelze uložit — zkontrolujte oprávnění v Supabase (RLS)')
     return
   }
 
   showToast('✅ Záznam uložen — obnovuji...')
-  if (id) _editAttOtisk = otiskDneProUpravu(updData[0])
+  // Okno mohlo mezitím přepnout na jiného člověka nebo den — do něj se výsledek nepromítá.
+  const stejneOkno = document.getElementById('edit-att-worker').value === workerId
+    && document.getElementById('edit-att-id').value === String(id || '')
+    && document.getElementById('edit-att-date').value === dateStr
+  if (id && stejneOkno) _editAttOtisk = otiskDneProUpravu(updData[0])
 
   // Pokud jsme v režimu týdenního editu, zůstaň v modalu: uložený den se ukáže
   // hned (bez nového stahování týdne) a přehledy se obnoví na pozadí.
   if (workerId) {
-    promitniDenDoTydne(updData[0].work_date || dateStr, updData[0])
+    if (stejneOkno) promitniDenDoTydne(updData[0].work_date || dateStr, updData[0])
     showToast('✅ Uloženo')
     refreshAttendanceEverywhere(workerId).catch(e => console.warn('[refresh]', e?.message))
     return
@@ -38610,7 +38781,14 @@ async function castkaSrazkyDne(workerId, den, srazkaH, hodiny) {
   return { sazba, hPo, castka: Math.round(hPo * sazba * 100) / 100 }
 }
 
+// Zámek proti dvojímu spuštění (dvě klepnutí by založila den dvakrát a hodiny by se sečetly).
+let _manualUklada = false
 async function saveManualAttendance() {
+  if (_manualUklada) return
+  _manualUklada = true
+  try { return await _saveManualAttendanceImpl() } finally { _manualUklada = false }
+}
+async function _saveManualAttendanceImpl() {
   const workerId = document.getElementById('manual-worker').value
   const date = document.getElementById('manual-date').value
   const ci = document.getElementById('manual-checkin').value
@@ -38696,6 +38874,8 @@ async function saveManualAttendance() {
         breaks: breaksArr,
         total_hours: hours,
         location_address: site || null,
+        // Přehledy ukazují construction_site přednostně — ruční přepis stavby ji musí přepsat také.
+        ...(site ? { construction_site: site } : {}),
         // Adresu napsala kancelář — nesmí u ní zůstat příznak 'gps' ani souřadnice
         // z původního měření, jinak se ručně psaný text tváří jako ověřená poloha.
         address_source: site ? 'manual' : null,
@@ -38959,13 +39139,14 @@ async function resetDocAlerts() {
   window._docAlertDismissed = new Set()
   // Odložené registrace (prefix "preg|") jsou ve stejné tabulce — ty nechat být
   try {
-    await sb.from('doc_alert_dismissals').delete()
+    const { error: delErr } = await sb.from('doc_alert_dismissals').delete()
       .neq('dismiss_key', '')
       .not('dismiss_key', 'like', PREG_KEY_PREFIX + '%')
       .not('dismiss_key', 'like', LONG_KEY_PREFIX + '%')
       .not('dismiss_key', 'like', CHAT_KEY_PREFIX + '%')
       .not('dismiss_key', 'like', VAC_KEY_PREFIX + '%')
-  } catch(e) {}
+    if (delErr) showToast('❌ Upozornění se nepodařilo obnovit: ' + delErr.message)
+  } catch(e) { showToast('❌ Upozornění se nepodařilo obnovit: ' + ((e && e.message) || e)) }
   loadDocumentAlertsStat()
 }
 
@@ -39067,7 +39248,9 @@ async function generateInvoiceMobImpl(lang = 'en', override = null) {
   let kohoFakturovat = [workerId]
   {
     // Šéfem může být i živnostník (1. 10. 2026), ne jen s.r.o.
-    const { data: lide } = await sb.from('profiles').select('id').eq('zamestnavatel_id', workerId)
+    const { data: lide, error: lideErr } = await sb.from('profiles').select('id').eq('zamestnavatel_id', workerId)
+    // Selhané načtení zaměstnanců není „firma nemá lidi“ — faktura by vyšla s neúplnými hodinami.
+    if (lideErr) { showToast('⚠️ Zaměstnance firmy se nepodařilo načíst — faktura se nevystavila. Zkuste to prosím znovu.'); return }
     const ids = (lide || []).map(x => x.id).filter(x => x && x !== workerId)
     if (ids.length) kohoFakturovat = kohoFakturovat.concat(ids)
   }
