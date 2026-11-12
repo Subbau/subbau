@@ -30638,15 +30638,18 @@ let _fktVat = false
 // Má pracovník ve fakturačních údajích něco rozepsaného, co ještě není uložené?
 let _fktDirty = false
 let _fktSaveTimer = null
+let _fktVerze = 0   // číslo verze rozepsaných údajů: uložení smaže příznak změn jen pro verzi, kterou opravdu zapsalo
 
 // Fakturační údaje se ukládají samy krátce po dopsání — pracovník nemá žádné
 // tlačítko Uložit a nesmí o rozepsané pole přijít jen tím, že přepne záložku.
 function fktTouched() {
   _fktDirty = true
+  _fktVerze++
   clearTimeout(_fktSaveTimer)
   _fktSaveTimer = setTimeout(async () => {
+    const verze = _fktVerze
     const ok = await saveInvoiceProfileFields(true)
-    if (ok) _fktDirty = false
+    if (ok && verze === _fktVerze) _fktDirty = false
   }, 1200)
 }
 
@@ -30654,8 +30657,9 @@ function fktTouched() {
 async function fktBlur() {
   clearTimeout(_fktSaveTimer)
   if (!_fktDirty) return
+  const verze = _fktVerze
   const ok = await saveInvoiceProfileFields(true)
-  if (ok) _fktDirty = false
+  if (ok && verze === _fktVerze) _fktDirty = false
 }
 
 function _fktPaint(onEl, offEl, on) {
@@ -30743,7 +30747,8 @@ async function loadInvoiceForm() {
     if (!el) return
     if (document.activeElement === el) return
     const now = String(el.value || '').trim()
-    if (now && now !== String(val == null ? '' : val).trim() && _fktDirty) return
+    // Při neuložených změnách se nepřepisuje nic, co se liší od profilu — ani záměrně vymazané pole.
+    if (_fktDirty && now !== String(val == null ? '' : val).trim()) return
     el.value = val == null ? '' : val
   }
 
@@ -30821,6 +30826,8 @@ async function nactiMojeFaktury() {
       .eq('worker_id', currentUser.id)
       .order('sent_at', { ascending: false }).limit(1000)
     data = r.data
+    // Chyba načtení není prázdný seznam: poslední úspěšný seznam zůstane a řekne se to.
+    if (r.error) { console.warn('[moje faktury] načtení selhalo:', r.error.message); showToast('⚠️ Seznam odeslaných faktur se nepodařilo obnovit'); return }
   } catch (e) { console.warn('[moje faktury] načtení selhalo:', e?.message) }
   // Faktury podržené v telefonu (slabé spojení nebo přihlášení) — appka je
   // pošle sama, pracovník je tu vidí jako „čeká na odeslání" (1. 11. 2026).
@@ -30852,8 +30859,17 @@ async function nactiMojeFaktury() {
 
 // Uloží fakturační údaje z formuláře do profilu. Vrací true, když se to povedlo.
 // Volá se sama při vystavení faktury, ať se pracovník nemusí starat o „Uložit".
-async function saveInvoiceProfileFields(silent) {
+// Zápisy se řadí za sebe (časovač a odchod z pole by jinak poslaly dva zápisy naráz
+// a starší mohl dokončit později a vrátit původní IBAN).
+let _fktRada = Promise.resolve()
+function saveInvoiceProfileFields(silent) {
+  const p = _fktRada.then(() => _saveInvoiceProfileFieldsCore(silent), () => _saveInvoiceProfileFieldsCore(silent))
+  _fktRada = p.catch(() => {})
+  return p
+}
+async function _saveInvoiceProfileFieldsCore(silent) {
   if (!currentUser) return false
+  const verzeZapisu = _fktVerze
   const val = id => document.getElementById(id)?.value.trim() || null
   const upd = {
     supplier_type: _fktType,
@@ -30869,7 +30885,9 @@ async function saveInvoiceProfileFields(silent) {
   // Sazbu z tohohle formuláře NEUKLÁDÁME. Nastavuje ji výhradně SubBau
   // v Provizích — pracovník ji jen vidí. Dřív si ji tady mohl vyplnit sám,
   // pokud mu ji SubBau ještě nezadal, a tím si určil vlastní hodinovku.
-  let { error } = await sb.from('profiles').update(upd).eq('id', currentUser.id)
+  let { error, data: zapsano } = await sb.from('profiles').update(upd).eq('id', currentUser.id).select('id')
+  // Zápis, který nezasáhl žádný řádek (práva), není uložení.
+  if (!error && (!zapsano || !zapsano.length)) error = { message: 'zápis nezměnil žádný řádek — zkontrolujte oprávnění' }
   // Starší databáze nemusí mít sloupec invoice_address — ulož zbytek a adresu
   // schovej do locality, ať se údaje neztratí a faktura měla co tisknout.
   if (error && /invoice_address/i.test(error.message || '')) {
@@ -30877,9 +30895,10 @@ async function saveInvoiceProfileFields(silent) {
     const fallback = { ...upd }
     delete fallback.invoice_address
     if (upd.invoice_address) fallback.locality = upd.invoice_address
-    ;({ error } = await sb.from('profiles').update(fallback).eq('id', currentUser.id))
+    ;({ error, data: zapsano } = await sb.from('profiles').update(fallback).eq('id', currentUser.id).select('id'))
+    if (!error && (!zapsano || !zapsano.length)) error = { message: 'zápis nezměnil žádný řádek — zkontrolujte oprávnění' }
     if (!error && currentProfile) Object.assign(currentProfile, fallback)
-    if (!error) return true
+    if (!error) { if (verzeZapisu === _fktVerze) _fktDirty = false; return true }
   }
   if (error) {
     console.error('[faktura] uložení údajů selhalo:', error)
@@ -30887,7 +30906,7 @@ async function saveInvoiceProfileFields(silent) {
     return false
   }
   if (currentProfile) Object.assign(currentProfile, upd)
-  _fktDirty = false
+  if (verzeZapisu === _fktVerze) _fktDirty = false
   return true
 }
 
