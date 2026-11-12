@@ -10807,6 +10807,8 @@ function showOsvec(profile) {
     // Schované sekce (ubytování, výkazy, podpis vedoucího) se načtou až s odstupem 3–8 s — při ranní vlně 200 příchodů
     // by jinak každý start posílal zbytečné dotazy ve stejnou chvíli jako příchod. Obsah je hotový dřív, než ho někdo otevře.
     {
+      window._mobAccNacteno = false
+      document.querySelectorAll('[id^="mob-acc-"]').forEach(el => { delete el.dataset.uprav })
       const pozdeji = (fn) => setTimeout(() => { try { if (currentUser) fn() } catch (e) { console.warn('[start] odložené načtení:', e && e.message) } }, 3000 + Math.floor(Math.random() * 5000))
       pozdeji(() => loadMobAccommodation(currentProfile))
       pozdeji(() => loadMobExportWeeks())
@@ -21250,10 +21252,12 @@ async function updateChatBadge() {
 async function updateAdminChatBadge() {
   if (!currentUser || currentProfile?.role !== 'admin') return
   // Po stránkách (nepřečtených zpráv může být přes 1000 — odznak by počítal jen část).
-  const { data: unread } = await stahniStrankyOdhad('chat-neprecteno', od => sb.from('chat_messages')
+  const { data: unread, error: chybaUnread } = await stahniStrankyOdhad('chat-neprecteno', od => sb.from('chat_messages')
     .select('worker_id')
     .neq('sender_role', 'admin')   // C5 (audit 3. 11. 2026): i zprávy parťáka ('partak'), ne jen 'osvec'
     .eq('is_read', false).order('id').range(od, od + 999))
+  if (chybaUnread || !Array.isArray(unread)) return   // chyba stránky: odznak zůstane, jak byl (ne „nic nepřečteno")
+  window._adminChatUnreadPosl = unread
   // Nepočítej právě otevřenou konverzaci
   const chatView = document.getElementById('v-chat')
   const chatOpen = chatView?.classList.contains('on')
@@ -21573,10 +21577,12 @@ async function _loadAdminChatListTed() {
 
   // Načti nepřečtené počty
   // Po stránkách (nepřečtených zpráv může být přes 1000 — odznak by počítal jen část).
-  const { data: unread } = await stahniStrankyOdhad('chat-neprecteno', od => sb.from('chat_messages')
+  let { data: unread, error: chybaUnread2 } = await stahniStrankyOdhad('chat-neprecteno', od => sb.from('chat_messages')
     .select('worker_id')
     .neq('sender_role', 'admin')   // C5 (audit 3. 11. 2026): i zprávy parťáka ('partak'), ne jen 'osvec'
     .eq('is_read', false).order('id').range(od, od + 999))
+  if (chybaUnread2 || !Array.isArray(unread)) unread = window._adminChatUnreadPosl || []   // chyba stránky: poslední známý stav, ne nuly
+  else window._adminChatUnreadPosl = unread
 
   const unreadMap = {}
   unread?.forEach(u => { unreadMap[u.worker_id] = (unreadMap[u.worker_id] || 0) + 1 })
@@ -36151,6 +36157,10 @@ function mobSv(name, btn) {
   }
   if (name === 'tymy') { loadTeams() }
   if (name === 'fotky') { loadSitePhotos() }
+  // Ubytování se po startu načítá s odstupem (viz showOsvec); kdo ho otevře dřív, dostane ho hned.
+  try {
+    if (!window._mobAccNacteno && document.getElementById('mob-acc-address')?.closest('.mob-view')?.id === 'mob-v-' + name) loadMobAccommodation(currentProfile)
+  } catch (e) {}
   // Výkazy se po startu načítají s odstupem (viz showOsvec); kdo je otevře dřív, dostane je hned.
   try {
     const sl = document.getElementById('mob-sheets-list')
@@ -38548,6 +38558,7 @@ async function saveMobAccommodation() {
     return
   }
   showToast('🏠 Ubytování uloženo!')
+  document.querySelectorAll('[id^="mob-acc-"]').forEach(el => { delete el.dataset.uprav })   // uloženo = zase se smí načítat z profilu
   // Aktualizuj currentProfile
   if (currentProfile) {
     currentProfile.accommodation_address = addr
@@ -38556,19 +38567,17 @@ async function saveMobAccommodation() {
   }
 }
 
+// Pole, do kterých už člověk začal psát, se při (odloženém) načtení ubytování nepřepisují (Codex 12. 11. 2026).
+document.addEventListener('input', (e) => { const el = e.target; if (el && el.id && /^mob-acc-/.test(el.id)) el.dataset.uprav = '1' })
 function loadMobAccommodation(profile) {
-  const a = document.getElementById('mob-acc-address')
-  const n = document.getElementById('mob-acc-night')
-  const p = document.getElementById('mob-acc-parking')
-  if (a) a.value = profile?.accommodation_address || ''
-  if (n) n.value = profile?.accommodation_price_night ?? ''
-  if (p) p.value = profile?.accommodation_parking_price ?? ''
-  const mn = document.getElementById('mob-acc-notes')
-  if (mn) mn.value = profile?.accommodation_notes || ''
-  const ph = document.getElementById('mob-acc-phone')
-  if (ph) ph.value = profile?.accommodation_phone || ''
-  const em = document.getElementById('mob-acc-email')
-  if (em) em.value = profile?.accommodation_email || ''
+  window._mobAccNacteno = true
+  const vypln = (id, hodnota) => { const el = document.getElementById(id); if (el && el.dataset.uprav !== '1') el.value = hodnota }
+  vypln('mob-acc-address', profile?.accommodation_address || '')
+  vypln('mob-acc-night', profile?.accommodation_price_night ?? '')
+  vypln('mob-acc-parking', profile?.accommodation_parking_price ?? '')
+  vypln('mob-acc-notes', profile?.accommodation_notes || '')
+  vypln('mob-acc-phone', profile?.accommodation_phone || '')
+  vypln('mob-acc-email', profile?.accommodation_email || '')
   // Kódy od StavKo — jen ke čtení, dotáhnou se zvlášť.
   nactiMojeKody(profile)
 }
@@ -51536,9 +51545,9 @@ const POZNAMKY_SLOUPCE = 'id, worker_id, den, text, autor_id, autor_jmeno, zdroj
 let _poznDen = { den: null, mapa: {}, chybi: false }   // naposledy načtený den v přehledu: { worker_id: [poznámky] }
 async function nactiPoznamkyDne(den) {
   try {
-    const { data, error } = await sb.from('poznamky_dne').select(POZNAMKY_SLOUPCE)
-      .eq('den', den).order('vytvoreno', { ascending: true }).limit(1000)
-    if (error) return { mapa: {}, chybi: jeChybiPuntiky(error), chyba: error }
+    const { data, error } = await stahniStrankyOdhad('poznamky-dne', od => sb.from('poznamky_dne').select(POZNAMKY_SLOUPCE)
+      .eq('den', den).order('vytvoreno', { ascending: true }).order('id').range(od, od + 999))
+    if (error || !Array.isArray(data)) return { mapa: {}, chybi: jeChybiPuntiky(error), chyba: error || new Error('poznámky dne: neúplný výpis') }
     const mapa = {}
     ;(data || []).forEach(p => { (mapa[String(p.worker_id)] = mapa[String(p.worker_id)] || []).push(p) })
     return { mapa, chybi: false, chyba: null }
@@ -51739,6 +51748,7 @@ async function otevriPoznamkyDne(workerId, den, jmeno) {
 }
 
 // V kartě pracovníka (záložka docházka): poznámky k dnům vybraného týdne.
+let _poznKartaBeh = 0
 async function nactiPoznamkyKarta() {
   const el = document.getElementById('wd-poznamky')
   if (!el || !currentWorkerId) return
@@ -51748,9 +51758,10 @@ async function nactiPoznamkyKarta() {
   if (!m) { el.innerHTML = ''; return }
   const start = getWeekStartDate(Number(m[1]), Number(m[2]))
   const dny = [0, 1, 2, 3, 4, 5, 6].map(i => { const d = new Date(start); d.setDate(start.getDate() + i); return localDateStr(d) })
+  const mujBeh = ++_poznKartaBeh
   const { data, error } = await sb.from('poznamky_dne').select(POZNAMKY_SLOUPCE)
     .eq('worker_id', wid).gte('den', dny[0]).lte('den', dny[6]).order('den', { ascending: true }).order('vytvoreno', { ascending: true })
-  if (wid !== currentWorkerId) return   // mezitím se otevřel jiný pracovník
+  if (wid !== currentWorkerId || mujBeh !== _poznKartaBeh) return   // mezitím se otevřel jiný pracovník nebo přepnul týden
   if (error) {
     el.innerHTML = jeChybiPuntiky(error)
       ? `<div style="margin-bottom:12px;font-size:12px;color:var(--amber);font-weight:700">📝 Poznámky ke dni — spusťte migraci supabase-migrace-poznamky-dne.sql</div>` : ''

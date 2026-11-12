@@ -585,11 +585,15 @@ module.exports = async (req, res) => {
             const p = await db(`profiles?select=id&id=in.(${kus})&team_id=in.(${sk})`, klic);
             (p || []).forEach(x => povoleno.add(x.id));
           }
+          // Bývalí členové: každý zvlášť (limit=1) — společný dotaz by směny jednoho člověka
+          // mohly vyčerpat limit řádků a ostatní by se potichu ztratili. Po vlnách po osmi.
           const zbyva = ids.filter(x => !povoleno.has(x));
-          for (let i = 0; i < zbyva.length; i += 100) {
-            const kus = zbyva.slice(i, i + 100).map(encodeURIComponent).join(',');
-            const a = await db(`attendance?select=worker_id&worker_id=in.(${kus})&team_id=in.(${sk})&limit=1000`, klic);
-            (a || []).forEach(x => povoleno.add(x.worker_id));
+          for (let i = 0; i < zbyva.length; i += 8) {
+            const vlna = await Promise.all(zbyva.slice(i, i + 8).map(async (id) => {
+              const a = await db(`attendance?select=worker_id&worker_id=eq.${encodeURIComponent(id)}&team_id=in.(${sk})&limit=1`, klic);
+              return a && a.length ? id : null;
+            }));
+            vlna.forEach(id => { if (id) povoleno.add(id); });
           }
           return povoleno;
         };
