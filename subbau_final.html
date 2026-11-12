@@ -1979,7 +1979,7 @@ setTimeout(function brzda() {
               <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
                 <div class="card-search">
                   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>
-                  <input type="text" id="inv-search" oninput="renderWorkerInvoices()" placeholder="Hledat jméno, číslo, firmu, týden…" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false">
+                  <input type="text" id="inv-search" oninput="renderWorkerInvoicesPoPsani()" placeholder="Hledat jméno, číslo, firmu, týden…" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false">
                 </div>
                 <select id="inv-filter-year" onchange="renderWorkerInvoices()" style="padding:7px 10px;border:1px solid var(--brd);border-radius:8px;font-size:12px;font-family:inherit;background:#fff">
                   <option value="">Všechny roky</option>
@@ -9142,7 +9142,7 @@ function showAdmin(profile) {
   loadTeams()
   loadDocuments()
   loadCompanies()
-  loadWorkerInvoices()
+  // Složka faktur (až 10 000 řádků, desítky MB) se při startu NEčte — načte se, až se otevře (sv('faktury-archiv')).
   setKWChip()
   checkDocumentAlerts()
   loadNotifWorkers()
@@ -22562,6 +22562,7 @@ async function odectenoZeZaloh(workerIds) {
 }
 
 async function loadWorkerInvoices() {
+  window._invKdyNacteno = Date.now()
   const tbody = document.getElementById('inv-table')
   // Data načtená na pozadí (viz níž) se při otevření složky ukážou hned, než dorazí nová.
   if (window._invNevykresleno && document.getElementById('v-faktury-archiv')?.classList.contains('on')) {
@@ -23151,11 +23152,17 @@ function tiskSoupisuFaktur(kw, rok) {
 // (_invVlozRadky) zůstává tentýž prvek a psaní neztratí fokus ani kurzor.
 const _invHledaniTydne = new Map()   // 'kw/rok' → text, jak ho správce napsal
 const INV_HLEDAT_TYDEN = 'inv-hledat-tyden'   // name políčka v hlavičce týdne
+// Hledání ve složce: každé písmeno přepsalo tisíce řádků (u 10 000 faktur 2–4 s zamrznutí). Překreslí se až 250 ms po posledním písmenu.
+let _invHledaniCasovac = null
+function renderWorkerInvoicesPoPsani() {
+  clearTimeout(_invHledaniCasovac)
+  _invHledaniCasovac = setTimeout(() => { _invHledaniCasovac = null; renderWorkerInvoices() }, 250)
+}
 function invHledatVTydnu(el, kw, rok) {
   const k = kw + '/' + rok
   if (el.value) _invHledaniTydne.set(k, el.value)
   else _invHledaniTydne.delete(k)
-  renderWorkerInvoices()
+  renderWorkerInvoicesPoPsani()
 }
 // Esc hledání v týdnu smaže (a dál nejde — nic jiného se tím nezavře).
 function invHledatVTydnuKlavesa(e, el, kw, rok) {
@@ -53810,7 +53817,7 @@ function tichaObnovaDat() {
       // `true` = tichý režim: neukáže „Načítám…" a když se data nezměnila,
       // nepřekreslí vůbec nic. Bez toho kalendář každou minutu bliknul.
       else if (name === 'kalendar' && typeof renderCalendar === 'function') renderCalendar(true)
-      else if (name === 'faktury-archiv' && typeof loadWorkerInvoices === 'function') loadWorkerInvoices()
+      else if (name === 'faktury-archiv' && typeof loadWorkerInvoices === 'function' && Date.now() - (window._invKdyNacteno || 0) > 240000) loadWorkerInvoices()   // jinak ji drží živé změny; úplné načtení jen jednou za 4 min
       else if (name === 'zalohove-faktury' && typeof loadZalohoveFaktury === 'function') loadZalohoveFaktury()
       // 'pristupy' (Přístupy) se sem záměrně nepřidává — má vlastní 5min interval
       // a realtime aktualizaci; časté 60s obnovování jen zbytečně bliká tabulkou.
