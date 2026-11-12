@@ -19366,7 +19366,7 @@ async function renderCalendar(tichy) {
       let popis = s ? s.nazev : 'Bez záznamu'
       if (prace && hod) popis += ' · ' + calH(hod.h) + ' h' + (hod.prichod ? ' (' + hod.prichod + '–' + (hod.odchod || (hod.bezi ? 'běží' : '?')) + ')' : '')
       if (st === 'bad') popis += ' · ' + calProcProblem(attMap[k])
-      if (st === 'vac' || st === 'sick' || st === 'absence') { const pozn = absNote(najdiVolno(w.id, d.ds)); if (pozn) popis += ' · ' + pozn }
+      if (st === 'vac' || st === 'sick' || st === 'absence') { const vv = najdiVolno(w.id, d.ds); const pozn = absNote(vv); if (pozn) popis += ' · ' + pozn; const zap = zapsanoKdy(vv); if (zap) popis += ' · ' + zap }
       if (volno) popis += ' · POZOR: zapsaná ' + ABSENCE[absType(volno)].label.toLowerCase() + ' i práce'
       // Zápis klepnutím (Nemoc/Dovolená v liště): zvýrazni dny vybrané pro
       // tohohle pracovníka, dokud se výběr neuloží nebo nezruší.
@@ -19384,7 +19384,7 @@ async function renderCalendar(tichy) {
       const styl = vPicku
         ? ` style="background:${ABSENCE[_calAbsPick.typ].fill};outline:2px solid ${ABSENCE[_calAbsPick.typ].color};outline-offset:-2px"`
         : (beziBarva ? ` style="${beziBarva}${roh}${ramNove}"` : (nove ? ` style="${ramNove.slice(1)}"` : ''))
-      html += `<td class="${tr}" data-w="${escAttr(w.id)}" data-den="${d.ds}"${nove ? ` data-nepotvrzeno="${escAttr(abs.id)}"` : ''}${styl} title="${escAttr(w.full_name + ' · ' + nazevDne(d) + ': ' + popis + (nove ? ' · NOVÉ — zapsal(a) si sám/sama, klepnutím označíte jako viděné' : ''))}">${text}</td>`
+      html += `<td class="${tr}" data-w="${escAttr(w.id)}" data-den="${d.ds}"${nove ? ` data-nepotvrzeno="${escAttr(abs.id)}"` : ''}${styl} title="${escAttr(w.full_name + ' · ' + nazevDne(d) + ': ' + popis + (nove ? ' · NOVÉ' + (zapsanoKdy(abs) ? ' (' + zapsanoKdy(abs) + ')' : '') + ' — zapsal(a) si sám/sama, klepnutím označíte jako viděné' : ''))}">${text}</td>`
     })
     celkem += suma
     html += `<td class="kal-soucet">${suma.toFixed(1)}h</td></tr>`
@@ -20687,6 +20687,7 @@ async function saveWdDocValidity(id, workerId, docType) {
 
 // ============ CHAT ============
 let activeChatWorkerId = null
+let _adminChatPosledni = null   // { id, jmeno } naposledy otevřená konverzace — po návratu do sekce se obnoví
 let currentWorkerProfile = null
 let chatRealtimeSub = null
 let adminChatRealtimeSub = null
@@ -20785,7 +20786,16 @@ function _startOsvecWatchdog() {
 
 // Formátování zprávy v bublině
 function chatBubble(msg, isMine, senderName) {
-  const time = msg.created_at ? new Date(msg.created_at).toLocaleTimeString('cs-CZ', {hour:'2-digit',minute:'2-digit'}) : ''
+  // Datum i čas (12. 11. 2026, majitel: „neukazuje se datum, kdy byly psané zprávy"). Rok jen u starších než letos.
+  let time = ''
+  if (msg.created_at) {
+    const d = new Date(msg.created_at)
+    if (!isNaN(d)) {
+      const rokTed = new Date().getFullYear()
+      time = d.toLocaleDateString('cs-CZ', d.getFullYear() === rokTed ? { day: 'numeric', month: 'numeric' } : { day: 'numeric', month: 'numeric', year: 'numeric' })
+        + ' ' + d.toLocaleTimeString('cs-CZ', { hour: '2-digit', minute: '2-digit' })
+    }
+  }
   const name = !isMine && senderName ? `<div style="font-size:11px;font-weight:700;color:#E8A13A;margin-bottom:3px">${escAttr(senderName)}</div>` : ''
   // Indikátor přečtení jen u zpráv odeslaných správcem (admin pohled)
   let receipt = ''
@@ -21251,7 +21261,45 @@ function scrollChatBottom(id) {
 
 // ── ADMIN CHAT ──
 let _adminChatListData = null
-async function loadAdminChatList() {
+// Seznam konverzací se při každé zprávě i otevření obnovoval stahováním CELÉ historie zpráv všech lidí (po tisících)
+// a překreslením všech řádků — při 200 lidech to zamrzalo psaní. Teď: souběžná volání se slijí do jednoho běhu
+// a poslední zprávy se drží v paměti a dotahují jen přírůstek (nové než naposledy viděná).
+let _chatListBezi = null, _chatListZnovu = false
+let _chatPosledniMezi = { uid: null, mapa: {}, od: '' }
+function loadAdminChatList() {
+  if (_chatListBezi) { _chatListZnovu = true; return _chatListBezi }
+  _chatListBezi = (async () => {
+    try { do { _chatListZnovu = false; await _loadAdminChatListTed() } while (_chatListZnovu) }
+    finally { _chatListBezi = null }
+  })()
+  return _chatListBezi
+}
+async function _poslednizpravyPracovniku(workers) {
+  const uid = currentUser?.id || null
+  if (_chatPosledniMezi.uid !== uid) _chatPosledniMezi = { uid, mapa: {}, od: '' }
+  const C = _chatPosledniMezi
+  const prvni = !C.od
+  // První načtení: nejnovějších max. 3000 zpráv (zbytek lidí je neaktivní — ukáže se jejich profese);
+  // další: jen zprávy novější než poslední viděná.
+  const maxStran = prvni ? 3 : 5
+  let nejnovejsi = C.od
+  for (let od = 0; od < maxStran * 1000; od += 1000) {
+    let q = sb.from('chat_messages').select('worker_id, message, created_at, sender_role')
+    if (!prvni) q = q.gte('created_at', C.od)
+    const { data: kus, error } = await q.order('created_at', { ascending: false }).order('id', { ascending: false }).range(od, od + 999)
+    if (error) { if (prvni) C.od = ''; return C.mapa }   // chyba: zůstane, co je; příště se zkusí znovu
+    ;(kus || []).forEach(m => {
+      const stary = C.mapa[m.worker_id]
+      if (!stary || String(m.created_at) > String(stary.created_at)) C.mapa[m.worker_id] = m
+      if (String(m.created_at) > nejnovejsi) nejnovejsi = String(m.created_at)
+    })
+    if (!kus || kus.length < 1000) break
+    if (prvni && workers.every(w => C.mapa[w.id])) break
+  }
+  if (nejnovejsi) C.od = nejnovejsi
+  return C.mapa
+}
+async function _loadAdminChatListTed() {
   const skrytiChat = await skrytiLideIds()   // schované firmy
   // Načti všechny workery s jejich poslední zprávou
   const { data: workersVse } = await sb.from('profiles')
@@ -21275,19 +21323,8 @@ async function loadAdminChatList() {
   const unreadMap = {}
   unread?.forEach(u => { unreadMap[u.worker_id] = (unreadMap[u.worker_id] || 0) + 1 })
 
-  // Načti poslední zprávy
-  // Po stránkách (server vrací nejvýš ~1000 řádků naráz), dokud nemá poslední zprávu
-  // každý pracovník — aktivní konverzace nevytlačí méně aktivního lidi z přehledu.
-  const lastMap = {}
-  for (let od = 0; od < 100000; od += 1000) {
-    const { data: lastMsgs, error: lastErr } = await sb.from('chat_messages')
-      .select('worker_id, message, created_at, sender_role')
-      .order('created_at', {ascending: false}).order('id', {ascending: false}).range(od, od + 999)
-    if (lastErr) break
-    lastMsgs?.forEach(m => { if (!lastMap[m.worker_id]) lastMap[m.worker_id] = m })
-    if (!lastMsgs || lastMsgs.length < 1000) break
-    if (workers.every(w => lastMap[w.id])) break
-  }
+  // Poslední zprávy: z paměti + přírůstek (viz _poslednizpravyPracovniku)
+  const lastMap = Object.assign({}, await _poslednizpravyPracovniku(workers))
 
   // Nepočítej zprávy z právě otevřené konverzace
   const chatView = document.getElementById('v-chat')
@@ -21358,6 +21395,7 @@ async function openAdminChat(workerId, workerName) {
   const poradi = ++_adminChatPoradi
   const jinyPracovnik = activeChatWorkerId !== workerId
   activeChatWorkerId = workerId
+  _adminChatPosledni = { id: workerId, jmeno: workerName }
   // Zprávy předchozího pracovníka hned pryč, ať do načtení nestojí pod novým jménem
   if (jinyPracovnik) {
     const d0 = document.getElementById('admin-chat-messages')
@@ -35473,6 +35511,9 @@ function sv(name, navEl) {
   if (_pt && _titles[name]) _pt.textContent = _titles[name]
   if(name === 'chat') {
     loadAdminChatList()
+    // Návrat do chatu: konverzace na obrazovce zůstala, ale po odchodu se zrušil výběr i živé spojení —
+    // bez obnovy by odeslání skončilo hláškou a zprávu bylo nutné kopírovat.
+    if (!activeChatWorkerId && _adminChatPosledni) openAdminChat(_adminChatPosledni.id, _adminChatPosledni.jmeno)
   } else {
     // Když admin odejde z chatu, odpoj realtime a reset active worker
     if (adminChatRealtimeSub && typeof sb !== 'undefined') {
@@ -49067,6 +49108,16 @@ function absType(v) {
 function absInfo(v) { return ABSENCE[absType(v)] }
 // Poznámka k zobrazení — u nemoci bez sloupce `type` odřízne prefix "Nemoc — ",
 // ať se vedle odznaku „Nemoc" nepíše to samé ještě jednou.
+// Kdy a kdo nepřítomnost zapsal (12. 11. 2026, majitel: „potřebuji vědět, kdy si zapsal dovolenou"). Sloupec created_at
+// přidává supabase-migrace-nepritomnost-zapsano.sql; starší záznamy a stav bez migrace ho nemají → prázdný řetězec.
+function zapsanoKdy(v) {
+  if (!v || !v.created_at) return ''
+  const d = new Date(v.created_at)
+  if (isNaN(d)) return ''
+  const kdy = d.toLocaleDateString('cs-CZ', { day: 'numeric', month: 'numeric', year: 'numeric' }) + ' ' + d.toLocaleTimeString('cs-CZ', { hour: '2-digit', minute: '2-digit' })
+  const kym = !v.created_by ? '' : String(v.created_by) === String(v.worker_id) ? ' · zapsal(a) si sám/sama' : ' · zapsal správce'
+  return 'zapsáno ' + kdy + kym
+}
 function absNote(v) {
   const n = String((v && v.note) || '').trim()
   if (!n) return ''
@@ -49334,6 +49385,7 @@ async function loadWdVacations() {
             <div style="display:inline-flex;align-items:center;gap:5px;background:${info.bg};border:1px solid ${info.color};color:${info.color};font-size:10.5px;font-weight:800;padding:2px 8px;border-radius:20px;margin-bottom:4px">${info.icon}${info.label}</div>
             <div style="font-weight:600;font-size:13px">${cz(v.date_from)} → ${cz(v.date_to)}</div>
             <div style="font-size:12px;color:var(--text2)">${days} ${days===1?'den':'dní'}${absNote(v)?' · '+escAttr(absNote(v)):''}</div>
+            ${zapsanoKdy(v) ? `<div style="font-size:11px;color:var(--text3);margin-top:1px">${escAttr(zapsanoKdy(v))}</div>` : ''}
           </div>
           <div style="display:flex;align-items:center;gap:8px;flex-shrink:0;margin-left:auto">
             <span class="pill ${isNow?'pb':isPast?'pq':'pg'}">${isNow?'Probíhá':isPast?'Proběhla':'Naplánována'}</span>
