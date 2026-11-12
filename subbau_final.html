@@ -49699,7 +49699,10 @@ async function loadWdAttendance() {
   nactiPuntikyKarta()
   const val = document.getElementById('wd-kw-sel').value
   const [week,year] = val.split('-').map(Number)
-  const { data } = await sb.from('attendance').select('*').eq('worker_id',currentWorkerId).eq('kw',week).eq('kw_year',year).order('work_date')
+  const widAtt = currentWorkerId
+  const { data, error: chybaAtt } = await sb.from('attendance').select('*').eq('worker_id',widAtt).eq('kw',week).eq('kw_year',year).order('work_date')
+  if (widAtt !== currentWorkerId) return   // mezitím se otevřel jiný pracovník
+  if (chybaAtt) { showToast('❌ Docházku se nepodařilo načíst — zkuste to prosím znovu'); return }
   const tbody = document.getElementById('wd-att-table')
   const nowForAtt = new Date().toTimeString().slice(0,8)
   const todayStrWd = localDateStr()
@@ -50256,7 +50259,10 @@ async function adminNastavBezRidicaku(wid, el) {
 }
 
 async function loadWdDocs(id) {
-  const { data } = await sb.from('documents').select('*').eq('worker_id', id||currentWorkerId)
+  const widDocs = id || currentWorkerId
+  const { data, error: chybaDocs } = await sb.from('documents').select('*').eq('worker_id', widDocs)
+  if (String(widDocs) !== String(currentWorkerId)) return   // mezitím se otevřel jiný pracovník
+  if (chybaDocs) { showToast('❌ Doklady se nepodařilo načíst — zkuste to prosím znovu'); return }
   const div = document.getElementById('wd-docs-list')
   const types = DOC_LABELS
   const statusInfo = {
@@ -50277,6 +50283,7 @@ async function loadWdDocs(id) {
     const { data: pr, error: prErr } = await sb.from('profiles').select('bez_ridicaku').eq('id', wid).maybeSingle()
     if (!prErr && pr) { bezRid = pr.bez_ridicaku === true; if (wCache) wCache.bez_ridicaku = bezRid }
   } catch (e) { console.warn('[řidičák] stav se nenačetl, platí paměť:', (e && e.message) || e) }
+  if (String(widDocs) !== String(currentWorkerId)) return
   // Správce zaškrtne za pracovníka, že nemá řidičák (majitel 5. 11. 2026: lidé
   // nepochopí, že to mají zaškrtnout sami) — pak se po něm nechce ani na Nástěnce.
   const ridicakBtnHtml = '<label style="font-size:13px;padding:9px 14px;background:' + (bezRid ? '#e6f0e9' : '#fff') + ';color:#211D1A;border:1.5px solid ' + (bezRid ? '#3f7d54' : 'var(--brd)') + ';border-radius:11px;cursor:pointer;font-family:inherit;font-weight:800;display:inline-flex;align-items:center;gap:7px" title="Po tomhle člověku se řidičský průkaz nebude chtít a nebude hlášen jako chybějící">' +
@@ -50452,13 +50459,17 @@ async function rejectDocWd(id, workerId) {
 }
 
 async function loadWdContracts(id) {
-  const { data } = await sb.from('contracts').select('*').eq('worker_id', id||currentWorkerId)
+  const widSml = id || currentWorkerId
+  const { data, error: chybaSml } = await sb.from('contracts').select('*').eq('worker_id', widSml)
+  if (String(widSml) !== String(currentWorkerId)) return   // mezitím se otevřel jiný pracovník
+  if (chybaSml) { showToast('❌ Smlouvy se nepodařilo načíst — zkuste to prosím znovu'); return }
   const div = document.getElementById('wd-contracts-list')
   if (!div) return
   if (!data?.length) { div.innerHTML='<div style="color:var(--text3);text-align:center;padding:20px">Žádné smlouvy</div>'; return }
   const sL = { admin_pending:'⏳ Čeká na admina', pending:'⏳ Čeká na OSVČ', signed_electronic:'✅ Podepsána', signed_scan:'✅ Podepsána (sken)', rejected:'❌ Zamítnuta' }
   const sP = { admin_pending:'pa', pending:'pa', signed_electronic:'pg', signed_scan:'pg', rejected:'pr' }
   const stIdx = await loadContractStorageIndex()
+  if (String(widSml) !== String(currentWorkerId)) return
   const wName = (typeof currentWorkerProfile !== 'undefined' && currentWorkerProfile?.full_name) || ''
   div.innerHTML = data.map(c => `
     <div style="padding:10px 12px;border-bottom:1px solid var(--brd)">
@@ -50484,11 +50495,14 @@ async function loadWdFinance() {
   if(!currentWorkerId) return
   const val = document.getElementById('wd-fin-kw').value
   const [week,year] = val.split('-').map(Number)
-  const { data } = await sb.from('financials').select('*').eq('worker_id',currentWorkerId).eq('kw',week).eq('kw_year',year)
+  const widFin = currentWorkerId
+  const { data, error: chybaFin } = await sb.from('financials').select('*').eq('worker_id',widFin).eq('kw',week).eq('kw_year',year)
   const div = document.getElementById('wd-finance-list')
   
   // Načti hodiny z evidence
-  const { data: att } = await sb.from('attendance').select('*').eq('worker_id',currentWorkerId).eq('kw',week).eq('kw_year',year)
+  const { data: att, error: chybaFinAtt } = await sb.from('attendance').select('*').eq('worker_id',widFin).eq('kw',week).eq('kw_year',year)
+  if (widFin !== currentWorkerId) return   // mezitím se otevřel jiný pracovník
+  if (chybaFin || chybaFinAtt) { showToast('❌ Finance se nepodařilo načíst — zkuste to prosím znovu'); return }
   const nowStrFin = new Date().toTimeString().slice(0,8)
   const dnesStrFin = localDateStr()
   const hoursWorked = att?.reduce((s,r) => {
