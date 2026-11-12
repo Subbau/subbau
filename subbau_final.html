@@ -51726,7 +51726,7 @@ function vyberFotkuZeSouboru(workerId) {
 async function otevriVyrezFotky(zdroj, workerId) {
   const zUrl = !!(zdroj && zdroj.url)
   if (!zUrl && !zdroj?.type?.startsWith('image/')) { showToast('⚠️ Tohle není obrázek'); return }
-  let obr
+  let obr, objUrlChyba = null
   try {
     obr = await new Promise((ok, ne) => {
       const i = new Image()
@@ -51738,9 +51738,9 @@ async function otevriVyrezFotky(zdroj, workerId) {
       i.onerror = () => ne(new Error(zUrl
         ? 'Doklad se nepodařilo načíst — zkuste fotku nahrát ze souboru'
         : 'Obrázek se nepodařilo načíst'))
-      i.src = zUrl ? zdroj.url : URL.createObjectURL(zdroj)
+      i.src = zUrl ? zdroj.url : (objUrlChyba = URL.createObjectURL(zdroj))
     })
-  } catch (e) { showToast('❌ ' + e.message); return }
+  } catch (e) { try { if (objUrlChyba) URL.revokeObjectURL(objUrlChyba) } catch (x) {} showToast('❌ ' + e.message); return }
 
   // Výřez je 3:4 NA VÝŠKU — týž tvar, v jakém se fotka pak ukazuje v seznamech
   // (viz fotkaHtml) i týž, jaký má fotka v dokladu. Do 29. 9. 2026 se ořezávalo
@@ -51907,9 +51907,12 @@ async function ulozFotkuPracovnika(workerId, blob) {
       showToast('❌ Fotka se nahrála, ale profil se nezměnil — zkontrolujte oprávnění')
       return false
     }
-    const im = document.getElementById('wd-avatar-img'), ini = document.getElementById('wd-avatar-init')
-    if (im) { im.src = nova; im.style.display = 'block' }
-    if (ini) ini.style.display = 'none'
+    // Karta mezitím mohla přejít na jiného člověka — jeho hlavičku nepřepisovat.
+    if (currentWorkerId === workerId) {
+      const im = document.getElementById('wd-avatar-img'), ini = document.getElementById('wd-avatar-init')
+      if (im) { im.src = nova; im.style.display = 'block' }
+      if (ini) ini.style.display = 'none'
+    }
     if (currentWorkerProfile && currentWorkerProfile.id === workerId) currentWorkerProfile.avatar_url = nova
     showToast('✅ Fotka uložena')
     return true
@@ -51948,7 +51951,14 @@ async function uploadAvatar(input) {
     if (currentProfile) currentProfile.avatar_url = url
     input.value = ''
     showToast('Fotka uložena ✓')
+    // Překreslení karty nesmí smazat rozepsaný telefon: koncept se před ním zapamatuje a po něm vrátí.
+    const editTel = document.getElementById('mob-phone-edit'), vstupTel = document.getElementById('mob-phone-input')
+    const konceptTel = (editTel && editTel.style.display !== 'none' && vstupTel) ? vstupTel.value : null
     loadMobProfil(currentProfile)
+    if (konceptTel !== null) {
+      const e2 = document.getElementById('mob-phone-edit'), i2 = document.getElementById('mob-phone-input')
+      if (e2 && i2) { e2.style.display = 'block'; i2.value = konceptTel }
+    }
   } catch(e) {
     showToast('Chyba: ' + e.message)
     zapisChybuAppky('profil-fotka', e?.message)
