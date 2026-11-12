@@ -515,6 +515,15 @@ module.exports = async (req, res) => {
     res.status(403).json({ ok: false, chyba: 'bez_klice' }); return;
   }
 
+  // POZNÁMKY K DNI pro Moniku (oddíl níž). Jako doklady: jen s klíčem Stavbyplánu,
+  // klient.html je nikdy nedostane ani nezapíše.
+  const telo0 = (req.method === 'POST' && req.body && typeof req.body === 'object') ? req.body : {};
+  const chcePoznamkyDne = (req.method === 'GET' && String(dotaz.poznamky_dne || '') === '1')
+    || (req.method === 'POST' && telo0.akce === 'poznamka_dne');
+  if (chcePoznamkyDne && !klicStavbyplanuSedi(req.headers && req.headers['x-stavbyplan-klic'])) {
+    res.status(403).json({ ok: false, chyba: 'bez_klice' }); return;
+  }
+
   try {
     const odkazy = await db(
       `client_links?select=id,nazev,aktivni,plati_do,pocet_navstev&token=eq.${token}&limit=1`, klic);
@@ -535,6 +544,135 @@ module.exports = async (req, res) => {
     if (okenniPocet(odkaz.id) > 10000) {
       res.status(429).json({ ok: false, chyba: 'prilis_mnoho' });
       return;
+    }
+
+    // ---------------------------------------------------------------
+    // POZNÁMKY K DNI (12. 11. 2026) — Monika ve Stavbyplánu
+    //
+    //   GET  ?t=TOKEN&poznamky_dne=1&od=YYYY-MM-DD&do=YYYY-MM-DD   (výchozí: dnes)
+    //        → { ok, poznamky: [{ id, worker_id, den, text, autor, zdroj, vytvoreno, upraveno }] }
+    //   POST { akce:'poznamka_dne', worker_id, den, text, kdo }             → nová poznámka
+    //   POST { akce:'poznamka_dne', id, text, kdo }                         → úprava SVÉ poznámky
+    //   POST { akce:'poznamka_dne', id, smazat:true, kdo }                  → smazání SVÉ poznámky
+    //
+    // Obojí jen s hlavičkou x-stavbyplan-klic (kontrola výš). Jen lidé z part
+    // odkazu (nebo ti, co v nich pracovali). `kdo` = jméno Moniky ve Stavbyplánu;
+    // upravit/smazat jde jen poznámku, kterou založil Stavbyplán pod stejným
+    // jménem. Poznámky správců SubBau (zdroj 'spravce') se odsud měnit nedají.
+    // ---------------------------------------------------------------
+    if (chcePoznamkyDne) {
+      const TVAR_DNE = /^\d{4}-\d{2}-\d{2}$/;
+      const TVAR_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+      const platneDatum = (d) => TVAR_DNE.test(d) && !isNaN(new Date(d + 'T00:00:00Z').getTime())
+        && new Date(d + 'T00:00:00Z').toISOString().slice(0, 10) === d;
+      const cisty = (v, max) => String(v == null ? '' : v)
+        .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]+/g, ' ').replace(/\r\n?/g, '\n').trim().slice(0, max);
+      const jmenoJednoRadek = (v) => cisty(v, 120).replace(/\s+/g, ' ');
+      const ven = (p) => ({ id: p.id, worker_id: p.worker_id, den: String(p.den).slice(0, 10), text: p.text,
+                            autor: p.autor_jmeno, zdroj: p.zdroj, vytvoreno: p.vytvoreno, upraveno: p.upraveno });
+      const SLOUPCE_POZNAMEK = 'id,worker_id,den,text,autor_jmeno,zdroj,vytvoreno,upraveno';
+      try {
+        const vazbyP = await db(`client_link_teams?select=team_id&link_id=eq.${odkaz.id}`, klic);
+        const skupinyP = (vazbyP || []).map(v => v.team_id).filter(Boolean);
+        // Kdo z daných lidí smí v tomhle odkazu mít poznámku: je v partě odkazu,
+        // nebo v ní pracoval (tytéž dvě podmínky jako u zápisu poznámky k člověku).
+        const povoleniLide = async (ids) => {
+          const povoleno = new Set();
+          if (!skupinyP.length || !ids.length) return povoleno;
+          const sk = skupinyP.map(encodeURIComponent).join(',');
+          for (let i = 0; i < ids.length; i += 100) {
+            const kus = ids.slice(i, i + 100).map(encodeURIComponent).join(',');
+            const p = await db(`profiles?select=id&id=in.(${kus})&team_id=in.(${sk})`, klic);
+            (p || []).forEach(x => povoleno.add(x.id));
+          }
+          const zbyva = ids.filter(x => !povoleno.has(x));
+          for (let i = 0; i < zbyva.length; i += 100) {
+            const kus = zbyva.slice(i, i + 100).map(encodeURIComponent).join(',');
+            const a = await db(`attendance?select=worker_id&worker_id=in.(${kus})&team_id=in.(${sk})&limit=1000`, klic);
+            (a || []).forEach(x => povoleno.add(x.worker_id));
+          }
+          return povoleno;
+        };
+
+        if (req.method === 'GET') {
+          const dnesP = ted().den;
+          const od = String(dotaz.od || dnesP), doDne = String(dotaz.do || od);
+          if (!platneDatum(od) || !platneDatum(doDne) || doDne < od
+              || (new Date(doDne + 'T00:00:00Z') - new Date(od + 'T00:00:00Z')) > 62 * 86400000) {
+            res.status(400).json({ ok: false, chyba: 'spatne_obdobi' }); return;
+          }
+          const vse = await dbVsechno(
+            `poznamky_dne?select=${SLOUPCE_POZNAMEK}&den=gte.${od}&den=lte.${doDne}&order=den.asc,vytvoreno.asc,id.asc`, klic);
+          const ids = Array.from(new Set(vse.map(p => p.worker_id)));
+          const smi = await povoleniLide(ids);
+          res.status(200).json({ ok: true, od, do: doDne, poznamky: vse.filter(p => smi.has(p.worker_id)).map(ven) });
+          return;
+        }
+
+        // ---- POST ----
+        const kdo = jmenoJednoRadek(telo0.kdo);
+        if (!kdo) { res.status(400).json({ ok: false, chyba: 'chybi_kdo' }); return; }
+        const hlavicky = { apikey: klic, Authorization: `Bearer ${klic}`, 'Content-Type': 'application/json',
+                           Prefer: 'return=representation' };
+        const selhani = async (krok, r) => {
+          const t = await r.text().catch(() => '');
+          console.error('[klient] poznámka dne:', krok, r.status, t.slice(0, 300));
+          await zapisChybuOdkazu('poznamka-dne', 'Poznámka dne ze Stavbyplánu se neuložila (' + krok + ', HTTP ' + r.status + ')', r.status, kodZTela(t));
+          res.status(500).json({ ok: false, chyba: 'nelze_ulozit' });
+        };
+
+        if (telo0.id != null && telo0.id !== '') {
+          const id = String(telo0.id);
+          if (!TVAR_UUID.test(id)) { res.status(400).json({ ok: false, chyba: 'spatne_id' }); return; }
+          // Jen vlastní poznámka ze Stavbyplánu, jen v tomhle odkaze.
+          const cil = await db(`poznamky_dne?select=${SLOUPCE_POZNAMEK}&id=eq.${id}&zdroj=eq.stavbyplan&limit=1`, klic);
+          const p = cil && cil[0];
+          const smi = p ? await povoleniLide([p.worker_id]) : new Set();
+          if (!p || !smi.has(p.worker_id) || p.autor_jmeno !== kdo) {
+            res.status(404).json({ ok: false, chyba: 'poznamka_nenalezena' }); return;
+          }
+          if (telo0.smazat === true) {
+            const r = await fetch(`${SUPABASE_URL}/rest/v1/poznamky_dne?id=eq.${id}&zdroj=eq.stavbyplan&select=id`,
+              { method: 'DELETE', headers: hlavicky, signal: AbortSignal.timeout(15000) });
+            if (!r.ok) { await selhani('smazani', r); return; }
+            const smaz = await r.json().catch(() => null);
+            if (!Array.isArray(smaz) || smaz.length !== 1) { res.status(404).json({ ok: false, chyba: 'poznamka_nenalezena' }); return; }
+            res.status(200).json({ ok: true, smazano: id }); return;
+          }
+          const text = cisty(telo0.text, 1000);
+          if (!text) { res.status(400).json({ ok: false, chyba: 'prazdny_text' }); return; }
+          const r = await fetch(`${SUPABASE_URL}/rest/v1/poznamky_dne?id=eq.${id}&zdroj=eq.stavbyplan&select=${SLOUPCE_POZNAMEK}`,
+            { method: 'PATCH', headers: hlavicky, body: JSON.stringify({ text, upraveno: new Date().toISOString() }),
+              signal: AbortSignal.timeout(15000) });
+          if (!r.ok) { await selhani('uprava', r); return; }
+          const uprav = await r.json().catch(() => null);
+          if (!Array.isArray(uprav) || uprav.length !== 1) { res.status(404).json({ ok: false, chyba: 'poznamka_nenalezena' }); return; }
+          res.status(200).json({ ok: true, poznamka: ven(uprav[0]) }); return;
+        }
+
+        const workerId = String(telo0.worker_id || '');
+        const den = String(telo0.den || '');
+        const text = cisty(telo0.text, 1000);
+        if (!TVAR_UUID.test(workerId)) { res.status(400).json({ ok: false, chyba: 'spatny_pracovnik' }); return; }
+        if (!platneDatum(den)) { res.status(400).json({ ok: false, chyba: 'spatny_den' }); return; }
+        if (!text) { res.status(400).json({ ok: false, chyba: 'prazdny_text' }); return; }
+        const smi = await povoleniLide([workerId]);
+        if (!smi.has(workerId)) { res.status(403).json({ ok: false, chyba: 'cizi_pracovnik' }); return; }
+        const r = await fetch(`${SUPABASE_URL}/rest/v1/poznamky_dne?select=${SLOUPCE_POZNAMEK}`,
+          { method: 'POST', headers: hlavicky,
+            body: JSON.stringify({ worker_id: workerId, den, text, autor_jmeno: kdo, zdroj: 'stavbyplan' }),
+            signal: AbortSignal.timeout(15000) });
+        if (!r.ok) { await selhani('vlozeni', r); return; }
+        const nova = await r.json().catch(() => null);
+        if (!Array.isArray(nova) || nova.length !== 1) { await selhani('vlozeni-nic', { status: r.status, text: async () => '' }); return; }
+        res.status(200).json({ ok: true, poznamka: ven(nova[0]) });
+        return;
+      } catch (e) {
+        console.error('[klient] poznámka dne:', e);
+        await zapisChybuOdkazu('poznamka-dne', 'Poznámky dne ze Stavbyplánu spadly (' + kodVyjimky(e) + ')', stavVyjimky(e), kodVyjimky(e));
+        res.status(500).json({ ok: false, chyba: 'chyba_serveru' });
+        return;
+      }
     }
 
     // ---------------------------------------------------------------

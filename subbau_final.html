@@ -4167,6 +4167,7 @@ setTimeout(function brzda() {
           </div>
         </div>
         <div id="wd-puntiky"></div>
+        <div id="wd-poznamky"></div>
         <div style="display:flex;gap:8px;margin-bottom:12px;align-items:center">
           <label style="font-size:12px;color:var(--text2)">Týden:</label>
           <select id="wd-kw-sel" onchange="loadWdAttendance()" style="padding:5px 10px;border:1px solid var(--brd);border-radius:7px;font-size:12px;width:auto"></select>
@@ -16592,6 +16593,7 @@ async function loadTodayTimeline() {
   // tabulka na okamžik zmizela a fotky „přeskakovaly" (majitel 1. 10. 2026).
   if (!div.querySelector('tbody')) div.innerHTML = '<div style="text-align:center;color:var(--text3);font-size:13px">Načítám…</div>'
   const vlajkyNactene = Promise.all([nactiVlajky(), nactiPuntikyVsech(), nactiSkupinky()])   // vlaječky, němčina, puntíky a ubytování u jmen (souběžně)
+  const poznamkyNactene = nactiPoznamkyDne(today)   // poznámky ke dni (nikdy nevyhodí chybu)
 
   // Všechny dnešní záznamy všech pracovníků + firma a podskupina, podle kterých se řadí
   const [{ data }, { data: tmTeams }, { data: tmComps }, { data: tmSubs }] = await Promise.all([
@@ -16650,7 +16652,12 @@ async function loadTodayTimeline() {
   }
 
   if (!data?.length) {
-    div.innerHTML = todayBubblesHtml([]) + '<div style="text-align:center;color:var(--text3);font-size:13px">'
+    const poznPrazdny = await poznamkyNactene
+    if (beh !== _denDochazkyBeh) return
+    _poznDen = { den: today, mapa: poznPrazdny.mapa, chybi: poznPrazdny.chybi }
+    const pasPrazdny = await poznamkyPasHtml(today, poznPrazdny.mapa, new Set(), poznPrazdny.chybi)
+    if (beh !== _denDochazkyBeh) return
+    div.innerHTML = todayBubblesHtml([]) + pasPrazdny + '<div style="text-align:center;color:var(--text3);font-size:13px">'
       + (jeDnes ? 'Žádné záznamy pro dnešek' : 'Žádné záznamy za ' + datumCz(today)) + '</div>'
     div._posledniHtml = null
     return
@@ -16753,6 +16760,10 @@ async function loadTodayTimeline() {
   // Hlavičky mají třídu tbl-group — filterTableRows je při hledání schová, když pod nimi nic nezbude.
   let lastFirm = null
   await vlajkyNejdyl(vlajkyNactene)
+  const poznDen = await poznamkyNactene
+  if (beh !== _denDochazkyBeh) return
+  _poznDen = { den: today, mapa: poznDen.mapa, chybi: poznDen.chybi }
+  const poznPas = await poznamkyPasHtml(today, poznDen.mapa, new Set(rows.map(g => String(g.worker_id))), poznDen.chybi)
   if (beh !== _denDochazkyBeh) return
   { const rz = document.getElementById('dochazka-razeni'); if (rz) rz.innerHTML = _skupinky.chybi ? '' : razeniSkupinHtml() }
   serazeniPodleSkupin(rows, g => g.worker_id)
@@ -16821,7 +16832,7 @@ async function loadTodayTimeline() {
                   <div style="display:flex;flex-direction:column;justify-content:center;min-width:0;padding:6px 0">
                     <div><b>${jmenoSNemcinou(g.name||'—', g.worker_id)}</b>${puntikyHtml(g.worker_id)}</div>${cipySkupinekDiv(g.worker_id)}
                     <small style="color:var(--text3)">${escAttr(profLabel(g.profession)||'')}</small>
-                    ${groupLine}
+                    ${groupLine}${poznamkaRadekHtml(g.worker_id)}
                   </div>
                 </div></td>
               <td class="td-open" style="padding:10px;font-weight:700;color:${odch.prichod ? '#1d4ed8' : 'var(--green)'};cursor:pointer;font-size:15px">${fmt(g.check_in)}${
@@ -16837,12 +16848,13 @@ async function loadTodayTimeline() {
                   style="background:${g.otazka ? '#fde3bd' : 'none'};border:1px solid ${g.otazka ? '#e08a2e' : 'var(--brd)'};color:#c46f14;font-weight:800;border-radius:6px;padding:5px 9px;cursor:pointer;margin-right:4px;min-height:32px">?</button>
                 <button onclick="event.stopPropagation();pridatPuntik('${g.worker_id}', '${today}', '${safeName}')" title="Dát černý puntík"
                   style="background:none;border:1px solid var(--brd);border-radius:6px;padding:5px 8px;cursor:pointer;margin-right:4px;min-height:32px">⚫</button>
+                ${poznamkaTlacitko(g.worker_id, today, safeName)}
                 <button onclick="deleteTodayRecord('${g.ids.join(',')}','${safeName}','${today}',this,'${g.worker_id||''}',${parseInt(g.kw)||0},${parseInt(g.kw_year)||0})" title="${jeDnes ? 'Smazat dnešní docházku' : 'Smazat docházku za tento den'}" style="background:none;border:1px solid var(--brd);border-radius:6px;padding:5px 9px;cursor:pointer;color:var(--red);font-family:inherit"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:1em;height:1em;flex-shrink:0;vertical-align:-2px"><path d="M3 6h18M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6M14 11v6"/></svg> </button>
               </td>
             </tr>`
         }).join('')
 
-  const dnesHtml = todayBubblesHtml(rows) + `
+  const dnesHtml = todayBubblesHtml(rows) + poznPas + `
     <div style="overflow-x:auto">
     <table style="width:100%;border-collapse:collapse;font-size:13px;min-width:1080px">
       <thead>
@@ -50550,6 +50562,259 @@ async function prepniOtazku(ids, zapnout, btn) {
     await loadTodayTimeline()
   } catch (e) { console.warn('[otazník]', e); showToast('❌ Otazník se nepodařilo uložit'); if (btn) btn.disabled = false }
 }
+// =====================================================================
+// POZNÁMKY K DNI (12. 11. 2026)
+// U člověka v dnešním přehledu jde napsat poznámku k jednomu dni („nemá telefon —
+// rozbitý", „přesouvá se na stavbu"). Platí jen na ten den, v historii zůstává
+// (v kartě pracovníka u docházky). Vidí je správci a Monika ze Stavbyplánu
+// (přes odkaz); pracovník ani odběratel ne. Víc poznámek na den, každá se jménem
+// autora a časem; upravit smí jen autor, smazat autor i kterýkoli správce.
+// Tabulka poznamky_dne (supabase-migrace-poznamky-dne.sql); bez ní appka jen napíše,
+// že poznámky zatím nejdou.
+// =====================================================================
+const POZNAMKA_DNE_MAX = 1000
+const POZNAMKY_SLOUPCE = 'id, worker_id, den, text, autor_id, autor_jmeno, zdroj, vytvoreno, upraveno'
+let _poznDen = { den: null, mapa: {}, chybi: false }   // naposledy načtený den v přehledu: { worker_id: [poznámky] }
+async function nactiPoznamkyDne(den) {
+  try {
+    const { data, error } = await sb.from('poznamky_dne').select(POZNAMKY_SLOUPCE)
+      .eq('den', den).order('vytvoreno', { ascending: true }).limit(1000)
+    if (error) return { mapa: {}, chybi: jeChybiPuntiky(error), chyba: error }
+    const mapa = {}
+    ;(data || []).forEach(p => { (mapa[String(p.worker_id)] = mapa[String(p.worker_id)] || []).push(p) })
+    return { mapa, chybi: false, chyba: null }
+  } catch (e) { return { mapa: {}, chybi: false, chyba: e } }
+}
+function poznamkaCas(p) {
+  try {
+    const d = new Date(p.vytvoreno || p.created_at)
+    return isNaN(d.getTime()) ? '' : d.toLocaleString('cs-CZ', { day: 'numeric', month: 'numeric', hour: '2-digit', minute: '2-digit' })
+  } catch (e) { return '' }
+}
+function poznamkyDneProWorkera(workerId) {
+  return (_poznDen.mapa && _poznDen.mapa[String(workerId)]) || []
+}
+// Malý řádek pod jménem v přehledu: poslední poznámka dne (celé znění je v okně a v popisku).
+function poznamkaRadekHtml(workerId) {
+  const n = poznamkyDneProWorkera(workerId)
+  if (!n.length) return ''
+  const p = n[n.length - 1]
+  const vse = n.map(x => x.autor_jmeno + ': ' + x.text).join('\n')
+  return `<div title="${escAttr(vse)}" style="font-size:11px;color:#1d4ed8;max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin-top:2px">📝 ${n.length > 1 ? '(' + n.length + ') ' : ''}${escAttr(p.text)}</div>`
+}
+function poznamkaTlacitko(workerId, den, jmenoJs) {
+  const n = poznamkyDneProWorkera(workerId)
+  const titulek = n.length ? n.map(x => x.autor_jmeno + ': ' + x.text).join('\n') : 'Poznámka k tomuto dni — vidí ji jen správci a Monika'
+  return `<button onclick="event.stopPropagation();otevriPoznamkyDne('${workerId}', '${den}', '${jmenoJs}')" title="${escAttr(titulek)}"
+    style="background:${n.length ? '#e7f0ff' : 'none'};border:1px solid ${n.length ? '#6b93d6' : 'var(--brd)'};border-radius:6px;padding:5px 8px;cursor:pointer;margin-right:4px;min-height:32px">📝${n.length ? '<b style="font-size:11px;margin-left:3px;color:#1d4ed8">' + n.length + '</b>' : ''}</button>`
+}
+// Pás nad tabulkou: tlačítko pro poznámku komukoli + poznámky lidí, kteří dnes nemají záznam.
+async function poznamkyPasHtml(den, mapa, vTabulce, chybi) {
+  if (chybi) return `<div style="margin:0 0 12px;font-size:12px;color:var(--amber);font-weight:700">📝 Poznámky ke dni — spusťte migraci supabase-migrace-poznamky-dne.sql</div>`
+  const bez = Object.keys(mapa || {}).filter(id => !vTabulce.has(id))
+  const jmena = {}
+  if (bez.length) {
+    try {
+      const { data } = await sb.from('profiles').select('id, full_name').in('id', bez)
+      ;(data || []).forEach(x => { jmena[String(x.id)] = x.full_name })
+    } catch (e) { /* bez jmen se ukáže „člověk" */ }
+  }
+  const chips = bez.map(id => {
+    const n = mapa[id]
+    const jm = jmena[id] || 'člověk'
+    const vse = n.map(x => x.autor_jmeno + ': ' + x.text).join('\n')
+    return `<button onclick="otevriPoznamkyDne('${escAttr(id)}', '${den}', '${jsStr(jm)}')" title="${escAttr(vse)}"
+      style="background:#e7f0ff;border:1px solid #6b93d6;border-radius:8px;padding:5px 10px;cursor:pointer;font-family:inherit;font-size:12px;max-width:340px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-height:32px">📝 <b>${escAttr(jm)}</b> (bez záznamu): ${escAttr(n[n.length - 1].text)}</button>`
+  }).join('')
+  return `<div style="display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin:0 0 12px">
+    <button onclick="otevriPoznamkyDne(null, '${den}', '')" title="Poznámka k dni u kohokoli — i u člověka, který dnes nemá záznam"
+      style="background:none;border:1px solid var(--brd);border-radius:8px;padding:5px 10px;cursor:pointer;font-family:inherit;font-size:12px;font-weight:700;min-height:32px">📝 Poznámka k člověku</button>${chips}</div>`
+}
+function poznamkyZmena(workerId, den) {
+  if (typeof loadTodayTimeline === 'function' && den === denDochazky()) loadTodayTimeline()
+  if (typeof nactiPoznamkyKarta === 'function' && currentWorkerId && String(currentWorkerId) === String(workerId)) nactiPoznamkyKarta()
+}
+async function otevriPoznamkyDne(workerId, den, jmeno) {
+  document.getElementById('poznamka-overlay')?.remove()
+  let wid = workerId || null, jm = jmeno || '', denV = den || localDateStr(), upravuji = null
+  const ov = document.createElement('div')
+  ov.id = 'poznamka-overlay'
+  ov.style.cssText = 'position:fixed;inset:0;z-index:100000;background:rgba(20,17,15,.6);display:flex;align-items:flex-start;justify-content:center;overflow-y:auto;padding:20px'
+  ov.innerHTML = `
+    <div style="background:#fff;border-radius:16px;max-width:520px;width:100%;margin:auto;box-shadow:0 24px 80px rgba(0,0,0,.4);overflow:hidden">
+      <div style="background:#211D1A;padding:14px 18px;color:#fff">
+        <div style="font-size:16px;font-weight:800">📝 Poznámka k dni</div>
+        <div id="pozn-jmeno" style="font-size:12px;color:rgba(255,255,255,.7)">${escAttr(jm)}</div>
+      </div>
+      <div style="padding:16px 18px">
+        <div id="pozn-vyber" style="${wid ? 'display:none;' : ''}margin-bottom:12px">
+          <label style="display:block;font-size:12px;font-weight:700;color:#6b6157;margin-bottom:6px">Člověk</label>
+          <input id="pozn-hledej" type="text" placeholder="Hledat jméno…" autocomplete="off"
+            style="width:100%;min-height:40px;padding:8px 10px;border:1.5px solid var(--brd);border-radius:10px;font-family:inherit;margin-bottom:6px">
+          <select id="pozn-clovek" size="5" style="width:100%;padding:6px;border:1.5px solid var(--brd);border-radius:10px;font-family:inherit"></select>
+        </div>
+        <label style="display:block;font-size:12px;font-weight:700;color:#6b6157;margin-bottom:6px">Den</label>
+        <input id="pozn-den" type="date" value="${escAttr(denV)}"
+          style="width:100%;min-height:44px;padding:9px;border:1.5px solid var(--brd);border-radius:10px;font-family:inherit;margin-bottom:12px">
+        <div id="pozn-seznam" style="margin-bottom:12px"></div>
+        <label id="pozn-stitek" style="display:block;font-size:12px;font-weight:700;color:#6b6157;margin-bottom:6px">Nová poznámka (vidí ji jen správci a Monika, pracovník ne)</label>
+        <textarea id="pozn-text" maxlength="${POZNAMKA_DNE_MAX}" rows="4" placeholder="Např. nemá telefon — rozbitý; přesouvá se na stavbu…"
+          style="width:100%;padding:10px;border:1.5px solid var(--brd);border-radius:10px;font-family:inherit;font-size:14px;resize:vertical"></textarea>
+        <div style="display:flex;gap:10px;margin-top:14px">
+          <button id="pozn-zavri" style="flex:1;min-height:44px;border-radius:12px;border:2px solid var(--brd);background:#fff;font-weight:700;font-family:inherit;cursor:pointer">Zavřít</button>
+          <button id="pozn-uloz" style="flex:1;min-height:44px;border-radius:12px;border:none;background:#211D1A;color:#E8A13A;font-weight:800;font-family:inherit;cursor:pointer">Uložit poznámku</button>
+        </div>
+      </div>
+    </div>`
+  document.body.appendChild(ov)
+  const q = (id) => ov.querySelector('#' + id)
+  const zavri = () => ov.remove()
+  q('pozn-zavri').onclick = zavri
+  ov.onclick = (e) => { if (e.target === ov) zavri() }
+  const jeMoje = (p) => p.zdroj === 'spravce' && p.autor_id && currentUser && String(p.autor_id) === String(currentUser.id)
+  let beh = 0
+
+  async function nactiSeznam() {
+    const el = q('pozn-seznam')
+    if (!wid) { el.innerHTML = ''; return }
+    const mojeBeh = ++beh
+    el.innerHTML = '<div style="font-size:12px;color:var(--text3)">Načítám…</div>'
+    const { data, error } = await sb.from('poznamky_dne').select(POZNAMKY_SLOUPCE)
+      .eq('worker_id', wid).eq('den', denV).order('vytvoreno', { ascending: true })
+    if (mojeBeh !== beh) return
+    if (error) {
+      el.innerHTML = `<div style="font-size:12px;color:var(--amber);font-weight:700">${jeChybiPuntiky(error) ? 'Poznámky zatím nejdou — spusťte migraci supabase-migrace-poznamky-dne.sql' : 'Poznámky se nepodařilo načíst: ' + escAttr(error.message || '')}</div>`
+      return
+    }
+    const seznam = data || []
+    el.innerHTML = seznam.length ? seznam.map(p => `
+      <div style="border:1px solid var(--brd);border-radius:10px;padding:9px 11px;margin-bottom:8px;background:${p.zdroj === 'stavbyplan' ? '#f1f6ff' : '#fbf8f3'}">
+        <div style="display:flex;justify-content:space-between;gap:8px;font-size:11px;color:var(--text3);margin-bottom:3px">
+          <span><b style="color:var(--text2)">${escAttr(p.autor_jmeno)}</b>${p.zdroj === 'stavbyplan' ? ' · Stavbyplán' : ''}</span>
+          <span>${escAttr(poznamkaCas(p))}${p.upraveno && p.vytvoreno && new Date(p.upraveno) - new Date(p.vytvoreno) > 60000 ? ' · upraveno' : ''}</span>
+        </div>
+        <div style="white-space:pre-wrap;word-break:break-word;font-size:14px">${escAttr(p.text)}</div>
+        <div style="margin-top:6px;display:flex;gap:6px">
+          ${jeMoje(p) ? `<button data-uprav="${escAttr(p.id)}" style="border:1px solid var(--brd);background:#fff;border-radius:6px;padding:3px 9px;font-size:12px;cursor:pointer;font-family:inherit">Upravit</button>` : ''}
+          <button data-smaz="${escAttr(p.id)}" style="border:1px solid var(--brd);background:#fff;color:var(--red);border-radius:6px;padding:3px 9px;font-size:12px;cursor:pointer;font-family:inherit">Smazat</button>
+        </div>
+      </div>`).join('') : '<div style="font-size:12px;color:var(--text3)">K tomuto dni zatím není žádná poznámka.</div>'
+    el.querySelectorAll('[data-uprav]').forEach(b => b.onclick = () => {
+      const p = seznam.find(x => String(x.id) === b.getAttribute('data-uprav'))
+      if (!p) return
+      upravuji = p.id
+      q('pozn-text').value = p.text
+      q('pozn-stitek').textContent = 'Úprava vaší poznámky'
+      q('pozn-uloz').textContent = 'Uložit změnu'
+      q('pozn-text').focus()
+    })
+    el.querySelectorAll('[data-smaz]').forEach(b => b.onclick = async () => {
+      const p = seznam.find(x => String(x.id) === b.getAttribute('data-smaz'))
+      if (!p) return
+      if (!confirm('Smazat poznámku od ' + p.autor_jmeno + '?\n\n„' + String(p.text).slice(0, 200) + '“')) return
+      b.disabled = true
+      const { data: smaz, error: chyba } = await sb.from('poznamky_dne').delete().eq('id', p.id).select('id')
+      if (chyba || !smaz || !smaz.length) { showToast('❌ Poznámka se nesmazala' + (chyba ? ': ' + chyba.message : ' — zkontrolujte oprávnění')); b.disabled = false; return }
+      if (upravuji === p.id) { upravuji = null; q('pozn-text').value = ''; q('pozn-uloz').textContent = 'Uložit poznámku'; q('pozn-stitek').textContent = 'Nová poznámka (vidí ji jen správci a Monika, pracovník ne)' }
+      showToast('🗑 Poznámka smazána')
+      await nactiSeznam(); poznamkyZmena(wid, denV)
+    })
+  }
+
+  if (!wid) {
+    // Výběr člověka: aktivní pracovníci, hledání podle jména.
+    let lide = []
+    try {
+      const { data } = await sb.from('profiles').select('id, full_name').in('role', ['osvec', 'partak']).eq('is_active', true).order('full_name')
+      lide = data || []
+    } catch (e) { /* prázdný seznam */ }
+    const sel = q('pozn-clovek')
+    const plnit = () => {
+      const f = (q('pozn-hledej').value || '').trim().toLocaleLowerCase('cs')
+      sel.innerHTML = lide.filter(l => !f || String(l.full_name || '').toLocaleLowerCase('cs').includes(f))
+        .map(l => `<option value="${escAttr(l.id)}">${escAttr(l.full_name || '—')}</option>`).join('')
+    }
+    plnit()
+    q('pozn-hledej').oninput = plnit
+    sel.onchange = () => {
+      wid = sel.value || null
+      jm = sel.options[sel.selectedIndex] ? sel.options[sel.selectedIndex].textContent : ''
+      q('pozn-jmeno').textContent = jm
+      upravuji = null; q('pozn-uloz').textContent = 'Uložit poznámku'
+      nactiSeznam()
+    }
+    setTimeout(() => { try { q('pozn-hledej').focus() } catch (e) {} }, 60)
+  } else {
+    setTimeout(() => { try { q('pozn-text').focus() } catch (e) {} }, 60)
+  }
+  q('pozn-den').onchange = () => { denV = q('pozn-den').value || localDateStr(); upravuji = null; q('pozn-text').value = ''; q('pozn-uloz').textContent = 'Uložit poznámku'; nactiSeznam() }
+
+  q('pozn-uloz').onclick = async () => {
+    if (!wid) { showToast('📝 Nejdřív vyberte člověka'); return }
+    const text = q('pozn-text').value.trim()
+    if (!text) { showToast('📝 Napište poznámku'); return }
+    if (text.length > POZNAMKA_DNE_MAX) { showToast('📝 Poznámka je příliš dlouhá (nejvýš ' + POZNAMKA_DNE_MAX + ' znaků)'); return }
+    const btn = q('pozn-uloz'); const puvodni = btn.textContent; btn.disabled = true; btn.textContent = 'Ukládám…'
+    try {
+      let res
+      if (upravuji) {
+        res = await sb.from('poznamky_dne').update({ text, upraveno: new Date().toISOString() }).eq('id', upravuji).select('id')
+      } else {
+        res = await sb.from('poznamky_dne').insert({ worker_id: wid, den: denV, text,
+          autor_id: currentUser?.id || null, autor_jmeno: (currentProfile?.full_name || currentUser?.email || 'Správce'), zdroj: 'spravce' }).select('id')
+      }
+      if (res.error || !res.data || !res.data.length) {
+        showToast(res.error && jeChybiPuntiky(res.error)
+          ? '❌ Poznámky zatím nejdou — spusťte migraci supabase-migrace-poznamky-dne.sql'
+          : '❌ Poznámka se neuložila' + (res.error ? ': ' + res.error.message : ' — zkontrolujte oprávnění'))
+        return
+      }
+      showToast('📝 Poznámka uložena')
+      upravuji = null; q('pozn-text').value = ''; q('pozn-stitek').textContent = 'Nová poznámka (vidí ji jen správci a Monika, pracovník ne)'
+      btn.textContent = 'Uložit poznámku'
+      await nactiSeznam(); poznamkyZmena(wid, denV)
+    } finally { btn.disabled = false; if (btn.textContent === 'Ukládám…') btn.textContent = puvodni }
+  }
+  q('pozn-text').addEventListener('keydown', (e) => { if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') q('pozn-uloz').click() })
+  if (wid) nactiSeznam()
+}
+
+// V kartě pracovníka (záložka docházka): poznámky k dnům vybraného týdne.
+async function nactiPoznamkyKarta() {
+  const el = document.getElementById('wd-poznamky')
+  if (!el || !currentWorkerId) return
+  const wid = currentWorkerId
+  const sel = document.getElementById('wd-kw-sel')
+  const m = sel && /^(\d+)-(\d+)$/.exec(sel.value || '')
+  if (!m) { el.innerHTML = ''; return }
+  const start = getWeekStartDate(Number(m[1]), Number(m[2]))
+  const dny = [0, 1, 2, 3, 4, 5, 6].map(i => { const d = new Date(start); d.setDate(start.getDate() + i); return localDateStr(d) })
+  const { data, error } = await sb.from('poznamky_dne').select(POZNAMKY_SLOUPCE)
+    .eq('worker_id', wid).gte('den', dny[0]).lte('den', dny[6]).order('den', { ascending: true }).order('vytvoreno', { ascending: true })
+  if (wid !== currentWorkerId) return   // mezitím se otevřel jiný pracovník
+  if (error) {
+    el.innerHTML = jeChybiPuntiky(error)
+      ? `<div style="margin-bottom:12px;font-size:12px;color:var(--amber);font-weight:700">📝 Poznámky ke dni — spusťte migraci supabase-migrace-poznamky-dne.sql</div>` : ''
+    return
+  }
+  const seznam = data || []
+  const jmeno = jsStr(currentWorkerProfile?.full_name || '')
+  const nazvyDnu = ['Po', 'Út', 'St', 'Čt', 'Pá', 'So', 'Ne']
+  el.innerHTML = `<div style="margin-bottom:12px;padding:12px 14px;border:1.5px solid ${seznam.length ? '#6b93d6' : 'var(--brd)'};border-radius:12px;background:${seznam.length ? '#f1f6ff' : '#fff'}">
+    <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+      <b style="font-size:14px">📝 Poznámky k dnům: ${seznam.length}</b>
+      <span style="font-size:12px;color:var(--text3)">vidí je správci a Monika, pracovník ne</span>
+      <button onclick="otevriPoznamkyDne('${escAttr(wid)}', '${localDateStr()}', '${jmeno}')" style="margin-left:auto;border:1px solid var(--brd);background:#fff;border-radius:8px;padding:5px 10px;font-size:12px;font-weight:700;cursor:pointer;font-family:inherit">+ Poznámka</button>
+    </div>
+    ${seznam.map(p => {
+      const d = String(p.den).slice(0, 10)
+      const i = dny.indexOf(d)
+      return `<div onclick="otevriPoznamkyDne('${escAttr(wid)}', '${d}', '${jmeno}')" title="Otevřít poznámky tohoto dne" style="cursor:pointer;font-size:13px;padding:6px 0;border-top:1px dashed var(--brd);white-space:pre-wrap;word-break:break-word">
+        <span style="color:var(--text3)">${i >= 0 ? nazvyDnu[i] + ' ' : ''}${escAttr(datumCz(d))}</span> — <b>${escAttr(p.autor_jmeno)}</b>${p.zdroj === 'stavbyplan' ? ' <span style="font-size:10px;color:#1d4ed8">(Stavbyplán)</span>' : ''} <span style="font-size:11px;color:var(--text3)">${escAttr(poznamkaCas(p))}</span>: ${escAttr(p.text)}</div>`
+    }).join('')}
+  </div>`
+}
+
 async function pridatPuntik(workerId, den, jmeno) {
   if (!workerId) return
   const ov = document.createElement('div')
@@ -51479,6 +51744,7 @@ async function fialovaUpravyDen(div, dnesBeh) {
 async function loadWdAttendance() {
   if(!currentWorkerId) return
   nactiPuntikyKarta()
+  nactiPoznamkyKarta()
   const val = document.getElementById('wd-kw-sel').value
   const [week,year] = val.split('-').map(Number)
   const widAtt = currentWorkerId
