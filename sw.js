@@ -107,6 +107,17 @@ self.addEventListener('unhandledrejection', (ev) => {
     { stack: swStack(r && r.stack) });
 });
 
+// Kopie se hledá nejdřív v AKTUÁLNÍ paměti, až potom ve starších (globální caches.match
+// prohledává podle pořadí vzniku, takže by přednost dostala zapomenutá stará verze).
+async function najdiKopii(r) {
+  try {
+    const nova = await caches.open(CACHE);
+    const k = await nova.match(r);
+    if (k) return k;
+  } catch (e) { /* zkusí se globálně */ }
+  return caches.match(r);
+}
+
 self.addEventListener('fetch', (event) => {
   const req = event.request;
   // Jen GET požadavky; POST/PUT (Supabase) necháme projít přímo na síť
@@ -150,11 +161,13 @@ self.addEventListener('fetch', (event) => {
     // na slabém signálu visela bez limitu, i když ji telefon měl v paměti (Codex 6. 11. 2026).
     // Dostává stejný limit jako otevření appky.
     if (req.mode === 'navigate' || url.pathname === '/supabase.js') {
-      const kopie = await caches.match(req)
+      // Otevření s jiným parametrem v adrese: přesná kopie není, ale hlavní stránka ano.
+      const kopie = (await najdiKopii(req)) || (req.mode === 'navigate' ? await najdiKopii('/') : null)
       if (kopie) {
         const limit = new Promise(ok => setTimeout(() => ok(null), LIMIT_SITE))
         const vitez = await Promise.race([ulozit.catch(() => null), limit])
-        if (vitez) return vitez
+        // Chybová odpověď serveru (5xx) nevyhrává nad funkční uloženou kopií.
+        if (vitez && vitez.status < 500) return vitez
         event.waitUntil(ulozit.catch(() => {}))
         return kopie
       }
@@ -167,14 +180,18 @@ self.addEventListener('fetch', (event) => {
       // Taková kopie zůstala v prohlížeči a při každém dalším spuštění se z ní
       // servírovala rozdrolená appka: holý nadpis, žádné styly, žádná pole.
       // Nepomohlo ani zavření okna, protože to nedrží stránka, ale prohlížeč.
+      if (fresh && fresh.status >= 500) {
+        const zaloha = await najdiKopii(req);
+        if (zaloha) return zaloha;
+      }
       return fresh;
     } catch (e) {
       // Offline → zkus cache
-      const cached = await caches.match(req);
+      const cached = await najdiKopii(req);
       if (cached) return cached;
       // Pro navigaci (otevření appky) offline vrať aspoň hlavní stránku z cache
       if (req.mode === 'navigate') {
-        const fallback = await caches.match('/');
+        const fallback = await najdiKopii('/');
         if (fallback) return fallback;
       }
       throw e;
