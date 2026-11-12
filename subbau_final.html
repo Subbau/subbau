@@ -11631,6 +11631,7 @@ function uvolniZalohuHistorieSazby(zl) {
 async function obnovHistoriiSazby(workerId, druh, zl) {
   const Z = zl && zl.zaloha
   if (!Z) return
+  if (!Z.rows) { uvolniZalohuHistorieSazby(zl); return }   // záloha se nenačetla — není co vracet
   try {
     const { data: ted, error: e1 } = await sb.from('worker_rate_history').select('id').eq('worker_id', workerId).eq('druh', druh)
     if (e1) throw e1
@@ -11663,10 +11664,12 @@ async function ulozSazbuSHistoriiVnitrni(workerId, druh, puvodni, nova, odKdy, o
   const zaneprazdneno = () => _zalohyHistorieSazby[kz0] && Date.now() - _zalohyHistorieSazby[kz0].od <= 120000
   const odmitni = () => { showToast('⚠️ Předchozí změna téhle sazby se ještě ukládá — zkuste to za chvíli.'); return false }
   if (zaneprazdneno()) return odmitni()
+  // Místo se zabere HNED (před čekáním na dotaz), ať druhá operace nepřijme zastaralou historii.
+  zl.zaloha = { kz: kz0, rows: null, od: Date.now() }
+  _zalohyHistorieSazby[kz0] = zl.zaloha
   try {
     const { data: zaloha, error: chybaZalohy } = await sb.from('worker_rate_history').select('*').eq('worker_id', workerId).eq('druh', druh)
-    if (zaneprazdneno()) return odmitni()   // mezitím začala jiná operace
-    if (!chybaZalohy && zaloha) { zl.zaloha = { kz: kz0, rows: zaloha, od: Date.now() }; _zalohyHistorieSazby[kz0] = zl.zaloha }
+    if (!chybaZalohy && zaloha) zl.zaloha.rows = zaloha
   } catch (e) { console.warn('[sazby] zálohu historie se nepodařilo načíst:', e && e.message) }
   // Chybějící tabulka (neproběhlá migrace) = není co mazat ani hlídat. Jméno
   // tabulky v hlášce nestačí — obsahuje ho i odmítnutí právy — a „schema cache"
@@ -52557,7 +52560,8 @@ async function saveWorkerProfile() {
 
   const zaklad = {
     full_name: fullName,
-    hourly_rate_worker: sazbaKUlozeni,
+    // Nezměněná sazba se nezapisuje — jinak by karta mohla přepsat novou sazbu uloženou mezitím z Provizí.
+    ...(String(sazbaKUlozeni ?? '') === String(puvSazba ?? '') ? {} : { hourly_rate_worker: sazbaKUlozeni }),
     cooperation_start: coopStart || null,
     cooperation_end: coopEnd || null,
     email: email,
