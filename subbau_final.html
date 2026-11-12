@@ -49983,7 +49983,15 @@ function openUploadForWorker() {
   adminDocTypeChange()   // nastaví povinnost pole "Platnost do" podle typu dokladu
 }
 
+// Adresy náhledů se uvolňují při výměně náhledu i zavření dialogu (jinak drží soubory v paměti).
+const _adminNahledUrl = { 1: null, 2: null }
+function adminNahled(strana, soubor) {
+  try { if (_adminNahledUrl[strana]) URL.revokeObjectURL(_adminNahledUrl[strana]) } catch (e) {}
+  _adminNahledUrl[strana] = soubor ? URL.createObjectURL(soubor) : null
+  return _adminNahledUrl[strana]
+}
 function closeUploadForWorker() {
+  adminNahled(1, null); adminNahled(2, null)
   const ov = document.getElementById('upload-for-worker-overlay')
   if (ov) ov.remove()
   uploadingForWorkerId = null
@@ -50130,7 +50138,7 @@ function adminFileSelect(input, side) {
     const prev2 = document.getElementById('admin-upload-preview2')
     if (prev2 && vybrane[0] && vybrane[0].type.startsWith('image/')) {
       const img = prev2.querySelector('img')
-      img.src = URL.createObjectURL(vybrane[0])
+      img.src = adminNahled(2, vybrane[0])
       prev2.style.display = 'block'
     }
     return
@@ -50144,14 +50152,25 @@ function adminFileSelect(input, side) {
   const prev = document.getElementById('admin-upload-preview1')
   if (prev && file.type.startsWith('image/')) {
     const img = prev.querySelector('img')
-    img.src = URL.createObjectURL(file)
+    img.src = adminNahled(1, file)
     prev.style.display = 'block'
   }
 }
 
+// Zámek proti dvojímu klepnutí: každé spuštění by jinak vytvořilo další cestu a další záznam.
+let _adminUploadBezi = false
 async function uploadDocumentForWorker() {
+  if (_adminUploadBezi) return
+  _adminUploadBezi = true
+  try { await _uploadDocumentForWorkerCore() } finally { _adminUploadBezi = false }
+}
+async function _uploadDocumentForWorkerCore() {
   if (!uploadingForWorkerId) { showToast('Chyba: zadny pracovnik'); return }
   if (!adminUploadFile1) { showToast('Vyberte soubor'); return }
+  // Snímek celé operace: zavření dialogu nebo otevření dalšího mění globální proměnné, tohle ne.
+  const wid = uploadingForWorkerId, soubor1 = adminUploadFile1, soubory2 = adminUploadFiles2.slice()
+  const dialog = document.getElementById('upload-for-worker-overlay')
+  const dialogPlati = () => uploadingForWorkerId === wid && document.getElementById('upload-for-worker-overlay') === dialog
   const st = document.getElementById('admin-upload-status')
 
   const docType = document.getElementById('admin-upload-doc-type')?.value || 'other'
@@ -50171,22 +50190,22 @@ async function uploadDocumentForWorker() {
   if (st) { st.style.display='block'; st.style.background='#e8f5e9'; st.style.color='#2e7d32'; st.textContent='Nahravam...' }
 
   const MULTI = MULTISIDE_TYPES
-  const safeName1 = adminUploadFile1.name.normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/[^a-zA-Z0-9._-]/g,'_').toLowerCase()
-  const fp1 = uploadingForWorkerId + '/' + Date.now() + '_' + safeName1
+  const safeName1 = soubor1.name.normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/[^a-zA-Z0-9._-]/g,'_').toLowerCase()
+  const fp1 = wid + '/' + Date.now() + '_' + safeName1
 
-  const { error: e1 } = await sb.storage.from('documents').upload(fp1, adminUploadFile1, {upsert:true})
+  const { error: e1 } = await sb.storage.from('documents').upload(fp1, soubor1, {upsert:true})
   if (e1) {
     if(st){st.style.background='#ffebee';st.style.color='#c62828';st.textContent='Chyba: '+e1.message}
     // DENÍK CHYB (2. 11. 2026): u správce šla chyba nahrání dokladu jen do panelu, bez hlášky — nezůstalo nic.
-    try { if (typeof denikChybZapis === 'function') denikChybZapis('nahravani-dokumentu-admin', 'Doklad se nenahrál do úložiště: ' + e1.message, { faze: 'uloziste', docType, workerId: uploadingForWorkerId, kod: e1.code, stav: e1.status || e1.statusCode }, { pohltit: true }) } catch (x) { console.warn('[deník chyb]', x) } // eslint-disable-line no-undef
+    try { if (typeof denikChybZapis === 'function') denikChybZapis('nahravani-dokumentu-admin', 'Doklad se nenahrál do úložiště: ' + e1.message, { faze: 'uloziste', docType, workerId: wid, kod: e1.code, stav: e1.status || e1.statusCode }, { pohltit: true }) } catch (x) { console.warn('[deník chyb]', x) } // eslint-disable-line no-undef
     return
   }
 
   const { data: url1 } = sb.storage.from('documents').getPublicUrl(fp1)
   const { error: db1 } = await sb.from('documents').insert({
-    worker_id: uploadingForWorkerId,
+    worker_id: wid,
     doc_type: docType,
-    file_name: adminUploadFile1.name + ' (strana 1)',
+    file_name: soubor1.name + ' (strana 1)',
     file_path: fp1,
     file_url: url1?.publicUrl,
     valid_until: validUntilA,
@@ -50200,8 +50219,8 @@ async function uploadDocumentForWorker() {
   // uložíme aspoň bez něj, ať se nahrávání nezastaví, a řekneme to.
   if (chybaDb1 && /no_expiry/i.test(chybaDb1.message || '')) {
     const { error: db1b } = await sb.from('documents').insert({
-      worker_id: uploadingForWorkerId, doc_type: docType,
-      file_name: adminUploadFile1.name + ' (strana 1)',
+      worker_id: wid, doc_type: docType,
+      file_name: soubor1.name + ' (strana 1)',
       file_path: fp1, file_url: url1?.publicUrl, valid_until: null,
       status: 'ok', uploaded_by: currentUser?.id, uploaded_at: new Date().toISOString()
     })
@@ -50209,42 +50228,70 @@ async function uploadDocumentForWorker() {
     if (!db1b) showToast('⚠️ Doklad uložen, ale „platnost neřeším" se nezapamatovalo — spusťte migraci supabase-migrace-doklad-bez-expirace.sql')
   }
   if (chybaDb1) {
+    // Soubor už je v úložišti, ale doklad se nezapsal — ať tam nezůstane osiřelý.
+    try { await sb.storage.from('documents').remove([fp1]) } catch (e) { console.warn('[doklad] osiřelý soubor se neodstranil:', e && e.message) }
     if(st){st.style.background='#ffebee';st.style.color='#c62828';st.textContent=docSaveErrorText(chybaDb1)}
     // DENÍK CHYB (2. 11. 2026): soubor je v úložišti, ale doklad se do databáze nezapsal — pracovník ho neuvidí.
-    try { if (typeof denikChybZapis === 'function') denikChybZapis('nahravani-dokumentu-admin', 'Doklad se nezapsal do databáze (' + kodChybyProDenik(chybaDb1) + ')', { faze: 'databaze', docType, workerId: uploadingForWorkerId, kod: chybaDb1.code, stav: chybaDb1.status }, { pohltit: true }) } catch (x) { console.warn('[deník chyb]', x) } // eslint-disable-line no-undef
+    try { if (typeof denikChybZapis === 'function') denikChybZapis('nahravani-dokumentu-admin', 'Doklad se nezapsal do databáze (' + kodChybyProDenik(chybaDb1) + ')', { faze: 'databaze', docType, workerId: wid, kod: chybaDb1.code, stav: chybaDb1.status }, { pohltit: true }) } catch (x) { console.warn('[deník chyb]', x) } // eslint-disable-line no-undef
     return
   }
 
   // Další listy dokladu (2. až 5.). Doklad jako A1 má víc stránek a dřív se
   // dala přidat jen jedna — zbytek se musel nahrávat jako samostatné dokumenty.
-  if (adminUploadFiles2.length && MULTI.includes(docType)) {
-    for (let i = 0; i < adminUploadFiles2.length; i++) {
-      const soubor = adminUploadFiles2[i]
+  const nenahraneListy = []
+  if (soubory2.length && MULTI.includes(docType)) {
+    for (let i = 0; i < soubory2.length; i++) {
+      const soubor = soubory2[i]
       const cisloListu = i + 2
       const safeName2 = soubor.name.normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/[^a-zA-Z0-9._-]/g,'_').toLowerCase()
-      const fp2 = uploadingForWorkerId + '/' + (Date.now() + cisloListu) + '_' + safeName2
+      const fp2 = wid + '/' + (Date.now() + cisloListu) + '_' + safeName2
       const { error: e2 } = await sb.storage.from('documents').upload(fp2, soubor, {upsert:true})
-      if (e2) { showToast('⚠️ ' + cisloListu + '. list se nenahrál: ' + e2.message); continue }
+      if (e2) { showToast('⚠️ ' + cisloListu + '. list se nenahrál: ' + e2.message); nenahraneListy.push(cisloListu); continue }
       const { data: url2 } = sb.storage.from('documents').getPublicUrl(fp2)
-      const { error: dbN } = await sb.from('documents').insert({
-        worker_id: uploadingForWorkerId, doc_type: docType,
+      let { error: dbN } = await sb.from('documents').insert({
+        worker_id: wid, doc_type: docType,
         file_name: soubor.name + ' (strana ' + cisloListu + ')',
         file_path: fp2, file_url: url2?.publicUrl,
         valid_until: validUntilA,
         ...(bezPlatnosti ? { no_expiry: true } : {}),
         status: 'ok', uploaded_by: currentUser?.id, uploaded_at: new Date().toISOString()
       })
-      if (dbN) showToast('⚠️ ' + cisloListu + '. list se neuložil: ' + dbN.message)
+      // Sloupec no_expiry nemusí v databázi být — stejný záložní zápis jako u prvního listu.
+      if (dbN && /no_expiry/i.test(dbN.message || '')) {
+        ;({ error: dbN } = await sb.from('documents').insert({
+          worker_id: wid, doc_type: docType, file_name: soubor.name + ' (strana ' + cisloListu + ')',
+          file_path: fp2, file_url: url2?.publicUrl, valid_until: null,
+          status: 'ok', uploaded_by: currentUser?.id, uploaded_at: new Date().toISOString()
+        }))
+      }
+      if (dbN) {
+        showToast('⚠️ ' + cisloListu + '. list se neuložil: ' + dbN.message)
+        nenahraneListy.push(cisloListu)
+        try { await sb.storage.from('documents').remove([fp2]) } catch (e) { console.warn('[doklad] osiřelý soubor se neodstranil:', e && e.message) }
+      }
     }
   }
 
+  const neuplne = nenahraneListy.length > 0
+  if (!dialogPlati()) {
+    // Dialog se mezitím zavřel nebo otevřel pro jiného člověka — jeho stav se nesahá.
+    if (neuplne) showToast('⚠️ Doklad se uložil neúplně — nenahrané listy: ' + nenahraneListy.join(', '))
+    if (currentWorkerId === wid) loadWdDocs(wid)
+    return
+  }
   adminUploadFiles2 = []
   adminUploadFile2 = null
   const l2h = document.getElementById('admin-upload-list2'); if (l2h) l2h.innerHTML = ''
   const f2h = document.getElementById('admin-upload-file2'); if (f2h) f2h.value = ''
   adminOsvezPocetListu()
+  if (neuplne) {
+    // Neúplné nahrání se nesmí tvářit jako úspěch a dialog se nezavírá samo.
+    if (st) { st.style.background = '#fff3e0'; st.style.color = '#b45309'; st.textContent = 'Doklad se uložil neúplně — nenahrané listy: ' + nenahraneListy.join(', ') + '. Ty nahrajte znovu zvlášť.' }
+    loadWdDocs(wid)
+    return
+  }
   if(st){st.textContent='Dokument nahran!'}
-  setTimeout(() => { closeUploadForWorker(); loadWdDocs(uploadingForWorkerId || currentWorkerId) }, 1200)
+  setTimeout(() => { if (dialogPlati()) closeUploadForWorker(); loadWdDocs(wid) }, 1200)
 }
 
 // Správce nastaví za pracovníka „nemá řidičské oprávnění“ (stejný sloupec jako
