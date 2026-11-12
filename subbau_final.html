@@ -11459,14 +11459,14 @@ function provizeSetMode(mode) { provizeMode = mode; renderProvizeContent() }
 function provizePrev() {
   if (provizeMode === 'day') provizeAnchor.setDate(provizeAnchor.getDate() - 1)
   else if (provizeMode === 'week') provizeAnchor.setDate(provizeAnchor.getDate() - 7)
-  else provizeAnchor.setMonth(provizeAnchor.getMonth() - 1)
+  else { provizeAnchor.setDate(1); provizeAnchor.setMonth(provizeAnchor.getMonth() - 1) }
   provizeAnchor = new Date(provizeAnchor)
   renderProvizeContent()
 }
 function provizeNext() {
   if (provizeMode === 'day') provizeAnchor.setDate(provizeAnchor.getDate() + 1)
   else if (provizeMode === 'week') provizeAnchor.setDate(provizeAnchor.getDate() + 7)
-  else provizeAnchor.setMonth(provizeAnchor.getMonth() + 1)
+  else { provizeAnchor.setDate(1); provizeAnchor.setMonth(provizeAnchor.getMonth() + 1) }
   provizeAnchor = new Date(provizeAnchor)
   renderProvizeContent()
 }
@@ -11603,8 +11603,39 @@ const jeBudouci = den => /^\d{4}-\d{2}-\d{2}$/.test(String(den || '')) && String
 // Uloží novou hodnotu a podle odpovědi k ní doplní historii.
 // Vrací true, když se uložilo. S datem v budoucnu je to naplánovaná změna —
 // volající pak NESMÍ přepsat dnešní hodnotu v profilu.
+// Záloha historie před úpravou: když se po ní nepodaří zapsat samotná hodnota
+// (profil / provize), volající historii vrátí zpět obnovHistoriiSazby —
+// jinak by zpětný přepočet nechal smazané hranice a minulé částky by se změnily.
+let _zalohaHistorieSazby = null
+async function obnovHistoriiSazby(workerId, druh) {
+  const Z = _zalohaHistorieSazby
+  _zalohaHistorieSazby = null
+  if (!Z || Z.workerId !== workerId || Z.druh !== druh) return
+  try {
+    const { data: ted, error: e1 } = await sb.from('worker_rate_history').select('id').eq('worker_id', workerId).eq('druh', druh)
+    if (e1) throw e1
+    const mela = new Set(Z.rows.map(r => r.id))
+    const navic = (ted || []).map(r => r.id).filter(id => !mela.has(id))
+    if (Z.rows.length) {
+      const { error: e2 } = await sb.from('worker_rate_history').upsert(Z.rows, { onConflict: 'id' })
+      if (e2) throw e2
+    }
+    if (navic.length) {
+      const { error: e3 } = await sb.from('worker_rate_history').delete().in('id', navic)
+      if (e3) throw e3
+    }
+  } catch (e) {
+    console.warn('[sazby] historii se nepodařilo vrátit zpět:', e && e.message)
+    showToast('⚠️ Historie sazby se po chybě nepodařilo vrátit — zkontrolujte ji a uložte sazbu znovu')
+  }
+}
 async function ulozSazbuSHistorii(workerId, druh, puvodni, nova, odKdy, opts) {
   const dnes = localDateStr()
+  _zalohaHistorieSazby = null
+  try {
+    const { data: zaloha, error: chybaZalohy } = await sb.from('worker_rate_history').select('*').eq('worker_id', workerId).eq('druh', druh)
+    if (!chybaZalohy && zaloha) _zalohaHistorieSazby = { workerId, druh, rows: zaloha }
+  } catch (e) { _zalohaHistorieSazby = null }
   // Chybějící tabulka (neproběhlá migrace) = není co mazat ani hlídat. Jméno
   // tabulky v hlášce nestačí — obsahuje ho i odmítnutí právy — a „schema cache"
   // hlásí i dočasně nedostupný server (PGRST002), proto jen tyhle kódy.
@@ -11729,7 +11760,14 @@ async function ulozSazbuSHistorii(workerId, druh, puvodni, nova, odKdy, opts) {
 // řádek zapsaný PŘEDEM (created_at před valid_from) — běžná změna sazby se
 // ukládá do profilu hned sama a tady se jí nic nedělá. Jednou denně za záložku.
 let _sazbySrovnanoDne = ''
+let _srovnavamSazby = false
 async function srovnejNaplanovaneSazby() {
+  // Zámek proti souběžnému běhu (dvě dobíhající načtení by zapisovala totéž).
+  if (_srovnavamSazby) return
+  _srovnavamSazby = true
+  try { await srovnejNaplanovaneSazbyImpl() } finally { _srovnavamSazby = false }
+}
+async function srovnejNaplanovaneSazbyImpl() {
   const dnes = localDateStr()
   if (_sazbySrovnanoDne === dnes || !smiVidetProvize()) return
   // Po stránkách: databáze vrátí nejvýš 1000 řádků na dotaz a bez nejnovějších
@@ -11757,13 +11795,27 @@ async function srovnejNaplanovaneSazby() {
   const sazby = {}, provize = {}
   ;(pr.data || []).forEach(p => { sazby[p.id] = p.hourly_rate_worker })
   ;(wc.data || []).forEach(c => { provize[c.worker_id] = c.provize })
+  const maRadekProvize = new Set((wc.data || []).map(c => c.worker_id))
   let vse = true
   for (const r of nastaly) {
     const ted = r.druh === 'sazba' ? sazby[r.worker_id] : provize[r.worker_id]
     if (ted != null && ted !== '' && Number(ted) === Number(r.hodnota)) continue
-    const { error: e } = r.druh === 'sazba'
-      ? await sb.from('profiles').update({ hourly_rate_worker: Number(r.hodnota) }).eq('id', r.worker_id)
-      : await sb.from('worker_commissions').upsert({ worker_id: r.worker_id, provize: Number(r.hodnota), updated_at: new Date().toISOString() }, { onConflict: 'worker_id' })
+    // Zápis je podmíněný hodnotou, kterou jsme načetli — když mezitím správce
+    // uložil novou sazbu, dobíhající srovnání ji nesmí přepsat starším plánem.
+    const podm = q => (ted == null || ted === '') ? q.is(r.druh === 'sazba' ? 'hourly_rate_worker' : 'provize', null) : q.eq(r.druh === 'sazba' ? 'hourly_rate_worker' : 'provize', ted)
+    let e = null
+    if (r.druh === 'sazba') {
+      const o = await podm(sb.from('profiles').update({ hourly_rate_worker: Number(r.hodnota) }).eq('id', r.worker_id)).select('id')
+      e = o.error
+      if (!e && !(o.data || []).length) vse = false   // mezitím změněno — příště znovu s čerstvými daty
+    } else if (maRadekProvize.has(r.worker_id)) {
+      const o = await podm(sb.from('worker_commissions').update({ provize: Number(r.hodnota), updated_at: new Date().toISOString() }).eq('worker_id', r.worker_id)).select('worker_id')
+      e = o.error
+      if (!e && !(o.data || []).length) vse = false
+    } else {
+      const o = await sb.from('worker_commissions').upsert({ worker_id: r.worker_id, provize: Number(r.hodnota), updated_at: new Date().toISOString() }, { onConflict: 'worker_id', ignoreDuplicates: true })
+      e = o.error
+    }
     if (e) { vse = false; console.warn('[sazby] naplánovaná změna se do profilu nepropsala:', e.message) }
   }
   if (vse) _sazbySrovnanoDne = dnes
@@ -11833,7 +11885,7 @@ async function ulozPlanSazby() {
     if (btn) { btn.disabled = false; btn.textContent = 'Naplánovat' }
     return
   }
-  zavriPlanSazby()
+  if (_planSazby === P) zavriPlanSazby()
   showToast('📅 Naplánováno — od ' + datumCz(od) + ' ' + (druh === 'sazba' ? 'hodinovka' : 'provize') + ' ' + castka + ' €/h')
   prekresliProvize()
 }
@@ -11846,6 +11898,22 @@ async function zrusPlanSazby(workerId, druh) {
   prekresliProvize()
 }
 
+// Celá historie sazeb po stránkách (server vrací nejvýš 1000 řádků na dotaz —
+// bez nejnovějších změn by se počítalo starou sazbou). Stabilní řazení + id.
+// Vrací { data, error } jako běžný dotaz; filtr `druh` je volitelný.
+async function nactiVsechnyHistorieSazeb(sloupce, druh) {
+  const out = []
+  for (let od = 0; od < 500000; od += 1000) {
+    let q = sb.from('worker_rate_history').select(sloupce)
+    if (druh) q = q.eq('druh', druh)
+    const { data: kus, error } = await q.order('valid_from', { ascending: true }).order('id').range(od, od + 999)
+    if (error) return { data: null, error }
+    out.push(...(kus || []))
+    if (!kus || kus.length < 1000) break
+  }
+  return { data: out, error: null }
+}
+
 // Načte historii jednoho údaje u jednoho pracovníka a vrátí funkci
 // „jaká hodnota platila v tenhle den". Když historie není nebo se nenačte,
 // vrací se všude výchozí hodnota — tedy přesně stav, jaký byl před historií.
@@ -11853,12 +11921,12 @@ async function sazbyPracovnika(workerId, druh, vychozi) {
   let h = []
   const { data, error } = await sb.from('worker_rate_history')
     .select('hodnota, valid_from').eq('worker_id', workerId).eq('druh', druh)
-    .order('valid_from', { ascending: true })
+    .order('valid_from', { ascending: true }).order('id').limit(5000)
   if (error) {
     // Chybějící tabulka (neproběhlá migrace) = žádná historie, počítá se jako dřív.
     // Jiná chyba se ale NESMÍ tvářit jako „historie není" — všechny dny by se
     // spočítaly dnešní sazbou a faktura by vyšla jinak (audit 30. 9. 2026).
-    if (!/does not exist|schema cache|could not find the table|PGRST205|42P01/i.test((error.message || '') + ' ' + (error.code || ''))) throw error
+    if (!/does not exist|could not find the table|PGRST205|42P01/i.test((error.message || '') + ' ' + (error.code || ''))) throw error
   } else {
     h = (data || []).map(r => ({ od: String(r.valid_from).slice(0, 10), hodnota: Number(r.hodnota) || 0 }))
   }
@@ -11906,7 +11974,8 @@ async function rozpisTydne(workerId, radky, sazbaVPoli) {
   const { data: p, error } = await sb.from('profiles').select('hourly_rate_worker').eq('id', workerId).maybeSingle()
   if (error) throw error
   const zProfilu = parseFloat(p && p.hourly_rate_worker) || 0
-  if (zProfilu > 0 && Math.abs(sazbaVPoli - zProfilu) < 0.005) {
+  // Nula je platná zadaná sazba (sazbaJeZadana) — historie se načte i při ní.
+  if (sazbaJeZadana(p && p.hourly_rate_worker) && Math.abs(sazbaVPoli - zProfilu) < 0.005) {
     sazbaKDni = await sazbyPracovnika(workerId, 'sazba', sazbaVPoli)
   }
   return hodinyPodleSazeb(radky, sazbaKDni)
@@ -12129,7 +12198,8 @@ async function saveProvizeRate(input, workerId) {
     return
   }
   const { error } = await sb.from('profiles').update({ hourly_rate_worker: rate }).eq('id', workerId)
-  if (error) { showToast('❌ Chyba: ' + error.message); return }
+  if (error) { await obnovHistoriiSazby(workerId, 'sazba'); showToast('❌ Chyba: ' + error.message); return }
+  _zalohaHistorieSazby = null
   smazNuluVimOTom('sazba', workerId, rate)
   showToast(poprve ? '✅ Sazba nastavena'
     : odKdy === 'zpetne'
@@ -12151,7 +12221,7 @@ async function nactiVlastniProvizeZamestnancu() {
     if (error) {
       // Chybějící sloupec = migrace ještě neproběhla → nikdo ji nemá. Jiná chyba
       // (síť, práva) se nesmí tvářit jako „nikdo" — peníze by vyšly jinak.
-      if (/42703|PGRST204|column|schema cache/i.test((error.code || '') + ' ' + (error.message || ''))) return { set: new Set(), chybi: true }
+      if (/42703|PGRST204|column/i.test((error.code || '') + ' ' + (error.message || ''))) return { set: new Set(), chybi: true }
       return { chyba: error }
     }
     return { set: new Set((data || []).map(r => r.worker_id)), chybi: false }
@@ -12159,9 +12229,18 @@ async function nactiVlastniProvizeZamestnancu() {
 }
 // Čí provizní sazbou se počítají hodiny pracovníka. Bez šéfa jeho vlastní;
 // u zaměstnance jeho, má-li vlastní zapnutou a vyplněnou, jinak šéfova.
-function provizniSazbaOd(workerId, sefId, vlastni, provMap) {
+// Volitelně `den` + `hodnotaFn(id, den)` (hodnota z historie provize nebo null):
+// po vymazání dnešní vlastní provize zůstane zaměstnanci jeho původní sazba
+// u dnů, kdy ji historie ještě měla (jinak by se přepočítaly i minulé týdny).
+function provizniSazbaOd(workerId, sefId, vlastni, provMap, den, hodnotaFn) {
   if (!sefId) return workerId
-  return (vlastni && vlastni.has(workerId) && sazbaJeZadana(provMap[workerId])) ? workerId : sefId
+  if (!(vlastni && vlastni.has(workerId))) return sefId
+  if (sazbaJeZadana(provMap[workerId])) return workerId
+  if (den && hodnotaFn) {
+    const v = hodnotaFn(workerId, den)
+    if (v != null && Number(v) > 0) return workerId
+  }
+  return sefId
 }
 async function nastavVlastniProvizi(workerId, zapnout) {
   // Je to jen přepínač bez „od kdy" — projeví se hned ve VŠECH obdobích,
@@ -12219,7 +12298,8 @@ async function saveProvizeCommission(input, workerId) {
   }
   const { error } = await sb.from('worker_commissions')
     .upsert({ worker_id: workerId, provize, updated_at: new Date().toISOString() }, { onConflict: 'worker_id' })
-  if (error) { showToast('❌ Chyba: ' + error.message); return }
+  if (error) { await obnovHistoriiSazby(workerId, 'provize'); showToast('❌ Chyba: ' + error.message); return }
+  _zalohaHistorieSazby = null
   smazNuluVimOTom('provize', workerId, provize)
   showToast(odKdy === 'zpetne'
     ? '✅ Provize uložena a přepočítána zpětně'
@@ -12260,7 +12340,13 @@ async function oznacVsechnyUhrazeno(checkbox, firmIdx) {
   prekresliProvize()
 }
 
+// Přepínač je po dobu zápisu zamčený — rychlé zaškrtnutí a odškrtnutí by jinak
+// mohlo uložit opačný stav (zápisy se předběhnou).
 async function toggleProvizePaid(checkbox, workerId, mode, periodKey) {
+  checkbox.disabled = true
+  try { await toggleProvizePaidImpl(checkbox, workerId, mode, periodKey) } finally { checkbox.disabled = false }
+}
+async function toggleProvizePaidImpl(checkbox, workerId, mode, periodKey) {
   const tr = checkbox.closest('tr')
   const paid = checkbox.checked
   if (tr) tr.style.background = paid ? 'var(--green-l)' : ''
@@ -12316,6 +12402,10 @@ async function toggleProvizeFirma(checkbox, firmIdx) {
 }
 
 async function toggleBezProvize(checkbox, workerId) {
+  checkbox.disabled = true
+  try { await toggleBezProvizeImpl(checkbox, workerId) } finally { checkbox.disabled = false }
+}
+async function toggleBezProvizeImpl(checkbox, workerId) {
   const bez = checkbox.checked
   const tr = checkbox.closest('tr')
   if (tr) tr.style.opacity = bez ? '0.55' : ''
@@ -12487,10 +12577,14 @@ async function generateProvizeFirmReport(firmName, mode) {
     // skupiny (starší záznam) se bere jako „nevíme, nevylučuj" — o tom
     // rozhodne členství podle firmaObdobi níž.
     const denPatriFirme = (a) => {
-      if (!a.team_id) return true
-      const tym = teamById[a.team_id]
-      if (!tym) return true
-      return (companyNameById[tym.company_id] || null) === firmName
+      const tym = a.team_id ? teamById[a.team_id] : null
+      if (tym) return provizeFirmOf({ team_id: a.team_id }, teamById, companyNameById) === firmName
+      // Bez známé skupiny (starší záznam) — stejná náhradní firma jako firmaObdobi,
+      // ne „patří všem firmám“ (audit 11. 11. 2026).
+      const w = podleId[a.worker_id]
+      if (!w) return false
+      const sf = sefOf(a.worker_id)
+      return firmaObdobi(sf ? podleId[sf] : w) === firmName
     }
 
     // Zaměstnanec firmy (s.r.o.): provize za jeho hodiny se počítá sazbou FIRMY
@@ -12529,9 +12623,7 @@ async function generateProvizeFirmReport(firmName, mode) {
     // Jinak by vyúčtování pro firmu nesedělo s Provizemi, kde se to tak počítá.
     const histFirma = {}
     try {
-      const { data: hh, error: hhErr } = await sb.from('worker_rate_history')
-        .select('worker_id, hodnota, valid_from').eq('druh', 'provize')
-        .order('valid_from', { ascending: true })
+      const { data: hh, error: hhErr } = await nactiVsechnyHistorieSazeb('worker_id, hodnota, valid_from', 'provize')
       if (hhErr) throw hhErr
       ;(hh || []).forEach(h => {
         ;(histFirma[h.worker_id] = histFirma[h.worker_id] || []).push({
@@ -12545,6 +12637,13 @@ async function generateProvizeFirmReport(firmName, mode) {
         showToast('❌ Historii sazeb se nepodařilo načíst — report by měl špatné částky. Zkuste to prosím znovu.'); return
       }
       console.warn('[report firmy] historie sazeb (tabulka chybí):', e?.message)
+    }
+    const histFirmaKDni = (workerId, den) => {
+      const h = histFirma[workerId]
+      if (!h || !h.length) return null
+      let v = null
+      for (let i = 0; i < h.length; i++) { if (h[i].od <= den) v = h[i].hodnota; else break }
+      return v
     }
     const provKDni = (workerId, den) => {
       // „Bez provize" musí přebít i historii — jinak by se u člověka, kterému
@@ -12574,7 +12673,7 @@ async function generateProvizeFirmReport(firmName, mode) {
       provHoursByWorker[a.worker_id] = (provHoursByWorker[a.worker_id] || 0) + h
       // „Bez provize" řídí ten, kdo platí (šéf); sazba může být zaměstnancova vlastní.
       const platce = sefOf(a.worker_id) || a.worker_id
-      const sazbaOd = provizniSazbaOd(a.worker_id, sefOf(a.worker_id), vlastniRep.set, provMap)
+      const sazbaOd = provizniSazbaOd(a.worker_id, sefOf(a.worker_id), vlastniRep.set, provMap, a.work_date, histFirmaKDni)
       commByWorker[a.worker_id] = (commByWorker[a.worker_id] || 0) + h * (bezProvizeFirma.has(platce) ? 0 : provKDni(sazbaOd, a.work_date))
     })
 
@@ -12652,9 +12751,11 @@ function smiVidetProvize() {
   return (currentProfile?.role || '').trim().toLowerCase() === 'admin'
 }
 
+let _provizePoradi = 0   // pořadí načítání — starší (pomalejší) odpověď nesmí přepsat novější pohled
 async function renderProvizeContent() {
   const el = document.getElementById('provize-content')
   if (!el) return
+  const _poradi = ++_provizePoradi
   if (!smiVidetProvize()) {
     el.innerHTML = '<div style="text-align:center;color:var(--text3);padding:30px">Provize může zobrazit jen správce.</div>'
     return
@@ -12688,8 +12789,7 @@ async function renderProvizeContent() {
   const _tedProvize = new Date()
   const _predemOd = localDateStr(new Date(Math.min(dStart.getTime(), wStart.getTime(), mStart.getTime(), yStart.getTime(), _tedProvize.getTime())))
   const _predemDo = localDateStr(new Date(Math.max(dEnd.getTime(), wEnd.getTime(), mEnd.getTime(), yEnd.getTime(), _tedProvize.getTime())))
-  const pHistorie = _bezVyjimky(sb.from('worker_rate_history')
-    .select('worker_id, druh, hodnota, valid_from').order('valid_from', { ascending: true }))
+  const pHistorie = _bezVyjimky(nactiVsechnyHistorieSazeb('worker_id, druh, hodnota, valid_from'))
   const pPlatby = _bezVyjimky(sb.from('provize_payments')
     .select('worker_id, paid').eq('period_type', 'week').eq('period_key', weekKey))
   const pPlatbyFirem = _bezVyjimky(sb.from('provize_platby_firem')
@@ -12697,13 +12797,13 @@ async function renderProvizeContent() {
   const pPocetDochazky = _bezVyjimky(sb.from('attendance').select('id', { count: 'exact', head: true })
     .gte('work_date', _predemOd).lte('work_date', _predemDo))
 
-  const [{ data: workers, error: chybaLidi }, provResult, { data: teams }, { data: companies }, { data: subteams }] = await Promise.all([
+  const [{ data: workers, error: chybaLidi }, provResult, { data: teams, error: chybaTymu }, { data: companies, error: chybaFirem }, { data: subteams, error: chybaPodskupin }] = await Promise.all([
     sb.from('profiles').select('id, full_name, hourly_rate_worker, team_id, subteam_id, zamestnavatel_id, supplier_type, company_name').in('role', ['osvec', 'partak']).eq('is_active', true).order('full_name'),
     sb.from('worker_commissions').select('worker_id, provize, payment_terms, bez_provize'),
     // payment_terms u firmy je nepovinné — bez migrace supabase-migrace-splatnost-firmy.sql
     // sloupec není a celý dotaz by skončil chybou, takže by zmizely i firmy.
     sb.from('teams').select('id, name, company_id, is_active, payment_terms')
-      .then(r => r.error ? sb.from('teams').select('id, name, company_id, is_active') : r,
+      .then(r => (r.error && /42703|PGRST204|column/i.test((r.error.code || '') + ' ' + (r.error.message || ''))) ? sb.from('teams').select('id, name, company_id, is_active') : r,
             () => sb.from('teams').select('id, name, company_id, is_active')),
     sb.from('companies').select('id, name'),
     // Podskupiny — v Provizích má být u jména vidět, do které patří, stejně
@@ -12713,11 +12813,15 @@ async function renderProvizeContent() {
   // Audit 30. 9. 2026: selhané čtení tu dřív vypadalo jako „nikdo nepracoval"
   // a Provize ukázaly samé nuly. Chyba se musí ukázat jako chyba.
   const provizeNejdou = (co, e) => {
+    if (_poradi !== _provizePoradi) return
     el.innerHTML = `<div style="text-align:center;color:var(--red);padding:30px;font-weight:700">❌ ${co} se nepodařilo načíst — čísla by nebyla správně.<div style="font-weight:400;color:var(--text3);margin-top:6px">${escAttr((e && e.message) || '')}</div><button onclick="renderProvizeContent()" style="margin-top:12px;padding:8px 14px;border:1.5px solid var(--brd);border-radius:8px;background:#fff;cursor:pointer;font-family:inherit">Zkusit znovu</button></div>`
     // DENÍK CHYB (2. 11. 2026): panel „nepodařilo se načíst" se dřív nezapsal nikam.
     try { if (typeof _dnPanel === 'function') _dnPanel('provize', '❌ ' + co + ' se nepodařilo načíst' + (e && e.message ? ': ' + e.message : ''), { kod: e && e.code, stav: e && e.status }) } catch (x) { console.warn('[deník chyb]', x) } // eslint-disable-line no-undef
   }
   if (chybaLidi) { provizeNejdou('Pracovníky', chybaLidi); return }
+  if (chybaTymu) { provizeNejdou('Týmy', chybaTymu); return }
+  if (chybaFirem) { provizeNejdou('Firmy', chybaFirem); return }
+  if (chybaPodskupin) { provizeNejdou('Podskupiny', chybaPodskupin); return }
   const subteamById = {}
   ;(subteams || []).forEach(st => { subteamById[st.id] = st.name })
 
@@ -12886,7 +12990,11 @@ async function renderProvizeContent() {
   // každého, kdo má v zobrazeném období docházku, a označíme ho jako bývalého.
   let workersAll = workers || []
   const _znameIds = new Set(workersAll.map(w => w.id))
-  const _chybejici = [...new Set((att || []).map(a => a.worker_id).filter(id => id && !_znameIds.has(id)))]
+  // + zaměstnavatelé, na které se odkazují lidé v seznamu — i bez vlastní docházky
+  // a i neaktivní, jinak by jejich zaměstnanci přišli o vazbu a počítali se jako OSVČ.
+  const _chybejici = [...new Set((att || []).map(a => a.worker_id)
+    .concat(workersAll.map(w => w.zamestnavatel_id))
+    .filter(id => id && !_znameIds.has(id)))]
   if (_chybejici.length) {
     // I u bývalých zařazení pod firmu — jinak by se deaktivovaný zaměstnanec
     // počítal jako OSVČ se svou starou sazbou (tabulka vs. report firmy nesedí).
@@ -12922,8 +13030,8 @@ async function renderProvizeContent() {
   // vždycky poslední skupina měsíce — kdo byl celý týden u firmy A a další týden
   // u B, měl v týdnu A provizi (i splatnost a „uhrazeno") připsanou firmě B.
   // Když v období nedělal, bere se měsíc a pak dnešní zařazení jako dřív.
-  const [obdOd, obdDo] = provizeMode === 'day' ? [dStartStr, dEndStr]
-    : provizeMode === 'month' ? [mStartStr, mEndStr] : [wStartStr, wEndStr]
+  const [obdOd, obdDo] = mode === 'day' ? [dStartStr, dEndStr]
+    : mode === 'month' ? [mStartStr, mEndStr] : [wStartStr, wEndStr]
   const posledniVObdobi = (od, doo) => {
     const mapa = {}
     ;(att || []).forEach(a => {
@@ -12950,6 +13058,13 @@ async function renderProvizeContent() {
       else break
     }
     return v == null ? vychozi : v
+  }
+  const histProvizeKDni = (id, den) => {
+    const h = historieSazeb.provize && historieSazeb.provize[id]
+    if (!h || !h.length) return null
+    let v = null
+    for (let i = 0; i < h.length; i++) { if (h[i].od <= den) v = h[i].hodnota; else break }
+    return v
   }
   const sazbaAktualni = {}
   workersAll.forEach(w => { sazbaAktualni[w.id] = Number(w.hourly_rate_worker) || 0 })
@@ -12988,7 +13103,7 @@ async function renderProvizeContent() {
     const firmaId = firmaZamestnance[a.worker_id] || null
     const komuProvize = firmaId || a.worker_id
     // Sazba šéfova, nebo zaměstnancova vlastní (provizniSazbaOd); „bez provize" řídí šéf.
-    const sazbaProvizeOd = provizniSazbaOd(a.worker_id, firmaId, vlastniProvizeZam, provMap)
+    const sazbaProvizeOd = provizniSazbaOd(a.worker_id, firmaId, vlastniProvizeZam, provMap, den, histProvizeKDni)
     const provDen = (bezProvize.has(komuProvize) || a.bez_provize_den)
       ? 0 : Number(hodnotaKDni('provize', sazbaProvizeOd, den, provMap[sazbaProvizeOd] || 0)) || 0
     // Kolik za ten den dostane pracovník. Ručně přepsaná částka platí celá za
@@ -12999,14 +13114,22 @@ async function renderProvizeContent() {
       : ((a.vyplata_castka != null && a.vyplata_castka !== '')
           ? (Math.max(0, Number(a.vyplata_castka) || 0) / h)
           : (Number(hodnotaKDni('sazba', a.worker_id, den, sazbaAktualni[a.worker_id] || 0)) || 0))
+    // Výdělek za zaměstnance firmy patří firmě (její faktura obsahuje i jeho hodiny)
+    // a počítá se stejně jako ve faktuře: sazbou firmy, den bez výplaty se
+    // nefakturuje, ručně zadaná částka dne platí celá (audit 11. 11. 2026).
+    const sazbaDenFirme = (firmaId && !a.bez_vyplaty)
+      ? ((a.vyplata_castka != null && a.vyplata_castka !== '')
+          ? (Math.max(0, Number(a.vyplata_castka) || 0) / h)
+          : (Number(hodnotaKDni('sazba', firmaId, den, sazbaAktualni[firmaId] || 0)) || 0))
+      : 0
     // `dnes` je opravdu dnešek, ne vybraný den — dlaždice nahoře se nesmí měnit,
     // když se šipkami listuje po minulých dnech.
     // Hodiny zůstávají u toho, kdo je odpracoval. Peníze jdou firmě, když
     // pod nějakou patří — jinak jemu samotnému, jako dosud.
     const penize = firmaId ? byWorker[firmaId] : bucket
     if (den === dnesStrStat) { bucket.dnes += h; penize.pDnes += h * provDen }
-    if (den >= dStartStr && den <= dEndStr) { bucket.day += h; penize.pDay += h * provDen; bucket.vDay += h * sazbaDen }
-    if (den >= wStartStr && den <= wEndStr) { bucket.week += h; penize.pWeek += h * provDen; bucket.vWeek += h * sazbaDen }
+    if (den >= dStartStr && den <= dEndStr) { bucket.day += h; penize.pDay += h * provDen; bucket.vDay += h * sazbaDen; if (firmaId) penize.vDay += h * sazbaDenFirme }
+    if (den >= wStartStr && den <= wEndStr) { bucket.week += h; penize.pWeek += h * provDen; bucket.vWeek += h * sazbaDen; if (firmaId) penize.vWeek += h * sazbaDenFirme }
     if (den >= mStartStr && den <= mEndStr) { bucket.month += h; penize.pMonth += h * provDen }
     if (den >= yStartStr && den <= yEndStr) { bucket.year += h; penize.pYear += h * provDen }
     // Podíl zaměstnance na provizi firmy — JEN pro zobrazení v jeho řádku.
@@ -13032,6 +13155,7 @@ async function renderProvizeContent() {
   ;(att || []).forEach(a => {
     if (a.work_date !== dnesStrStat) return
     if (!a.check_in) return
+    if (a.bez_provize_den) return   // den označený „bez provize“ do hodinové provize nepatří
     if (!firmaVProvizich(firmaPodleId[a.worker_id])) return
     dnesVPraci.add(a.worker_id)
   })
@@ -13042,7 +13166,7 @@ async function renderProvizeContent() {
   dnesVPraci.forEach(id => {
     const komu = firmaZamestnance[id] || id
     if (bezProvize.has(komu)) return
-    const od = provizniSazbaOd(id, firmaZamestnance[id] || null, vlastniProvizeZam, provMap)
+    const od = provizniSazbaOd(id, firmaZamestnance[id] || null, vlastniProvizeZam, provMap, dnesStrStat, histProvizeKDni)
     dnesNaHodinu += Number(hodnotaKDni('provize', od, dnesStrStat, provMap[od] || 0)) || 0
   })
   const dnesTedLidi = dnesVPraci.size
@@ -13186,8 +13310,8 @@ async function renderProvizeContent() {
   // nebo přístup. Seznam se tím zbytečně plnil řádky se samými nulami.
   // Zpětně se nikdo neztratí: kdo pracoval, ten se v tom svém týdnu ukáže dál.
   // Období se řídí přepínačem Den / Týden / Měsíc nad tabulkou.
-  const odpracoval = r => provizeMode === 'day' ? r.hoursDay > 0
-    : provizeMode === 'month' ? r.hoursMonth > 0
+  const odpracoval = r => mode === 'day' ? r.hoursDay > 0
+    : mode === 'month' ? r.hoursMonth > 0
     : r.hoursWeek > 0
   // ...a nově přidaný člověk, který ještě nemá nastavenou sazbu nebo provizi.
   // Objeví se hned, jak ho zařadíte do skupiny — i když ještě neodpracoval
@@ -13262,6 +13386,8 @@ async function renderProvizeContent() {
         earnGrandTotal = souhrn.earnWeek, earnDayGrandTotal = souhrn.earnDay
 
   // Index řádků pro doplňkové výpočty v tabulce (souhrny za firmu).
+  // Mezitím se spustilo novější načítání (přepnutý týden/režim) — tohle je zastaralé.
+  if (_poradi !== _provizePoradi) return
   window._provizeIndex = {}
   window._provizeFirmTotals = []
   // Kdo za kterou firmu má v zobrazeném týdnu nějakou provizi — podle toho se
@@ -13685,10 +13811,16 @@ async function dismissVacationAlerts(ids) {
   })
 
   try {
-    const { error } = await sb.from('doc_alert_dismissals').insert(
-      seznam.map(id => ({ dismiss_key: VAC_KEY_PREFIX + id, dismissed_by: currentUser?.id || null }))
-    )
-    if (error && error.code !== '23505') console.warn('[dovolená] odložení se neuložilo:', error.message)
+    const radky = seznam.map(id => ({ dismiss_key: VAC_KEY_PREFIX + id, dismissed_by: currentUser?.id || null }))
+    // Jedna duplicita (23505) nesmí zahodit celou dávku — duplicity se ignorují,
+    // ostatní řádky se uloží. Kdyby to server nepřijal, jde se po jednom.
+    const { error } = await sb.from('doc_alert_dismissals').upsert(radky, { onConflict: 'dismiss_key', ignoreDuplicates: true })
+    if (error) {
+      for (const r of radky) {
+        const { error: e1 } = await sb.from('doc_alert_dismissals').insert(r)
+        if (e1 && e1.code !== '23505') console.warn('[dovolená] odložení se neuložilo:', e1.message)
+      }
+    }
   } catch (e) { console.warn('[dovolená] odložení se neuložilo:', e?.message) }
 }
 
@@ -13700,10 +13832,17 @@ function closeVacationAlert(ids) {
 
 // Načte nepřítomnosti, které si pracovníci nahlásili sami, a na ty dosud
 // neodkliknuté vyskočí okno. Volá se z dashboardu i z realtime.
+let _vacAlertNacitam = false
 async function loadVacationAlerts() {
   if (!_jeAdminPrihlasen()) return
   // Okno už na obrazovce visí — nepřekresluj ho adminovi pod rukama.
   if (document.getElementById('vac-alert-modal')) return
+  // Souběžné načítání (dashboard + realtime) by jinak vytvořilo dvě okna.
+  if (_vacAlertNacitam) return
+  _vacAlertNacitam = true
+  try { await loadVacationAlertsImpl() } finally { _vacAlertNacitam = false }
+}
+async function loadVacationAlertsImpl() {
 
   await loadVacationAlertDismissals()
 
@@ -13753,6 +13892,7 @@ async function loadVacationAlerts() {
       </div>`
   }).join('')
 
+  if (document.getElementById('vac-alert-modal')) return
   const ov = document.createElement('div')
   ov.id = 'vac-alert-modal'
   ov.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:300;display:flex;align-items:center;justify-content:center;padding:20px'
@@ -13955,12 +14095,14 @@ function renderPendingRegDashboardBlock(pendingWorkers) {
 
 // Stránka "Čekající registrace" — VŠECHNY čekající registrace (odložené i neodložené)
 async function loadPendingRegistrationsPage() {
-  const { data: pendingWorkers } = await sb.from('profiles')
+  const { data: pendingWorkers, error: chybaCekajicich } = await sb.from('profiles')
     .select('id, full_name, email, phone, profession, created_at')
     .in('role', ['osvec', 'partak'])
     .eq('is_active', false)
     .eq('registration_status', 'pending')
     .order('created_at', { ascending: false })
+  // Chyba čtení není „žádné čekající registrace" — nech poslední data i odznaky.
+  if (chybaCekajicich) { showToast('❌ Čekající registrace se nepodařilo načíst: ' + chybaCekajicich.message); return }
 
   // Otevřením téhle stránky admin registrace "viděl" — odznak proto zhasne
   // a rozsvítí se znovu, jen když přibyde skutečně nová registrace.
@@ -14034,7 +14176,7 @@ async function loadDashboard() {
   // Dřív se tu navíc načítali všichni aktivní lidé, všechny firmy a CELÝ týden
   // docházky (select *, u 40 lidí ~135 kB) — a nikde se nepoužily (počty se
   // přestěhovaly do Provizí). Načítal se jen seznam čekajících registrací.
-  const { data: pendingWorkersRaw } = await sb.from('profiles')
+  const { data: pendingWorkersRaw, error: chybaCekajicichDash } = await sb.from('profiles')
       .select('id, full_name, email, created_at')
       .in('role', ['osvec', 'partak'])
       .eq('is_active', false)
@@ -14043,8 +14185,12 @@ async function loadDashboard() {
 
 
   await pDismissals   // co odložili ostatní admini — bez toho by blok blikl a přerovnal se
-  updatePendingRegBadge(unseenPendingCount(pendingWorkersRaw))
-  renderPendingRegDashboardBlock((pendingWorkersRaw || []).filter(w => !isPendingRegDismissed(w.id)))
+  // Při chybě čtení se odznak ani blok nemění (null by se tvářil jako „nikdo nečeká").
+  if (chybaCekajicichDash) console.warn('[dashboard] čekající registrace se nenačetly:', chybaCekajicichDash.message)
+  else {
+    updatePendingRegBadge(unseenPendingCount(pendingWorkersRaw))
+    renderPendingRegDashboardBlock((pendingWorkersRaw || []).filter(w => !isPendingRegDismissed(w.id)))
+  }
 
   // 💬 zprávy, ☀️ dovolené a ⚠️ dlouhé směny už běží — počkáme, až dokreslí
   await Promise.all([pChat, pVac, pLong])
@@ -14082,12 +14228,14 @@ async function loadDashboard() {
 let _lastPendingCount = null
 async function refreshPendingRegistrations() {
   try {
-    const { data: pendingWorkersRaw } = await sb.from('profiles')
+    const { data: pendingWorkersRaw, error: chybaCekajicichRef } = await sb.from('profiles')
       .select('id, full_name, email, created_at')
       .in('role', ['osvec', 'partak'])
       .eq('is_active', false)
       .eq('registration_status', 'pending')
       .order('created_at', { ascending: false })
+    // Chyba čtení: nic nepřepisovat (odznak, seznam ani poslední známý počet).
+    if (chybaCekajicichRef) return
 
     await loadPendingRegDismissals()   // ať se propíše, co odložil jiný admin
     updatePendingRegBadge(unseenPendingCount(pendingWorkersRaw))
@@ -14568,12 +14716,14 @@ async function loadWorkers() {
   // čekalo zvlášť — šest obrátek k serveru za sebou.
   const pDalsi = Promise.all([computeLongDayAlerts(), vlajkyNejdyl(Promise.all([nactiVlajky(), nactiPuntikyVsech(), typeof nactiSkupinky === 'function' ? nactiSkupinky() : null])), nactiKodyUbytovani()])
   pDalsi.catch(() => {})   // při prázdném seznamu se na ně nečeká — ať nevznikne nezachycená chyba
-  const [{ data }, { data: teamsForW }, { data: subteamsForW }] = await Promise.all([
+  const [{ data, error: chybaPracovniku }, { data: teamsForW }, { data: subteamsForW }] = await Promise.all([
     sb.from('profiles').select('*').in('role',['osvec','partak']).eq('is_active',true)
       .order('full_name'),
     sb.from('teams').select('id,name'),
     sb.from('subteams').select('id,name,team_id')
   ])
+  // Chyba čtení nesmí smazat seznam pracovníků jako „Žádní pracovníci".
+  if (chybaPracovniku) { showToast('❌ Pracovníky se nepodařilo načíst: ' + chybaPracovniku.message); return }
   // První „jsem online" pracovníka po otevření appky už není „změna profilu":
   // otisk se založí z načteného seznamu (jen kde žádný není — zprávu ze živého
   // spojení nepřepíše). Dřív každý první heartbeat spustil celé přenačtení
@@ -14711,7 +14861,9 @@ function nactiSkupinky(vynutit) {
       // — člověk se tak přesune „sám", jakmile ten den kdokoli otevře docházku.
       // Bez SQL se plány jen nenabízejí; ubytování jede dál jako dřív.
       const bezPresunu = !!(pr.error && jeChybiSkupinky(pr.error))
-      let presuny = pr.error ? [] : (pr.data || [])
+      // Skutečná chyba čtení (výpadek) nesmí plány vynulovat — platí, co bylo načtené
+      // minule. Prázdno jen při úspěšném čtení nebo chybějící tabulce.
+      let presuny = pr.error ? (bezPresunu ? [] : ((_skupinky && _skupinky.presuny) || [])) : (pr.data || [])
       // Den v čase firmy (jako databáze), ne v čase prohlížeče. Zkouší se
       // nejvýš jednou za 10 minut: když databáze nic neprovede nebo spadne,
       // nemá se ptát při každé tiché obnově.
