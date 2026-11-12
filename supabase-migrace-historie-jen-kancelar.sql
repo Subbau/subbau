@@ -260,7 +260,10 @@ begin
   delete from public.historie_uprav h
    using public.profiles p
    where p.id = h.kdo
-     and lower(btrim(p.role::text)) in ('osvec', 'partak');
+     and lower(btrim(p.role::text)) in ('osvec', 'partak')
+     -- jen ranní záznamy z doby první migrace (2. 10. 2026); pozdější opakované spuštění
+     -- nesmí smazat historii člověka, který byl tehdy správcem a roli dostal později
+     and h.kdy < timestamptz '2026-10-03 00:00:00+02';
   get diagnostics v_pocet = row_count;
   -- Počet si zapamatuje jen tohle spojení — pro výpis na konci.
   perform set_config('subbau.historie_smazano_pracovniku', v_pocet::text, false);

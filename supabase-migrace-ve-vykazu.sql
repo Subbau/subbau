@@ -62,6 +62,14 @@ begin
     return new;
   end if;
 
+  -- Zápis přímo v Supabase (SQL Editor): žádné přihlášení z appky → zámek se nepoužije
+  -- (stejná výjimka jako v profiles_zamek_party()).
+  if coalesce(current_setting('request.jwt.claims', true), '') = ''
+     and coalesce(current_setting('request.jwt.claim.sub', true), '') = ''
+     and coalesce(current_setting('role', true), 'none') not in ('anon', 'authenticated') then
+    return new;
+  end if;
+
   select exists (
     select 1 from public.profiles p
      where p.id = auth.uid() and p.role = 'admin'
