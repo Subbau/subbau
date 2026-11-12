@@ -9438,8 +9438,10 @@ function _onAdminDbChange(table, payload) {
       if (view === 'pristupy') _debouncedRefresh('access', loadAccess)
       break
     case 'documents':
-      if (view === 'dokumenty') _debouncedRefresh('docs', loadDocuments)
-      if (view !== 'dashboard') _debouncedRefresh('docstat', loadDocumentAlertsStat)   // nástěnka je má v loadDashboard
+      // Při 200 lidech, co nahrávají doklady, by každý nový doklad přenačetl všech ~30 000 řádků u každého správce:
+      // změny se slučují (3–5 s) a obnova nejde častěji než jednou za 20–30 s.
+      if (view === 'dokumenty') _debouncedRefresh('docs', loadDocuments, 3000, 20000)
+      if (view !== 'dashboard') _debouncedRefresh('docstat', loadDocumentAlertsStat, 5000, 30000)   // nástěnka je má v loadDashboard
       break
     case 'teams':
     case 'team_assignments':
@@ -19069,7 +19071,8 @@ let _docsCache = []
 let _docValidityEditId = null
 const _docLabels = DOC_LABELS
 async function loadDocuments() {
-  const { data, error } = await sb.from('documents').select('*, worker:profiles!worker_id(full_name)').order('uploaded_at',{ascending:false})
+  // Po stránkách (dokladů je přes 1000 — jinak by se starší nedaly najít, schválit ani smazat).
+  const { data, error } = await stahniStrankyOdhad('dokumenty-admin', od => sb.from('documents').select('*, worker:profiles!worker_id(full_name)').order('uploaded_at',{ascending:false}).order('id',{ascending:false}).range(od, od + 999))
   if (error) { console.warn('[dokumenty] načtení:', error.message); showToast('❌ Dokumenty se nepodařilo načíst: ' + error.message); return }   // poslední úspěšná data zůstanou
   const skryti = await skrytiLideIds()   // schované firmy
   _docsCache = (data || []).filter(d => !skryti.has(d.worker_id))
@@ -29790,7 +29793,8 @@ async function upomenChybejiciDoklady(rucne) {
 
     const ids = lide.map(w => w.id)
     const [{ data: doklady, error: chybaDok }, { data: dnesniUpominky, error: chybaUpom }] = await Promise.all([
-      sb.from('documents').select('worker_id, doc_type, status').in('worker_id', ids),
+      // Po stránkách: při přes 1000 dokladech by neúplný výpis rozeslal falešné upomínky lidem, kteří doklady mají.
+      stahniStrankyOdhad('doklady-upominky', od => sb.from('documents').select('worker_id, doc_type, status').in('worker_id', ids).order('id').range(od, od + 999)),
       // Co už dneska odešlo. Pozná se to podle NADPISU, ne podle typu zprávy —
       // sloupec `type` má v databázi omezený výčet hodnot a nová hodnota by
       // zápis tiše shodila.
