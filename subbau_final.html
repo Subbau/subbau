@@ -21203,14 +21203,14 @@ async function hledatProFakturu() {
     </button>`).join('')
 }
 
-function vystavitFakturuPro(workerId) {
+async function vystavitFakturuPro(workerId) {
   toggleVystavitFakturu()
-  openWorkerModal(workerId)
-  // Karta se otevírá na profilu — přepni ji rovnou na fakturaci.
-  setTimeout(() => {
-    const zalozka = document.querySelector('.wd-tab[onclick*="finance"]')
-    wdTab('finance', zalozka)
-  }, 260)
+  // Karta se otevírá na profilu — přepni ji na fakturaci až po jejím dokončení,
+  // a jen když je stále otevřená karta tohoto člověka (ne předchozího).
+  try { await openWorkerModal(workerId) } catch (e) { console.warn('[faktura] karta:', e?.message); return }
+  if (String(currentWorkerId) !== String(workerId) || !currentWorkerProfile || String(currentWorkerProfile.id) !== String(workerId)) return
+  const zalozka = document.querySelector('.wd-tab[onclick*="finance"]')
+  wdTab('finance', zalozka)
 }
 
 // ===========================================================================
@@ -21369,6 +21369,8 @@ async function zfPredvyplnit() {
     if (data) p = data
   } catch (e) { console.warn('[záloha] profil:', e?.message) }
   if (!p) return
+  // Správce mezitím mohl vybrat jiného pracovníka — pozdní odpověď formulář nepřepíše.
+  if (document.getElementById('zf-worker')?.value !== id) return
   const nastav = (idc, hodnota) => { const el = document.getElementById(idc); if (el) el.value = hodnota || '' }
   const jeSro = p.supplier_type === 'sro'
   nastav('zf-d-jmeno', (jeSro && p.company_name) ? p.company_name : (p.full_name || ''))
@@ -21387,7 +21389,12 @@ async function zfPredvyplnit() {
   const popis = document.getElementById('zf-popis')
   if (popis && !popis.value.trim()) popis.value = 'Anzahlung für Bauleistungen'
   const cislo = document.getElementById('zf-cislo')
-  if (cislo && !cislo.value.trim()) cislo.value = await dalsiCisloZalohy(id)
+  // Automaticky vyplněné číslo se při změně pracovníka přepočítá; ručně upravené zůstane.
+  if (cislo && (!cislo.value.trim() || cislo.dataset.auto === cislo.value)) {
+    const nove = await dalsiCisloZalohy(id)
+    if (document.getElementById('zf-worker')?.value !== id) return
+    if (!cislo.value.trim() || cislo.dataset.auto === cislo.value) { cislo.value = nove; cislo.dataset.auto = nove }
+  }
 }
 
 // Další číslo v řadě záloh toho pracovníka. Tvar si určuje správce sám —
@@ -21948,7 +21955,11 @@ function _invSortValue(r, key) {
 // Bez docházky se zapsanou skupinou platí dnešní zařazení jako dřív.
 const _tymFakturyTydne = new Map()   // 'worker|kw|rok' → team_id
 const _tymFakturyNacteno = new Set()  // 'worker|kw|rok', na které už se ptalo
+let _tymFakturyKdy = 0
 async function nactiTymyFaktur(radky) {
+  // Opravená docházka (firma u dne) se musela projevit: zařazení starší než minutu
+  // se při další obnově seznamu načte znovu, ne že zůstane napořád.
+  if (Date.now() - _tymFakturyKdy > 60000) { _tymFakturyNacteno.clear(); _tymFakturyTydne.clear(); _tymFakturyKdy = Date.now() }
   const chybi = (radky || []).filter(r => r.worker_id && r.kw && r.kw_year && !_tymFakturyNacteno.has(r.worker_id + '|' + r.kw + '|' + r.kw_year))
   if (!chybi.length) return
   const lide = [...new Set(chybi.map(r => r.worker_id))]
@@ -22083,7 +22094,16 @@ async function nactiSedeRadkyFaktur() {
 }
 
 // Fajfka „poslal jinak" u šedého řádku — sdílená pro všechny správce.
-async function fakturaPoslalJinak(workerId, kw, rok, zapnout) {
+// Zápisy téže fajfky jdou po řadě — rychlé zaškrtnutí a odškrtnutí nesmí skončit
+// tím, že smazání doběhne dřív než vložení.
+const _invJinakFronta = new Map()
+function fakturaPoslalJinak(workerId, kw, rok, zapnout) {
+  const kl = workerId + '|' + kw + '|' + rok
+  const dalsi = (_invJinakFronta.get(kl) || Promise.resolve()).catch(() => {}).then(() => fakturaPoslalJinakZapis(workerId, kw, rok, zapnout))
+  _invJinakFronta.set(kl, dalsi)
+  return dalsi
+}
+async function fakturaPoslalJinakZapis(workerId, kw, rok, zapnout) {
   const kl = workerId + '|' + kw + '|' + rok
   const klic = FAKT_JINAK_KLIC + kl
   const { error } = zapnout
