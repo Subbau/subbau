@@ -22241,8 +22241,20 @@ async function nactiOdeslaneFaktury() {
   const { data: pr, error: e2 } = await sb.from('faktury_prijemci').select('firma, email')
   if (!e2) { _invPrijemci = new Map(); (pr || []).forEach(x => _invPrijemci.set(String(x.firma), x.email)) }
 }
+// Faktura byla po odeslání znovu uložena nebo upravena (nové PDF) — odeslaná verze už není ta aktuální.
+// Tolerance 60 s kvůli rozdílu hodin telefonu a serveru.
+function fakturaZmenenaPoOdeslani(r, o) {
+  try {
+    if (!r || !o || o.stav === 'rezervovano') return false
+    const kdy = Date.parse(o.kdy); if (isNaN(kdy)) return false
+    const zmena = Math.max(Date.parse(r.sent_at) || 0, Date.parse(r.edited_at) || 0)
+    return zmena > kdy + 60000
+  } catch (e) { return false }
+}
 function odeslanoStitek(id) {
   const o = _invOdeslane.get(String(id))
+  if (o && o.stav !== 'rezervovano' && fakturaZmenenaPoOdeslani((_invCache || []).find(x => x && String(x.id) === String(id)), o))
+    return `<span title="Odesláno e-mailem na ${escAttr(o.komu)} ${escAttr(_invDmy(String(o.kdy).slice(0, 10)))} — faktura byla od té doby opravena, odběratel dostal starší verzi" style="font-size:11px;font-weight:700;color:var(--amber);white-space:nowrap">⚠ odesláno před opravou</span>`
   if (o && o.stav === 'rezervovano') return `<span title="Odesílání se nedokončilo nebo odpověď serveru zmizela — zkontrolujte schránku (Odeslané), než ji pošlete znovu" style="font-size:11px;font-weight:700;color:var(--amber);white-space:nowrap">⚠ nejisté</span>`
   return o ? `<span title="Odesláno e-mailem na ${escAttr(o.komu)} ${escAttr(_invDmy(String(o.kdy).slice(0, 10)))}" style="font-size:11px;font-weight:700;color:var(--green);white-space:nowrap">✓ odesláno</span>` : ''
 }
@@ -22256,8 +22268,9 @@ function odeslatFakturyOtevri(kw, rok, firma, jenId) {
   const cz = v => (Number(v) || 0).toFixed(2).replace('.', ',')
   const radekHtml = r => {
     const o = _invOdeslane.get(String(r.id))
+    const opravena = fakturaZmenenaPoOdeslani(r, o)   // opravená po odeslání se nabízí znovu (zaškrtnutá)
     return `<label data-odes-radek="${escAttr(r.id)}" style="display:flex;align-items:center;gap:10px;padding:8px 4px;border-bottom:1px solid var(--brd);cursor:pointer">
-      <input type="checkbox" data-odes-cb="${escAttr(r.id)}" ${o ? '' : 'checked'} style="width:18px;height:18px;accent-color:var(--green);flex-shrink:0">
+      <input type="checkbox" data-odes-cb="${escAttr(r.id)}" ${o && !opravena ? '' : 'checked'} style="width:18px;height:18px;accent-color:var(--green);flex-shrink:0">
       <span style="flex:1;min-width:0"><b>${escAttr(r.worker?.full_name || r.supplier_name || '—')}</b> · č. ${escAttr(r.invoice_number || '—')}<span style="color:var(--text3)"> · ${cz(r.total_amount)} €</span></span>
       <span data-odes-stav style="font-size:12px;white-space:nowrap;${o ? (o.stav === 'rezervovano' ? 'color:var(--amber);font-weight:700' : 'color:var(--green);font-weight:700') : 'color:var(--text3)'}">${o ? (o.stav === 'rezervovano' ? '⚠ nejisté — zkontrolujte schránku' : '✓ odesláno ' + escAttr(_invDmy(String(o.kdy).slice(0, 10)))) : ''}</span>
     </label>`
@@ -43129,9 +43142,14 @@ async function vykresliFakturuDoPlatna(el) {
     if (meritko <= 2) throw e
     console.warn('[faktura] vykreslení ve ' + meritko + '× selhalo, zkouším 2×:', e?.message)
   }
-  if (c && (meritko <= 2 || !platnoJePrazdne(c))) return c
+  // Prázdné plátno (telefon nezvládl velké plátno) nesmí projít jako hotová faktura — ani ve 2×.
+  const bezPrazdneho = pl => {
+    if (platnoJePrazdne(pl)) { pl.width = 0; pl.height = 0; throw new Error('Fakturu se nepodařilo vykreslit (prázdná stránka) — zkuste to prosím znovu') }
+    return pl
+  }
+  if (c && (meritko <= 2 || !platnoJePrazdne(c))) return meritko <= 2 ? bezPrazdneho(c) : c
   if (c) { console.warn('[faktura] plátno ve ' + meritko + '× vyšlo prázdné, zkouším 2×'); c.width = 0; c.height = 0 }
-  return kresli(2)
+  return bezPrazdneho(await kresli(2))
 }
 
 // Vykreslí fakturu do PDF (vždy jedna strana A4) a vrátí ji jako soubor.
@@ -44121,11 +44139,21 @@ async function loadInvoiceWeeks() {
   const sel = document.getElementById('inv-week-sel')
   if (!sel) return
 
-  const { data } = await sb.from('attendance')
-    .select('kw, kw_year, total_hours')
-    .eq('worker_id', currentUser.id)
-    .order('kw_year', {ascending: false})
-    .order('kw', {ascending: false})
+  // Po stránkách (server vrací nejvýš ~1000 řádků naráz) a s kontrolou chyby: výpadek spojení
+  // se nesmí tvářit jako „žádné odpracované týdny" — dosavadní nabídka se zachová.
+  const data = []
+  for (let od = 0; od < 100000; od += 1000) {
+    const { data: kus, error: chybaTydnu } = await sb.from('attendance')
+      .select('kw, kw_year, total_hours')
+      .eq('worker_id', currentUser.id)
+      .order('kw_year', {ascending: false})
+      .order('kw', {ascending: false})
+      .order('id', {ascending: true})
+      .range(od, od + 999)
+    if (chybaTydnu) { console.warn('[faktura] týdny se nenačetly:', chybaTydnu.message); return }
+    data.push(...(kus || []))
+    if (!kus || kus.length < 1000) break
+  }
 
   if (!data?.length) {
     sel.innerHTML = '<option value="">Žádné odpracované týdny</option>'
