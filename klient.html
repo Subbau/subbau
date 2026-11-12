@@ -502,7 +502,13 @@ function kontaktHtml(wid){
     // podle toho plánuje, kdo pojede — mlčet o propadlé platnosti by bylo
     // horší než neukázat nic.
     var doKdy = o.ridicak.do || '';
-    var propadl = doKdy && doKdy < new Date().toISOString().slice(0,10);
+    var dnesCZ;
+    try { dnesCZ = new Date().toLocaleDateString('sv-SE', { timeZone: 'Europe/Prague' }); } catch (x) { dnesCZ = ''; }
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(dnesCZ)) {
+      var dn = new Date();
+      dnesCZ = dn.getFullYear() + '-' + String(dn.getMonth()+1).padStart(2,'0') + '-' + String(dn.getDate()).padStart(2,'0');
+    }
+    var propadl = doKdy && doKdy < dnesCZ;
     kusy.push('<span class="kontakt-rp' + (propadl ? ' propadly' : '') + '">'
       + '🚗 ' + (propadl
           ? 'Führerschein abgelaufen · řidičák propadl ' + esc(datumPlne(doKdy))
@@ -734,7 +740,7 @@ function vykreslit(d, preklady){
       + '</div>'
       // ---- poznámka přes celou šířku, mezi jménem a hodinami
       + '<div class="pozn-obal">'
-      +   '<textarea class="pozn" rows="2" placeholder="Hier können Sie sich eine Notiz machen · zde si můžete napsat poznámku"'
+      +   '<textarea class="pozn" rows="2" maxlength="1000" placeholder="Hier können Sie sich eine Notiz machen · zde si můžete napsat poznámku"'
       +   ' data-w="' + esc(wid) + '" onchange="ulozPoznamku(this)"'
       +   ' onfocus="ukazNastroje(this)" onblur="schovejNastroje(this)"'
       +   ' style="' + stylPoznamky(pz) + '">' + esc(pz.poznamka || '') + '</textarea>'
@@ -840,20 +846,41 @@ function vykreslit(d, preklady){
 // `selhalo` se zavolá, když server zápis nevzal. Bez toho zůstalo zaškrtnuté
 // políčko vizuálně zaškrtnuté, ačkoli se nic neuložilo — a odběratel to zjistil
 // až po obnovení stránky, kdy mu volba zmizela.
+// Zápisy téhož údaje (stejný člověk a stejná pole) jdou za sebou, ne souběžně — jinak by
+// starší zápis mohl doběhnout po novějším a uložit starší volbu jako poslední. Každý zápis
+// má časový limit, takže fronta nezůstane viset na zaseknutém spojení.
+var FRONTA_ZAPISU = {};
 function ulozPoznamkuNaServer(data, hotovo, selhalo){
+  var klic = String(data.worker_id || '') + '|' + Object.keys(data).filter(function(k){ return k !== 'worker_id' && k !== 'rok' }).sort().join(',');
+  var pred = FRONTA_ZAPISU[klic] || Promise.resolve();
+  var tenhle = pred.then(function(){ return ulozPoznamkuNaServerTed(data, hotovo, selhalo) });
+  FRONTA_ZAPISU[klic] = tenhle;
+  tenhle.then(function(){ if (FRONTA_ZAPISU[klic] === tenhle) delete FRONTA_ZAPISU[klic] });
+  return tenhle;
+}
+// Překreslení po uložení počká, až odběratel dopíše (jinak by mu zmizel rozepsaný text).
+function prekresliPoPsani(){
+  if (pisePrave()) { setTimeout(prekresliPoPsani, 500); return; }
+  vykreslit(DATA, prekladyCache);
+}
+function ulozPoznamkuNaServerTed(data, hotovo, selhalo){
   // Deník chyb (2. 11. 2026, oponentura): odpověď, která nejde přečíst (Vercel
   // funkci zastavil — 504 s textem), a výjimka v obsluze po odpovědi jdou do
   // deníku jako klient|poznamka. Naše odpovědi s kódem chyby zapsal server sám,
   // výpadek spojení odběratel vidí a zkusí znovu. Chování stránky beze změny.
   var stavOdpovedi = 0, precteno = false;
-  fetch('/api/klient-dochazka?t=' + encodeURIComponent(TOKEN), {
+  var ac = (typeof AbortController !== 'undefined') ? new AbortController() : null;
+  var limitZapisu = ac ? setTimeout(function(){ ac.abort() }, 30000) : null;
+  return fetch('/api/klient-dochazka?t=' + encodeURIComponent(TOKEN), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(data),
     cache: 'no-store',
+    signal: ac ? ac.signal : undefined,
   })
     .then(function(r){ stavOdpovedi = r.status; return r.json().then(function(j){ precteno = true; return j }, function(){ return {} }) })
     .then(function(j){
+      if (limitZapisu) clearTimeout(limitZapisu);
       if (j && j.ok) { stav('Gespeichert · uloženo'); hotovo && hotovo() }
       else {
         if (stavOdpovedi >= 500 && !precteno) {
@@ -873,6 +900,7 @@ function ulozPoznamkuNaServer(data, hotovo, selhalo){
       }
     })
     .catch(function(e){
+      if (limitZapisu) clearTimeout(limitZapisu);
       if (stavOdpovedi) { try { if (window.__denikKlient) window.__denikKlient('poznamka', e, {}) } catch (x) { /* deník nesmí nic shodit */ } }
       stav('Keine Verbindung · bez připojení'); selhalo && selhalo('offline');
     });
@@ -910,7 +938,7 @@ function vyberFoto(workerId){
           if (!DATA.poznamky) DATA.poznamky = {};
           DATA.poznamky[workerId] = DATA.poznamky[workerId] || {};
           DATA.poznamky[workerId].foto = maly;
-          vykreslit(DATA, prekladyCache);
+          prekresliPoPsani();
         });
       };
       obr.onerror = function(){ stav('Bild konnte nicht gelesen werden · obrázek nejde načíst') };
@@ -941,7 +969,7 @@ function smazFoto(workerId){
   if (!confirm('Foto entfernen?\nOdebrat fotku?')) return;
   ulozPoznamkuNaServer({ worker_id: workerId, foto: null }, function(){
     if (DATA.poznamky && DATA.poznamky[workerId]) DATA.poznamky[workerId].foto = null;
-    vykreslit(DATA, prekladyCache);
+    prekresliPoPsani();
   });
 }
 
@@ -1070,12 +1098,13 @@ function ulozUkonceni(pole){
   var obal = document.querySelector('[data-konec-datum="' + wid + '"]');
   if (obal) obal.style.display = zapnuto ? '' : 'none';
   var telo = { worker_id: wid, spoluprace_ukoncena: zapnuto };
+  var puvodniDatum = '';
   // Odškrtnutím se datum zahodí — jinak by u nezaškrtnutého člověka zůstalo
   // viset staré datum a při příštím zaškrtnutí by se tvářilo jako platné.
   if (!zapnuto) {
     telo.spoluprace_do = '';
     var vstup = document.querySelector('input[type=date][data-w="' + wid + '"]');
-    if (vstup) vstup.value = '';
+    if (vstup) { puvodniDatum = vstup.value; vstup.value = ''; }
   }
   ulozPoznamkuNaServer(telo, function(){
     if (!DATA.poznamky) DATA.poznamky = {};
@@ -1088,6 +1117,10 @@ function ulozUkonceni(pole){
     // uloženě a odběratel se to nedozvěděl až po obnovení stránky.
     pole.checked = !zapnuto;
     if (obal) obal.style.display = !zapnuto ? '' : 'none';
+    if (puvodniDatum) {
+      var vstupZpet = document.querySelector('input[type=date][data-w="' + wid + '"]');
+      if (vstupZpet) vstupZpet.value = puvodniDatum;
+    }
     oznacKartu(wid);
   });
 }
@@ -1135,15 +1168,23 @@ function dejZnamku(workerId, n){
     if (!DATA.poznamky) DATA.poznamky = {};
     DATA.poznamky[workerId] = DATA.poznamky[workerId] || {};
     DATA.poznamky[workerId].hodnoceni = n;
-    vykreslit(DATA, prekladyCache);
+    prekresliPoPsani();
   });
 }
 
 function oznacUhrazeno(zaskrtnuto){
   if (!DATA) return;
-  ulozPoznamkuNaServer({ uhrazeno: !!zaskrtnuto, kw: DATA.kw, rok: DATA.rok }, function(){
+  // Týden se zachytí při odeslání: pozdní potvrzení nesmí změnit jiný, mezitím vybraný týden.
+  var kw = DATA.kw, rok = DATA.rok;
+  ulozPoznamkuNaServer({ uhrazeno: !!zaskrtnuto, kw: kw, rok: rok }, function(){
+    if (!DATA || DATA.kw !== kw || DATA.rok !== rok) return;
     DATA.uhrazeno = !!zaskrtnuto;
-    vykreslit(DATA, prekladyCache);
+    prekresliPoPsani();
+  }, function(){
+    // Neuložilo se — políčko se vrátí do uloženého stavu.
+    if (!DATA || DATA.kw !== kw || DATA.rok !== rok) return;
+    var cb = document.getElementById('uhrazeno');
+    if (cb) cb.checked = !!DATA.uhrazeno;
   });
 }
 
@@ -1265,6 +1306,7 @@ function stav(text){
 // `prvni=1` pošleme jen při prvním načtení. Podle toho server pozná skutečné
 // otevření stránky a nezapočítá do něj automatická obnovení.
 var prvniNacteni = true;
+var poradiNacteni = 0;      // jen odpověď na poslední dotaz smí změnit stránku
 var posledniTydny = null;   // viz DATA.tydny == null níž
 // Který týden si odběratel naposledy vybral, jako text („" = probíhající).
 function klicTydne(){ return TYDEN ? TYDEN.kw + '/' + TYDEN.rok : ''; }
@@ -1294,17 +1336,31 @@ function nacti(rucne){
              + (TYDEN ? '&kw=' + TYDEN.kw + '&rok=' + TYDEN.rok : '');
   prvniNacteni = false;
   var tydenDotazu = klicTydne();
+  var mojePoradi = ++poradiNacteni;
+  var acN = (typeof AbortController !== 'undefined') ? new AbortController() : null;
+  var limitN = acN ? setTimeout(function(){ acN.abort() }, 30000) : null;
   // Pro deník chyb: jaký stav odpověď měla a jestli šla přečíst jako JSON.
   var stavOdpovedi = 0, precteno = false;
-  return fetch(adresa, { cache: 'no-store' })
+  return fetch(adresa, { cache: 'no-store', signal: acN ? acN.signal : undefined })
     .then(function(r){ stavOdpovedi = r.status; return r.json().then(function(j){ precteno = true; return { stav: r.status, j: j } }) })
     .then(function(o){
+      if (limitN) clearTimeout(limitN);
       // Seznam týdnů platí, ať odpověď patří ke kterémukoli týdnu.
       if (o.j && o.j.ok && o.j.tydny != null) posledniTydny = o.j.tydny;
+      // Novější dotaz už běží (nebo doběhl) — tahle odpověď, úspěšná i chybová, se zahodí.
+      if (mojePoradi !== poradiNacteni) return;
       // Odběratel mezitím přepnul na jiný týden (třeba dvakrát rychle za
       // sebou). Pozdě dorazivší odpověď na ten předchozí by přepsala stránku
       // špatným týdnem — zahodí se, novější dotaz už běží.
       if (o.j && o.j.ok && tydenDotazu !== klicTydne()) return;
+      if (o.stav >= 500 && !(o.j && o.j.ok)){
+        // Dočasná chyba serveru není zneplatněný odkaz: data zůstanou a zkusí se to znovu.
+        if (DATA) stav('Keine Verbindung · bez připojení');
+        else chyba('Verbindungsfehler', 'Die Daten konnten nicht geladen werden. Bitte später erneut versuchen.',
+                   'Data se nepodařilo načíst, zkuste to prosím později.');
+        naplanuj();
+        return;
+      }
       if (!o.j || !o.j.ok){
         if (casovac) { clearTimeout(casovac); casovac = null }
         if (o.stav === 429){
@@ -1346,6 +1402,8 @@ function nacti(rucne){
         // Mezitím dorazila novější data (jiný týden, obnovení) — ta si
         // stránku vykreslí sama, tahle by ji jen přepsala starším.
         if (DATA !== mojeData) return;
+        // Odběratel mezitím začal psát — stránka se nepřekreslí pod rukama, počká se.
+        if (predtim && pisePrave()) { setTimeout(hotovo, 500); return; }
         if (cesky) doplnPreklady(); else vykreslit(DATA, prekladyCache);
         var d = new Date();
         stav('Stand ' + String(d.getHours()).padStart(2,'0') + ':' + String(d.getMinutes()).padStart(2,'0'));
@@ -1382,6 +1440,8 @@ function nacti(rucne){
       });
     })
     .catch(function(e){
+      if (limitN) clearTimeout(limitN);
+      if (mojePoradi !== poradiNacteni) return;
       denikNacteni(e, stavOdpovedi, precteno);
       // Výpadek sítě není důvod smazat, co už klient vidí — jen to řekneme
       // a zkusíme to za chvíli znovu.
