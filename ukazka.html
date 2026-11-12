@@ -12500,7 +12500,7 @@ function provizeDochZneplatni(payload) {
   const r = payload && (payload.new || payload.old)
   const den = r && r.work_date ? String(r.work_date).slice(0, 10) : ''
   const hranice = localDateStr(new Date(Date.now() - PROVIZE_DOCH_TAIL_DNU * 86400000))
-  if (den && den >= hranice) return   // čerstvý den: dotáhne se při příštím vykreslení
+  if (den && den >= hranice && den <= localDateStr(new Date())) return   // čerstvý den (ne budoucí): dotáhne se při příštím vykreslení
   _provizeDochGen++
   if (_provizeDoch) _provizeDoch.spinava = true
 }
@@ -21462,13 +21462,13 @@ async function _poslednizpravyPracovniku(workers) {
   let uzavreno = false
   let nejnovejsi = C.od
   for (let od = 0; od < maxStran * 1000; od += 1000) {
-    let q = sb.from('chat_messages').select('worker_id, message, created_at, sender_role')
+    let q = sb.from('chat_messages').select('id, worker_id, message, created_at, sender_role')
     if (!prvni) q = q.gte('created_at', C.od)
     const { data: kus, error } = await q.order('created_at', { ascending: false }).order('id', { ascending: false }).range(od, od + 999)
     if (error) { if (prvni) C.od = ''; return C.mapa }   // chyba: zůstane, co je; příště se zkusí znovu
     ;(kus || []).forEach(m => {
       const stary = C.mapa[m.worker_id]
-      if (!stary || String(m.created_at) > String(stary.created_at)) C.mapa[m.worker_id] = m
+      if (!stary || String(m.created_at) > String(stary.created_at) || (String(m.created_at) === String(stary.created_at) && String(m.id) > String(stary.id))) C.mapa[m.worker_id] = m
       if (String(m.created_at) > nejnovejsi) nejnovejsi = String(m.created_at)
     })
     if (!kus || kus.length < 1000) { uzavreno = true; break }
@@ -32614,6 +32614,7 @@ function adresaDoPoli(pred, text) {
 // Formulář pracovníka: skrytý fkt-addr drží celou adresu (jen je-li úplná), ať ostatní kontroly dál fungují.
 function fktAdresaZmena() {
   const A = adresaZPoli('fkt')
+  _fktAdresaRozepsana = A.stav === 'castecna'
   const h = document.getElementById('fkt-addr'); if (h) h.value = A.stav === 'cela' ? A.text : ''
   fktTouched()
 }
@@ -32689,6 +32690,7 @@ function fktSetVat(v, odUzivatele) {
 // se otevře sama. `null` = ještě jsme nerozhodli, ať to při každém načtení
 // profilu vyhodnotíme znovu; po kliknutí na tlačítko platí volba pracovníka.
 let _fktOpen = null
+let _fktAdresaRozepsana = false   // pracovník právě píše adresu, která ještě není úplná (a tedy ani uložená)
 
 // Má pracovník vyplněno to podstatné, co faktura potřebuje?
 function fktFilledIn() {
@@ -32766,7 +32768,7 @@ async function loadInvoiceForm() {
     const aktivni = ['fkt-ulice', 'fkt-cp', 'fkt-mesto'].some(i => document.activeElement === document.getElementById(i))
     const A = adresaZPoli('fkt'), profilAdr = invoiceSupplierAddress(p)
     // Rozepsanou, ještě nikdy neuloženou (neúplnou) adresu profil nepřepíše.
-    if (!aktivni && A.stav !== 'castecna' && (!_fktDirty || A.stav === 'prazdna')) {
+    if (!aktivni && !_fktAdresaRozepsana && (!_fktDirty || A.stav === 'prazdna')) {
       adresaDoPoli('fkt', profilAdr)
       const B = adresaZPoli('fkt'), h = document.getElementById('fkt-addr'); if (h) h.value = B.stav === 'cela' ? B.text : ''
     }
