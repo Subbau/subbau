@@ -6197,7 +6197,7 @@ async function submitAdminSignatureWithPlacement() {
 // Po nahrání nové verze se snadno pozná, jestli se opravdu nasadila: otevřete
 // appku, zmáčkněte F12 (na Macu ⌥⌘I) a v konzoli je vypsané tohle datum. Když
 // tam svítí starší, prohlížeč nebo GitHub drží starou verzi.
-const SUBBAU_VERZE = '2026-11-11 n — Audit: neescapované názvy firem/kontakty, ochrana exportu PDF při výpadku, deaktivovaný správce'
+const SUBBAU_VERZE = '2026-11-12 a — Audit: opravy souběhů a pozdních odpovědí (smlouvy, faktury, zálohy, docházka, Plán MMI), vedoucí a profese v Plánu MMI'
 console.log('SubBau docházka — verze ' + SUBBAU_VERZE)
 // Verze i dole v menu správce. Když někdo novinku „nevidí", podle ní se hned
 // pozná, jestli nemá otevřenou starou kopii appky — bez hledání v konzoli.
@@ -33627,8 +33627,8 @@ function mmirPavouk(id, lide, den) {
   const pocet = Math.min(poradi.length, 3)
   const sVedenim = vedouci.length && poradi.length
   return (vedouci.length ? `<div class="mmir-vedouci${poradi.length ? ' mmir-vedouci--s-vetvemi' : ''}" data-mmi-vedouci>${vedouci.map(kart).join('')}</div>` : '')
-    + (poradi.length ? `<div class="mmir-sloupce mmir-sloupce--${pocet}${sVedenim ? ' mmir-sloupce--s-hlavou' : ''}" data-mmi-sloupce>${poradi.map(p => `<div class="mmir-sloupec" data-mmi-profese><div class="mmir-sloupec__hlavicka"><span class="mmir-sloupec__nazev">${escAttr(p.nazev)}</span><span class="mmir-sloupec__pocet">${sloupce.get(p.id).length}</span></div><div class="mmir-sloupec__lide">${sloupce.get(p.id).map(kart).join('')}</div></div>`).join('')}</div>` : '')
-    + (bez.length ? `<div class="mmir-zbytek">${bez.map(kart).join('')}</div>` : '')
+    + (poradi.length ? `<div class="mmir-sloupce mmir-sloupce--${pocet}${sVedenim ? ' mmir-sloupce--s-hlavou' : ''}" data-mmi-sloupce>${poradi.map(p => `<div class="mmir-sloupec" data-mmi-profese data-mmi-profese-id="${escAttr(p.id)}"><div class="mmir-sloupec__hlavicka"><span class="mmir-sloupec__nazev">${escAttr(p.nazev)}</span><span class="mmir-sloupec__pocet">${sloupce.get(p.id).length}</span></div><div class="mmir-sloupec__lide">${sloupce.get(p.id).map(kart).join('')}</div></div>`).join('')}</div>` : '')
+    + (bez.length ? `<div class="mmir-zbytek" data-mmi-bez-profese>${bez.map(kart).join('')}</div>` : '')
 }
 // Sklad mimo mřížku staveb (PruhSkladu.jsx).
 function mmirSklad(id, lide, den, smiseni) {
@@ -33936,6 +33936,18 @@ function mmiVykresliPresun() {
   // Přesunout jen s povolením ze Stavbyplánu a jen u člověka, kterého smí
   // SubBau přesouvat (c.lzePresouvat, 2. 11. 2026 — viz mmiModel).
   const lze = M.lzePresouvat && c.lzePresouvat && P.cil !== undefined && !P.bezi
+  // Vedoucí a profese ve stavbě (jen SubBau lidé, jen když stojí na normální stavbě a Stavbyplán posílá profese/vedoucí).
+  const naStavbe = ted && !mmirJePryc(mmirDruhMista(ted)) && mmirDruhMista(ted) !== 'nemoc' && mmirDruhMista(ted) !== 'sklad'
+  let pavoukBlok = ''
+  if (M.lzePresouvat && c.lzePresouvat && naStavbe && M.maPavouka) {
+    const jeVed = M.vedouci.has(ted + '|' + c.cid)
+    const pid = M.profeseRadku[c.cid]?.[P.den] || M.profeseLidi[c.cid] || ''
+    const mimo = P.bezi || _mmiPavoukBezi ? ' disabled' : ''
+    pavoukBlok = `<fieldset class="mmir-skupina" data-mmi-pavouk><legend class="mmir-skupina__nadpis">Ve stavbě</legend>`
+      + `<button type="button" class="mmir-tlacitko" data-mmi-vedouci-tl onclick="mmiZmenaVPavouku('${jsStr(c.cid)}','${jsStr(ted)}','${jsStr(P.den)}',{vedouci:${jeVed ? 'false' : 'true'}})"${mimo}>${jeVed ? 'Zrušit vedoucího' : 'Udělat vedoucím'}</button>`
+      + (M.profese.length ? `<select class="mmir-tlacitko" data-mmi-profese-vyber aria-label="Profese" onchange="mmiZmenaVPavouku('${jsStr(c.cid)}','${jsStr(ted)}','${jsStr(P.den)}',{profese:this.value||null})"${mimo}><option value="">Bez profese</option>${M.profese.map(p => `<option value="${escAttr(p.id)}"${p.id === pid ? ' selected' : ''}>${escAttr(p.nazev)}</option>`).join('')}</select>` : '')
+      + '</fieldset>'
+  }
   const sipka = (o, popis, zakaz) => `<button type="button" class="mmir-tlacitko" onclick="mmiPresunDen(${o})" aria-label="${popis}" title="${popis}"${zakaz ? ' disabled' : ''}>${o < 0 ? '‹' : '›'}</button>`
   box.innerHTML = `<div class="mmir-okno" role="dialog" aria-modal="true" aria-label="${escAttr(c.jmeno)}">
     <div class="mmir-okno__hlavicka"><h2 class="mmir-okno__nadpis">${escAttr(c.jmeno)}</h2><button type="button" class="mmir-tlacitko" onclick="mmiZavriPresun()" aria-label="Zavřít">×</button></div>
@@ -33945,6 +33957,7 @@ function mmiVykresliPresun() {
       <div class="mmir-pole"><span class="mmir-pole__popisek">Od dne</span><div class="mmir-od">${sipka(-1, 'Předchozí den', k <= 0)}<span data-mmi-od class="mmir-od__den">${mmiDen(P.den)}</span>${sipka(1, 'Další den', k >= M.dny.length - 1)}</div></div>
       <fieldset class="mmir-skupina" role="radiogroup"><legend class="mmir-skupina__nadpis">Kam</legend>${cile}</fieldset>
       <fieldset class="mmir-skupina" role="radiogroup"><legend class="mmir-skupina__nadpis">Na jak dlouho</legend>${volba('den', 'Jen tento den', mmiDen(P.den))}${volba('tyden', 'Do konce týdne', 'do ' + mmiDen(mmiKonecTydne(P.den)))}${volba('trvale', 'Dokud ho nepřesunou', 'jako ve Stavbyplánu')}</fieldset>
+      ${pavoukBlok}
     </div>
     <div class="mmir-okno__zpravy">
       <p class="mmir-napoveda mmir-veta" data-mmi-veta>${veta}</p>
@@ -33990,6 +34003,15 @@ function mmiTahCil(x, y) {
   const cil = st || bez
   return cil && _mmiTah.blok.contains(cil) ? cil : null
 }
+// Zóna uvnitř stavby (vedoucí / sloupec profese / bez profese) — jen pro tažení v rámci TÉŽE stavby.
+function mmiTahZona(x, y) {
+  const el = document.elementFromPoint(x, y)
+  const pr = el?.closest('[data-mmi-profese-id]')
+  if (pr) return { profese: pr.getAttribute('data-mmi-profese-id') }
+  if (el?.closest('[data-mmi-vedouci]')) return { vedouci: true }
+  if (el?.closest('[data-mmi-bez-profese]')) return { vedouci: false, profese: null }
+  return null
+}
 function mmiTahZrus() {
   const T = _mmiTah; if (!T) return
   clearTimeout(T.cas); T.duch?.remove(); T.zvyrazneny?.classList.remove('mmir-tah-cil'); T.karta.classList.remove('mmir-tah-zdroj')
@@ -34033,18 +34055,26 @@ document.addEventListener('touchmove', e => { if (_mmiTah?.jede) e.preventDefaul
 document.addEventListener('pointerup', e => {
   const T = _mmiTah; if (!T || e.pointerId !== T.id) return
   const jede = T.jede, cil = jede ? mmiTahCil(e.clientX, e.clientY) : null
+  const zona = jede && cil ? mmiTahZona(e.clientX, e.clientY) : null
   const { i, den, cid } = T
   if (jede) _mmiTahKonec = Date.now()
   mmiTahZrus()
-  if (jede && cil) mmiTahPust(i, den, cil, cid)
+  if (jede && cil) mmiTahPust(i, den, cil, cid, zona)
 }, true)
 document.addEventListener('pointercancel', () => { if (_mmiTah?.jede) _mmiTahKonec = Date.now(); mmiTahZrus() }, true)
 // Po tažení se nesmí otevřít okno (prohlížeč pošle klepnutí na kartu).
 document.addEventListener('click', e => { if (Date.now() - _mmiTahKonec < 400 && e.target.closest?.('.mmir-karticka, .mmir-pryc-clovek')) { e.stopPropagation(); e.preventDefault() } }, true)
-function mmiTahPust(i, den, cilEl, cid) {
+function mmiTahPust(i, den, cilEl, cid, zona) {
   const M = _mmiM, c = M?.lide[i]; if (!c || _mmiPresun?.bezi) return
   if (cid != null && c.cid !== cid) return   // plán se během tažení obnovil — index už patří jinému člověku
   const cilId = cilEl.hasAttribute('data-mmi-bez-stavby') ? '' : cilEl.getAttribute('data-mmi-misto')
+  // Táž stavba + jiné místo v ní = vedoucí / profese (Stavbyplán, akce 'vedouci' a 'profese').
+  if (zona && cilId && (M.plan[c.cid]?.[den] || '') === cilId) {
+    if (!M.lzePresouvat || !c.lzePresouvat) { showToast(!M.lzePresouvat ? 'Přesouvání se zapne po propojení se Stavbyplánem.' : 'Tohohle člověka může měnit jen MMI ve Stavbyplánu.'); return }
+    // Vedoucí pustěný do sloupce profese přestává být vedoucím a zařadí se mezi ostatní.
+    mmiZmenaVPavouku(c.cid, cilId, den, zona.profese !== undefined && zona.vedouci === undefined && M.vedouci.has(cilId + '|' + c.cid) ? { ...zona, vedouci: false } : zona)
+    return
+  }
   if ((M.plan[c.cid]?.[den] || '') === cilId) return
   if (!M.lzePresouvat || !c.lzePresouvat) { showToast(!M.lzePresouvat ? 'Přesouvání se zapne po propojení se Stavbyplánem.' : 'Tohohle člověka může přesunout jen MMI ve Stavbyplánu.'); return }
   if (cilId && !M.cile.some(x => x.id === cilId)) { showToast('Na tuhle stavbu přesunout nejde.'); return }
@@ -34052,6 +34082,52 @@ function mmiTahPust(i, den, cilEl, cid) {
   mmiPotvrdPresun()
 }
 
+// VEDOUCÍ A PROFESE ZE SUBBAU (12. 11. 2026): POST na týž odkaz jako přesun, akce 'vedouci'
+// {clovek_id, misto_id, vedouci:true|false} a 'profese' {clovek_id, misto_id, den_od, den_do:null, profese_id|null}.
+// Platí, jen když Stavbyplán odpoví { ok: true, akce }. Klient hlídá souběh (jedna změna naráz).
+let _mmiPavoukBezi = false
+async function mmiPostAkce(akce, pole) {
+  const M = _mmiM
+  const odkaz = String(M?.j?.__odkaz || '')
+  const token = (odkaz.match(/[?&]t=([0-9a-f]{64})(?:&|$)/i) || [])[1]
+  if (!token) return { chyba: 'V uloženém odkazu chybí klíč — vložte odkaz znovu.' }
+  const zadani = { token: token.toLowerCase(), akce, ...pole, kdo: String(currentProfile?.full_name || '').slice(0, 80),
+    klic: (crypto.randomUUID && crypto.randomUUID()) || String(Date.now()) + Math.random().toString(16).slice(2) }
+  const ovl = new AbortController()
+  const stop = setTimeout(() => ovl.abort(), 20000)
+  let j = null
+  try {
+    const r = await fetch(odkaz.split('?')[0], { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(zadani), cache: 'no-store', signal: ovl.signal })
+    j = await r.json().catch(() => null)
+  } catch (e) {
+    return { chyba: e?.name === 'AbortError' ? 'Stavbyplán neodpověděl do 20 s. Změna možná proběhla — klepněte na Obnovit a podívejte se.' : 'Stavbyplán se teď nepodařilo zavolat. Zkuste to znovu.' }
+  } finally { clearTimeout(stop) }
+  if (j && j.ok === true && j.akce === akce) return { j }
+  const kod = String(j?.kod || '').slice(0, 40)
+  return { chyba: j?.ok === true ? 'Stavbyplán změnu nepotvrdil — zatím neumí měnit vedoucí a profese ze SubBau.'
+    : Object.prototype.hasOwnProperty.call(MMI_CHYBY_PRESUNU, kod) ? MMI_CHYBY_PRESUNU[kod]
+    : 'Stavbyplán změnu odmítl' + (kod ? ' (' + kod + ')' : '') + '.' }
+}
+// zmena: { vedouci?: true|false, profese?: id|null } pro člověka cid na stavbě misto od dne den.
+async function mmiZmenaVPavouku(cid, misto, den, zmena) {
+  const M = _mmiM, c = M?.lide.find(x => x.cid === cid)
+  if (!c || !M.lzePresouvat || !c.lzePresouvat || _mmiPavoukBezi || _mmiPresun?.bezi) return
+  if (zmena.profese && !M.profese.some(p => p.id === String(zmena.profese))) { showToast('Tahle profese ve Stavbyplánu není.'); return }
+  const jeVed = M.vedouci.has(misto + '|' + cid)
+  const chceVed = zmena.vedouci === undefined ? jeVed : zmena.vedouci
+  const menitVed = chceVed !== jeVed
+  const menitProf = zmena.profese !== undefined && (zmena.profese || '') !== (M.profeseRadku[cid]?.[den] || M.profeseLidi[cid] || '')
+  if (!menitVed && !menitProf) return
+  _mmiPavoukBezi = true
+  let chyba = ''
+  try {
+    if (menitVed) chyba = (await mmiPostAkce('vedouci', { clovek_id: cid, misto_id: misto, vedouci: chceVed })).chyba || ''
+    if (!chyba && menitProf) chyba = (await mmiPostAkce('profese', { clovek_id: cid, misto_id: misto, den_od: den, den_do: null, profese_id: zmena.profese || null })).chyba || ''
+  } finally { _mmiPavoukBezi = false }
+  if (document.getElementById('mmi-presun')) { _mmiPresun = null; document.getElementById('mmi-presun').remove() }
+  showToast(chyba ? '❌ ' + chyba : '✅ Zapsáno ve Stavbyplánu: ' + c.jmeno)
+  loadPlanMmi(true)   // i po chybě — první z dvou zápisů mohl projít
+}
 async function mmiPotvrdPresun() {
   const P = _mmiPresun, M = _mmiM
   if (!P || P.bezi || P.cil === undefined || !M?.lzePresouvat) return
