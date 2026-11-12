@@ -14994,7 +14994,7 @@ async function loadVacationAlertsImpl() {
       .not('created_by', 'is', null)
       .gte('date_to', localDateStr(hranice))
       .order('date_from', { ascending: false })
-      .limit(50)
+      .limit(500)   // dřív 50 — hromadný zápis dovolených správcem pak schoval samonahlášení pracovníků
     if (res.error) return      // sloupec created_by ještě není → migrace neproběhla
     data = res.data
   } catch (e) { return }
@@ -38014,11 +38014,12 @@ async function exportKW() {
   const endDate = new Date(startDate); endDate.setDate(endDate.getDate() + 6)
   const fmt = d => localDateStr(d)
 
-  const { data: attVse, error: chybaDochazky } = await sb.from('attendance')
+  // Po stránkách: server vrací nejvýš ~1000 řádků a týden 200 lidí jich má víc — konec týdne by v součtech chyběl.
+  const { data: attVse, error: chybaDochazky } = await stahniStrankyOdhad('export-kw', od => sb.from('attendance')
     .select('*, worker:profiles!worker_id(full_name, profession)')
     .gte('work_date', fmt(startDate))
     .lte('work_date', fmt(endDate))
-    .order('work_date')
+    .order('work_date').order('id').range(od, od + 999))
   if (chybaDochazky) { showToast('❌ Docházku se nepodařilo načíst — výkaz se nevytvořil. Zkuste to prosím znovu.'); return }
 
   // Kdo je v Týmech odškrtnutý („mimo výkaz"), do tohohle přehledu nepatří.
@@ -38280,11 +38281,15 @@ async function generateAttendanceExport() {
 
   showToast('⏳ Generuji PDF...')
 
-  const { data: att, error: attErr } = await sb.from('attendance')
-    .select('*, worker:profiles!worker_id(full_name, profession)')
-    .in('worker_id', ids)
-    .gte('work_date', startStr).lte('work_date', endStr)
-    .order('work_date').order('check_in')
+  // Lidé po stovkách (200 UUID v adrese je na hraně limitu) a každá stovka po stránkách (strop ~1000 řádků).
+  const casti = await Promise.all(Array.from({ length: Math.ceil(ids.length / 100) }, (_, k) => ids.slice(k * 100, k * 100 + 100)).map((kus, k) =>
+    stahniStrankyOdhad('export-att-' + k, od => sb.from('attendance')
+      .select('*, worker:profiles!worker_id(full_name, profession)')
+      .in('worker_id', kus)
+      .gte('work_date', startStr).lte('work_date', endStr)
+      .order('work_date').order('check_in').order('id').range(od, od + 999))))
+  const attErr = (casti.find(c => c.error) || {}).error || null
+  const att = attErr ? null : casti.flatMap(c => c.data || []).sort((a, b) => String(a.work_date).localeCompare(String(b.work_date)) || String(a.check_in || '').localeCompare(String(b.check_in || '')))
 
   if (attErr) { showToast('❌ Docházku se nepodařilo načíst — zkuste to prosím znovu'); return }
   if (!att?.length) { showToast('❌ Žádná data pro zvolené období a pracovníky'); return }
@@ -41184,7 +41189,8 @@ async function _loadDocumentAlertsStatTelo() {
   // Načti všechny AKTIVNÍ OSVČ pracovníky (neaktivní/odebrané neřešíme).
   // bez_ridicaku říká, kdo prohlásil, že řidičák nemá — po tom se nechce.
   // Odložená upozornění se čtou souběžně s lidmi (dřív až po dokladech — o obrátku víc).
-  const pDismissals = Promise.resolve(sb.from('doc_alert_dismissals').select('dismiss_key')).catch(e => ({ data: null, error: e || { message: 'chyba' } }))
+  // Po stránkách: přes 1000 odložení by se starší upozornění začala vracet.
+  const pDismissals = Promise.resolve(stahniStrankyOdhad('dismissals', od => sb.from('doc_alert_dismissals').select('dismiss_key').order('dismiss_key').range(od, od + 999))).catch(e => ({ data: null, error: e || { message: 'chyba' } }))
   let { data: workers, error: chybaLidi } = await sb.from('profiles')
     .select('id, full_name, profession, bez_ridicaku, team_id')
     .in('role', ['osvec', 'partak'])
