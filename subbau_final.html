@@ -33194,9 +33194,20 @@ function mmiHtmlPresuny(presuny) {
 }
 
 // ── Okno přesunu ────────────────────────────────────────────────────────
+// Přesun drží stabilní cid člověka: po obnovení plánu během odesílání se index
+// v novém modelu najde znovu (jinak by se opakování týkalo jiného člověka).
+function mmiPresunClovek(P, M) {
+  if (P.cid != null) {
+    const k = M.lide.findIndex(x => x.cid === P.cid)
+    if (k < 0) return null
+    P.i = k
+    return M.lide[k]
+  }
+  return M.lide[P.i] || null
+}
 function mmiOtevriPresun(i, den) {
   if (!_mmiM?.lide[i] || !_mmiM.dny.includes(den) || _mmiPresun?.bezi) return
-  _mmiPresun = { i, den, cil: undefined, rozsah: 'den', bezi: false, chyba: '' }
+  _mmiPresun = { i, cid: _mmiM.lide[i].cid, den, cil: undefined, rozsah: 'den', bezi: false, chyba: '' }
   mmiVykresliPresun()
 }
 function mmiZavriPresun() {
@@ -33257,7 +33268,8 @@ function mmiVykresliPresun() {
   // tom vykreslí znovu — fokus se proto vrátí na totéž místo.
   const ovladace = () => [...box.querySelectorAll('button, input')]
   const fokus = box.contains(document.activeElement) ? ovladace().indexOf(document.activeElement) : -1
-  const c = M.lide[P.i]
+  const c = mmiPresunClovek(P, M)
+  if (!c) return   // člověk už v obnoveném plánu není
   const ted = M.plan[c.cid]?.[P.den] || null
   const k = M.dny.indexOf(P.den)
   const zak = P.bezi ? ' disabled' : ''
@@ -33348,7 +33360,7 @@ document.addEventListener('pointerdown', e => {
   const m = String(karta.getAttribute('onclick') || '').match(/mmiOtevriPresun\((\d+),'([^']+)'/)
   const blok = karta.closest('[data-mmi-den-blok]')
   if (!m || !blok) return
-  _mmiTah = { karta, i: +m[1], den: m[2], blok, x0: e.clientX, y0: e.clientY, dotyk: e.pointerType === 'touch', jede: false, id: e.pointerId, duch: null, zvyrazneny: null, cil: null }
+  _mmiTah = { karta, i: +m[1], cid: _mmiM?.lide[+m[1]]?.cid, den: m[2], blok, x0: e.clientX, y0: e.clientY, dotyk: e.pointerType === 'touch', jede: false, id: e.pointerId, duch: null, zvyrazneny: null, cil: null }
   if (_mmiTah.dotyk) _mmiTah.cas = setTimeout(() => { if (_mmiTah) mmiTahStart(_mmiTah.x0, _mmiTah.y0) }, 350)
 }, true)
 function mmiTahStart(x, y) {
@@ -33380,28 +33392,30 @@ document.addEventListener('touchmove', e => { if (_mmiTah?.jede) e.preventDefaul
 document.addEventListener('pointerup', e => {
   const T = _mmiTah; if (!T || e.pointerId !== T.id) return
   const jede = T.jede, cil = jede ? mmiTahCil(e.clientX, e.clientY) : null
-  const { i, den } = T
+  const { i, den, cid } = T
   if (jede) _mmiTahKonec = Date.now()
   mmiTahZrus()
-  if (jede && cil) mmiTahPust(i, den, cil)
+  if (jede && cil) mmiTahPust(i, den, cil, cid)
 }, true)
 document.addEventListener('pointercancel', () => { if (_mmiTah?.jede) _mmiTahKonec = Date.now(); mmiTahZrus() }, true)
 // Po tažení se nesmí otevřít okno (prohlížeč pošle klepnutí na kartu).
 document.addEventListener('click', e => { if (Date.now() - _mmiTahKonec < 400 && e.target.closest?.('.mmir-karticka, .mmir-pryc-clovek')) { e.stopPropagation(); e.preventDefault() } }, true)
-function mmiTahPust(i, den, cilEl) {
+function mmiTahPust(i, den, cilEl, cid) {
   const M = _mmiM, c = M?.lide[i]; if (!c || _mmiPresun?.bezi) return
+  if (cid != null && c.cid !== cid) return   // plán se během tažení obnovil — index už patří jinému člověku
   const cilId = cilEl.hasAttribute('data-mmi-bez-stavby') ? '' : cilEl.getAttribute('data-mmi-misto')
   if ((M.plan[c.cid]?.[den] || '') === cilId) return
   if (!M.lzePresouvat || !c.lzePresouvat) { showToast(!M.lzePresouvat ? 'Přesouvání se zapne po propojení se Stavbyplánem.' : 'Tohohle člověka může přesunout jen MMI ve Stavbyplánu.'); return }
   if (cilId && !M.cile.some(x => x.id === cilId)) { showToast('Na tuhle stavbu přesunout nejde.'); return }
-  _mmiPresun = { i, den, cil: cilId, rozsah: 'trvale', bezi: false, chyba: '' }
+  _mmiPresun = { i, cid: c.cid, den, cil: cilId, rozsah: 'trvale', bezi: false, chyba: '' }
   mmiPotvrdPresun()
 }
 
 async function mmiPotvrdPresun() {
   const P = _mmiPresun, M = _mmiM
-  if (!P || P.bezi || P.cil === undefined || !M?.lzePresouvat || !M.lide[P.i]?.lzePresouvat) return
-  const c = M.lide[P.i]
+  if (!P || P.bezi || P.cil === undefined || !M?.lzePresouvat) return
+  const c = mmiPresunClovek(P, M)
+  if (!c || !c.lzePresouvat) return
   const odkaz = String(M.j.__odkaz || '')
   const token = (odkaz.match(/[?&]t=([0-9a-f]{64})(?:&|$)/i) || [])[1]
   if (!token) { P.chyba = 'V uloženém odkazu chybí klíč — vložte odkaz znovu.'; return mmiVykresliPresun() }
@@ -33568,14 +33582,22 @@ async function vimONuloveSazbe(klice) {
 // Sazba je vyplněná (víc než nula) — „Vím o tom" už neplatí, další nula se ukáže znovu.
 function smazNuluVimOTom(druh, workerId, hodnota) {
   if (!(Number(hodnota) > 0)) return
-  sb.from('doc_alert_dismissals').delete().eq('dismiss_key', sazba0Klic(druh, workerId))
-    .then(() => {}, () => {})
+  // Selhání se zkusí ještě jednou a trvalé selhání se oznámí (jinak by se další nula neukázala).
+  ;(async () => {
+    for (let pokus = 0; pokus < 2; pokus++) {
+      try {
+        const { error } = await sb.from('doc_alert_dismissals').delete().eq('dismiss_key', sazba0Klic(druh, workerId))
+        if (!error) return
+      } catch (e) { /* zkusí se znovu */ }
+    }
+    showToast('⚠️ Starší „Vím o tom“ u sazby se nepodařilo smazat — upozornění na další nulovou sazbu se nemusí ukázat')
+  })()
 }
 
 async function mmiVidelJsem(klice) {
   try {
     const { error } = await sb.from('doc_alert_dismissals')
-      .insert(klice.map(k => ({ dismiss_key: k, dismissed_by: currentUser?.id || null })))
+      .upsert(klice.map(k => ({ dismiss_key: k, dismissed_by: currentUser?.id || null })), { onConflict: 'dismiss_key', ignoreDuplicates: true })
     if (error && error.code !== '23505') { showToast('⚠️ Nepodařilo se uložit: ' + error.message); return }
   } catch (e) { showToast('⚠️ Nepodařilo se uložit: ' + (e?.message || e)); return }
   nactiPresunyMmiNaNastenku()
