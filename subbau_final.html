@@ -44341,7 +44341,19 @@ async function loadContractWorkers() {
   if (vybrany && lide.some(w => String(w.id) === String(vybrany))) sel.value = vybrany
 }
 
-async function uploadContract() {
+// Po vypršení času zápisu do databáze mohl původní požadavek smlouvu přesto uložit — než se nahrání
+// zopakuje (nový soubor, nový záznam), ověří se podle adresy souboru, jestli smlouva nevznikla.
+async function smlouvaPoTimeoutu(workerId, fileUrl) {
+  try {
+    await new Promise(r => setTimeout(r, 2500))
+    const { data } = await sb.from('contracts').select('id').eq('worker_id', workerId).eq('file_url', fileUrl).limit(1)
+    return (data && data[0]) ? data[0] : null
+  } catch (e) { return null }
+}
+// Nahrání smlouvy se nesmí spustit dvakrát naráz (dvojklik, druhé tlačítko na slabém signálu) —
+// každé spuštění by vytvořilo nový soubor i záznam. Jeden zámek pro všechny tři cesty nahrání.
+async function uploadContract() { return _jednouNaraz('smlouva-nahrani', _uploadContractVnitrni) }
+async function _uploadContractVnitrni() {
   const workerId = document.getElementById('contract-worker').value
   const title = document.getElementById('contract-title').value.trim()
   if (!workerId) { showToast('⚠️ Vyberte pracovníka'); return }
@@ -44391,19 +44403,24 @@ async function uploadContract() {
       created_at: new Date().toISOString()
     }).select().single(), 15000))
   } catch (e) { dbErr = e }
+  if (dbErr && /Vypršel čas/.test(dbErr.message || '')) {
+    const nalezena = await smlouvaPoTimeoutu(workerId, fileUrl)
+    if (nalezena) { contractData = nalezena; dbErr = null }
+  }
   if (dbErr) { showToast('❌ Chyba DB: ' + dbErr.message); progress.style.display='none'; return }
 
   const contractId = contractData?.id
   if (!contractId) { showToast('❌ Nepodařilo se získat ID smlouvy'); progress.style.display='none'; return }
 
   // Pošli notifikaci pracovníkovi
-  await sb.from('notifications').insert({
+  const { error: chybaNotif } = await sb.from('notifications').insert({
     worker_id: workerId,
     title: '✍️ Nová smlouva k podpisu',
     message: `Byla vám zaslána smlouva "${escAttr(title)}". Přejděte do sekce Smlouvy a podepište ji.`,
     type: 'smlouva',
     is_read: false
   })
+  if (chybaNotif) { console.warn('[smlouva] oznámení pracovníkovi se nevložilo:', chybaNotif.message); showToast('⚠️ Smlouva je nahraná, ale oznámení pracovníkovi se nepodařilo odeslat — upozorněte ho sami') }
 
   progress.style.display = 'none'
   contractFile = null
@@ -44420,7 +44437,8 @@ async function uploadContract() {
 }
 
 // Nahraje smlouvu, která je už podepsaná (sken) — uloží rovnou jako hotovou, nikdo nepodepisuje
-async function uploadSignedContract() {
+async function uploadSignedContract() { return _jednouNaraz('smlouva-nahrani', _uploadSignedContractVnitrni) }
+async function _uploadSignedContractVnitrni() {
   const workerId = document.getElementById('contract-worker').value
   const title = document.getElementById('contract-title').value.trim()
   if (!workerId) { showToast('⚠️ Vyberte pracovníka'); return }
@@ -44464,6 +44482,7 @@ async function uploadSignedContract() {
       created_at: new Date().toISOString()
     }), 15000))
   } catch (e) { dbErr = e }
+  if (dbErr && /Vypršel čas/.test(dbErr.message || '') && await smlouvaPoTimeoutu(workerId, fileUrl)) dbErr = null
   if (dbErr) { showToast('❌ Chyba DB: ' + dbErr.message); progress.style.display = 'none'; return }
 
   progress.style.display = 'none'
@@ -44482,7 +44501,8 @@ async function uploadSignedContract() {
 // OSVČ ji ještě musí elektronicky podepsat v appce. Na rozdíl od uploadContract()
 // admin nemusí podpis kreslit znovu (soubor ho už obsahuje), na rozdíl od
 // uploadSignedContract() to není hotovo — čeká se na podpis pracovníka.
-async function uploadAdminSignedContract() {
+async function uploadAdminSignedContract() { return _jednouNaraz('smlouva-nahrani', _uploadAdminSignedContractVnitrni) }
+async function _uploadAdminSignedContractVnitrni() {
   const workerId = document.getElementById('contract-worker').value
   const title = document.getElementById('contract-title').value.trim()
   if (!workerId) { showToast('⚠️ Vyberte pracovníka'); return }
@@ -44527,17 +44547,22 @@ async function uploadAdminSignedContract() {
       created_at: new Date().toISOString()
     }).select().single(), 15000))
   } catch (e) { dbErr = e }
+  if (dbErr && /Vypršel čas/.test(dbErr.message || '')) {
+    const nalezena = await smlouvaPoTimeoutu(workerId, fileUrl)
+    if (nalezena) { contractData = nalezena; dbErr = null }
+  }
   if (dbErr) { showToast('❌ Chyba DB: ' + dbErr.message); progress.style.display = 'none'; return }
 
   // Pošli notifikaci pracovníkovi — stejná jako u běžného nahrání k podpisu
   if (contractData?.id) {
-    await sb.from('notifications').insert({
+    const { error: chybaNotif2 } = await sb.from('notifications').insert({
       worker_id: workerId,
       title: '✍️ Nová smlouva k podpisu',
       message: `Byla vám zaslána smlouva "${escAttr(title)}". Přejděte do sekce Smlouvy a podepište ji.`,
       type: 'smlouva',
       is_read: false
     })
+    if (chybaNotif2) { console.warn('[smlouva] oznámení pracovníkovi se nevložilo:', chybaNotif2.message); showToast('⚠️ Smlouva je nahraná, ale oznámení pracovníkovi se nepodařilo odeslat — upozorněte ho sami') }
   }
 
   progress.style.display = 'none'
@@ -44592,13 +44617,16 @@ async function ensureContractOriginal(contractId) {
     console.warn('[smlouva] záloha původní verze selhala:', e?.message)
     // DENÍK CHYB (2. 11. 2026): bez zálohy může přepis souboru smlouvy smazat původní verzi — dřív o tom věděla jen konzole.
     try { if (typeof denikChybZapis === 'function') denikChybZapis('smlouva-zaloha', 'Záloha původní verze smlouvy selhala: ' + String((e && e.message) || e).slice(0, 200), { kod: e && e.code, stav: e && (e.status || e.statusCode) }, { trida: 'varovani' }) } catch (x) { console.warn('[deník chyb]', x) } // eslint-disable-line no-undef
-    return null
+    return false   // false = záloha selhala (null = nebylo co zálohovat)
   }
 }
 
 // Jediná cesta, kterou se mění file_url smlouvy — vždy nejdřív zazálohuje původní verzi.
 async function updateContractFile(contractId, updateData) {
-  if (updateData && updateData.file_url) await ensureContractOriginal(contractId)
+  if (updateData && updateData.file_url) {
+    // Bez ověřené zálohy originálu se odkaz na soubor nepřepisuje — původní verze by se ztratila.
+    if (await ensureContractOriginal(contractId) === false) return { error: { message: 'Původní verzi smlouvy se nepodařilo zazálohovat — změna zastavena, zkuste to prosím znovu.' } }
+  }
   // .select('id'): update, který nezměnil ani jeden řádek (smlouva mezitím zmizela, chybí oprávnění), se
   // dřív tvářil jako úspěch (Codex 6. 11. 2026).
   const r = await sb.from('contracts').update(updateData).eq('id', contractId).select('id')
