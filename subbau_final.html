@@ -36987,6 +36987,8 @@ async function _exportWorkerKWTed(workerId, workerName, week, year, lang, forema
 
   showToast(T.gen)
 
+  // Datum potvrzení u podpisu převzatého ze staršího výkazu je datum toho podpisu, ne dnešek.
+  let datumPodpisuZDb = null
   // Když podpis vedoucího není v paměti (foreman), zkus načíst uložený z databáze.
   if (!foreman || !foreman.signature) {
     try {
@@ -36996,10 +36998,15 @@ async function _exportWorkerKWTed(workerId, workerName, week, year, lang, forema
         .order('created_at', { ascending: false })
       const withSig = (sheets || []).find(s => s.foreman_signature) || (sheets || [])[0]
       if (withSig) {
+        // Jméno a podpis se přebírají jako celek: pod nové jméno vedoucího se starý podpis jiného člověka nedoplní.
+        const zadaneJmeno = String((foreman && foreman.name) || '').trim()
+        const ulozeneJmeno = String(withSig.foreman_name || '').trim()
+        const stejnyVedouci = !zadaneJmeno || zadaneJmeno.toLowerCase() === ulozeneJmeno.toLowerCase()
         foreman = {
-          name: (foreman && foreman.name) || withSig.foreman_name || '',
-          signature: (foreman && foreman.signature) || withSig.foreman_signature || null
+          name: zadaneJmeno || ulozeneJmeno,
+          signature: stejnyVedouci ? (withSig.foreman_signature || null) : null
         }
+        if (foreman.signature && withSig.created_at) datumPodpisuZDb = new Date(withSig.created_at)
       }
     } catch(e) { console.warn('[exportWorkerKW] foreman load:', e?.message) }
   }
@@ -37133,7 +37140,7 @@ async function _exportWorkerKWTed(workerId, workerName, week, year, lang, forema
       </div>
       <div style="width:150px">
         <div style="font-size:10px;color:#000;font-weight:700;margin-bottom:3px">Date · Datum:</div>
-        <div style="border-bottom:1.5px solid #333;height:50px;width:130px;display:flex;align-items:flex-end;padding-bottom:5px;font-size:11px">${new Date().toLocaleDateString('cs-CZ')}</div>
+        <div style="border-bottom:1.5px solid #333;height:50px;width:130px;display:flex;align-items:flex-end;padding-bottom:5px;font-size:11px">${(datumPodpisuZDb && !isNaN(datumPodpisuZDb) ? datumPodpisuZDb : new Date()).toLocaleDateString('cs-CZ')}</div>
       </div>
     </div>
   </div>
@@ -37190,6 +37197,7 @@ async function _exportWorkerKWTed(workerId, workerName, week, year, lang, forema
       }
     } catch(e) {
       console.error('[hour-sheet] insert výjimka:', e?.message)
+      showToast('⚠️ Uložení výkazu pro kancelář se nepodařilo potvrdit — zkontrolujte připojení a výkaz případně vytvořte znovu')
       zapisChybuAppky('vykaz-hodin', e?.message, { workerId, week, year })
     }
   }
