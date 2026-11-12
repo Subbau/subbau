@@ -43331,9 +43331,15 @@ async function storeInvoiceRow(row) {
   // položky…) se dál normálně přepíše.
   if (row.worker_id && row.invoice_number) {
     try {
-      const { data: existujici, error: chybaExist } = await sb.from('worker_invoices')
-        .select('status, cash_paid, cash_paid_note, cash_paid_typ')
+      let { data: existujici, error: chybaExist } = await sb.from('worker_invoices')
+        .select('status, cash_paid, cash_paid_note, cash_paid_typ, zalohy_pouzite')
         .eq('worker_id', row.worker_id).eq('invoice_number', String(row.invoice_number)).maybeSingle()
+      // Sloupec zalohy_pouzite nemusí být v databázi (nespuštěná migrace) — ptát se pak bez něj.
+      if (chybaExist && /zalohy_pouzite/i.test(chybaExist.message || '')) {
+        ;({ data: existujici, error: chybaExist } = await sb.from('worker_invoices')
+          .select('status, cash_paid, cash_paid_note, cash_paid_typ')
+          .eq('worker_id', row.worker_id).eq('invoice_number', String(row.invoice_number)).maybeSingle())
+      }
       // Když se nepodaří zjistit, jestli faktura už není vyřízená nebo zaplacená, nepřepisuje se
       // (zápis by vrátil status „nová" a smazal úhrady — Codex 6. 11. 2026). Chyba jde volajícímu jako chyba uložení.
       if (chybaExist) {
@@ -43343,6 +43349,9 @@ async function storeInvoiceRow(row) {
       if (existujici && (existujici.status === 'paid' || existujici.status === 'seen')) {
         row = { ...row, status: existujici.status, cash_paid: existujici.cash_paid,
                 cash_paid_note: existujici.cash_paid_note, cash_paid_typ: existujici.cash_paid_typ }
+        // Evidence použitých záloh patří k uhrazené částce — přegenerování (i z archivu, který
+        // ji nenese) ji nesmí vynulovat, jinak by se záloha uvolnila a odečetla podruhé.
+        if ('zalohy_pouzite' in existujici && 'zalohy_pouzite' in row) row.zalohy_pouzite = Array.isArray(existujici.zalohy_pouzite) ? existujici.zalohy_pouzite : []
       } else if (Array.isArray(row.zalohy_pouzite)) {
         // Odečet zálohy se spočítal už při náhledu faktury — mezitím mohla
         // tutéž zálohu spolykat jiná faktura. Těsně před zápisem ho zužujeme
@@ -43400,9 +43409,12 @@ async function zapisRadekFaktury(row) {
   //
   // Přepiš-nebo-vlož funguje bez ohledu na to, jaký index v databázi je.
   const klic = { worker_id: row.worker_id, invoice_number: String(row.invoice_number || '') }
+  // Zápis „nové" faktury se nesmí přepsat přes fakturu, kterou mezitím někdo označil jako
+  // vyřízenou/zaplacenou (stav by se vrátil na „nová" a úhrada zmizela) — podmínka na stav.
+  const jenNova = q => row.status === 'new' ? q.or('status.eq.new,status.is.null') : q
   if (klic.worker_id && klic.invoice_number) {
-    const { data: prepsane, error: chybaUpravy } = await sb.from('worker_invoices')
-      .update(row).eq('worker_id', klic.worker_id).eq('invoice_number', klic.invoice_number)
+    const { data: prepsane, error: chybaUpravy } = await jenNova(sb.from('worker_invoices')
+      .update(row).eq('worker_id', klic.worker_id).eq('invoice_number', klic.invoice_number))
       .select('id')
     if (chybaUpravy) return chybaUpravy
     if (prepsane && prepsane.length) return null      // hotovo, přepsali jsme
@@ -43414,8 +43426,8 @@ async function zapisRadekFaktury(row) {
   // Mezitím ji mohl uložit někdo jiný (pracovník ze svého telefonu ve stejnou
   // chvíli). Zkusíme tedy ještě jednou přepsat, ať se práce neztratí.
   if (/duplicate key|already exists|23505/i.test(chybaVlozeni.message || '') && klic.invoice_number) {
-    const { data: podruhe, error: chybaPodruhe } = await sb.from('worker_invoices')
-      .update(row).eq('worker_id', klic.worker_id).eq('invoice_number', klic.invoice_number)
+    const { data: podruhe, error: chybaPodruhe } = await jenNova(sb.from('worker_invoices')
+      .update(row).eq('worker_id', klic.worker_id).eq('invoice_number', klic.invoice_number))
       .select('id')
     if (!chybaPodruhe && podruhe && podruhe.length) return null
   }
@@ -43833,6 +43845,9 @@ async function emailInvoiceToSubbau() {
   const d = window._lastInvoice
   if (!d || !d.workerId) { showToast('⚠️ Nejdřív vytvořte fakturu'); return }
 
+  // Řádek do složky se sestaví z TÉHOŽ dokladu, který se odesílá — pozdější otevření jiné faktury
+  // (zavřený náhled) by jinak podstrčilo údaje druhé faktury k PDF první.
+  const rowSnimek = invoiceRowFromLast('email')
   const label = document.getElementById('inv-email-label')
   const orig = label ? label.textContent : ''
   _invSendBusy(true, 'inv-email-label', 'Připravuji fakturu…')
@@ -43845,7 +43860,7 @@ async function emailInvoiceToSubbau() {
 
     // 1) Odeslat přes server (Brevo) — příloha dorazí spolehlivě
     if (label) label.textContent = 'Odesílám na ' + INVOICE_EMAIL + '…'
-    const sent = await sendInvoiceByServer(out)
+    const sent = await sendInvoiceByServer(out, d)
     let sentVia = 'email', zpravaNavic = ''
 
     if (!sent.ok) {
@@ -43896,7 +43911,7 @@ async function emailInvoiceToSubbau() {
     // to je náš vlastní spolehlivý systém a nezávisí na tom, jestli se povede
     // odeslat (nebo opravdu odešle) e-mail. Admin tak fakturu uvidí, i když
     // zrovna nepřijde mail.
-    const row = invoiceRowFromLast(sentVia)
+    const row = Object.assign(rowSnimek || invoiceRowFromLast(sentVia), { sent_via: sentVia, sent_at: new Date().toISOString() })
     try {
       const up = await uploadInvoicePdf(out.blob, d.workerId, d.invoiceNum)
       row.pdf_path = up.path; row.pdf_url = up.url
@@ -43916,15 +43931,21 @@ async function emailInvoiceToSubbau() {
       try { podrzena = await podrzFakturuVTelefonu(error, row, out) } catch (e) { podrzena = false }
       zapisChybuAppky('faktura-email-bez-zapisu', error.message, { invoiceNum: d.invoiceNum, workerId: d.workerId, podrzena })
       if (podrzena) {
-        _invSentNote = '⏳ Odesláno e-mailem, do složky Faktury ji appka zapíše sama, jakmile to půjde.'
+        // „Odešla e-mailem" smí tvrdit jen potvrzené odeslání ze serveru — ne otevřený koncept ani nepotvrzené sdílení.
+        _invSentNote = sentVia === 'email' ? '⏳ Odesláno e-mailem, do složky Faktury ji appka zapíše sama, jakmile to půjde.'
+          : '⏳ Do složky Faktury ji appka zapíše sama, jakmile to půjde. Zkontrolujte prosím, že e-mail opravdu odešel.'
         updateInvoiceSendUi()
-        showInvoiceSentModal('Faktura č. ' + (d.invoiceNum || '') + ' odešla e-mailem, do složky Faktury se ale zatím nezapsala (slabé spojení nebo přihlášení). Appka ji tam zapíše sama, jakmile to půjde — nemusíte nic dělat.', true)
+        showInvoiceSentModal(sentVia === 'email'
+          ? 'Faktura č. ' + (d.invoiceNum || '') + ' odešla e-mailem, do složky Faktury se ale zatím nezapsala (slabé spojení nebo přihlášení). Appka ji tam zapíše sama, jakmile to půjde — nemusíte nic dělat.'
+          : 'Faktura č. ' + (d.invoiceNum || '') + ' se do složky Faktury zatím nezapsala (slabé spojení nebo přihlášení). Appka ji tam zapíše sama, jakmile to půjde. Zkontrolujte prosím, že e-mail opravdu odešel.', true)
         nactiMojeFaktury().catch(() => {})
         return
       }
-      _invSentNote = '⚠️ Odesláno e-mailem, ale do složky Faktury se nezapsala — dejte prosím vědět SubBau.'
+      _invSentNote = sentVia === 'email' ? '⚠️ Odesláno e-mailem, ale do složky Faktury se nezapsala — dejte prosím vědět SubBau.'
+        : '⚠️ Do složky Faktury se nezapsala — dejte prosím vědět SubBau a zkontrolujte, že e-mail opravdu odešel.'
       updateInvoiceSendUi()
-      showInvoiceSentModal('Faktura odešla e-mailem, ale do složky Faktury se nezapsala. Dejte prosím vědět SubBau.', true)
+      showInvoiceSentModal(sentVia === 'email' ? 'Faktura odešla e-mailem, ale do složky Faktury se nezapsala. Dejte prosím vědět SubBau.'
+        : 'Faktura se do složky Faktury nezapsala. Dejte prosím vědět SubBau a zkontrolujte, že e-mail opravdu odešel.', true)
       return
     }
     // Zapsaná — podržená starší verze téhož čísla už nesmí nic přepsat.
@@ -43949,9 +43970,9 @@ async function emailInvoiceToSubbau() {
 
 // Pošle PDF přes serverovou funkci (Vercel + Brevo). Když endpoint neexistuje
 // nebo není nastavený klíč, vrátí ok:false a appka zkusí jiný způsob.
-async function sendInvoiceByServer(out) {
+async function sendInvoiceByServer(out, dd) {
   try {
-    const d = window._lastInvoice || {}
+    const d = dd || window._lastInvoice || {}
     const b64 = await blobToBase64(out.blob)
     let token = null
     try { token = (await sb.auth.getSession())?.data?.session?.access_token || null } catch (e) {}
