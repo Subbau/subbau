@@ -11616,17 +11616,18 @@ const jeBudouci = den => /^\d{4}-\d{2}-\d{2}$/.test(String(den || '')) && String
 // Záloha historie před úpravou: když se po ní nepodaří zapsat samotná hodnota
 // (profil / provize), volající historii vrátí zpět obnovHistoriiSazby —
 // jinak by zpětný přepočet nechal smazané hranice a minulé částky by se změnily.
-const _zalohyHistorieSazby = {}   // klíč workerId|druh — souběžné změny sazeb si zálohy nepřepisují
+// Každá operace má VLASTNÍ úchyt zálohy (zl = {}), který jí předá volající. Tentýž údaj (pracovník + druh) ukládá
+// jen jedna operace naráz — druhá se odmítne, ať se zálohy nemíchají. Opuštěná záloha (>2 min) neblokuje.
+const _zalohyHistorieSazby = {}   // klíč workerId|druh → { rows, od }
 const _klicZalohy = (workerId, druh) => String(workerId) + '|' + druh
-function uvolniZalohuHistorieSazby(workerId, druh) {
-  const kz = _klicZalohy(workerId, druh), Z = _zalohyHistorieSazby[kz]
-  if (Z && --Z.bezi <= 0) delete _zalohyHistorieSazby[kz]
+function uvolniZalohuHistorieSazby(zl) {
+  const Z = zl && zl.zaloha
+  if (Z && _zalohyHistorieSazby[Z.kz] === Z) delete _zalohyHistorieSazby[Z.kz]
 }
-async function obnovHistoriiSazby(workerId, druh) {
-  const kz = _klicZalohy(workerId, druh)
-  const Z = _zalohyHistorieSazby[kz]
-  delete _zalohyHistorieSazby[kz]
+async function obnovHistoriiSazby(workerId, druh, zl) {
+  const Z = zl && zl.zaloha
   if (!Z) return
+  uvolniZalohuHistorieSazby(zl)
   try {
     const { data: ted, error: e1 } = await sb.from('worker_rate_history').select('id').eq('worker_id', workerId).eq('druh', druh)
     if (e1) throw e1
@@ -11645,28 +11646,25 @@ async function obnovHistoriiSazby(workerId, druh) {
     showToast('⚠️ Historie sazby se po chybě nepodařilo vrátit — zkontrolujte ji a uložte sazbu znovu')
   }
 }
-// Obálka: při neúspěchu uvolní zálohu (nikdo ji nevrací ani neuvolní); u úspěchu ji uvolní volající po zápisu profilu/provize.
+// Obálka: opts.zaloha = {} si volající ponechá, když po úspěchu ještě zapisuje samotnou hodnotu (a při chybě historii
+// vrací / po úspěchu zálohu uvolní). Bez opts.zaloha, nebo při neúspěchu, se záloha uvolní hned.
 async function ulozSazbuSHistorii(workerId, druh, puvodni, nova, odKdy, opts) {
+  const zl = (opts && opts.zaloha) || {}
   let ok = false
-  try { ok = await ulozSazbuSHistoriiVnitrni(workerId, druh, puvodni, nova, odKdy, opts) } finally { if (!ok) uvolniZalohuHistorieSazby(workerId, druh) }
+  try { ok = await ulozSazbuSHistoriiVnitrni(workerId, druh, puvodni, nova, odKdy, opts, zl) } finally { if (!ok || !(opts && opts.zaloha)) uvolniZalohuHistorieSazby(zl) }
   return ok
 }
-async function ulozSazbuSHistoriiVnitrni(workerId, druh, puvodni, nova, odKdy, opts) {
+async function ulozSazbuSHistoriiVnitrni(workerId, druh, puvodni, nova, odKdy, opts, zl) {
   const dnes = localDateStr()
-  // Souběžná uložení téže sazby sdílejí JEDNU zálohu — tu nejstarší (stav před všemi změnami); čítač drží, dokud nedoběhnou všechna.
   const kz0 = _klicZalohy(workerId, druh)
-  // Záloha starší než 2 minuty je opuštěná (volající ji neuvolnil) — začíná se znovu.
-  if (_zalohyHistorieSazby[kz0] && Date.now() - _zalohyHistorieSazby[kz0].od > 120000) delete _zalohyHistorieSazby[kz0]
-  if (_zalohyHistorieSazby[kz0]) _zalohyHistorieSazby[kz0].bezi++
-  else {
-    try {
-      const { data: zaloha, error: chybaZalohy } = await sb.from('worker_rate_history').select('*').eq('worker_id', workerId).eq('druh', druh)
-      if (!chybaZalohy && zaloha) {
-        if (_zalohyHistorieSazby[kz0]) _zalohyHistorieSazby[kz0].bezi++
-        else _zalohyHistorieSazby[kz0] = { workerId, druh, rows: zaloha, bezi: 1, od: Date.now() }
-      }
-    } catch (e) { console.warn('[sazby] zálohu historie se nepodařilo načíst:', e && e.message) }
-  }
+  const zaneprazdneno = () => _zalohyHistorieSazby[kz0] && Date.now() - _zalohyHistorieSazby[kz0].od <= 120000
+  const odmitni = () => { showToast('⚠️ Předchozí změna téhle sazby se ještě ukládá — zkuste to za chvíli.'); return false }
+  if (zaneprazdneno()) return odmitni()
+  try {
+    const { data: zaloha, error: chybaZalohy } = await sb.from('worker_rate_history').select('*').eq('worker_id', workerId).eq('druh', druh)
+    if (zaneprazdneno()) return odmitni()   // mezitím začala jiná operace
+    if (!chybaZalohy && zaloha) { zl.zaloha = { kz: kz0, rows: zaloha, od: Date.now() }; _zalohyHistorieSazby[kz0] = zl.zaloha }
+  } catch (e) { console.warn('[sazby] zálohu historie se nepodařilo načíst:', e && e.message) }
   // Chybějící tabulka (neproběhlá migrace) = není co mazat ani hlídat. Jméno
   // tabulky v hlášce nestačí — obsahuje ho i odmítnutí právy — a „schema cache"
   // hlásí i dočasně nedostupný server (PGRST002), proto jen tyhle kódy.
@@ -12218,19 +12216,21 @@ async function saveProvizeRate(input, workerId) {
   const odKdy = poprve ? 'zpetne'
     : await zeptejSeOdKdy('Hodinová sazba pracovníka', puvodni, rate, p && p.full_name)
   if (!odKdy) { input.value = puvodni == null ? '' : puvodni; return }
-  if (!await ulozSazbuSHistorii(workerId, 'sazba', puvodni, rate, odKdy)) {
+  const zlSazba = {}
+  if (!await ulozSazbuSHistorii(workerId, 'sazba', puvodni, rate, odKdy, { zaloha: zlSazba })) {
     input.value = puvodni == null ? '' : puvodni
     return
   }
   if (jeBudouci(odKdy)) {
+    uvolniZalohuHistorieSazby(zlSazba)
     input.value = puvodni == null ? '' : puvodni
     showToast('📅 Naplánováno — od ' + datumCz(odKdy) + ' hodinovka ' + rate + ' €/h')
     prekresliProvize()
     return
   }
   const { error } = await sb.from('profiles').update({ hourly_rate_worker: rate }).eq('id', workerId)
-  if (error) { await obnovHistoriiSazby(workerId, 'sazba'); showToast('❌ Chyba: ' + error.message); return }
-  uvolniZalohuHistorieSazby(workerId, 'sazba')
+  if (error) { await obnovHistoriiSazby(workerId, 'sazba', zlSazba); showToast('❌ Chyba: ' + error.message); return }
+  uvolniZalohuHistorieSazby(zlSazba)
   smazNuluVimOTom('sazba', workerId, rate)
   showToast(poprve ? '✅ Sazba nastavena'
     : odKdy === 'zpetne'
@@ -12317,11 +12317,13 @@ async function saveProvizeCommission(input, workerId) {
   const odKdy = poprve ? 'zpetne'
     : await zeptejSeOdKdy('Provize SubBau na hodinu', puvodni, provize, pr && pr.full_name)
   if (!odKdy) { input.value = puvodni == null ? '' : puvodni; return }
-  if (!await ulozSazbuSHistorii(workerId, 'provize', puvodni, provize, odKdy)) {
+  const zlProvize = {}
+  if (!await ulozSazbuSHistorii(workerId, 'provize', puvodni, provize, odKdy, { zaloha: zlProvize })) {
     input.value = puvodni == null ? '' : puvodni
     return
   }
   if (jeBudouci(odKdy)) {
+    uvolniZalohuHistorieSazby(zlProvize)
     input.value = puvodni == null ? '' : puvodni
     showToast('📅 Naplánováno — od ' + datumCz(odKdy) + ' provize ' + provize + ' €/h')
     prekresliProvize()
@@ -12329,8 +12331,8 @@ async function saveProvizeCommission(input, workerId) {
   }
   const { error } = await sb.from('worker_commissions')
     .upsert({ worker_id: workerId, provize, updated_at: new Date().toISOString() }, { onConflict: 'worker_id' })
-  if (error) { await obnovHistoriiSazby(workerId, 'provize'); showToast('❌ Chyba: ' + error.message); return }
-  uvolniZalohuHistorieSazby(workerId, 'provize')
+  if (error) { await obnovHistoriiSazby(workerId, 'provize', zlProvize); showToast('❌ Chyba: ' + error.message); return }
+  uvolniZalohuHistorieSazby(zlProvize)
   smazNuluVimOTom('provize', workerId, provize)
   showToast(odKdy === 'zpetne'
     ? '✅ Provize uložena a přepočítána zpětně'
