@@ -18500,7 +18500,8 @@ let _docsCache = []
 let _docValidityEditId = null
 const _docLabels = DOC_LABELS
 async function loadDocuments() {
-  const { data } = await sb.from('documents').select('*, worker:profiles!worker_id(full_name)').order('uploaded_at',{ascending:false})
+  const { data, error } = await sb.from('documents').select('*, worker:profiles!worker_id(full_name)').order('uploaded_at',{ascending:false})
+  if (error) { console.warn('[dokumenty] načtení:', error.message); showToast('❌ Dokumenty se nepodařilo načíst: ' + error.message); return }   // poslední úspěšná data zůstanou
   const skryti = await skrytiLideIds()   // schované firmy
   _docsCache = (data || []).filter(d => !skryti.has(d.worker_id))
   renderDocuments()
@@ -18954,6 +18955,12 @@ async function deleteSitePhoto(id, url) {
   // Nejdřív záznam v databázi, teprve pak soubor (Codex 6. 11. 2026). Opačné pořadí nechalo
   // v galerii fotku, jejíž soubor je pryč, když zápis do databáze selhal. Soubor, který zůstane
   // bez záznamu, nikomu neškodí.
+  // Zmenšenina je samostatný soubor — její adresu si vezmeme z načtených dat ještě před smazáním řádku.
+  let thumbUrl = ''
+  try {
+    const zn = (_fotkySurove || []).concat(_fotkyPrehled || [], _sitePhotosCache || []).find(x => x && String(x.id) === String(id))
+    thumbUrl = (zn && zn.thumb_url) || ''
+  } catch (e) {}
   const { data: smazanoF, error } = await sb.from('site_photos').delete().eq('id', id).select('id')
   if (error) {
     showToast(/row-level security|policy|permission|42501/i.test(error.message || '')
@@ -18970,6 +18977,12 @@ async function deleteSitePhoto(id, url) {
       const path = decodeURIComponent(m[1].split('?')[0])
       const { error: sErr } = await sb.storage.from('site-photos').remove([path])
       if (sErr) console.warn('[fotky] soubor z úložiště se nesmazal:', sErr.message)
+    }
+    const mt = String(thumbUrl || '').match(/\/storage\/v1\/object\/public\/site-photos\/(.+)$/)
+    if (mt) {
+      const pathT = decodeURIComponent(mt[1].split('?')[0])
+      const { error: tErr } = await sb.storage.from('site-photos').remove([pathT])
+      if (tErr) console.warn('[fotky] zmenšenina z úložiště se nesmazala:', tErr.message)
     }
   } catch (e) { console.warn('[fotky] mazání souboru:', e?.message) }
   _sitePhotosCache = _sitePhotosCache.filter(x => String(x.id) !== String(id))
@@ -19063,8 +19076,9 @@ function renderDocuments() {
 
 async function approveDoc(id) {
   // Bez kontroly chyby appka hlásila „schváleno" i když se nic neuložilo.
-  const { error } = await sb.from('documents').update({ status:'ok', reviewed_at: new Date().toISOString() }).eq('id',id)
+  const { data: zmeneno, error } = await sb.from('documents').update({ status:'ok', reviewed_at: new Date().toISOString() }).eq('id',id).select('id')
   if (error) { showToast('❌ Chyba: ' + error.message); return }
+  if (!zmeneno || !zmeneno.length) { showToast('❌ Dokument se nepodařilo schválit — už neexistuje nebo to databáze nepovolila'); loadDocuments(); return }
   showToast('✅ Dokument schválen'); loadDocuments()
 }
 
@@ -19135,7 +19149,8 @@ async function applyDocValidity(id, workerId, docType, value) {
     if (!confirm('Bez data platnosti u tohoto dokladu neupozorníme na konec platnosti.\nOpravdu datum smazat?')) return false
   }
 
-  const { error } = await sb.from('documents').update({ valid_until: value || null }).eq('id', id)
+  const { data: zmenenoPl, error } = await sb.from('documents').update({ valid_until: value || null }).eq('id', id).select('id')
+  if (!error && (!zmenenoPl || !zmenenoPl.length)) { showToast('❌ Datum platnosti se neuložilo — doklad už neexistuje nebo to databáze nepovolila'); return false }
   if (error) {
     showToast(/valid_until|column/i.test(error.message)
       ? '❌ Chybí sloupec valid_until — spusťte migraci supabase-migrace-platnost-dokladu.sql'
@@ -19148,7 +19163,7 @@ async function applyDocValidity(id, workerId, docType, value) {
   if (workerId) {
     const keys = [workerId+'|expiring|'+id, workerId+'|expired|'+id, workerId+'|novalid|'+id]
     if (window._docAlertDismissed) keys.forEach(k => window._docAlertDismissed.delete(k))
-    try { await sb.from('doc_alert_dismissals').delete().in('dismiss_key', keys) } catch(e) {}
+    try { const { error: eSkryti } = await sb.from('doc_alert_dismissals').delete().in('dismiss_key', keys); if (eSkryti) showToast('⚠️ Obnovení upozornění se neuložilo: ' + eSkryti.message) } catch(e) {}
   }
 
   const v = docValidity(value)
@@ -19176,7 +19191,8 @@ async function applyDocNoExpiry(id, workerId, value, maDatum) {
   }
   const upd = { no_expiry: !!value }
   if (value) upd.valid_until = null   // ať vedle sebe nestojí „neřešíme" a datum
-  const { error } = await sb.from('documents').update(upd).eq('id', id)
+  const { data: zmenenoNe, error } = await sb.from('documents').update(upd).eq('id', id).select('id')
+  if (!error && (!zmenenoNe || !zmenenoNe.length)) { showToast('❌ Změna se neuložila — doklad už neexistuje nebo to databáze nepovolila'); return false }
   if (error) {
     showToast(/no_expiry|column/i.test(error.message)
       ? '❌ Chybí sloupec no_expiry — spusťte migraci supabase-migrace-VSE.sql'
@@ -19187,7 +19203,7 @@ async function applyDocNoExpiry(id, workerId, value, maDatum) {
   if (workerId) {
     const keys = [workerId+'|expiring|'+id, workerId+'|expired|'+id, workerId+'|novalid|'+id]
     if (window._docAlertDismissed) keys.forEach(k => window._docAlertDismissed.delete(k))
-    try { await sb.from('doc_alert_dismissals').delete().in('dismiss_key', keys) } catch(e) {}
+    try { const { error: eSkryti } = await sb.from('doc_alert_dismissals').delete().in('dismiss_key', keys); if (eSkryti) showToast('⚠️ Obnovení upozornění se neuložilo: ' + eSkryti.message) } catch(e) {}
   }
   showToast(value ? '✅ U tohoto dokladu se platnost už neřeší' : '🔔 Platnost dokladu se zase hlídá')
   if (typeof loadDocumentAlertsStat === 'function') loadDocumentAlertsStat()
@@ -19198,13 +19214,14 @@ async function applyDocNoExpiry(id, workerId, value, maDatum) {
 // občanku pošlou jako „Jiný dokument" — ať to admin spraví bez mazání a nahrávání znovu.
 async function applyDocTypeChange(id, workerId, newType) {
   if (!newType) return false
-  const { error } = await sb.from('documents').update({ doc_type: newType }).eq('id', id)
+  const { data: zmenenoTyp, error } = await sb.from('documents').update({ doc_type: newType }).eq('id', id).select('id')
   if (error) { showToast('❌ ' + docSaveErrorText(error)); return false }
+  if (!zmenenoTyp || !zmenenoTyp.length) { showToast('❌ Přeřazení se neuložilo — doklad už neexistuje nebo to databáze nepovolila'); return false }
   // Upozornění visí na konkrétním dokladu — po přeřazení ať se přepočítají podle nového typu
   if (workerId) {
     const keys = ['expiring', 'expired', 'novalid', 'pending', 'unreadable'].map(k => workerId + '|' + k + '|' + id)
     if (window._docAlertDismissed) keys.forEach(k => window._docAlertDismissed.delete(k))
-    try { await sb.from('doc_alert_dismissals').delete().in('dismiss_key', keys) } catch(e) {}
+    try { const { error: eSkryti } = await sb.from('doc_alert_dismissals').delete().in('dismiss_key', keys); if (eSkryti) showToast('⚠️ Obnovení upozornění se neuložilo: ' + eSkryti.message) } catch(e) {}
   }
   const nt = DOC_TYPE_BY_ID[newType]
   showToast('✅ Přeřazeno na: ' + docLabel(newType)
@@ -19471,11 +19488,12 @@ async function loadMobChat() {
 
   // Nejnovějších 100 zpráv. Dřív šlo vzestupně s limitem, takže kdo měl
   // přes 100 zpráv, viděl těch 100 nejstarších a nové ne.
-  const { data: nejnovejsi } = await sb.from('chat_messages')
+  const { data: nejnovejsi, error: chybaChatu } = await sb.from('chat_messages')
     .select('*')
     .eq('worker_id', currentUser.id)
     .order('created_at', {ascending: false})
     .limit(100)
+  if (chybaChatu) throw chybaChatu   // chyba načtení není „prázdná konverzace" — chytí ji catch níž
   if (poradi !== _mobChatPoradi) return   // mezitím se chat načítá znovu
   const data = (nejnovejsi || []).slice().reverse()
 
@@ -19612,7 +19630,8 @@ async function _sendChatMessageVnitrni() {
     // načte znovu, ať ji pracovník vidí, než ji pošle podruhé (Codex 6. 11. 2026).
     showToast('❌ Chyba odeslání: ' + error.message + ' — zkontrolujte konverzaci, než zprávu pošlete znovu')
     setTimeout(() => { try { loadMobChat() } catch (e) { console.warn('[chat] obnova po chybě:', e && e.message) } }, 2500)
-    input.value = msg
+    // Mezitím rozepsaný další text se nepřepíše — neodeslaná zpráva se přidá před něj.
+    input.value = input.value.trim() ? msg + '\n' + input.value : msg
     console.error('[sendChatMessage]', error)
     zapisChybuAppky('chat-odeslani', error?.message)
     return
@@ -19742,7 +19761,7 @@ async function dismissChatAlert(key) {
 // Vrátí zpět všechna smazaná upozornění na zprávy
 async function resetChatAlerts() {
   window._chatAlertDismissed = new Set()
-  try { await sb.from('doc_alert_dismissals').delete().like('dismiss_key', CHAT_KEY_PREFIX + '%') } catch (e) {}
+  try { const { error: eSkryti } = await sb.from('doc_alert_dismissals').delete().like('dismiss_key', CHAT_KEY_PREFIX + '%'); if (eSkryti) showToast('⚠️ Obnovení upozornění se neuložilo: ' + eSkryti.message) } catch (e) {}
   _forgetLocalChatAlerts(CHAT_KEY_PREFIX)
   loadChatAlerts()
 }
@@ -19930,12 +19949,18 @@ async function loadAdminChatList() {
   unread?.forEach(u => { unreadMap[u.worker_id] = (unreadMap[u.worker_id] || 0) + 1 })
 
   // Načti poslední zprávy
-  const { data: lastMsgs } = await sb.from('chat_messages')
-    .select('worker_id, message, created_at, sender_role')
-    .order('created_at', {ascending: false})
-
+  // Po stránkách (server vrací nejvýš ~1000 řádků naráz), dokud nemá poslední zprávu
+  // každý pracovník — aktivní konverzace nevytlačí méně aktivního lidi z přehledu.
   const lastMap = {}
-  lastMsgs?.forEach(m => { if (!lastMap[m.worker_id]) lastMap[m.worker_id] = m })
+  for (let od = 0; od < 100000; od += 1000) {
+    const { data: lastMsgs, error: lastErr } = await sb.from('chat_messages')
+      .select('worker_id, message, created_at, sender_role')
+      .order('created_at', {ascending: false}).order('id', {ascending: false}).range(od, od + 999)
+    if (lastErr) break
+    lastMsgs?.forEach(m => { if (!lastMap[m.worker_id]) lastMap[m.worker_id] = m })
+    if (!lastMsgs || lastMsgs.length < 1000) break
+    if (workers.every(w => lastMap[w.id])) break
+  }
 
   // Nepočítej zprávy z právě otevřené konverzace
   const chatView = document.getElementById('v-chat')
@@ -20018,12 +20043,18 @@ async function openAdminChat(workerId, workerName) {
 
   // Nejnovějších 100 zpráv (sestupně, pro zobrazení otočit). Dřív šlo
   // vzestupně s limitem — u dlouhé konverzace se ukázalo 100 nejstarších.
-  const { data: nejnovejsi } = await sb.from('chat_messages')
+  const { data: nejnovejsi, error: chybaCteni } = await sb.from('chat_messages')
     .select('*')
     .eq('worker_id', workerId)
     .order('created_at', {ascending: false})
     .limit(100)
   if (poradi !== _adminChatPoradi) return   // mezitím otevřel jinou konverzaci
+  if (chybaCteni) {
+    // Chyba načtení není „začněte konverzaci" — nic se nepřečte ani nepřipojí.
+    const dChyba = document.getElementById('admin-chat-messages')
+    if (dChyba) dChyba.innerHTML = '<div data-empty style="text-align:center;padding:40px;color:var(--text3);font-size:13px">Zprávy se nepodařilo načíst. Zkontrolujte připojení.</div>'
+    return
+  }
   const data = (nejnovejsi || []).slice().reverse()
 
   const div = document.getElementById('admin-chat-messages')
@@ -20055,13 +20086,15 @@ async function openAdminChat(workerId, workerName) {
   ;(async () => {
     // Přečtené jen zprávy, které jsou na obrazovce. Starší mimo posledních
     // 100 zůstanou nepřečtené — dřív se označilo vše, i co nikdo neviděl.
+    // Správce mezitím mohl odejít ze sekce (activeChatWorkerId = null) — pak nic neoznačovat.
+    if (poradi !== _adminChatPoradi || activeChatWorkerId !== workerId) return
     const ukazane = data.filter(m => m.sender_role !== 'admin' && !m.is_read).map(m => m.id)
     if (ukazane.length) {
       await sb.from('chat_messages')
         .update({is_read: true})
         .in('id', ukazane)
     }
-    if (poradi !== _adminChatPoradi) return
+    if (poradi !== _adminChatPoradi || activeChatWorkerId !== workerId) return
 
     // Konverzace je přečtená → skrytí bubliny už nemá co držet
     await clearChatAlertDismissals(workerId)
@@ -20070,7 +20103,7 @@ async function openAdminChat(workerId, workerName) {
     await loadAdminChatList()
     updateAdminChatBadge()
     loadChatAlerts()
-    if (poradi !== _adminChatPoradi) return   // kanál si zapne novější otevření
+    if (poradi !== _adminChatPoradi || activeChatWorkerId !== workerId) return   // kanál si zapne novější otevření / odchod ze sekce
 
     // Realtime
     if (adminChatRealtimeSub) sb.removeChannel(adminChatRealtimeSub)
@@ -20140,7 +20173,14 @@ async function _sendAdminChatMessageVnitrni() {
     is_read: false
   }).select().single()
 
-  if (error) { showToast('❌ Chyba: ' + error.message); input.value = msg; return }
+  if (error) {
+    showToast('❌ Chyba: ' + error.message)
+    // Text vrátit jen do téže konverzace a nepřepsat mezitím rozepsaný další;
+    // u jiné konverzace ho nevkládat (soukromý text by skončil u jiného člověka).
+    if (activeChatWorkerId === wid) input.value = input.value.trim() ? msg + '\n' + input.value : msg
+    else showToast('⚠️ Neodeslaná zpráva: ' + msg.slice(0, 120))
+    return
+  }
 
   // Zobraz vlastní zprávu IHNED — jen když je pořád otevřené to samé vlákno
   const div = document.getElementById('admin-chat-messages')
