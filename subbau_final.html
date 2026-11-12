@@ -24423,6 +24423,16 @@ async function zkopirujKlientOdkaz(token) {
 
 async function prepniKlientOdkaz(id, zapnout) {
   if (!zapnout && !confirm('Deaktivovat odkaz?\n\nOdběratel na něj přestane vidět okamžitě. Zapnout ho můžete kdykoli zpátky.')) return
+  if (zapnout) {
+    // Prošlý odkaz se zapnutím neobnoví (datum platnosti zůstane v minulosti) — otevře se
+    // jeho úprava, ať se nastaví nové datum, a nehlásí se zapnutí, které nic nezměnilo.
+    const { data: odk } = await sb.from('client_links').select('plati_do').eq('id', id).maybeSingle()
+    if (odk && odk.plati_do && odk.plati_do < localDateStr()) {
+      showToast('⚠️ Odkaz je prošlý — nastavte nové datum platnosti')
+      otevriNovyOdkaz(id)
+      return
+    }
+  }
   const { error } = await sb.from('client_links').update({ aktivni: !!zapnout }).eq('id', id)
   if (error) { showToast('❌ Chyba: ' + error.message); return }
   showToast(zapnout ? '✅ Odkaz zapnutý' : '🚫 Odkaz deaktivován')
@@ -24438,7 +24448,9 @@ async function smazKlientOdkaz(id, nazev) {
 }
 
 let _klientOdkazId = null
+let _klientOdkazPoradi = 0   // generace otevření editoru — pozdní odpověď staršího otevření ho nesmí přepsat
 async function otevriNovyOdkaz(id) {
+  const poradiOdkazu = ++_klientOdkazPoradi
   _klientOdkazId = id || null
   const modal = document.getElementById('klient-odkaz-modal')
   if (!modal) return
@@ -24454,6 +24466,7 @@ async function otevriNovyOdkaz(id) {
     sb.from('teams').select('id, name, company_id').eq('is_active', true).order('name'),
     sb.from('companies').select('id, name')
   ])
+  if (poradiOdkazu !== _klientOdkazPoradi) return
   _klientTymy = tymy || []
   const firmaJmeno = {}
   ;(firmy || []).forEach(f => { firmaJmeno[f.id] = f.name })
@@ -24464,6 +24477,7 @@ async function otevriNovyOdkaz(id) {
       sb.from('client_links').select('nazev, plati_do').eq('id', id).maybeSingle(),
       sb.from('client_link_teams').select('team_id').eq('link_id', id)
     ])
+    if (poradiOdkazu !== _klientOdkazPoradi) return
     if (o) {
       document.getElementById('klient-odkaz-nazev').value = o.nazev || ''
       document.getElementById('klient-odkaz-do').value = o.plati_do || ''
@@ -24480,6 +24494,7 @@ async function otevriNovyOdkaz(id) {
 }
 
 function zavriNovyOdkaz() {
+  _klientOdkazPoradi++   // rozběhnuté načítání zavřeného editoru už nic nevyplní
   const m = document.getElementById('klient-odkaz-modal')
   if (m) m.style.display = 'none'
   _klientOdkazId = null
@@ -24494,6 +24509,7 @@ async function ulozNovyOdkaz() {
 
   const btn = document.getElementById('klient-odkaz-ulozit')
   if (btn) { btn.disabled = true; btn.textContent = 'Ukládám…' }
+  let idNovehoOdkazu = null
   try {
     let id = _klientOdkazId
     if (id) {
@@ -24507,15 +24523,28 @@ async function ulozNovyOdkaz() {
         .select('id, token').single()
       if (error) throw error
       id = data.id
+      idNovehoOdkazu = id
     }
     // Skupiny nastavíme vždycky znovu — ať se dají i ubírat, nejen přidávat.
     // Audit 30. 9. 2026: mazání se nekontrolovalo. Když ho databáze nepustila,
     // odebraná skupina v odkazu zůstala — a odběratel dál viděl její lidi.
-    const { error: chybaMazani } = await sb.from('client_link_teams').delete().eq('link_id', id)
-    if (chybaMazani) throw chybaMazani
-    const { error: chybaVazeb } = await sb.from('client_link_teams')
-      .insert(tymy.map(t => ({ link_id: id, team_id: t })))
-    if (chybaVazeb) throw chybaVazeb
+    // Pořadí: NEJDŘÍV se přidají chybějící skupiny, AŽ POTOM se odeberou odebrané — při výpadku
+    // uprostřed tak odkaz nezůstane bez skupin (původní nastavení se nezničí).
+    const { data: stavajici, error: chybaCteni } = await sb.from('client_link_teams').select('team_id').eq('link_id', id)
+    if (chybaCteni) throw chybaCteni
+    const maji = new Set((stavajici || []).map(v => String(v.team_id)))
+    const pridat = tymy.filter(t => !maji.has(String(t)))
+    if (pridat.length) {
+      const { error: chybaVazeb } = await sb.from('client_link_teams')
+        .insert(pridat.map(t => ({ link_id: id, team_id: t })))
+      if (chybaVazeb) throw chybaVazeb
+    }
+    const zaskrtnute = new Set(tymy.map(String))
+    const odebrat = (stavajici || []).map(v => v.team_id).filter(t => !zaskrtnute.has(String(t)))
+    if (odebrat.length) {
+      const { error: chybaMazani } = await sb.from('client_link_teams').delete().eq('link_id', id).in('team_id', odebrat)
+      if (chybaMazani) throw chybaMazani
+    }
     // Kontrola, že odkaz má PŘESNĚ zaškrtnuté skupiny — nic navíc.
     const { data: vazby, error: chybaKontroly } = await sb.from('client_link_teams').select('team_id').eq('link_id', id)
     if (chybaKontroly) throw chybaKontroly
@@ -24528,6 +24557,11 @@ async function ulozNovyOdkaz() {
     showToast('✅ Odkaz uložený — zkopírujte ho tlačítkem a pošlete odběrateli')
     loadKlientOdkazy()
   } catch (e) {
+    // Nově založený odkaz, kterému se nepodařilo uložit skupiny, se zase smaže — jinak by zůstal
+    // prázdný záznam a opakování by založilo další.
+    if (idNovehoOdkazu) {
+      try { await sb.from('client_link_teams').delete().eq('link_id', idNovehoOdkazu); await sb.from('client_links').delete().eq('id', idNovehoOdkazu) } catch (x) {}
+    }
     const m = e?.message || ''
     showToast(/does not exist|schema cache|could not find the table|PGRST205|42P01/i.test(m + ' ' + (e?.code || ''))
       ? '❌ Chybí tabulky odkazů — spusťte migraci supabase-migrace-odkaz-pro-odberatele.sql'
@@ -24615,9 +24649,17 @@ async function loadTeams() {
       !w.team_id || subOwner[String(w.subteam_id)] !== String(w.team_id)
     ))
     if (orphans.length) {
-      const { error: cleanErr } = await sb.from('profiles').update({ subteam_id: null }).in('id', orphans.map(o => o.id))
-      if (!cleanErr) orphans.forEach(o => { o.subteam_id = null })
-      else console.warn('[loadTeams] úklid podskupin:', cleanErr.message)
+      // Zápis se podmiňuje načteným zařazením (subteam_id + team_id) — kdo mezitím dostal
+      // jiné zařazení od druhého správce, tomu se nové zařazení nesmaže.
+      const skupiny = new Map()
+      orphans.forEach(o => { const k = o.subteam_id + '|' + (o.team_id == null ? '' : o.team_id); if (!skupiny.has(k)) skupiny.set(k, []); skupiny.get(k).push(o) })
+      for (const [, cl] of skupiny) {
+        let q = sb.from('profiles').update({ subteam_id: null }).in('id', cl.map(o => o.id)).eq('subteam_id', cl[0].subteam_id)
+        q = cl[0].team_id == null ? q.is('team_id', null) : q.eq('team_id', cl[0].team_id)
+        const { error: cleanErr } = await q
+        if (!cleanErr) cl.forEach(o => { o.subteam_id = null })
+        else console.warn('[loadTeams] úklid podskupin:', cleanErr.message)
+      }
     }
   }
 
@@ -24814,11 +24856,13 @@ async function renameSubteam(subteamId, oldName) {
 async function deleteSubteam(subteamId, name) {
   if (!confirm(`Smazat podskupinu "${name||''}"?\n\nČlenové zůstanou v týmu, jen se uvolní ze skupiny.`)) return
   // Uvolni členy
-  await sb.from('profiles').update({ subteam_id: null }).eq('subteam_id', subteamId)
+  const { error: chybaUvolneni } = await sb.from('profiles').update({ subteam_id: null }).eq('subteam_id', subteamId)
+  if (chybaUvolneni) { showToast('❌ Podskupina se nesmazala — členy se nepodařilo uvolnit: ' + chybaUvolneni.message); loadTeams(); return }
   const { error } = await sb.from('subteams').delete().eq('id', subteamId)
   if (error) {
     // soft delete fallback
-    await sb.from('subteams').update({ is_active: false }).eq('id', subteamId)
+    const { error: chybaSoft } = await sb.from('subteams').update({ is_active: false }).eq('id', subteamId)
+    if (chybaSoft) { showToast('❌ Podskupina se nesmazala: ' + chybaSoft.message); loadTeams(); return }
   }
   showToast('🗑 Podskupina smazána')
   loadTeams()
