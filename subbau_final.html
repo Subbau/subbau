@@ -44572,9 +44572,23 @@ function invoiceRowFromLast(sentVia) {
 async function uploadInvoicePdf(blob, workerId, invoiceNum) {
   const safeNum = String(invoiceNum || '').replace(/[^a-zA-Z0-9_-]/g, '') || 'faktura'
   const path = workerId + '/faktura_' + safeNum + '_' + Date.now() + '.pdf'
-  const { error } = await sb.storage.from('documents')
-    .upload(path, blob, { contentType: 'application/pdf', upsert: true })
-  if (error) throw error
+  // Slabý signál na stavbě: jedno selhání nahrání nesmí zanechat fakturu bez PDF. Až 3 pokusy do téže cesty (upsert),
+  // každý s limitem 40 s a odstupem 2 s / 4 s; jiná chyba než síťová (práva, velikost) končí hned.
+  const jeSit = (e) => /Failed to fetch|NetworkError|Load failed|network|timeout|Vypršel/i.test(String((e && e.message) || e || ''))
+  let posledni = null
+  for (let pokus = 0; pokus < 3; pokus++) {
+    if (pokus > 0) await new Promise(r => setTimeout(r, pokus * 2000))
+    try {
+      const r = await Promise.race([
+        sb.storage.from('documents').upload(path, blob, { contentType: 'application/pdf', upsert: true }),
+        new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), 40000))
+      ])
+      if (!r.error) { posledni = null; break }
+      posledni = r.error
+      if (!jeSit(r.error)) break
+    } catch (e) { posledni = e; if (!jeSit(e)) break }
+  }
+  if (posledni) throw posledni
   const { data } = sb.storage.from('documents').getPublicUrl(path)
   return { path, url: data?.publicUrl || null }
 }
