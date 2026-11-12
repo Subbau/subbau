@@ -18799,7 +18799,8 @@ let _docsCache = []
 let _docValidityEditId = null
 const _docLabels = DOC_LABELS
 async function loadDocuments() {
-  const { data } = await sb.from('documents').select('*, worker:profiles!worker_id(full_name)').order('uploaded_at',{ascending:false})
+  const { data, error } = await sb.from('documents').select('*, worker:profiles!worker_id(full_name)').order('uploaded_at',{ascending:false})
+  if (error) { console.warn('[dokumenty] načtení:', error.message); showToast('❌ Dokumenty se nepodařilo načíst: ' + error.message); return }   // poslední úspěšná data zůstanou
   const skryti = await skrytiLideIds()   // schované firmy
   _docsCache = (data || []).filter(d => !skryti.has(d.worker_id))
   renderDocuments()
@@ -19253,6 +19254,12 @@ async function deleteSitePhoto(id, url) {
   // Nejdřív záznam v databázi, teprve pak soubor (Codex 6. 11. 2026). Opačné pořadí nechalo
   // v galerii fotku, jejíž soubor je pryč, když zápis do databáze selhal. Soubor, který zůstane
   // bez záznamu, nikomu neškodí.
+  // Zmenšenina je samostatný soubor — její adresu si vezmeme z načtených dat ještě před smazáním řádku.
+  let thumbUrl = ''
+  try {
+    const zn = (_fotkySurove || []).concat(_fotkyPrehled || [], _sitePhotosCache || []).find(x => x && String(x.id) === String(id))
+    thumbUrl = (zn && zn.thumb_url) || ''
+  } catch (e) {}
   const { data: smazanoF, error } = await sb.from('site_photos').delete().eq('id', id).select('id')
   if (error) {
     showToast(/row-level security|policy|permission|42501/i.test(error.message || '')
@@ -19269,6 +19276,12 @@ async function deleteSitePhoto(id, url) {
       const path = decodeURIComponent(m[1].split('?')[0])
       const { error: sErr } = await sb.storage.from('site-photos').remove([path])
       if (sErr) console.warn('[fotky] soubor z úložiště se nesmazal:', sErr.message)
+    }
+    const mt = String(thumbUrl || '').match(/\/storage\/v1\/object\/public\/site-photos\/(.+)$/)
+    if (mt) {
+      const pathT = decodeURIComponent(mt[1].split('?')[0])
+      const { error: tErr } = await sb.storage.from('site-photos').remove([pathT])
+      if (tErr) console.warn('[fotky] zmenšenina z úložiště se nesmazala:', tErr.message)
     }
   } catch (e) { console.warn('[fotky] mazání souboru:', e?.message) }
   _sitePhotosCache = _sitePhotosCache.filter(x => String(x.id) !== String(id))
@@ -19362,8 +19375,9 @@ function renderDocuments() {
 
 async function approveDoc(id) {
   // Bez kontroly chyby appka hlásila „schváleno" i když se nic neuložilo.
-  const { error } = await sb.from('documents').update({ status:'ok', reviewed_at: new Date().toISOString() }).eq('id',id)
+  const { data: zmeneno, error } = await sb.from('documents').update({ status:'ok', reviewed_at: new Date().toISOString() }).eq('id',id).select('id')
   if (error) { showToast('❌ Chyba: ' + error.message); return }
+  if (!zmeneno || !zmeneno.length) { showToast('❌ Dokument se nepodařilo schválit — už neexistuje nebo to databáze nepovolila'); loadDocuments(); return }
   showToast('✅ Dokument schválen'); loadDocuments()
 }
 
@@ -19434,7 +19448,8 @@ async function applyDocValidity(id, workerId, docType, value) {
     if (!confirm('Bez data platnosti u tohoto dokladu neupozorníme na konec platnosti.\nOpravdu datum smazat?')) return false
   }
 
-  const { error } = await sb.from('documents').update({ valid_until: value || null }).eq('id', id)
+  const { data: zmenenoPl, error } = await sb.from('documents').update({ valid_until: value || null }).eq('id', id).select('id')
+  if (!error && (!zmenenoPl || !zmenenoPl.length)) { showToast('❌ Datum platnosti se neuložilo — doklad už neexistuje nebo to databáze nepovolila'); return false }
   if (error) {
     showToast(/valid_until|column/i.test(error.message)
       ? '❌ Chybí sloupec valid_until — spusťte migraci supabase-migrace-platnost-dokladu.sql'
@@ -19447,7 +19462,7 @@ async function applyDocValidity(id, workerId, docType, value) {
   if (workerId) {
     const keys = [workerId+'|expiring|'+id, workerId+'|expired|'+id, workerId+'|novalid|'+id]
     if (window._docAlertDismissed) keys.forEach(k => window._docAlertDismissed.delete(k))
-    try { await sb.from('doc_alert_dismissals').delete().in('dismiss_key', keys) } catch(e) {}
+    try { const { error: eSkryti } = await sb.from('doc_alert_dismissals').delete().in('dismiss_key', keys); if (eSkryti) showToast('⚠️ Obnovení upozornění se neuložilo: ' + eSkryti.message) } catch(e) {}
   }
 
   const v = docValidity(value)
@@ -19475,7 +19490,8 @@ async function applyDocNoExpiry(id, workerId, value, maDatum) {
   }
   const upd = { no_expiry: !!value }
   if (value) upd.valid_until = null   // ať vedle sebe nestojí „neřešíme" a datum
-  const { error } = await sb.from('documents').update(upd).eq('id', id)
+  const { data: zmenenoNe, error } = await sb.from('documents').update(upd).eq('id', id).select('id')
+  if (!error && (!zmenenoNe || !zmenenoNe.length)) { showToast('❌ Změna se neuložila — doklad už neexistuje nebo to databáze nepovolila'); return false }
   if (error) {
     showToast(/no_expiry|column/i.test(error.message)
       ? '❌ Chybí sloupec no_expiry — spusťte migraci supabase-migrace-VSE.sql'
@@ -19486,7 +19502,7 @@ async function applyDocNoExpiry(id, workerId, value, maDatum) {
   if (workerId) {
     const keys = [workerId+'|expiring|'+id, workerId+'|expired|'+id, workerId+'|novalid|'+id]
     if (window._docAlertDismissed) keys.forEach(k => window._docAlertDismissed.delete(k))
-    try { await sb.from('doc_alert_dismissals').delete().in('dismiss_key', keys) } catch(e) {}
+    try { const { error: eSkryti } = await sb.from('doc_alert_dismissals').delete().in('dismiss_key', keys); if (eSkryti) showToast('⚠️ Obnovení upozornění se neuložilo: ' + eSkryti.message) } catch(e) {}
   }
   showToast(value ? '✅ U tohoto dokladu se platnost už neřeší' : '🔔 Platnost dokladu se zase hlídá')
   if (typeof loadDocumentAlertsStat === 'function') loadDocumentAlertsStat()
@@ -19497,13 +19513,14 @@ async function applyDocNoExpiry(id, workerId, value, maDatum) {
 // občanku pošlou jako „Jiný dokument" — ať to admin spraví bez mazání a nahrávání znovu.
 async function applyDocTypeChange(id, workerId, newType) {
   if (!newType) return false
-  const { error } = await sb.from('documents').update({ doc_type: newType }).eq('id', id)
+  const { data: zmenenoTyp, error } = await sb.from('documents').update({ doc_type: newType }).eq('id', id).select('id')
   if (error) { showToast('❌ ' + docSaveErrorText(error)); return false }
+  if (!zmenenoTyp || !zmenenoTyp.length) { showToast('❌ Přeřazení se neuložilo — doklad už neexistuje nebo to databáze nepovolila'); return false }
   // Upozornění visí na konkrétním dokladu — po přeřazení ať se přepočítají podle nového typu
   if (workerId) {
     const keys = ['expiring', 'expired', 'novalid', 'pending', 'unreadable'].map(k => workerId + '|' + k + '|' + id)
     if (window._docAlertDismissed) keys.forEach(k => window._docAlertDismissed.delete(k))
-    try { await sb.from('doc_alert_dismissals').delete().in('dismiss_key', keys) } catch(e) {}
+    try { const { error: eSkryti } = await sb.from('doc_alert_dismissals').delete().in('dismiss_key', keys); if (eSkryti) showToast('⚠️ Obnovení upozornění se neuložilo: ' + eSkryti.message) } catch(e) {}
   }
   const nt = DOC_TYPE_BY_ID[newType]
   showToast('✅ Přeřazeno na: ' + docLabel(newType)
@@ -19770,11 +19787,12 @@ async function loadMobChat() {
 
   // Nejnovějších 100 zpráv. Dřív šlo vzestupně s limitem, takže kdo měl
   // přes 100 zpráv, viděl těch 100 nejstarších a nové ne.
-  const { data: nejnovejsi } = await sb.from('chat_messages')
+  const { data: nejnovejsi, error: chybaChatu } = await sb.from('chat_messages')
     .select('*')
     .eq('worker_id', currentUser.id)
     .order('created_at', {ascending: false})
     .limit(100)
+  if (chybaChatu) throw chybaChatu   // chyba načtení není „prázdná konverzace" — chytí ji catch níž
   if (poradi !== _mobChatPoradi) return   // mezitím se chat načítá znovu
   const data = (nejnovejsi || []).slice().reverse()
 
@@ -19911,7 +19929,8 @@ async function _sendChatMessageVnitrni() {
     // načte znovu, ať ji pracovník vidí, než ji pošle podruhé (Codex 6. 11. 2026).
     showToast('❌ Chyba odeslání: ' + error.message + ' — zkontrolujte konverzaci, než zprávu pošlete znovu')
     setTimeout(() => { try { loadMobChat() } catch (e) { console.warn('[chat] obnova po chybě:', e && e.message) } }, 2500)
-    input.value = msg
+    // Mezitím rozepsaný další text se nepřepíše — neodeslaná zpráva se přidá před něj.
+    input.value = input.value.trim() ? msg + '\n' + input.value : msg
     console.error('[sendChatMessage]', error)
     zapisChybuAppky('chat-odeslani', error?.message)
     return
@@ -20041,7 +20060,7 @@ async function dismissChatAlert(key) {
 // Vrátí zpět všechna smazaná upozornění na zprávy
 async function resetChatAlerts() {
   window._chatAlertDismissed = new Set()
-  try { await sb.from('doc_alert_dismissals').delete().like('dismiss_key', CHAT_KEY_PREFIX + '%') } catch (e) {}
+  try { const { error: eSkryti } = await sb.from('doc_alert_dismissals').delete().like('dismiss_key', CHAT_KEY_PREFIX + '%'); if (eSkryti) showToast('⚠️ Obnovení upozornění se neuložilo: ' + eSkryti.message) } catch (e) {}
   _forgetLocalChatAlerts(CHAT_KEY_PREFIX)
   loadChatAlerts()
 }
@@ -20229,12 +20248,18 @@ async function loadAdminChatList() {
   unread?.forEach(u => { unreadMap[u.worker_id] = (unreadMap[u.worker_id] || 0) + 1 })
 
   // Načti poslední zprávy
-  const { data: lastMsgs } = await sb.from('chat_messages')
-    .select('worker_id, message, created_at, sender_role')
-    .order('created_at', {ascending: false})
-
+  // Po stránkách (server vrací nejvýš ~1000 řádků naráz), dokud nemá poslední zprávu
+  // každý pracovník — aktivní konverzace nevytlačí méně aktivního lidi z přehledu.
   const lastMap = {}
-  lastMsgs?.forEach(m => { if (!lastMap[m.worker_id]) lastMap[m.worker_id] = m })
+  for (let od = 0; od < 100000; od += 1000) {
+    const { data: lastMsgs, error: lastErr } = await sb.from('chat_messages')
+      .select('worker_id, message, created_at, sender_role')
+      .order('created_at', {ascending: false}).order('id', {ascending: false}).range(od, od + 999)
+    if (lastErr) break
+    lastMsgs?.forEach(m => { if (!lastMap[m.worker_id]) lastMap[m.worker_id] = m })
+    if (!lastMsgs || lastMsgs.length < 1000) break
+    if (workers.every(w => lastMap[w.id])) break
+  }
 
   // Nepočítej zprávy z právě otevřené konverzace
   const chatView = document.getElementById('v-chat')
@@ -20317,12 +20342,18 @@ async function openAdminChat(workerId, workerName) {
 
   // Nejnovějších 100 zpráv (sestupně, pro zobrazení otočit). Dřív šlo
   // vzestupně s limitem — u dlouhé konverzace se ukázalo 100 nejstarších.
-  const { data: nejnovejsi } = await sb.from('chat_messages')
+  const { data: nejnovejsi, error: chybaCteni } = await sb.from('chat_messages')
     .select('*')
     .eq('worker_id', workerId)
     .order('created_at', {ascending: false})
     .limit(100)
   if (poradi !== _adminChatPoradi) return   // mezitím otevřel jinou konverzaci
+  if (chybaCteni) {
+    // Chyba načtení není „začněte konverzaci" — nic se nepřečte ani nepřipojí.
+    const dChyba = document.getElementById('admin-chat-messages')
+    if (dChyba) dChyba.innerHTML = '<div data-empty style="text-align:center;padding:40px;color:var(--text3);font-size:13px">Zprávy se nepodařilo načíst. Zkontrolujte připojení.</div>'
+    return
+  }
   const data = (nejnovejsi || []).slice().reverse()
 
   const div = document.getElementById('admin-chat-messages')
@@ -20354,13 +20385,15 @@ async function openAdminChat(workerId, workerName) {
   ;(async () => {
     // Přečtené jen zprávy, které jsou na obrazovce. Starší mimo posledních
     // 100 zůstanou nepřečtené — dřív se označilo vše, i co nikdo neviděl.
+    // Správce mezitím mohl odejít ze sekce (activeChatWorkerId = null) — pak nic neoznačovat.
+    if (poradi !== _adminChatPoradi || activeChatWorkerId !== workerId) return
     const ukazane = data.filter(m => m.sender_role !== 'admin' && !m.is_read).map(m => m.id)
     if (ukazane.length) {
       await sb.from('chat_messages')
         .update({is_read: true})
         .in('id', ukazane)
     }
-    if (poradi !== _adminChatPoradi) return
+    if (poradi !== _adminChatPoradi || activeChatWorkerId !== workerId) return
 
     // Konverzace je přečtená → skrytí bubliny už nemá co držet
     await clearChatAlertDismissals(workerId)
@@ -20369,7 +20402,7 @@ async function openAdminChat(workerId, workerName) {
     await loadAdminChatList()
     updateAdminChatBadge()
     loadChatAlerts()
-    if (poradi !== _adminChatPoradi) return   // kanál si zapne novější otevření
+    if (poradi !== _adminChatPoradi || activeChatWorkerId !== workerId) return   // kanál si zapne novější otevření / odchod ze sekce
 
     // Realtime
     if (adminChatRealtimeSub) sb.removeChannel(adminChatRealtimeSub)
@@ -20439,7 +20472,14 @@ async function _sendAdminChatMessageVnitrni() {
     is_read: false
   }).select().single()
 
-  if (error) { showToast('❌ Chyba: ' + error.message); input.value = msg; return }
+  if (error) {
+    showToast('❌ Chyba: ' + error.message)
+    // Text vrátit jen do téže konverzace a nepřepsat mezitím rozepsaný další;
+    // u jiné konverzace ho nevkládat (soukromý text by skončil u jiného člověka).
+    if (activeChatWorkerId === wid) input.value = input.value.trim() ? msg + '\n' + input.value : msg
+    else showToast('⚠️ Neodeslaná zpráva: ' + msg.slice(0, 120))
+    return
+  }
 
   // Zobraz vlastní zprávu IHNED — jen když je pořád otevřené to samé vlákno
   const div = document.getElementById('admin-chat-messages')
@@ -21502,14 +21542,14 @@ async function hledatProFakturu() {
     </button>`).join('')
 }
 
-function vystavitFakturuPro(workerId) {
+async function vystavitFakturuPro(workerId) {
   toggleVystavitFakturu()
-  openWorkerModal(workerId)
-  // Karta se otevírá na profilu — přepni ji rovnou na fakturaci.
-  setTimeout(() => {
-    const zalozka = document.querySelector('.wd-tab[onclick*="finance"]')
-    wdTab('finance', zalozka)
-  }, 260)
+  // Karta se otevírá na profilu — přepni ji na fakturaci až po jejím dokončení,
+  // a jen když je stále otevřená karta tohoto člověka (ne předchozího).
+  try { await openWorkerModal(workerId) } catch (e) { console.warn('[faktura] karta:', e?.message); return }
+  if (String(currentWorkerId) !== String(workerId) || !currentWorkerProfile || String(currentWorkerProfile.id) !== String(workerId)) return
+  const zalozka = document.querySelector('.wd-tab[onclick*="finance"]')
+  wdTab('finance', zalozka)
 }
 
 // ===========================================================================
@@ -21668,6 +21708,8 @@ async function zfPredvyplnit() {
     if (data) p = data
   } catch (e) { console.warn('[záloha] profil:', e?.message) }
   if (!p) return
+  // Správce mezitím mohl vybrat jiného pracovníka — pozdní odpověď formulář nepřepíše.
+  if (document.getElementById('zf-worker')?.value !== id) return
   const nastav = (idc, hodnota) => { const el = document.getElementById(idc); if (el) el.value = hodnota || '' }
   const jeSro = p.supplier_type === 'sro'
   nastav('zf-d-jmeno', (jeSro && p.company_name) ? p.company_name : (p.full_name || ''))
@@ -21686,7 +21728,12 @@ async function zfPredvyplnit() {
   const popis = document.getElementById('zf-popis')
   if (popis && !popis.value.trim()) popis.value = 'Anzahlung für Bauleistungen'
   const cislo = document.getElementById('zf-cislo')
-  if (cislo && !cislo.value.trim()) cislo.value = await dalsiCisloZalohy(id)
+  // Automaticky vyplněné číslo se při změně pracovníka přepočítá; ručně upravené zůstane.
+  if (cislo && (!cislo.value.trim() || cislo.dataset.auto === cislo.value)) {
+    const nove = await dalsiCisloZalohy(id)
+    if (document.getElementById('zf-worker')?.value !== id) return
+    if (!cislo.value.trim() || cislo.dataset.auto === cislo.value) { cislo.value = nove; cislo.dataset.auto = nove }
+  }
 }
 
 // Další číslo v řadě záloh toho pracovníka. Tvar si určuje správce sám —
@@ -22015,6 +22062,10 @@ async function stornoZalohy(id) {
     return
   }
   if (!confirm('Stornovat zálohovou fakturu ' + z.cislo + '?\n\nPřestane se odečítat z faktur, doklad zůstane uložený.')) return
+  const cerstve2 = await odectenoZeZaloh([z.worker_id])
+  if (cerstve2 === null || ((cerstve2[z.worker_id + '|' + String(z.cislo || '')] || {}).castka || 0) > 0) {
+    showToast('⚠️ Záloha se mezitím odečetla nebo ji nejde ověřit — storno zastaveno'); await loadZalohoveFaktury(); return
+  }
   const { error } = await sb.from('zalohove_faktury')
     .update({ stav: 'stornovana', updated_at: new Date().toISOString() }).eq('id', id)
   if (error) { showToast('❌ Storno selhalo: ' + error.message); return }
@@ -22039,6 +22090,11 @@ async function smazZalohu(id) {
     return
   }
   if (!confirm('Opravdu smazat zálohovou fakturu ' + z.cislo + '?\n\nTato akce je nevratná.')) return
+  // Přehled mohl zestárnout (pracovník mezitím odeslal fakturu s odečtem) — čerstvě těsně před smazáním.
+  const cerstve = await odectenoZeZaloh([z.worker_id])
+  if (cerstve === null || ((cerstve[z.worker_id + '|' + String(z.cislo || '')] || {}).castka || 0) > 0) {
+    showToast('⚠️ Záloha se mezitím odečetla nebo ji nejde ověřit — smazání zastaveno'); await loadZalohoveFaktury(); return
+  }
   // Nejdřív řádek, AŽ POTOM soubor — dřív se mazal soubor první a když řádek
   // smazat nešel, zůstala záloha bez PDF.
   const { data: smazano, error } = await sb.from('zalohove_faktury').delete().eq('id', id).select('id')
@@ -22053,6 +22109,20 @@ async function smazZalohu(id) {
 // Když má pracovník otevřenou zálohovou fakturu, odečte se mu z faktury,
 // kterou si vystaví. Bere se i záloha, která už byla zúčtovaná PRÁVĚ TOUHLE
 // fakturou — jinak by při opravě a znovuodeslání téhož dokladu odečet zmizel.
+// Faktury s odečty po stránkách (server vrací nejvýš ~1000 řádků naráz) — jinak by
+// po dosažení limitu část odečtů nebyla započítaná a záloha by se použila znovu.
+async function fakturyOdectyVse(workerIds) {
+  const vse = []
+  for (let od = 0; od < 200000; od += 1000) {
+    const { data, error } = await sb.from('worker_invoices')
+      .select('id, worker_id, invoice_number, zalohy_pouzite').in('worker_id', workerIds)
+      .order('id', { ascending: true }).range(od, od + 999)
+    if (error) return { data: null, error }
+    vse.push(...(data || []))
+    if (!data || data.length < 1000) break
+  }
+  return { data: vse, error: null }
+}
 async function zalohyKOdecteni(workerId, invoiceNum, celkem, bezHlasky) {
   const prazdno = { castka: 0, popis: '', pouzite: [], chyba: false }
   if (!workerId) return prazdno
@@ -22060,7 +22130,7 @@ async function zalohyKOdecteni(workerId, invoiceNum, celkem, bezHlasky) {
     const [{ data: zalohy, error: chybaZ }, { data: faktury, error: chybaF }] = await Promise.all([
       sb.from('zalohove_faktury').select('id, cislo, castka, stav')
         .eq('worker_id', workerId).order('issue_date', { ascending: true }),
-      sb.from('worker_invoices').select('invoice_number, zalohy_pouzite').eq('worker_id', workerId),
+      fakturyOdectyVse([workerId]),
     ])
     if (chybaZ) throw chybaZ
     if (chybaF) throw chybaF
@@ -22124,8 +22194,7 @@ async function odectenoZeZaloh(workerIds) {
   const ids = [...new Set((workerIds || []).filter(Boolean))]
   if (!ids.length) return mapa
   try {
-    const { data, error } = await sb.from('worker_invoices')
-      .select('worker_id, invoice_number, zalohy_pouzite').in('worker_id', ids)
+    const { data, error } = await fakturyOdectyVse(ids)
     if (error) throw error
     ;(data || []).forEach(f => {
       const seznam = Array.isArray(f.zalohy_pouzite) ? f.zalohy_pouzite : []
@@ -22247,7 +22316,11 @@ function _invSortValue(r, key) {
 // Bez docházky se zapsanou skupinou platí dnešní zařazení jako dřív.
 const _tymFakturyTydne = new Map()   // 'worker|kw|rok' → team_id
 const _tymFakturyNacteno = new Set()  // 'worker|kw|rok', na které už se ptalo
+let _tymFakturyKdy = 0
 async function nactiTymyFaktur(radky) {
+  // Opravená docházka (firma u dne) se musela projevit: zařazení starší než minutu
+  // se při další obnově seznamu načte znovu, ne že zůstane napořád.
+  if (Date.now() - _tymFakturyKdy > 60000) { _tymFakturyNacteno.clear(); _tymFakturyTydne.clear(); _tymFakturyKdy = Date.now() }
   const chybi = (radky || []).filter(r => r.worker_id && r.kw && r.kw_year && !_tymFakturyNacteno.has(r.worker_id + '|' + r.kw + '|' + r.kw_year))
   if (!chybi.length) return
   const lide = [...new Set(chybi.map(r => r.worker_id))]
@@ -22382,7 +22455,16 @@ async function nactiSedeRadkyFaktur() {
 }
 
 // Fajfka „poslal jinak" u šedého řádku — sdílená pro všechny správce.
-async function fakturaPoslalJinak(workerId, kw, rok, zapnout) {
+// Zápisy téže fajfky jdou po řadě — rychlé zaškrtnutí a odškrtnutí nesmí skončit
+// tím, že smazání doběhne dřív než vložení.
+const _invJinakFronta = new Map()
+function fakturaPoslalJinak(workerId, kw, rok, zapnout) {
+  const kl = workerId + '|' + kw + '|' + rok
+  const dalsi = (_invJinakFronta.get(kl) || Promise.resolve()).catch(() => {}).then(() => fakturaPoslalJinakZapis(workerId, kw, rok, zapnout))
+  _invJinakFronta.set(kl, dalsi)
+  return dalsi
+}
+async function fakturaPoslalJinakZapis(workerId, kw, rok, zapnout) {
   const kl = workerId + '|' + kw + '|' + rok
   const klic = FAKT_JINAK_KLIC + kl
   const { error } = zapnout
@@ -22458,8 +22540,20 @@ async function nactiOdeslaneFaktury() {
   const { data: pr, error: e2 } = await sb.from('faktury_prijemci').select('firma, email')
   if (!e2) { _invPrijemci = new Map(); (pr || []).forEach(x => _invPrijemci.set(String(x.firma), x.email)) }
 }
+// Faktura byla po odeslání znovu uložena nebo upravena (nové PDF) — odeslaná verze už není ta aktuální.
+// Tolerance 60 s kvůli rozdílu hodin telefonu a serveru.
+function fakturaZmenenaPoOdeslani(r, o) {
+  try {
+    if (!r || !o || o.stav === 'rezervovano') return false
+    const kdy = Date.parse(o.kdy); if (isNaN(kdy)) return false
+    const zmena = Math.max(Date.parse(r.sent_at) || 0, Date.parse(r.edited_at) || 0)
+    return zmena > kdy + 60000
+  } catch (e) { return false }
+}
 function odeslanoStitek(id) {
   const o = _invOdeslane.get(String(id))
+  if (o && o.stav !== 'rezervovano' && fakturaZmenenaPoOdeslani((_invCache || []).find(x => x && String(x.id) === String(id)), o))
+    return `<span title="Odesláno e-mailem na ${escAttr(o.komu)} ${escAttr(_invDmy(String(o.kdy).slice(0, 10)))} — faktura byla od té doby opravena, odběratel dostal starší verzi" style="font-size:11px;font-weight:700;color:var(--amber);white-space:nowrap">⚠ odesláno před opravou</span>`
   if (o && o.stav === 'rezervovano') return `<span title="Odesílání se nedokončilo nebo odpověď serveru zmizela — zkontrolujte schránku (Odeslané), než ji pošlete znovu" style="font-size:11px;font-weight:700;color:var(--amber);white-space:nowrap">⚠ nejisté</span>`
   return o ? `<span title="Odesláno e-mailem na ${escAttr(o.komu)} ${escAttr(_invDmy(String(o.kdy).slice(0, 10)))}" style="font-size:11px;font-weight:700;color:var(--green);white-space:nowrap">✓ odesláno</span>` : ''
 }
@@ -22473,8 +22567,9 @@ function odeslatFakturyOtevri(kw, rok, firma, jenId) {
   const cz = v => (Number(v) || 0).toFixed(2).replace('.', ',')
   const radekHtml = r => {
     const o = _invOdeslane.get(String(r.id))
+    const opravena = fakturaZmenenaPoOdeslani(r, o)   // opravená po odeslání se nabízí znovu (zaškrtnutá)
     return `<label data-odes-radek="${escAttr(r.id)}" style="display:flex;align-items:center;gap:10px;padding:8px 4px;border-bottom:1px solid var(--brd);cursor:pointer">
-      <input type="checkbox" data-odes-cb="${escAttr(r.id)}" ${o ? '' : 'checked'} style="width:18px;height:18px;accent-color:var(--green);flex-shrink:0">
+      <input type="checkbox" data-odes-cb="${escAttr(r.id)}" ${o && !opravena ? '' : 'checked'} style="width:18px;height:18px;accent-color:var(--green);flex-shrink:0">
       <span style="flex:1;min-width:0"><b>${escAttr(r.worker?.full_name || r.supplier_name || '—')}</b> · č. ${escAttr(r.invoice_number || '—')}<span style="color:var(--text3)"> · ${cz(r.total_amount)} €</span></span>
       <span data-odes-stav style="font-size:12px;white-space:nowrap;${o ? (o.stav === 'rezervovano' ? 'color:var(--amber);font-weight:700' : 'color:var(--green);font-weight:700') : 'color:var(--text3)'}">${o ? (o.stav === 'rezervovano' ? '⚠ nejisté — zkontrolujte schránku' : '✓ odesláno ' + escAttr(_invDmy(String(o.kdy).slice(0, 10)))) : ''}</span>
     </label>`
@@ -22529,6 +22624,7 @@ async function odeslatFakturyPosli() {
   if (document.getElementById('odes-pamatovat')?.checked) {
     const { error } = await sb.from('faktury_prijemci').upsert({ firma: d.firma, email, upraveno: new Date().toISOString() }, { onConflict: 'firma' })
     if (!error) _invPrijemci.set(d.firma, email)
+    else { console.warn('[faktury] příjemce se nezapamatoval:', error.message); showToast('⚠️ E-mail odběratele se nepodařilo zapamatovat — odesílání pokračuje') }
   }
   let ok = 0, chyby = 0
   const odeslaneTed = new Set()    // které faktury odešly teď (jen ty se na konci odškrtnou)
@@ -22577,13 +22673,17 @@ async function odeslatFakturyPosli() {
       const kdo = r.worker?.full_name || r.supplier_name || ''
       const who = kdo.normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-zA-Z0-9]+/g, '_').replace(/^_+|_+$/g, '')
       let resp
-      try { resp = await fetch('/api/odeslat-fakturu', { method: 'POST',
+      // Časový limit: při ztrátě spojení by „Odesílám…" visela napořád a zamkla celou dávku.
+      // Vypršení po zahájení požadavku = nejisté odeslání (rezervace zůstane, e-mail mohl odejít).
+      const acOdes = new AbortController(); const ctOdes = setTimeout(() => acOdes.abort(), 60000)
+      try { resp = await fetch('/api/odeslat-fakturu', { method: 'POST', signal: acOdes.signal,
         headers: { 'content-type': 'application/json', ...(token ? { authorization: 'Bearer ' + token } : {}) },
         body: JSON.stringify({ to: email, invoiceId: String(r.id), pokus, fileName: 'Rechnung_' + cis + (who ? '_' + who : '') + '.pdf', pdfBase64: b64,
           subject: 'Rechnung ' + (r.invoice_number || '') + ' — ' + kdo + ' — KW ' + r.kw + '/' + r.kw_year,
           text: 'Guten Tag,\n\nanbei erhalten Sie die Rechnung Nr. ' + (r.invoice_number || '') + ' (' + kdo + ') für KW ' + r.kw + '/' + r.kw_year + '.\n\nMit freundlichen Grüßen\nSubBau' }) }) }
-      catch (ne) { const e2 = new Error('spojení se přerušilo — zkontrolujte schránku, e-mail mohl odejít'); e2._nejasne = true; throw e2 }
-      const j = await resp.json().catch(() => null)
+      catch (ne) { clearTimeout(ctOdes); const e2 = new Error('spojení se přerušilo — zkontrolujte schránku, e-mail mohl odejít'); e2._nejasne = true; throw e2 }
+      let j
+      try { j = await resp.json().catch(() => null) } finally { clearTimeout(ctOdes) }
       if (j === null) { const ne = new Error('odpověď serveru se nepodařilo přečíst — zkontrolujte schránku, e-mail mohl odejít'); ne._nejasne = true; throw ne }
       if (!resp.ok || !j.sent) {
         const dukaz = j && j.reason
@@ -23411,7 +23511,21 @@ async function odlozFakturu(id, zapnout) {
   showToast(zapnout ? '⏸ Faktura odložená' : '↩ Odložení zrušeno')
 }
 
-async function setInvoiceStatus(id, status) {
+// Změny stavu téže faktury jdou po řadě — zápis faktury a následný zápis Provizí
+// se tak nepředběhnou s další změnou (zaplaceno / zrušeno).
+const _invStatusFronta = new Map()
+function setInvoiceStatus(id, status) {
+  const dalsi = (_invStatusFronta.get(id) || Promise.resolve()).catch(() => {}).then(() => setInvoiceStatusZapis(id, status))
+  _invStatusFronta.set(id, dalsi)
+  return dalsi
+}
+// Jiná zaplacená faktura téhož člověka za týž týden — Provize „uhrazeno" je společná
+// pro pracovníka a týden, zrušením jedné faktury se nesmí odškrtnout, dokud druhá platí.
+function jinaZaplacenaVTydnu(vynechId, workerId, kw, kwYear) {
+  return (_invCache || []).some(x => x && x.id !== vynechId && x.worker_id === workerId
+    && String(x.kw) === String(kw) && String(x.kw_year) === String(kwYear) && x.status === 'paid')
+}
+async function setInvoiceStatusZapis(id, status) {
   const row = _invCache.find(r => r.id === id)
   const prev = row ? (row.status || 'new') : null
   const { data: zmeneno, error } = await sb.from('worker_invoices').update({ status }).eq('id', id).select('id')
@@ -23431,6 +23545,9 @@ async function setInvoiceStatus(id, status) {
   // Pouhé „Vyřídit" u nové faktury do provizí nesahá — jinak by odškrtlo,
   // co si admin předtím odklikal v Provizích.
   if (row && (status === 'paid' || prev === 'paid')) {
+    if (status !== 'paid' && jinaZaplacenaVTydnu(id, row.worker_id, row.kw, row.kw_year)) {
+      showToast('↩️ Zaplacení zrušeno'); return   // Provize zůstávají uhrazené — jiná faktura za týden je zaplacená
+    }
     const res = await syncProvizePaidFromInvoice(row.worker_id, row.kw, row.kw_year, status === 'paid')
     if (res.error) {
       const msg = res.error.message || ''
@@ -23782,7 +23899,9 @@ function openInvoiceEdit(id) {
   setTimeout(() => { try { amt.focus() } catch (e) {} }, 120)
 }
 
-function closeInvoiceEdit() {
+let _invEditUklada = false   // běží uložení — dialog se nezavře ani neotevře jiný nad rozpracovaným zápisem
+function closeInvoiceEdit(force) {
+  if (_invEditUklada && force !== true) return
   const d = document.getElementById('invedit-dialog')
   if (d) d.style.display = 'none'
   _invEditId = null
@@ -23814,12 +23933,18 @@ function invEditRecalc() {
     warn.textContent = over ? '⚠️ Záloha je vyšší než celá faktura (' + total.toFixed(2) + ' €)' : ''
   }
   const btn = document.getElementById('invedit-save-btn')
-  if (btn) { btn.disabled = over; btn.style.opacity = over ? '0.5' : '1' }
+  if (btn) { const zakaz = over || _invEditUklada; btn.disabled = zakaz; btn.style.opacity = zakaz ? '0.5' : '1' }
 }
 
 // Uloží zálohu a PŘEPÍŠE PDF. Bez přepsání PDF by v databázi seděla nová částka,
 // ale ve složce by pořád viselo staré PDF bez zálohy — a tisklo by se to špatné.
 async function saveInvoiceEdit() {
+  // Zámek proti dvojímu spuštění: úprava formuláře za běhu uložení tlačítko znovu povolovala.
+  if (_invEditUklada) return
+  _invEditUklada = true
+  try { return await saveInvoiceEditVnitrni() } finally { _invEditUklada = false }
+}
+async function saveInvoiceEditVnitrni() {
   const r = _invCache.find(x => x.id === _invEditId)
   if (!r) { showToast('⚠️ Faktura se nenašla'); return }
 
@@ -23968,7 +24093,9 @@ async function saveInvoiceEdit() {
     const puvodniCelkem = zalohyPuvodni.reduce((s2, p) => s2 + (Number(p.vzato) || 0), 0)
     if (cash <= 0.005) {
       upd.zalohy_pouzite = []
-    } else if (Math.abs(cash - puvodniCelkem) > 0.005 && puvodniCelkem > 0) {
+    } else if (cash < puvodniCelkem - 0.005 && puvodniCelkem > 0) {
+      // Jen snížení: zvýšení zálohy rozpis nezvětšuje — ze zálohové faktury se nesmí
+      // vzít víc, než kolik už bylo odečteno (zbytek je hotovost mimo zálohovou fakturu).
       // Poměrově — zbytek dorovnáme na poslední položce, ať součet sedí na cent.
       let zbyva = Math.round(cash * 100) / 100
       upd.zalohy_pouzite = zalohyPuvodni.map((p, i) => {
@@ -23999,15 +24126,22 @@ async function saveInvoiceEdit() {
     || String(r.kw_year ?? '') !== String(kwRokNovy ?? '')
   const byloZaplaceno = r.status === 'paid'
 
+  // Zápis se podmiňuje původním edited_at: když fakturu mezitím upravil někdo jiný,
+  // nepřepíše se jeho novější údaj (nula řádků → „mezitím se změnila").
+  const zapisUpravuFaktury = () => {
+    let q = sb.from('worker_invoices').update(upd).eq('id', r.id)
+    if (r.edited_at !== undefined) q = r.edited_at === null ? q.is('edited_at', null) : q.eq('edited_at', r.edited_at)
+    return q.select('id')
+  }
   let bezPuvodni = false
   let bezVzhledu = false
-  let { data: zapsanoF, error } = await sb.from('worker_invoices').update(upd).eq('id', r.id).select('id')
+  let { data: zapsanoF, error } = await zapisUpravuFaktury()
   // Sloupec se vzhledem ještě nemusí být v databázi. PDF už je přepsané správně,
   // takže zálohu ulož i bez něj a řekni nahlas, co chybí.
   if (error && /zalohy_pouzite/i.test(error.message || '')) {
     // Nespuštěná migrace — fakturu kvůli tomu neblokuj.
     delete upd.zalohy_pouzite
-    ;({ data: zapsanoF, error } = await sb.from('worker_invoices').update(upd).eq('id', r.id).select('id'))
+    ;({ data: zapsanoF, error } = await zapisUpravuFaktury())
   }
   // Sloupec cash_paid_typ nemusí být v databázi (nespuštěná migrace). PDF je
   // přepsané správně, jen si appka nezapamatuje, že šlo o zálohu na účet —
@@ -24016,12 +24150,12 @@ async function saveInvoiceEdit() {
   if (error && /cash_paid_typ/i.test(error.message || '')) {
     bezTypuZalohy = true
     delete upd.cash_paid_typ
-    ;({ data: zapsanoF, error } = await sb.from('worker_invoices').update(upd).eq('id', r.id).select('id'))
+    ;({ data: zapsanoF, error } = await zapisUpravuFaktury())
   }
   if (error && /design_idx/i.test(error.message || '')) {
     bezVzhledu = true
     delete upd.design_idx
-    ;({ data: zapsanoF, error } = await sb.from('worker_invoices').update(upd).eq('id', r.id).select('id'))
+    ;({ data: zapsanoF, error } = await zapisUpravuFaktury())
   }
   // Sloupce na původní verzi ještě nemusí být v databázi. Fakturu kvůli tomu
   // neblokuj — zálohu ulož i bez nich a řekni nahlas, co chybí.
@@ -24029,7 +24163,7 @@ async function saveInvoiceEdit() {
     bezPuvodni = true
     delete upd.original_pdf_url
     delete upd.original_pdf_path
-    ;({ data: zapsanoF, error } = await sb.from('worker_invoices').update(upd).eq('id', r.id).select('id'))
+    ;({ data: zapsanoF, error } = await zapisUpravuFaktury())
   }
   // Na číslo je v databázi unikátní index. Kdyby ho mezitím obsadila jiná
   // faktura, ať admin nečte hlášku z Postgresu, ale ví, co má udělat.
@@ -24056,7 +24190,7 @@ async function saveInvoiceEdit() {
   // nemaže se nic: osiřelý soubor je menší škoda než ztracená faktura.
   const puvodniPath = upd.original_pdf_path || r.original_pdf_path || null
   if (uploaded && puvodniPath && r.pdf_path && r.pdf_path !== uploaded.path && r.pdf_path !== puvodniPath) {
-    try { await sb.storage.from('documents').remove([r.pdf_path]) }
+    try { const { error: eUklid } = await sb.storage.from('documents').remove([r.pdf_path]); if (eUklid) console.warn('[faktura] předchozí přepsané PDF nešlo smazat:', eUklid.message) }
     catch (e) { console.warn('[faktura] předchozí přepsané PDF nešlo smazat:', e?.message) }
   }
 
@@ -24091,7 +24225,9 @@ async function saveInvoiceEdit() {
   // ukazovala na týden, ke kterému faktura není.
   let provizeNepresunuta = ''
   if (kwZmeneno && byloZaplaceno) {
-    const stary = await syncProvizePaidFromInvoice(r.worker_id, r.kw, r.kw_year, false)
+    const stary = jinaZaplacenaVTydnu(r.id, r.worker_id, r.kw, r.kw_year)
+      ? { skipped: true }   // jiná zaplacená faktura za starý týden — Provize tam zůstanou uhrazené
+      : await syncProvizePaidFromInvoice(r.worker_id, r.kw, r.kw_year, false)
     const novy = await syncProvizePaidFromInvoice(r.worker_id, kwNovy, kwRokNovy, true)
     const chyba = stary.error || novy.error
     if (chyba) provizeNepresunuta = chyba.message || String(chyba)
@@ -24099,7 +24235,7 @@ async function saveInvoiceEdit() {
 
   Object.assign(r, upd)
   renderWorkerInvoices()
-  closeInvoiceEdit()
+  closeInvoiceEdit(true)
   if (provizeNepresunuta) {
     finish('⚠️ Faktura přepsaná, ale „uhrazeno" v Provizích zůstalo u starého týdne: ' + provizeNepresunuta)
     return
@@ -24144,7 +24280,7 @@ async function deleteWorkerInvoice(id) {
   if (!smazano || !smazano.length) { showToast('❌ Faktura se nesmazala — databáze to nepovolila'); return }
   const kSmazani = [r?.pdf_path, r?.original_pdf_path].filter(p => p && typeof p === 'string')
   if (kSmazani.length) {
-    try { await sb.storage.from('documents').remove([...new Set(kSmazani)]) }
+    try { const { error: eUklid } = await sb.storage.from('documents').remove([...new Set(kSmazani)]); if (eUklid) console.warn('[faktury] PDF ze Storage nešlo smazat:', eUklid.message) }
     catch (e) { console.warn('[faktury] PDF ze Storage nešlo smazat:', e?.message) }
   }
   _invCache = _invCache.filter(x => x.id !== id)
@@ -24599,6 +24735,16 @@ async function zkopirujKlientOdkaz(token) {
 
 async function prepniKlientOdkaz(id, zapnout) {
   if (!zapnout && !confirm('Deaktivovat odkaz?\n\nOdběratel na něj přestane vidět okamžitě. Zapnout ho můžete kdykoli zpátky.')) return
+  if (zapnout) {
+    // Prošlý odkaz se zapnutím neobnoví (datum platnosti zůstane v minulosti) — otevře se
+    // jeho úprava, ať se nastaví nové datum, a nehlásí se zapnutí, které nic nezměnilo.
+    const { data: odk } = await sb.from('client_links').select('plati_do').eq('id', id).maybeSingle()
+    if (odk && odk.plati_do && odk.plati_do < localDateStr()) {
+      showToast('⚠️ Odkaz je prošlý — nastavte nové datum platnosti')
+      otevriNovyOdkaz(id)
+      return
+    }
+  }
   const { error } = await sb.from('client_links').update({ aktivni: !!zapnout }).eq('id', id)
   if (error) { showToast('❌ Chyba: ' + error.message); return }
   showToast(zapnout ? '✅ Odkaz zapnutý' : '🚫 Odkaz deaktivován')
@@ -24614,7 +24760,9 @@ async function smazKlientOdkaz(id, nazev) {
 }
 
 let _klientOdkazId = null
+let _klientOdkazPoradi = 0   // generace otevření editoru — pozdní odpověď staršího otevření ho nesmí přepsat
 async function otevriNovyOdkaz(id) {
+  const poradiOdkazu = ++_klientOdkazPoradi
   _klientOdkazId = id || null
   const modal = document.getElementById('klient-odkaz-modal')
   if (!modal) return
@@ -24630,6 +24778,7 @@ async function otevriNovyOdkaz(id) {
     sb.from('teams').select('id, name, company_id').eq('is_active', true).order('name'),
     sb.from('companies').select('id, name')
   ])
+  if (poradiOdkazu !== _klientOdkazPoradi) return
   _klientTymy = tymy || []
   const firmaJmeno = {}
   ;(firmy || []).forEach(f => { firmaJmeno[f.id] = f.name })
@@ -24640,6 +24789,7 @@ async function otevriNovyOdkaz(id) {
       sb.from('client_links').select('nazev, plati_do').eq('id', id).maybeSingle(),
       sb.from('client_link_teams').select('team_id').eq('link_id', id)
     ])
+    if (poradiOdkazu !== _klientOdkazPoradi) return
     if (o) {
       document.getElementById('klient-odkaz-nazev').value = o.nazev || ''
       document.getElementById('klient-odkaz-do').value = o.plati_do || ''
@@ -24656,6 +24806,7 @@ async function otevriNovyOdkaz(id) {
 }
 
 function zavriNovyOdkaz() {
+  _klientOdkazPoradi++   // rozběhnuté načítání zavřeného editoru už nic nevyplní
   const m = document.getElementById('klient-odkaz-modal')
   if (m) m.style.display = 'none'
   _klientOdkazId = null
@@ -24670,6 +24821,7 @@ async function ulozNovyOdkaz() {
 
   const btn = document.getElementById('klient-odkaz-ulozit')
   if (btn) { btn.disabled = true; btn.textContent = 'Ukládám…' }
+  let idNovehoOdkazu = null
   try {
     let id = _klientOdkazId
     if (id) {
@@ -24683,15 +24835,28 @@ async function ulozNovyOdkaz() {
         .select('id, token').single()
       if (error) throw error
       id = data.id
+      idNovehoOdkazu = id
     }
     // Skupiny nastavíme vždycky znovu — ať se dají i ubírat, nejen přidávat.
     // Audit 30. 9. 2026: mazání se nekontrolovalo. Když ho databáze nepustila,
     // odebraná skupina v odkazu zůstala — a odběratel dál viděl její lidi.
-    const { error: chybaMazani } = await sb.from('client_link_teams').delete().eq('link_id', id)
-    if (chybaMazani) throw chybaMazani
-    const { error: chybaVazeb } = await sb.from('client_link_teams')
-      .insert(tymy.map(t => ({ link_id: id, team_id: t })))
-    if (chybaVazeb) throw chybaVazeb
+    // Pořadí: NEJDŘÍV se přidají chybějící skupiny, AŽ POTOM se odeberou odebrané — při výpadku
+    // uprostřed tak odkaz nezůstane bez skupin (původní nastavení se nezničí).
+    const { data: stavajici, error: chybaCteni } = await sb.from('client_link_teams').select('team_id').eq('link_id', id)
+    if (chybaCteni) throw chybaCteni
+    const maji = new Set((stavajici || []).map(v => String(v.team_id)))
+    const pridat = tymy.filter(t => !maji.has(String(t)))
+    if (pridat.length) {
+      const { error: chybaVazeb } = await sb.from('client_link_teams')
+        .insert(pridat.map(t => ({ link_id: id, team_id: t })))
+      if (chybaVazeb) throw chybaVazeb
+    }
+    const zaskrtnute = new Set(tymy.map(String))
+    const odebrat = (stavajici || []).map(v => v.team_id).filter(t => !zaskrtnute.has(String(t)))
+    if (odebrat.length) {
+      const { error: chybaMazani } = await sb.from('client_link_teams').delete().eq('link_id', id).in('team_id', odebrat)
+      if (chybaMazani) throw chybaMazani
+    }
     // Kontrola, že odkaz má PŘESNĚ zaškrtnuté skupiny — nic navíc.
     const { data: vazby, error: chybaKontroly } = await sb.from('client_link_teams').select('team_id').eq('link_id', id)
     if (chybaKontroly) throw chybaKontroly
@@ -24704,6 +24869,11 @@ async function ulozNovyOdkaz() {
     showToast('✅ Odkaz uložený — zkopírujte ho tlačítkem a pošlete odběrateli')
     loadKlientOdkazy()
   } catch (e) {
+    // Nově založený odkaz, kterému se nepodařilo uložit skupiny, se zase smaže — jinak by zůstal
+    // prázdný záznam a opakování by založilo další.
+    if (idNovehoOdkazu) {
+      try { await sb.from('client_link_teams').delete().eq('link_id', idNovehoOdkazu); await sb.from('client_links').delete().eq('id', idNovehoOdkazu) } catch (x) {}
+    }
     const m = e?.message || ''
     showToast(/does not exist|schema cache|could not find the table|PGRST205|42P01/i.test(m + ' ' + (e?.code || ''))
       ? '❌ Chybí tabulky odkazů — spusťte migraci supabase-migrace-odkaz-pro-odberatele.sql'
@@ -24791,9 +24961,17 @@ async function loadTeams() {
       !w.team_id || subOwner[String(w.subteam_id)] !== String(w.team_id)
     ))
     if (orphans.length) {
-      const { error: cleanErr } = await sb.from('profiles').update({ subteam_id: null }).in('id', orphans.map(o => o.id))
-      if (!cleanErr) orphans.forEach(o => { o.subteam_id = null })
-      else console.warn('[loadTeams] úklid podskupin:', cleanErr.message)
+      // Zápis se podmiňuje načteným zařazením (subteam_id + team_id) — kdo mezitím dostal
+      // jiné zařazení od druhého správce, tomu se nové zařazení nesmaže.
+      const skupiny = new Map()
+      orphans.forEach(o => { const k = o.subteam_id + '|' + (o.team_id == null ? '' : o.team_id); if (!skupiny.has(k)) skupiny.set(k, []); skupiny.get(k).push(o) })
+      for (const [, cl] of skupiny) {
+        let q = sb.from('profiles').update({ subteam_id: null }).in('id', cl.map(o => o.id)).eq('subteam_id', cl[0].subteam_id)
+        q = cl[0].team_id == null ? q.is('team_id', null) : q.eq('team_id', cl[0].team_id)
+        const { error: cleanErr } = await q
+        if (!cleanErr) cl.forEach(o => { o.subteam_id = null })
+        else console.warn('[loadTeams] úklid podskupin:', cleanErr.message)
+      }
     }
   }
 
@@ -24990,11 +25168,13 @@ async function renameSubteam(subteamId, oldName) {
 async function deleteSubteam(subteamId, name) {
   if (!confirm(`Smazat podskupinu "${name||''}"?\n\nČlenové zůstanou v týmu, jen se uvolní ze skupiny.`)) return
   // Uvolni členy
-  await sb.from('profiles').update({ subteam_id: null }).eq('subteam_id', subteamId)
+  const { error: chybaUvolneni } = await sb.from('profiles').update({ subteam_id: null }).eq('subteam_id', subteamId)
+  if (chybaUvolneni) { showToast('❌ Podskupina se nesmazala — členy se nepodařilo uvolnit: ' + chybaUvolneni.message); loadTeams(); return }
   const { error } = await sb.from('subteams').delete().eq('id', subteamId)
   if (error) {
     // soft delete fallback
-    await sb.from('subteams').update({ is_active: false }).eq('id', subteamId)
+    const { error: chybaSoft } = await sb.from('subteams').update({ is_active: false }).eq('id', subteamId)
+    if (chybaSoft) { showToast('❌ Podskupina se nesmazala: ' + chybaSoft.message); loadTeams(); return }
   }
   showToast('🗑 Podskupina smazána')
   loadTeams()
@@ -25889,16 +26069,33 @@ async function populateTeamPdfWeeks() {
       // Týdny podle skupiny ZAPSANÉ u docházky (i lidé, co jsou dnes jinde),
       // plus dny bez zapsané skupiny u dnešních členů. NEJNOVĚJŠÍ NAPŘED:
       // databáze vrací nejvýš 1000 řádků (1. 10. 2026).
+      // Po stránkách (server vrací nejvýš ~1000 řádků naráz) — starší týdny se jinak nevešly do nabídky.
+      const strankuj = async (fab) => {
+        const vse = []
+        for (let od = 0; od < 200000; od += 1000) {
+          const { data, error } = await fab().order('id', { ascending: true }).range(od, od + 999)
+          if (error) return { data: null, error }
+          vse.push(...(data || []))
+          if (!data || data.length < 1000) break
+        }
+        return { data: vse, error: null }
+      }
       const [z1, z2] = await Promise.all([
-        sb.from('attendance').select('kw, kw_year, worker_id').eq('team_id', teamId)
-          .not('kw', 'is', null).order('work_date', { ascending: false }),
-        memberIds.length ? sb.from('attendance').select('kw, kw_year, worker_id').in('worker_id', memberIds).is('team_id', null)
-          .not('kw', 'is', null).order('work_date', { ascending: false }) : Promise.resolve({ data: [] })
+        strankuj(() => sb.from('attendance').select('kw, kw_year, worker_id').eq('team_id', teamId).not('kw', 'is', null)),
+        memberIds.length ? strankuj(() => sb.from('attendance').select('kw, kw_year, worker_id').in('worker_id', memberIds).is('team_id', null).not('kw', 'is', null)) : Promise.resolve({ data: [] })
       ])
       const veVykazu = id => patriDoVykazu(workers.find(w => String(w.id) === String(id)))
-      const rows = (z1.error && memberIds.length
-        ? ((await sb.from('attendance').select('kw, kw_year, worker_id').in('worker_id', memberIds).not('kw', 'is', null).order('work_date', { ascending: false })).data || [])
-        : [...(z1.data || []), ...(z2.data || [])]).filter(r => veVykazu(r.worker_id))
+      // Náhradní cesta jen při chybějícím sloupci (neproběhlá migrace); jiná chyba = načtení selhalo.
+      const chybiSloupecTeam = !!z1.error && (z1.error.code === '42703' || /team_id|column .* does not exist|schema cache/i.test(z1.error.message || ''))
+      let z3 = null
+      if (z1.error && chybiSloupecTeam && memberIds.length) {
+        z3 = await strankuj(() => sb.from('attendance').select('kw, kw_year, worker_id').in('worker_id', memberIds).not('kw', 'is', null))
+        if (z3.error) throw z3.error
+      } else {
+        if (z1.error) throw z1.error
+        if (z2.error) throw z2.error
+      }
+      const rows = (z3 ? (z3.data || []) : [...(z1.data || []), ...(z2.data || [])]).filter(r => veVykazu(r.worker_id))
       const map = new Map()
       ;(rows || []).forEach(r => {
         if (r.kw == null || r.kw_year == null) return
@@ -26120,9 +26317,11 @@ async function generateTeamAttendancePdf(teamId, teamName) {
   if (smiVidetProvize()) {
     try {
       const vl = await nactiVlastniProvizeZamestnancu()
+      if (vl.chyba) throw vl.chyba
       if (vl.set) _vlastniProvize = vl.set
       let pv = await sb.from('worker_commissions').select('worker_id, provize, bez_provize')
       if (pv.error) pv = await sb.from('worker_commissions').select('worker_id, provize')
+      if (pv.error) throw pv.error
       ;(pv.data || []).forEach(p => {
         if (p.bez_provize) _bezProvizeLidi.add(p.worker_id)
         if (p.provize != null) _provMap[p.worker_id] = Number(p.provize)
@@ -26131,11 +26330,19 @@ async function generateTeamAttendancePdf(teamId, teamName) {
         sb.from('worker_rate_history').select('worker_id, hodnota, valid_from').eq('druh', 'provize').order('valid_from', { ascending: true }),
         sb.from('profiles').select('id, zamestnavatel_id').in('id', ids)
       ])
+      // Chyba načtení se nesmí tvářit jako „nulové provize / žádná historie / bez zaměstnavatele".
+      if (hist.error && !/42P01|42703|PGRST20[245]|does not exist|schema cache/i.test((hist.error.code || '') + ' ' + (hist.error.message || ''))) throw hist.error
+      if (zam.error && !/42703|PGRST204|zamestnavatel_id|schema cache/i.test((zam.error.code || '') + ' ' + (zam.error.message || ''))) throw zam.error
       ;(hist.data || []).forEach(h => {
         ;(_histProv[h.worker_id] = _histProv[h.worker_id] || []).push({ od: String(h.valid_from).slice(0, 10), hodnota: Number(h.hodnota) || 0 })
       })
       ;(zam.data || []).forEach(z => { if (z.zamestnavatel_id && z.zamestnavatel_id !== z.id) _sefPodle[z.id] = z.zamestnavatel_id })
-    } catch(e) { console.warn('[team-pdf] provize:', e?.message) }
+    } catch(e) {
+      // Bez spolehlivých podkladů provizní část nevytvářet — výkaz s nulovou či špatnou provizí je horší než žádný.
+      console.warn('[team-pdf] provize:', e?.message)
+      showToast('❌ Provize se nepodařilo načíst — PDF nevytvořeno, zkuste to znovu')
+      return
+    }
   }
   // Provize za hodinu v konkrétní den — komu (zaměstnanec → firma), „bez provize", historie.
   const _provizeDne = (wid, den) => {
@@ -43234,9 +43441,14 @@ async function vykresliFakturuDoPlatna(el) {
     if (meritko <= 2) throw e
     console.warn('[faktura] vykreslení ve ' + meritko + '× selhalo, zkouším 2×:', e?.message)
   }
-  if (c && (meritko <= 2 || !platnoJePrazdne(c))) return c
+  // Prázdné plátno (telefon nezvládl velké plátno) nesmí projít jako hotová faktura — ani ve 2×.
+  const bezPrazdneho = pl => {
+    if (platnoJePrazdne(pl)) { pl.width = 0; pl.height = 0; throw new Error('Fakturu se nepodařilo vykreslit (prázdná stránka) — zkuste to prosím znovu') }
+    return pl
+  }
+  if (c && (meritko <= 2 || !platnoJePrazdne(c))) return meritko <= 2 ? bezPrazdneho(c) : c
   if (c) { console.warn('[faktura] plátno ve ' + meritko + '× vyšlo prázdné, zkouším 2×'); c.width = 0; c.height = 0 }
-  return kresli(2)
+  return bezPrazdneho(await kresli(2))
 }
 
 // Vykreslí fakturu do PDF (vždy jedna strana A4) a vrátí ji jako soubor.
@@ -43436,9 +43648,15 @@ async function storeInvoiceRow(row) {
   // položky…) se dál normálně přepíše.
   if (row.worker_id && row.invoice_number) {
     try {
-      const { data: existujici, error: chybaExist } = await sb.from('worker_invoices')
-        .select('status, cash_paid, cash_paid_note, cash_paid_typ')
+      let { data: existujici, error: chybaExist } = await sb.from('worker_invoices')
+        .select('status, cash_paid, cash_paid_note, cash_paid_typ, zalohy_pouzite')
         .eq('worker_id', row.worker_id).eq('invoice_number', String(row.invoice_number)).maybeSingle()
+      // Sloupec zalohy_pouzite nemusí být v databázi (nespuštěná migrace) — ptát se pak bez něj.
+      if (chybaExist && /zalohy_pouzite/i.test(chybaExist.message || '')) {
+        ;({ data: existujici, error: chybaExist } = await sb.from('worker_invoices')
+          .select('status, cash_paid, cash_paid_note, cash_paid_typ')
+          .eq('worker_id', row.worker_id).eq('invoice_number', String(row.invoice_number)).maybeSingle())
+      }
       // Když se nepodaří zjistit, jestli faktura už není vyřízená nebo zaplacená, nepřepisuje se
       // (zápis by vrátil status „nová" a smazal úhrady — Codex 6. 11. 2026). Chyba jde volajícímu jako chyba uložení.
       if (chybaExist) {
@@ -43448,6 +43666,9 @@ async function storeInvoiceRow(row) {
       if (existujici && (existujici.status === 'paid' || existujici.status === 'seen')) {
         row = { ...row, status: existujici.status, cash_paid: existujici.cash_paid,
                 cash_paid_note: existujici.cash_paid_note, cash_paid_typ: existujici.cash_paid_typ }
+        // Evidence použitých záloh patří k uhrazené částce — přegenerování (i z archivu, který
+        // ji nenese) ji nesmí vynulovat, jinak by se záloha uvolnila a odečetla podruhé.
+        if ('zalohy_pouzite' in existujici && 'zalohy_pouzite' in row) row.zalohy_pouzite = Array.isArray(existujici.zalohy_pouzite) ? existujici.zalohy_pouzite : []
       } else if (Array.isArray(row.zalohy_pouzite)) {
         // Odečet zálohy se spočítal už při náhledu faktury — mezitím mohla
         // tutéž zálohu spolykat jiná faktura. Těsně před zápisem ho zužujeme
@@ -43505,9 +43726,12 @@ async function zapisRadekFaktury(row) {
   //
   // Přepiš-nebo-vlož funguje bez ohledu na to, jaký index v databázi je.
   const klic = { worker_id: row.worker_id, invoice_number: String(row.invoice_number || '') }
+  // Zápis „nové" faktury se nesmí přepsat přes fakturu, kterou mezitím někdo označil jako
+  // vyřízenou/zaplacenou (stav by se vrátil na „nová" a úhrada zmizela) — podmínka na stav.
+  const jenNova = q => row.status === 'new' ? q.or('status.eq.new,status.is.null') : q
   if (klic.worker_id && klic.invoice_number) {
-    const { data: prepsane, error: chybaUpravy } = await sb.from('worker_invoices')
-      .update(row).eq('worker_id', klic.worker_id).eq('invoice_number', klic.invoice_number)
+    const { data: prepsane, error: chybaUpravy } = await jenNova(sb.from('worker_invoices')
+      .update(row).eq('worker_id', klic.worker_id).eq('invoice_number', klic.invoice_number))
       .select('id')
     if (chybaUpravy) return chybaUpravy
     if (prepsane && prepsane.length) return null      // hotovo, přepsali jsme
@@ -43519,8 +43743,8 @@ async function zapisRadekFaktury(row) {
   // Mezitím ji mohl uložit někdo jiný (pracovník ze svého telefonu ve stejnou
   // chvíli). Zkusíme tedy ještě jednou přepsat, ať se práce neztratí.
   if (/duplicate key|already exists|23505/i.test(chybaVlozeni.message || '') && klic.invoice_number) {
-    const { data: podruhe, error: chybaPodruhe } = await sb.from('worker_invoices')
-      .update(row).eq('worker_id', klic.worker_id).eq('invoice_number', klic.invoice_number)
+    const { data: podruhe, error: chybaPodruhe } = await jenNova(sb.from('worker_invoices')
+      .update(row).eq('worker_id', klic.worker_id).eq('invoice_number', klic.invoice_number))
       .select('id')
     if (!chybaPodruhe && podruhe && podruhe.length) return null
   }
@@ -43938,6 +44162,9 @@ async function emailInvoiceToSubbau() {
   const d = window._lastInvoice
   if (!d || !d.workerId) { showToast('⚠️ Nejdřív vytvořte fakturu'); return }
 
+  // Řádek do složky se sestaví z TÉHOŽ dokladu, který se odesílá — pozdější otevření jiné faktury
+  // (zavřený náhled) by jinak podstrčilo údaje druhé faktury k PDF první.
+  const rowSnimek = invoiceRowFromLast('email')
   const label = document.getElementById('inv-email-label')
   const orig = label ? label.textContent : ''
   _invSendBusy(true, 'inv-email-label', 'Připravuji fakturu…')
@@ -43950,7 +44177,7 @@ async function emailInvoiceToSubbau() {
 
     // 1) Odeslat přes server (Brevo) — příloha dorazí spolehlivě
     if (label) label.textContent = 'Odesílám na ' + INVOICE_EMAIL + '…'
-    const sent = await sendInvoiceByServer(out)
+    const sent = await sendInvoiceByServer(out, d)
     let sentVia = 'email', zpravaNavic = ''
 
     if (!sent.ok) {
@@ -44001,7 +44228,7 @@ async function emailInvoiceToSubbau() {
     // to je náš vlastní spolehlivý systém a nezávisí na tom, jestli se povede
     // odeslat (nebo opravdu odešle) e-mail. Admin tak fakturu uvidí, i když
     // zrovna nepřijde mail.
-    const row = invoiceRowFromLast(sentVia)
+    const row = Object.assign(rowSnimek || invoiceRowFromLast(sentVia), { sent_via: sentVia, sent_at: new Date().toISOString() })
     try {
       const up = await uploadInvoicePdf(out.blob, d.workerId, d.invoiceNum)
       row.pdf_path = up.path; row.pdf_url = up.url
@@ -44021,15 +44248,21 @@ async function emailInvoiceToSubbau() {
       try { podrzena = await podrzFakturuVTelefonu(error, row, out) } catch (e) { podrzena = false }
       zapisChybuAppky('faktura-email-bez-zapisu', error.message, { invoiceNum: d.invoiceNum, workerId: d.workerId, podrzena })
       if (podrzena) {
-        _invSentNote = '⏳ Odesláno e-mailem, do složky Faktury ji appka zapíše sama, jakmile to půjde.'
+        // „Odešla e-mailem" smí tvrdit jen potvrzené odeslání ze serveru — ne otevřený koncept ani nepotvrzené sdílení.
+        _invSentNote = sentVia === 'email' ? '⏳ Odesláno e-mailem, do složky Faktury ji appka zapíše sama, jakmile to půjde.'
+          : '⏳ Do složky Faktury ji appka zapíše sama, jakmile to půjde. Zkontrolujte prosím, že e-mail opravdu odešel.'
         updateInvoiceSendUi()
-        showInvoiceSentModal('Faktura č. ' + (d.invoiceNum || '') + ' odešla e-mailem, do složky Faktury se ale zatím nezapsala (slabé spojení nebo přihlášení). Appka ji tam zapíše sama, jakmile to půjde — nemusíte nic dělat.', true)
+        showInvoiceSentModal(sentVia === 'email'
+          ? 'Faktura č. ' + (d.invoiceNum || '') + ' odešla e-mailem, do složky Faktury se ale zatím nezapsala (slabé spojení nebo přihlášení). Appka ji tam zapíše sama, jakmile to půjde — nemusíte nic dělat.'
+          : 'Faktura č. ' + (d.invoiceNum || '') + ' se do složky Faktury zatím nezapsala (slabé spojení nebo přihlášení). Appka ji tam zapíše sama, jakmile to půjde. Zkontrolujte prosím, že e-mail opravdu odešel.', true)
         nactiMojeFaktury().catch(() => {})
         return
       }
-      _invSentNote = '⚠️ Odesláno e-mailem, ale do složky Faktury se nezapsala — dejte prosím vědět SubBau.'
+      _invSentNote = sentVia === 'email' ? '⚠️ Odesláno e-mailem, ale do složky Faktury se nezapsala — dejte prosím vědět SubBau.'
+        : '⚠️ Do složky Faktury se nezapsala — dejte prosím vědět SubBau a zkontrolujte, že e-mail opravdu odešel.'
       updateInvoiceSendUi()
-      showInvoiceSentModal('Faktura odešla e-mailem, ale do složky Faktury se nezapsala. Dejte prosím vědět SubBau.', true)
+      showInvoiceSentModal(sentVia === 'email' ? 'Faktura odešla e-mailem, ale do složky Faktury se nezapsala. Dejte prosím vědět SubBau.'
+        : 'Faktura se do složky Faktury nezapsala. Dejte prosím vědět SubBau a zkontrolujte, že e-mail opravdu odešel.', true)
       return
     }
     // Zapsaná — podržená starší verze téhož čísla už nesmí nic přepsat.
@@ -44054,9 +44287,9 @@ async function emailInvoiceToSubbau() {
 
 // Pošle PDF přes serverovou funkci (Vercel + Brevo). Když endpoint neexistuje
 // nebo není nastavený klíč, vrátí ok:false a appka zkusí jiný způsob.
-async function sendInvoiceByServer(out) {
+async function sendInvoiceByServer(out, dd) {
   try {
-    const d = window._lastInvoice || {}
+    const d = dd || window._lastInvoice || {}
     const b64 = await blobToBase64(out.blob)
     let token = null
     try { token = (await sb.auth.getSession())?.data?.session?.access_token || null } catch (e) {}
@@ -44205,11 +44438,21 @@ async function loadInvoiceWeeks() {
   const sel = document.getElementById('inv-week-sel')
   if (!sel) return
 
-  const { data } = await sb.from('attendance')
-    .select('kw, kw_year, total_hours')
-    .eq('worker_id', currentUser.id)
-    .order('kw_year', {ascending: false})
-    .order('kw', {ascending: false})
+  // Po stránkách (server vrací nejvýš ~1000 řádků naráz) a s kontrolou chyby: výpadek spojení
+  // se nesmí tvářit jako „žádné odpracované týdny" — dosavadní nabídka se zachová.
+  const data = []
+  for (let od = 0; od < 100000; od += 1000) {
+    const { data: kus, error: chybaTydnu } = await sb.from('attendance')
+      .select('kw, kw_year, total_hours')
+      .eq('worker_id', currentUser.id)
+      .order('kw_year', {ascending: false})
+      .order('kw', {ascending: false})
+      .order('id', {ascending: true})
+      .range(od, od + 999)
+    if (chybaTydnu) { console.warn('[faktura] týdny se nenačetly:', chybaTydnu.message); return }
+    data.push(...(kus || []))
+    if (!kus || kus.length < 1000) break
+  }
 
   if (!data?.length) {
     sel.innerHTML = '<option value="">Žádné odpracované týdny</option>'
@@ -44397,7 +44640,19 @@ async function loadContractWorkers() {
   if (vybrany && lide.some(w => String(w.id) === String(vybrany))) sel.value = vybrany
 }
 
-async function uploadContract() {
+// Po vypršení času zápisu do databáze mohl původní požadavek smlouvu přesto uložit — než se nahrání
+// zopakuje (nový soubor, nový záznam), ověří se podle adresy souboru, jestli smlouva nevznikla.
+async function smlouvaPoTimeoutu(workerId, fileUrl) {
+  try {
+    await new Promise(r => setTimeout(r, 2500))
+    const { data } = await sb.from('contracts').select('id').eq('worker_id', workerId).eq('file_url', fileUrl).limit(1)
+    return (data && data[0]) ? data[0] : null
+  } catch (e) { return null }
+}
+// Nahrání smlouvy se nesmí spustit dvakrát naráz (dvojklik, druhé tlačítko na slabém signálu) —
+// každé spuštění by vytvořilo nový soubor i záznam. Jeden zámek pro všechny tři cesty nahrání.
+async function uploadContract() { return _jednouNaraz('smlouva-nahrani', _uploadContractVnitrni) }
+async function _uploadContractVnitrni() {
   const workerId = document.getElementById('contract-worker').value
   const title = document.getElementById('contract-title').value.trim()
   if (!workerId) { showToast('⚠️ Vyberte pracovníka'); return }
@@ -44447,6 +44702,10 @@ async function uploadContract() {
       created_at: new Date().toISOString()
     }).select().single(), 15000))
   } catch (e) { dbErr = e }
+  if (dbErr && /Vypršel čas/.test(dbErr.message || '')) {
+    const nalezena = await smlouvaPoTimeoutu(workerId, fileUrl)
+    if (nalezena) { contractData = nalezena; dbErr = null }
+  }
   if (dbErr) { showToast('❌ Chyba DB: ' + dbErr.message); progress.style.display='none'; return }
 
   const contractId = contractData?.id
@@ -44476,7 +44735,8 @@ async function uploadContract() {
 }
 
 // Nahraje smlouvu, která je už podepsaná (sken) — uloží rovnou jako hotovou, nikdo nepodepisuje
-async function uploadSignedContract() {
+async function uploadSignedContract() { return _jednouNaraz('smlouva-nahrani', _uploadSignedContractVnitrni) }
+async function _uploadSignedContractVnitrni() {
   const workerId = document.getElementById('contract-worker').value
   const title = document.getElementById('contract-title').value.trim()
   if (!workerId) { showToast('⚠️ Vyberte pracovníka'); return }
@@ -44520,6 +44780,7 @@ async function uploadSignedContract() {
       created_at: new Date().toISOString()
     }), 15000))
   } catch (e) { dbErr = e }
+  if (dbErr && /Vypršel čas/.test(dbErr.message || '') && await smlouvaPoTimeoutu(workerId, fileUrl)) dbErr = null
   if (dbErr) { showToast('❌ Chyba DB: ' + dbErr.message); progress.style.display = 'none'; return }
 
   progress.style.display = 'none'
@@ -44664,7 +44925,7 @@ async function ensureContractOriginal(contractId) {
     console.warn('[smlouva] záloha původní verze selhala:', e?.message)
     // DENÍK CHYB (2. 11. 2026): bez zálohy může přepis souboru smlouvy smazat původní verzi — dřív o tom věděla jen konzole.
     try { if (typeof denikChybZapis === 'function') denikChybZapis('smlouva-zaloha', 'Záloha původní verze smlouvy selhala: ' + String((e && e.message) || e).slice(0, 200), { kod: e && e.code, stav: e && (e.status || e.statusCode) }, { trida: 'varovani' }) } catch (x) { console.warn('[deník chyb]', x) } // eslint-disable-line no-undef
-    return null
+    return false   // false = záloha selhala (null = nebylo co zálohovat)
   }
 }
 
