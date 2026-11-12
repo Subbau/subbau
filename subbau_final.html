@@ -36249,14 +36249,21 @@ function showToast(msg) {
 
 
 
+// Cena ubytování z pole: prázdné = null, platná nula (bezplatné) = 0, neplatné číslo = null.
+function cenaUbytovaniZPole(id) {
+  const t = String(document.getElementById(id)?.value ?? '').trim().replace(',', '.')
+  if (!t) return null
+  const n = parseFloat(t)
+  return Number.isFinite(n) && n >= 0 ? n : null
+}
 async function saveMobAccommodation() {
   if (!currentUser) return
   const addr = document.getElementById('mob-acc-address')?.value.trim()
   if (!addr) { showToast('Zadejte adresu ubytování'); return }
   const { data: updMobAcc, error } = await sb.from('profiles').update({
     accommodation_address: addr,
-    accommodation_price_night: parseFloat(document.getElementById('mob-acc-night')?.value) || null,
-    accommodation_parking_price: parseFloat(document.getElementById('mob-acc-parking')?.value) || null,
+    accommodation_price_night: cenaUbytovaniZPole('mob-acc-night'),
+    accommodation_parking_price: cenaUbytovaniZPole('mob-acc-parking'),
     accommodation_notes: document.getElementById('mob-acc-notes')?.value.trim() || null,
     accommodation_phone: document.getElementById('mob-acc-phone')?.value.trim() || null,
     accommodation_email: document.getElementById('mob-acc-email')?.value.trim() || null
@@ -36270,8 +36277,8 @@ async function saveMobAccommodation() {
   // Aktualizuj currentProfile
   if (currentProfile) {
     currentProfile.accommodation_address = addr
-    currentProfile.accommodation_price_night = parseFloat(document.getElementById('mob-acc-night')?.value) || null
-    currentProfile.accommodation_parking_price = parseFloat(document.getElementById('mob-acc-parking')?.value) || null
+    currentProfile.accommodation_price_night = cenaUbytovaniZPole('mob-acc-night')
+    currentProfile.accommodation_parking_price = cenaUbytovaniZPole('mob-acc-parking')
   }
 }
 
@@ -36280,8 +36287,8 @@ function loadMobAccommodation(profile) {
   const n = document.getElementById('mob-acc-night')
   const p = document.getElementById('mob-acc-parking')
   if (a) a.value = profile?.accommodation_address || ''
-  if (n) n.value = profile?.accommodation_price_night || ''
-  if (p) p.value = profile?.accommodation_parking_price || ''
+  if (n) n.value = profile?.accommodation_price_night ?? ''
+  if (p) p.value = profile?.accommodation_parking_price ?? ''
   const mn = document.getElementById('mob-acc-notes')
   if (mn) mn.value = profile?.accommodation_notes || ''
   const ph = document.getElementById('mob-acc-phone')
@@ -36298,8 +36305,8 @@ function loadWorkerAccommodation(profile) {
   const n = document.getElementById('wd-acc-night')
   const p = document.getElementById('wd-acc-parking')
   if (a) a.value = profile.accommodation_address || ''
-  if (n) n.value = profile.accommodation_price_night || ''
-  if (p) p.value = profile.accommodation_parking_price || ''
+  if (n) n.value = profile.accommodation_price_night ?? ''
+  if (p) p.value = profile.accommodation_parking_price ?? ''
   const notes = document.getElementById('wd-acc-notes')
   if (notes) notes.value = profile.accommodation_notes || ''
   // Kontakt a platbu ukládá „Uložit ubytování“ taky — bez načtení by je smazal
@@ -36318,8 +36325,8 @@ async function saveWorkerAccommodation() {
   if (!addr) { showToast('Zadejte adresu ubytování'); return }
   const { data: updAcc, error } = await sb.from('profiles').update({
     accommodation_address: addr,
-    accommodation_price_night: parseFloat(document.getElementById('wd-acc-night')?.value) || null,
-    accommodation_parking_price: parseFloat(document.getElementById('wd-acc-parking')?.value) || null,
+    accommodation_price_night: cenaUbytovaniZPole('wd-acc-night'),
+    accommodation_parking_price: cenaUbytovaniZPole('wd-acc-parking'),
     accommodation_notes: document.getElementById('wd-acc-notes')?.value.trim() || null,
     accommodation_phone: document.getElementById('wd-acc-phone')?.value.trim() || null,
     accommodation_email: document.getElementById('wd-acc-email')?.value.trim() || null,
@@ -36334,8 +36341,10 @@ async function saveWorkerAccommodation() {
 let _workerCustCompanies = []
 async function loadWorkerInvoiceCustomer(profile) {
   const sel = document.getElementById('wd-inv-cust-company')
+  const widPriStartu = currentWorkerId   // karta se může během čekání přepnout na jiného pracovníka
   // Načti firmy z databáze
   const { data } = await sb.from('companies').select('id, name, ico, dic, address').order('name')
+  if (widPriStartu !== currentWorkerId) return
   _workerCustCompanies = data || []
   if (sel) {
     sel.innerHTML = '<option value="">— vyberte firmu —</option>' +
@@ -36393,13 +36402,14 @@ async function saveWorkerInvoiceCustomer() {
   if (!currentWorkerId) return
   const name = document.getElementById('wd-inv-cust-name')?.value.trim()
   if (!name) { showToast('Vyberte firmu z databáze'); return }
-  const { error } = await sb.from('profiles').update({
+  const { error, data: zapsano } = await sb.from('profiles').update({
     invoice_customer_name: name,
     invoice_customer_id: document.getElementById('wd-inv-cust-id')?.value.trim() || null,
     invoice_customer_vat: document.getElementById('wd-inv-cust-vat')?.value.trim() || null,
     invoice_customer_address: document.getElementById('wd-inv-cust-addr')?.value.trim() || null
-  }).eq('id', currentWorkerId)
+  }).eq('id', currentWorkerId).select('id')
   if (error) { showToast('Chyba: ' + error.message); return }
+  if (!zapsano || zapsano.length !== 1) { showToast('❌ Odběratel se neuložil — zkontrolujte oprávnění'); return }
   showToast('Odběratel uložen!')
 }
 
