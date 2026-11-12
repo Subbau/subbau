@@ -16980,7 +16980,7 @@ function nactiPuntikyVsech(vynutit) {
   if (_puntikyBezi) return _puntikyBezi
   _puntikyBezi = (async () => {
     try {
-      const { data, error } = await sb.from('puntiky').select('worker_id, srazka_zapsana_v')
+      const { data, error } = await stahniStrankyOdhad('puntiky', od => sb.from('puntiky').select('worker_id, srazka_zapsana_v').order('id').range(od, od + 999))
       if (error) return _puntikyVsech.mapa
       const mapa = new Map()
       ;(data || []).forEach(p => {
@@ -20265,10 +20265,11 @@ async function updateChatBadge() {
 // Aktualizuje admin badge (nepřečtené zprávy od pracovníků) — funguje i mimo sekci Chat
 async function updateAdminChatBadge() {
   if (!currentUser || currentProfile?.role !== 'admin') return
-  const { data: unread } = await sb.from('chat_messages')
+  // Po stránkách (nepřečtených zpráv může být přes 1000 — odznak by počítal jen část).
+  const { data: unread } = await stahniStrankyOdhad('chat-neprecteno', od => sb.from('chat_messages')
     .select('worker_id')
     .neq('sender_role', 'admin')   // C5 (audit 3. 11. 2026): i zprávy parťáka ('partak'), ne jen 'osvec'
-    .eq('is_read', false)
+    .eq('is_read', false).order('id').range(od, od + 999))
   // Nepočítej právě otevřenou konverzaci
   const chatView = document.getElementById('v-chat')
   const chatOpen = chatView?.classList.contains('on')
@@ -20587,10 +20588,11 @@ async function _loadAdminChatListTed() {
   }
 
   // Načti nepřečtené počty
-  const { data: unread } = await sb.from('chat_messages')
+  // Po stránkách (nepřečtených zpráv může být přes 1000 — odznak by počítal jen část).
+  const { data: unread } = await stahniStrankyOdhad('chat-neprecteno', od => sb.from('chat_messages')
     .select('worker_id')
     .neq('sender_role', 'admin')   // C5 (audit 3. 11. 2026): i zprávy parťáka ('partak'), ne jen 'osvec'
-    .eq('is_read', false)
+    .eq('is_read', false).order('id').range(od, od + 999))
 
   const unreadMap = {}
   unread?.forEach(u => { unreadMap[u.worker_id] = (unreadMap[u.worker_id] || 0) + 1 })
@@ -38799,11 +38801,17 @@ async function loadMySheets() {
   const box = document.getElementById('mob-sheets-list')
   if (!box || !currentUser) return
   try {
-    const { data } = await sb.from('weekly_hour_sheets')
-      .select('id, kw, kw_year, foreman_name, foreman_signature, pdf_url, created_at')
-      .eq('worker_id', currentUser.id)
-      .order('kw_year', { ascending: false }).order('kw', { ascending: false })
-      .order('created_at', { ascending: false })
+    // Podpis je obrázek (desítky kB) — seznam ho NESTAHUJE; které výkazy jsou podepsané, řekne druhý (malý) dotaz jen s id.
+    const [{ data }, { data: podepsane }] = await Promise.all([
+      sb.from('weekly_hour_sheets')
+        .select('id, kw, kw_year, foreman_name, pdf_url, created_at')
+        .eq('worker_id', currentUser.id)
+        .order('kw_year', { ascending: false }).order('kw', { ascending: false })
+        .order('created_at', { ascending: false }).limit(300),
+      sb.from('weekly_hour_sheets').select('id').eq('worker_id', currentUser.id).not('foreman_signature', 'is', null).limit(1000)
+    ])
+    const podepsanaId = new Set((podepsane || []).map(r => String(r.id)))
+    if (data) data.forEach(r => { r.foreman_signature = podepsanaId.has(String(r.id)) ? true : null })
     if (!data || !data.length) { box.innerHTML = '<div style="color:var(--text3);font-size:13px;padding:6px 0">Zatím žádné výkazy. Vytvořte výkaz výše.</div>'; return }
     // Jeden řádek na týden (nejnovější výkaz daného týdne)
     const seen = new Set()
@@ -47035,9 +47043,11 @@ async function loadAdminContracts() {
   // fill_fields = dřív dopsaný text. Bez migrace sloupec neexistuje a dotaz by
   // spadl — pak se zeptáme znovu bez něj, ať se seznam smluv vůbec zobrazí.
   const CSEL = 'id,title,status,file_url,signature_url,admin_signature_url,signed_at,admin_signed_at,created_at,company_signed_at,company_signature_url,company_signer_name,worker_sign_page,worker_id, worker:profiles!worker_id(full_name)'
-  let { data, error: cErr } = await sb.from('contracts').select(CSEL + ',fill_fields,fill_base_at,fill_base_sigs').order('created_at',{ascending:false})
+  // Po stránkách (server vrací nejvýš ~1000 řádků; smluv je tisíce) — jinak by se starší smlouvy tiše ztratily.
+  const dotazSmluv = (sl) => (od) => sb.from('contracts').select(sl).order('created_at',{ascending:false}).order('id',{ascending:false}).range(od, od + 999)
+  let { data, error: cErr } = await stahniStrankyOdhad('smlouvy', dotazSmluv(CSEL + ',fill_fields,fill_base_at,fill_base_sigs'))
   if (cErr && /fill_fields|fill_base_at|fill_base_sigs/.test(cErr.message || '')) {
-    ;({ data, error: cErr } = await sb.from('contracts').select(CSEL).order('created_at',{ascending:false}))
+    ;({ data, error: cErr } = await stahniStrankyOdhad('smlouvy', dotazSmluv(CSEL)))
   }
   const div = document.getElementById('contracts-list')
   if (!div) return
