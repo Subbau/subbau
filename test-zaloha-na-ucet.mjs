@@ -64,8 +64,8 @@ try {
   ok(/Po odečtení již uhrazené zálohy/.test(v.ucet), 'a česky „Po odečtení již uhrazené zálohy"')
   ok(!/Bar erhalten/.test(v.ucet), 'a NE „Bar erhalten"')
   ok(/Bar erhalten/.test(v.prazdno), 'stará faktura bez nastavení zůstává u hotovosti')
-  ok(/Vorschuss/.test(v.zeZalohove) && !v.zeZalohove.includes(veta),
-     'odečet ze zálohové faktury si drží svoje „Vorschuss"')
+  ok(/Anzahlung · Advance payment/.test(v.zeZalohove) && !v.zeZalohove.includes(veta),
+     'odečet ze zálohové faktury si drží svoje „Anzahlung · Advance payment"')
   ok(/100/.test(v.ucet), 'kontrolní měření: odečtená částka je na faktuře vidět')
   ok(padky.length === 0, 'stránka nevyhodila chybu' + (padky.length ? ': ' + padky[0] : ''))
 } finally { await b.close() }

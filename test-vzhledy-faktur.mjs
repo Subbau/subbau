@@ -9,7 +9,7 @@ const S = window.SABLONY_FAKTUR
 
 const L = {
   title:'FAKTURA · RECHNUNG · INVOICE', invoiceNo:'Číslo · Nr. · No.',
-  supplier:'Dodavatel · Lieferant · Supplier', customer:'Odběratel · Kunde · Customer',
+  supplier:'Dodavatel · Leistungserbringer · Supplier', customer:'Odběratel · Leistungsempfänger · Customer',
   contactInfo:'Kontakt', dateIssue:'Datum vystavení · Ausstellungsdatum · Date of issue',
   dueDate:'Datum splatnosti · Fälligkeitsdatum · Due date',
   supplyPeriod:'Období plnění · Leistungszeitraum · Period of supply',

@@ -88,8 +88,17 @@ const v = await p.evaluate(async () => {
     cesky: /Dodavatel|Odběratel|K úhradě|Uhrazeno v hotovosti/.test(t),
     listaZaloha: document.getElementById('invoice-zaloha-bar')?.style.display,
     listaOdeslani: document.getElementById('invoice-actions')?.style.display,
+    castkaDe: t.includes('500,00 EUR') && !/\d\.\d{2} EUR/.test(t),
+    datumDe: /\d{2}\.\d{2}\.\d{4}/.test(t) && !/\d{4}-\d{2}-\d{2}/.test(t),
   }
   zavriZalohovyDoklad()
+  // Tisíce tečkou a desetinná čárka: 1234.5 → 1.234,50 EUR (německý zápis)
+  document.getElementById('zf-castka').value = '1234.5'
+  nahledZalohoveFaktury(); await new Promise(r => setTimeout(r, 300))
+  const tTisice = document.getElementById('invoice-page')?.textContent || ''
+  out.doklad.tisice = tTisice.includes('1.234,50 EUR') && !tTisice.includes('1234.50')
+  zavriZalohovyDoklad()
+  document.getElementById('zf-castka').value = '500'
 
   // --- vlastní pracovník, ať měření nestojí na tom, co je zrovna v ukázce ---
   // Dřív se bral `lide[0]` a z nabídky týdnů ta PRVNÍ položka — jenže ta je
@@ -171,7 +180,7 @@ const v = await p.evaluate(async () => {
                  cekaneHodiny: kdo.hodiny, cekanaCastka: kdo.celkem }
   out.odecet = d ? { celkem: d.totalAmount, zaloha: d.cashPaid, popis: d.cashPaidNote,
     zeZF: !!d.zalohaZeZalohoveFaktury, pouzito: (d.zalohyPouzite || []).length,
-    vorschussNaDokladu: vys.doklad.includes('Vorschuss'),
+    vorschussNaDokladu: vys.doklad.includes('Anzahlung · Advance payment'),
     hotovostNaDokladu: vys.doklad.includes('Bar erhalten') } : null
 
   // --- odečet zapsaný u faktury a opakované vystavení -----------------------
@@ -273,12 +282,12 @@ const v = await p.evaluate(async () => {
 
   // --- NEGATIVNÍ KONTROLY: ať je vidět, že zkouška umí říct i „ne" ----------
   // 1) Týž postup, ale pracovník nemá žádnou zálohu. Kdyby i tady vyšlo
-  //    „odečteno" nebo „Vorschuss", neměřila by zkouška odečet, ale něco jiného.
+  //    „odečteno" nebo „Anzahlung · Advance payment", neměřila by zkouška odečet, ale něco jiného.
   const bezZalohy = await vyrobPracovnika('Zkouška Bez zálohy', 20, 8)
   const vysBZ = await vystavFakturu(bezZalohy.id, 'T202607')
   out.bezZalohy = { celkem: vysBZ.d ? vysBZ.d.totalAmount : null,
                     zaloha: vysBZ.d ? vysBZ.d.cashPaid : null,
-                    vorschuss: vysBZ.doklad.includes('Vorschuss'),
+                    vorschuss: vysBZ.doklad.includes('Anzahlung · Advance payment'),
                     hotovost: vysBZ.doklad.includes('Bar erhalten') }
   closeInvoiceOverlay()
   // 2) Past, na kterou zkouška dřív sedla: z faktury na 0 € se neodečte nic.
@@ -301,6 +310,8 @@ ok(v.doklad.sirka === 794 && v.doklad.vyska <= 1123, 'sedí na A4 (' + v.doklad.
 ok(v.doklad.nemecke === 8, 'je celý německy (' + v.doklad.nemecke + '/8 popisků)')
 ok(!v.doklad.cesky, 'není na něm česky ani slovo')
 ok(v.doklad.reverse, 'je na něm reverse charge')
+ok(v.doklad.castkaDe && v.doklad.tisice, 'částky po německu: desetinná čárka, tisíce tečkou (1.234,50 EUR)')
+ok(v.doklad.datumDe, 'data jako dd.mm.rrrr')
 ok(v.doklad.iban, 'je na něm IBAN')
 ok(v.doklad.listaZaloha === 'block' && v.doklad.listaOdeslani === 'none',
    'nabízí stažení PDF, ne odeslání faktury')
@@ -319,7 +330,7 @@ ok(!dialogy.length, 'appka se během měření na nic neptala'
 console.log('\n── odečet z faktury pracovníka ──')
 ok(v.odecet && v.odecet.zaloha === 500, 'z faktury se odečte 500 € (odečteno ' + (v.odecet?.zaloha) + ')')
 ok(v.odecet && /Z202601/.test(v.odecet.popis || ''), 'na faktuře je číslo zálohové faktury')
-ok(v.odecet && v.odecet.vorschussNaDokladu, 'na dokladu je „Vorschuss" (záloha předem)')
+ok(v.odecet && v.odecet.vorschussNaDokladu, 'na dokladu je „Anzahlung · Advance payment" (záloha předem)')
 ok(v.odecet && !v.odecet.hotovostNaDokladu, 'a NE „Bar erhalten" (hotovost)')
 
 console.log('\n── zúčtování ──')
@@ -371,7 +382,7 @@ if (umi !== kontroly.length) chyb++
 const ziveKontroly = [
   ['faktura bez zálohy', v.bezZalohy.zaloha === 0 && !v.bezZalohy.vorschuss && !v.bezZalohy.hotovost
      && v.bezZalohy.celkem === v.mereni.cekanaCastka,
-   'stejná faktura bez zálohy → odečet 0 a žádné „Vorschuss" (' + JSON.stringify(v.bezZalohy) + ')'],
+   'stejná faktura bez zálohy → odečet 0 a žádné „Anzahlung · Advance payment" (' + JSON.stringify(v.bezZalohy) + ')'],
   ['faktura na 0 €', v.prazdnaFaktura === 0,
    'z faktury na nulu se neodečte nic — proto se měří v uzavřeném týdnu (' + v.prazdnaFaktura + ')'],
   ['otevřená vs. stornovaná', v.stejnaOtevrena === 400,
