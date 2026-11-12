@@ -53944,8 +53944,9 @@ async function loadWdInvoiceForm(profile) {
   // Předvyplň bankovní údaje a sazbu z profilu pracovníka (admin je může přepsat)
   const ib = document.getElementById('wd-inv-iban'); if (ib) ib.value = profile?.invoice_iban || ''
   const sw = document.getElementById('wd-inv-swift'); if (sw) sw.value = profile?.invoice_swift || ''
-  clearTimeout(_wdInvAdrCasovac); _wdInvAdrVerze++
+  clearTimeout(_wdInvAdrCasovac)
   adresaDoPoli('wd-inv', invoiceSupplierAddress(profile || {}))
+  _wdInvAdrZnama = adresaZPoli('wd-inv').text
   { const u = document.getElementById('wd-inv-ulice'); if (u) u.dataset.puvodni = adresaZPoli('wd-inv').text }   // co bylo předvyplněno — jen skutečná úprava se bere jako přepsání
   const rt = document.getElementById('wd-inv-rate'); if (rt) rt.value = profile?.hourly_rate_worker ?? ''
   const vz = document.getElementById('wd-inv-design')
@@ -54273,24 +54274,30 @@ async function ulozVzhledFaktury(hodnota, workerId) {
 // Adresa sídla v admin formuláři faktury se ukládá do profilu sama, jakmile je úplná
 // (ulice + číslo + město) — dřív se zapsala až při vystavení faktury a bez ní zmizela.
 let _wdInvAdrCasovac = null
-let _wdInvAdrVerze = 0
+let _wdInvAdrRada = Promise.resolve()   // zápisy jdou přísně za sebou — starší nikdy nedoběhne po novějším
+let _wdInvAdrZnama = null               // adresa, o které víme, že je v profilu (načtená nebo naposledy zapsaná)
 function wdInvAdresaZmena(hned) {
   clearTimeout(_wdInvAdrCasovac)
   const wid = currentWorkerId
   if (!wid) return
-  const verze = ++_wdInvAdrVerze
-  const spust = async () => {
-    if (wid !== currentWorkerId) return
-    const A = adresaZPoli('wd-inv')
-    if (A.stav !== 'cela') return   // nedopsanou adresu neukládáme — dosavadní zůstane
-    const uEl = document.getElementById('wd-inv-ulice')
-    if (A.text === (uEl?.dataset.puvodni ?? '')) return   // nic se nezměnilo
-    const { data: zapsano, error } = await sb.from('profiles').update({ invoice_address: A.text }).eq('id', wid).select('id')
-    if (error || !zapsano || !zapsano.length) { showToast('❌ Adresa se neuložila' + (error?.message ? ': ' + error.message : '')); return }
-    if (currentWorkerProfile && String(currentWorkerProfile.id) === String(wid)) currentWorkerProfile.invoice_address = A.text
-    // Dopsal-li mezitím dál, platí nová verze a ta se uloží vlastním během.
-    if (verze === _wdInvAdrVerze && wid === currentWorkerId && uEl) uEl.dataset.puvodni = A.text
-    showToast('✅ Adresa uložena')
+  const spust = () => {
+    const beh = async () => {
+      if (wid !== currentWorkerId) return
+      // Pole se čtou až ve chvíli, kdy je řada na tomhle zápisu — vždy platí poslední dopsané.
+      const A = adresaZPoli('wd-inv')
+      if (A.stav !== 'cela') return   // nedopsanou adresu neukládáme — dosavadní zůstane
+      if (A.text === _wdInvAdrZnama) return   // v profilu už přesně tohle je
+      const { data: zapsano, error } = await sb.from('profiles').update({ invoice_address: A.text }).eq('id', wid).select('id')
+      if (error || !zapsano || !zapsano.length) { showToast('❌ Adresa se neuložila' + (error?.message ? ': ' + error.message : '')); return }
+      if (wid !== currentWorkerId) return   // karta mezitím přešla na jiného člověka
+      _wdInvAdrZnama = A.text
+      if (currentWorkerProfile && String(currentWorkerProfile.id) === String(wid)) currentWorkerProfile.invoice_address = A.text
+      // „Původní" se posune jen když v poli pořád stojí uložená adresa; jinak ji dopsaná změna ještě čeká.
+      const uEl = document.getElementById('wd-inv-ulice')
+      if (uEl && adresaZPoli('wd-inv').text === A.text) uEl.dataset.puvodni = A.text
+      showToast('✅ Adresa uložena')
+    }
+    _wdInvAdrRada = _wdInvAdrRada.then(beh, beh).catch(() => {})
   }
   if (hned) spust(); else _wdInvAdrCasovac = setTimeout(spust, 900)
 }
@@ -54320,6 +54327,8 @@ async function generateInvoiceAdmin() {
     invoiceNum: document.getElementById('wd-inv-num-full')?.value || ''
   }
 
+  // Rozběhnuté automatické ukládání adresy musí doběhnout dřív, než se profil načte.
+  await _wdInvAdrRada
   // Profil načti čerstvý — ať faktura obsahuje aktuální fakturační údaje i odběratele
   const { data: prof } = await sb.from('profiles').select('*').eq('id', wid).maybeSingle()
   if (!prof) { showToast('❌ Profil pracovníka se nepodařilo načíst'); return }
