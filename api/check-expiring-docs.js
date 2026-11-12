@@ -196,8 +196,8 @@ async function upomenChybejiciDoklady(serviceKey, dnesIso) {
   if (!lide?.length) return { poslano: 0 };
 
   const ids = lide.map((w) => w.id);
-  const doklady = await sbVse(
-    `documents?select=worker_id,doc_type,status&worker_id=in.(${ids.join(',')})&order=id.asc`,
+  const doklady = await sbVsePodleId(
+    `documents?select=worker_id,doc_type,status&worker_id=in.`, ids, `&order=id.asc`,
     serviceKey
   );
 
@@ -213,9 +213,17 @@ async function upomenChybejiciDoklady(serviceKey, dnesIso) {
 
   let poslano = 0;
   const chyby = [];
-  for (const w of lide) {
-    if (dnesUz.has(w.id)) continue;
-    const moje = (doklady || []).filter((d) => d.worker_id === w.id);
+  // Doklady podle člověka jednou (dřív se pro každého filtrovaly všechny).
+  const doklPodleLidi = new Map();
+  for (const d of (doklady || [])) {
+    if (!doklPodleLidi.has(d.worker_id)) doklPodleLidi.set(d.worker_id, []);
+    doklPodleLidi.get(d.worker_id).push(d);
+  }
+  // Zprávy se zakládají po osmi naráz (dřív jedna po druhé: 200 lidí × ~150 ms = 30 s
+  // a víc, a funkce na Vercelu má strop doby běhu).
+  await souNaraz(lide, 8, async (w) => {
+    if (dnesUz.has(w.id)) return;
+    const moje = doklPodleLidi.get(w.id) || [];
     const chceme = w.bez_ridicaku === true
       ? POVINNE_DOKLADY.filter((t) => t !== 'ridicak')
       : POVINNE_DOKLADY;
@@ -225,7 +233,7 @@ async function upomenChybejiciDoklady(serviceKey, dnesIso) {
       const sedi = typ === 'op' ? (dt === 'op' || dt === 'pas') : dt === typ;
       return sedi && d.status !== 'rejected' && d.status !== 'unreadable';
     }));
-    if (!chybi.length) continue;
+    if (!chybi.length) return;
 
     const seznam = chybi.map((t) => DOC_LABELS[t] || t).join(', ');
     try {
@@ -244,7 +252,7 @@ async function upomenChybejiciDoklady(serviceKey, dnesIso) {
     } catch (e) {
       chyby.push(String(e?.message || e));
     }
-  }
+  });
   return { poslano, chyby };
 }
 
@@ -269,6 +277,28 @@ async function nahlasProblemyBehu(presuny, upominky, results) {
       stav: presuny && Number.isInteger(presuny.chyba) ? presuny.chyba : undefined,
     });
   } catch (e) { console.error('[check-expiring-docs] souhrn do deníku chyb:', (e && e.name) || e); }
+}
+
+// Seznam id do `in.(…)` po kusech: 200 uuid v jedné adrese je přes 7 kB a brány
+// před databází (a Node) mají strop na délku adresy kolem 8 kB — dotaz by u plné
+// firmy spadl na 414. Kusy jdou souběžně (po 4), výsledky se složí za sebou.
+async function sbVsePodleId(cestaPred, ids, cestaPo, serviceKey, kus = 50) {
+  const kusy = [];
+  for (let i = 0; i < ids.length; i += kus) kusy.push(ids.slice(i, i + kus));
+  const vysledky = new Array(kusy.length);
+  await souNaraz(kusy.map((k, i) => [k, i]), 4, async ([k, i]) => {
+    vysledky[i] = await sbVse(`${cestaPred}(${k.join(',')})${cestaPo}`, serviceKey);
+  });
+  return vysledky.flat();
+}
+
+// Pracovní fronta: `fn` se pustí nad položkami, nejvýš `pocet` naráz. Chyba z `fn`
+// zastaví čekání (stejně jako dřív chyba ve smyčce); běžící volání dojedou.
+async function souNaraz(polozky, pocet, fn) {
+  let dalsi = 0;
+  await Promise.all(Array.from({ length: Math.min(pocet, polozky.length) }, async () => {
+    while (dalsi < polozky.length) await fn(polozky[dalsi++]);
+  }));
 }
 
 module.exports = async function handler(req, res) {
@@ -347,8 +377,8 @@ module.exports = async function handler(req, res) {
 
     // 2) Načti pracovníky (jen aktivní — odebraným nemá smysl psát)
     const ids = [...new Set(docs.map((d) => d.worker_id))].filter(Boolean);
-    const workers = await sbVse(
-      `profiles?select=id,full_name,email,is_active&id=in.(${ids.join(',')})&order=id.asc`,
+    const workers = await sbVsePodleId(
+      `profiles?select=id,full_name,email,is_active&id=in.`, ids, `&order=id.asc`,
       serviceKey
     );
     const workerById = new Map((workers || []).map((w) => [w.id, w]));
@@ -360,9 +390,9 @@ module.exports = async function handler(req, res) {
     // dokladu, stejně jako chybějící doklady výš.
     // Když se kontrola nepovede načíst, běh skončí chybou (do deníku) — bez ní by se
     // připomínaly doklady, které už pracovník nahradil novým.
-    const vsechnyDoklady = await sbVse(
-      `documents?select=worker_id,doc_type,status,uploaded_at&worker_id=in.(${ids.join(',')})` +
-        `&status=not.in.(rejected,unreadable)&order=id.asc`,
+    const vsechnyDoklady = await sbVsePodleId(
+      `documents?select=worker_id,doc_type,status,uploaded_at&worker_id=in.`, ids,
+      `&status=not.in.(rejected,unreadable)&order=id.asc`,
       serviceKey
     );
     const typovaSkupina = (t) => (t === 'op' || t === 'pas') ? 'op' : (t === 'gewerbeschein' ? 'zivnost' : t);
@@ -376,27 +406,35 @@ module.exports = async function handler(req, res) {
     const results = [];
     const adminSummary = [];
 
-    for (const doc of docs) {
+    // Doklady se zpracují po čtyřech naráz (dřív jeden po druhém: rezervace, zpráva
+    // a e-mail = 3 obrátky na doklad, u stovky dokladů přes minutu). Výsledky se na
+    // konci skládají podle pořadí dokladů, takže odpověď i souhrn jsou stejné jako dřív.
+    const zaznamy = new Array(docs.length);
+    await souNaraz(docs.map((d, i) => [d, i]), 4, async ([doc, poradi]) => {
+      const mojeVysl = [];
+      const mojeSouhrn = [];
+      zaznamy[poradi] = { vysl: mojeVysl, souhrn: mojeSouhrn };
+
       const worker = workerById.get(doc.worker_id);
-      if (!worker || worker.is_active === false) continue;
+      if (!worker || worker.is_active === false) return;
 
       // Doklad, u kterého admin řekl „platnost neřešíme" — nepřipomínat.
       // (Když migrace supabase-migrace-doklad-bez-expirace.sql ještě neproběhla,
       //  sloupec chybí, hodnota je undefined a chová se to jako dřív.)
-      if (doc.no_expiry) continue;
+      if (doc.no_expiry) return;
 
       // Novější doklad stejného typu už existuje — tenhle starý přeskočit.
       const nejnovejsiUploadTypu = nejnovejsi.get(doc.worker_id + '|' + typovaSkupina(doc.doc_type));
-      if (nejnovejsiUploadTypu && String(nejnovejsiUploadTypu) > String(doc.uploaded_at || '')) continue;
+      if (nejnovejsiUploadTypu && String(nejnovejsiUploadTypu) > String(doc.uploaded_at || '')) return;
 
       const daysLeft = daysBetween(today, new Date(doc.valid_until + 'T00:00:00'));
       // Propadlý doklad připomínáme, dokud ho nevymění; končící až od 30 dní.
-      if (daysLeft > WARN_DAYS) continue;
+      if (daysLeft > WARN_DAYS) return;
 
       // Neposílat každý den to samé
       if (doc.expiry_notified_at) {
         const since = daysBetween(new Date(doc.expiry_notified_at), today);
-        if (since < REMIND_AFTER_DAYS) continue;
+        if (since < REMIND_AFTER_DAYS) return;
       }
 
       // Rezervace upomínky: podmíněný zápis značky PŘED odesláním. Druhý souběžný běh
@@ -411,12 +449,12 @@ module.exports = async function handler(req, res) {
           headers: { Prefer: 'return=representation' },
           body: JSON.stringify({ expiry_notified_at: mojeRezervace }),
         });
-        if (!Array.isArray(vzato) || !vzato.length) continue;
+        if (!Array.isArray(vzato) || !vzato.length) return;
       } catch (e) {
         // Když sloupec ještě neexistuje (neproběhla migrace), upozornění by
         // chodilo denně — radši to ohlásíme v odpovědi, ať je to vidět.
-        results.push({ worker: worker.full_name, doc: (DOC_LABELS[doc.doc_type] || doc.doc_type || 'Dokument'), error: 'expiry_notified_at: ' + e.message });
-        continue;
+        mojeVysl.push({ worker: worker.full_name, doc: (DOC_LABELS[doc.doc_type] || doc.doc_type || 'Dokument'), error: 'expiry_notified_at: ' + e.message });
+        return;
       }
 
       const label = DOC_LABELS[doc.doc_type] || doc.doc_type || 'Dokument';
@@ -470,12 +508,12 @@ module.exports = async function handler(req, res) {
             body: JSON.stringify({ expiry_notified_at: puvodniZnacka }),
           });
         } catch (e) {
-          results.push({ worker: worker.full_name, doc: label, error: 'expiry_notified_at: ' + e.message });
-          continue;
+          mojeVysl.push({ worker: worker.full_name, doc: label, error: 'expiry_notified_at: ' + e.message });
+          return;
         }
       }
 
-      results.push({
+      mojeVysl.push({
         worker: worker.full_name,
         doc: label,
         validUntil: doc.valid_until,
@@ -483,10 +521,11 @@ module.exports = async function handler(req, res) {
         email: mail.sent ? 'odesláno' : 'neodesláno (' + mail.reason + ')',
         inApp: inApp ? 'odesláno' : 'neodesláno',
       });
-      adminSummary.push(
+      mojeSouhrn.push(
         `${worker.full_name} — ${label}: ${expired ? 'PROPADLO ' + czDate(doc.valid_until) : 'zbývá ' + daysLeft + ' ' + dayWord(daysLeft) + ' (do ' + czDate(doc.valid_until) + ')'}`
       );
-    }
+        });
+    for (const z of zaznamy) { if (!z) continue; results.push(...z.vysl); adminSummary.push(...z.souhrn); }
 
     // 5) Souhrn pro SubBau (nepovinné)
     const adminMail = process.env.DOC_EXPIRY_ADMIN_EMAIL;
