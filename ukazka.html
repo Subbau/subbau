@@ -12579,6 +12579,10 @@ const jeBudouci = den => /^\d{4}-\d{2}-\d{2}$/.test(String(den || '')) && String
 // jen jedna operace naráz — druhá se odmítne, ať se zálohy nemíchají. Opuštěná záloha (>2 min) neblokuje.
 const _zalohyHistorieSazby = {}   // klíč workerId|druh → { rows, od }
 const _klicZalohy = (workerId, druh) => String(workerId) + '|' + druh
+function sazbaSeUklada(workerId, druh) {
+  const Z = _zalohyHistorieSazby[_klicZalohy(workerId, druh)]
+  return !!Z && Date.now() - Z.od <= 120000
+}
 function uvolniZalohuHistorieSazby(zl) {
   const Z = zl && zl.zaloha
   if (Z && _zalohyHistorieSazby[Z.kz] === Z) delete _zalohyHistorieSazby[Z.kz]
@@ -12586,7 +12590,6 @@ function uvolniZalohuHistorieSazby(zl) {
 async function obnovHistoriiSazby(workerId, druh, zl) {
   const Z = zl && zl.zaloha
   if (!Z) return
-  uvolniZalohuHistorieSazby(zl)
   try {
     const { data: ted, error: e1 } = await sb.from('worker_rate_history').select('id').eq('worker_id', workerId).eq('druh', druh)
     if (e1) throw e1
@@ -12603,7 +12606,7 @@ async function obnovHistoriiSazby(workerId, druh, zl) {
   } catch (e) {
     console.warn('[sazby] historii se nepodařilo vrátit zpět:', e && e.message)
     showToast('⚠️ Historie sazby se po chybě nepodařilo vrátit — zkontrolujte ji a uložte sazbu znovu')
-  }
+  } finally { uvolniZalohuHistorieSazby(zl) }   // ochrana proti souběžnému ukládání platí až do konce obnovy
 }
 // Obálka: opts.zaloha = {} si volající ponechá, když po úspěchu ještě zapisuje samotnou hodnotu (a při chybě historii
 // vrací / po úspěchu zálohu uvolní). Bez opts.zaloha, nebo při neúspěchu, se záloha uvolní hned.
@@ -53501,6 +53504,14 @@ async function saveWorkerProfile() {
       const poleSazba = wid === currentWorkerId ? document.getElementById('wd-rate') : null
       if (poleSazba) poleSazba.value = puvSazba == null ? '' : puvSazba
     }
+  }
+  // Táž sazba se právě ukládá z jiného místa (Provize) — profil se sazbou nesmí předběhnout její historii.
+  if (odKdySazba && sazbaSeUklada(wid, 'sazba')) {
+    showToast('⚠️ Hodinová sazba se právě ukládá jinde — zbytek profilu se uloží, sazbu změňte znovu za chvíli.')
+    sazbaKUlozeni = puvSazba
+    odKdySazba = null
+    const poleSazba = wid === currentWorkerId ? document.getElementById('wd-rate') : null
+    if (poleSazba) poleSazba.value = puvSazba == null ? '' : puvSazba
   }
 
   const zaklad = {
