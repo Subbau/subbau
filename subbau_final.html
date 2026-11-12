@@ -35646,7 +35646,13 @@ function attAddressMissing() {
     (r.construction_site || '').trim()
   )
 }
+let _adresaUklada = false   // dvojí potvrzení během ukládání by zapsalo adresu dvakrát
 async function applyManualAddress() {
+  if (_adresaUklada) return
+  _adresaUklada = true
+  try { await _applyManualAddressCore() } finally { _adresaUklada = false }
+}
+async function _applyManualAddressCore() {
   const street = (document.getElementById('mob-manual-street')?.value || '').trim()
   const city = (document.getElementById('mob-manual-city')?.value || '').trim()
   if (!street && !city) { showToast('Zadejte aspoň ulici a město'); return }
@@ -35683,18 +35689,18 @@ async function applyManualAddress() {
   // Na uložení se musí počkat. Dřív se zápis pustil na pozadí, panel se hned
   // zavřel a padlo „✅ Adresa nastavena“ — a když zápis selhal, přiletěla chyba
   // až potom, s panelem zavřeným a bez možnosti adresu doplnit znovu.
-  if (todayAttId) {
+  if (puvodniId) {
     const upd = { manual_address: val, location_address: val, address_source: 'manual' }
     if (!haveGps) { upd.gps_address = null; upd.location_lat = null; upd.location_lng = null }
     // `.select('id')` je tu schválně: update, který nenajde ani jeden řádek,
     // se tváří jako úspěch (chyba je null). Bez téhle kontroly by appka řekla
     // „✅ uloženo“ i ve chvíli, kdy se do admina nedostalo nic.
-    let { data: radky, error } = await sb.from('attendance').update(upd).eq('id', todayAttId).select('id')
+    let { data: radky, error } = await sb.from('attendance').update(upd).eq('id', puvodniId).select('id')
     if (!error && (!radky || !radky.length)) error = { message: 'zápis nezměnil žádný řádek' }
     if (error) {
       // Starší databáze nemusí mít sloupec manual_address — zkus zápis bez něj
       console.warn('[ruční adresa] update s manual_address selhal, zkouším bez:', error.message)
-      const r2 = await sb.from('attendance').update({ location_address: val, address_source: 'manual' }).eq('id', todayAttId).select('id')
+      const r2 = await sb.from('attendance').update({ location_address: val, address_source: 'manual' }).eq('id', puvodniId).select('id')
       error = r2.error || ((!r2.data || !r2.data.length) ? { message: 'zápis nezměnil žádný řádek' } : null)
     }
     if (error) {
