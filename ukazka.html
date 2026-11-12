@@ -46842,6 +46842,7 @@ function verzeSmlouvyDe(f) {
 
 // Odloží stranou původní verzi smlouvy — jen jednou, podruhé už se nepřepíše.
 async function ensureContractOriginal(contractId) {
+  zneplatniIndexSmluv()   // změna smlouvy/souborů → další načtení seznamu vypíše bucket znovu
   if (!contractId) return null
   const path = 'signed/' + contractId + '_original.pdf'
   try {
@@ -46866,6 +46867,7 @@ async function ensureContractOriginal(contractId) {
 
 // Jediná cesta, kterou se mění file_url smlouvy — vždy nejdřív zazálohuje původní verzi.
 async function updateContractFile(contractId, updateData) {
+  zneplatniIndexSmluv()   // změna smlouvy/souborů → další načtení seznamu vypíše bucket znovu
   // Codex 11. 11. 2026: bez úspěšné zálohy původní verze se file_url nemění (jinak by se původní verze nenávratně ztratila).
   if (updateData && updateData.file_url && !(await ensureContractOriginal(contractId))) {
     return { error: { message: 'Původní verzi smlouvy se nepodařilo odložit — smlouva zůstala beze změny. Zkuste to znovu.' } }
@@ -46911,14 +46913,30 @@ async function listStorageVse(slozka) {
   }
   return out
 }
-async function loadContractStorageIndex() {
+// Výpis celého bucketu smluv (tisíce souborů po 1000 položkách, jedno volání za druhým) se při každém načtení smluv i při
+// otevření karty pracovníka s 1–3 smlouvami opakoval. Teď se drží 20 s v paměti (a zneplatní ho každá změna smlouvy);
+// při chybě výpisu zůstane poslední dobrý — prázdný index by správci falešně hlásil „Nepodepsaná verze chybí".
+let _stIdxCache = { kdy: 0, idx: null, bezi: null }
+function zneplatniIndexSmluv() { _stIdxCache.kdy = 0 }
+function loadContractStorageIndex() {
+  if (_stIdxCache.idx && Date.now() - _stIdxCache.kdy < 20000) return Promise.resolve(_stIdxCache.idx)
+  if (_stIdxCache.bezi) return _stIdxCache.bezi
+  const p = _loadContractStorageIndexTed().then(r => {
+    if (r.celkem) { _stIdxCache.idx = r.idx; _stIdxCache.kdy = Date.now(); return r.idx }
+    return _stIdxCache.idx || r.idx   // výpis selhal → poslední dobrý index (nebo prázdný, když žádný není)
+  }).finally(() => { if (_stIdxCache.bezi === p) _stIdxCache.bezi = null })
+  return (_stIdxCache.bezi = p)
+}
+async function _loadContractStorageIndexTed() {
   const idx = { originals: new Set(), filled: {} }
+  let ok1 = false, ok2 = false
   try {
     const signed = await listStorageVse('signed')
     ;(signed || []).forEach(f => {
       const m = f && f.name && f.name.match(/^(.+)_original\.pdf$/)
       if (m) idx.originals.add(m[1])
     })
+    ok1 = true
   } catch (e) { console.warn('[smlouvy] výpis složky signed:', e?.message) }
   try {
     const root = await listStorageVse('')
@@ -46928,8 +46946,9 @@ async function loadContractStorageIndex() {
       ;(idx.filled[m[1]] = idx.filled[m[1]] || []).push({ name: m[0], ts: Number(m[2]) })
     })
     Object.values(idx.filled).forEach(a => a.sort((x, y) => x.ts - y.ts))
+    ok2 = true
   } catch (e) { console.warn('[smlouvy] výpis vyplněných verzí:', e?.message) }
-  return idx
+  return { idx, celkem: ok1 && ok2 }
 }
 
 // Vrátí smlouvu do podoby, v jaké se nahrála — z PDF zmizí dopsaný text i podpisy.
@@ -47137,6 +47156,7 @@ async function openHourSheet(url) {
 
 
 async function deleteContract(contractId, title, fileUrl, adminSigUrl, workerSigUrl) {
+  zneplatniIndexSmluv()   // změna smlouvy/souborů → další načtení seznamu vypíše bucket znovu
   if (!confirm('Smazat smlouvu "' + title + '"?\nTato akce je nevratná.')) return
 
   // Cesty k souborům ve storage (soubory se mažou až po záznamu; ignoruj chyby - soubory možná neexistují)
