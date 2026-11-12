@@ -22312,6 +22312,7 @@ async function odeslatFakturyPosli() {
   if (document.getElementById('odes-pamatovat')?.checked) {
     const { error } = await sb.from('faktury_prijemci').upsert({ firma: d.firma, email, upraveno: new Date().toISOString() }, { onConflict: 'firma' })
     if (!error) _invPrijemci.set(d.firma, email)
+    else { console.warn('[faktury] příjemce se nezapamatoval:', error.message); showToast('⚠️ E-mail odběratele se nepodařilo zapamatovat — odesílání pokračuje') }
   }
   let ok = 0, chyby = 0
   const odeslaneTed = new Set()    // které faktury odešly teď (jen ty se na konci odškrtnou)
@@ -22360,13 +22361,17 @@ async function odeslatFakturyPosli() {
       const kdo = r.worker?.full_name || r.supplier_name || ''
       const who = kdo.normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-zA-Z0-9]+/g, '_').replace(/^_+|_+$/g, '')
       let resp
-      try { resp = await fetch('/api/odeslat-fakturu', { method: 'POST',
+      // Časový limit: při ztrátě spojení by „Odesílám…" visela napořád a zamkla celou dávku.
+      // Vypršení po zahájení požadavku = nejisté odeslání (rezervace zůstane, e-mail mohl odejít).
+      const acOdes = new AbortController(); const ctOdes = setTimeout(() => acOdes.abort(), 60000)
+      try { resp = await fetch('/api/odeslat-fakturu', { method: 'POST', signal: acOdes.signal,
         headers: { 'content-type': 'application/json', ...(token ? { authorization: 'Bearer ' + token } : {}) },
         body: JSON.stringify({ to: email, invoiceId: String(r.id), pokus, fileName: 'Rechnung_' + cis + (who ? '_' + who : '') + '.pdf', pdfBase64: b64,
           subject: 'Rechnung ' + (r.invoice_number || '') + ' — ' + kdo + ' — KW ' + r.kw + '/' + r.kw_year,
           text: 'Guten Tag,\n\nanbei erhalten Sie die Rechnung Nr. ' + (r.invoice_number || '') + ' (' + kdo + ') für KW ' + r.kw + '/' + r.kw_year + '.\n\nMit freundlichen Grüßen\nSubBau' }) }) }
-      catch (ne) { const e2 = new Error('spojení se přerušilo — zkontrolujte schránku, e-mail mohl odejít'); e2._nejasne = true; throw e2 }
-      const j = await resp.json().catch(() => null)
+      catch (ne) { clearTimeout(ctOdes); const e2 = new Error('spojení se přerušilo — zkontrolujte schránku, e-mail mohl odejít'); e2._nejasne = true; throw e2 }
+      let j
+      try { j = await resp.json().catch(() => null) } finally { clearTimeout(ctOdes) }
       if (j === null) { const ne = new Error('odpověď serveru se nepodařilo přečíst — zkontrolujte schránku, e-mail mohl odejít'); ne._nejasne = true; throw ne }
       if (!resp.ok || !j.sent) {
         const dukaz = j && j.reason
@@ -23873,7 +23878,7 @@ async function saveInvoiceEditVnitrni() {
   // nemaže se nic: osiřelý soubor je menší škoda než ztracená faktura.
   const puvodniPath = upd.original_pdf_path || r.original_pdf_path || null
   if (uploaded && puvodniPath && r.pdf_path && r.pdf_path !== uploaded.path && r.pdf_path !== puvodniPath) {
-    try { await sb.storage.from('documents').remove([r.pdf_path]) }
+    try { const { error: eUklid } = await sb.storage.from('documents').remove([r.pdf_path]); if (eUklid) console.warn('[faktura] předchozí přepsané PDF nešlo smazat:', eUklid.message) }
     catch (e) { console.warn('[faktura] předchozí přepsané PDF nešlo smazat:', e?.message) }
   }
 
@@ -23963,7 +23968,7 @@ async function deleteWorkerInvoice(id) {
   if (!smazano || !smazano.length) { showToast('❌ Faktura se nesmazala — databáze to nepovolila'); return }
   const kSmazani = [r?.pdf_path, r?.original_pdf_path].filter(p => p && typeof p === 'string')
   if (kSmazani.length) {
-    try { await sb.storage.from('documents').remove([...new Set(kSmazani)]) }
+    try { const { error: eUklid } = await sb.storage.from('documents').remove([...new Set(kSmazani)]); if (eUklid) console.warn('[faktury] PDF ze Storage nešlo smazat:', eUklid.message) }
     catch (e) { console.warn('[faktury] PDF ze Storage nešlo smazat:', e?.message) }
   }
   _invCache = _invCache.filter(x => x.id !== id)
