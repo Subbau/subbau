@@ -50385,6 +50385,7 @@ async function loadWdDocs(id) {
 async function downloadOneDoc(url, label, docType, jmeno, strana) {
   try {
     const resp = await fetch(url)
+    if (!resp.ok) throw new Error('HTTP ' + resp.status)   // chybová odpověď se neukládá jako doklad
     const blob = await resp.blob()
     const ext = (url.split('?')[0].match(/\.([a-z0-9]+)$/i)?.[1]) || (blob.type.includes('pdf') ? 'pdf' : 'jpg')
     const a = document.createElement('a')
@@ -50425,11 +50426,12 @@ async function downloadAllDocs(workerId) {
     const zip = new window.JSZip()
     const jmenoDe = bezpecnyNazevSouboru(wName)
     const used = {}
-    let added = 0
+    let added = 0, selhalo = 0
     for (const d of docs) {
       if (!d.file_url) continue
       try {
         const resp = await fetch(d.file_url)
+        if (!resp.ok) throw new Error('HTTP ' + resp.status)   // chybová odpověď není doklad
         const blob = await resp.blob()
         const ext = (d.file_url.split('?')[0].match(/\.([a-z0-9]+)$/i)?.[1]) || (blob.type.includes('pdf') ? 'pdf' : 'jpg')
         // Německy, stejně jako jeden stažený doklad: Personalausweis_jméno_
@@ -50440,7 +50442,7 @@ async function downloadAllDocs(workerId) {
         if (used[base] > 1) base += '_' + used[base]
         zip.file(base + '.' + ext, blob)
         added++
-      } catch(e) { console.warn('Nešlo stáhnout:', d.file_url, e) }
+      } catch(e) { console.warn('Nešlo stáhnout:', d.file_url, e); selhalo++ }
     }
     if (!added) {
       showToast('❌ Soubory se nepodařilo načíst'); if(btn){btn.disabled=false;btn.innerHTML=orig}
@@ -50455,7 +50457,7 @@ async function downloadAllDocs(workerId) {
     a.download = ['Dokumente', jmenoDe].filter(Boolean).join('_') + '.zip'
     document.body.appendChild(a); a.click(); a.remove()
     setTimeout(() => URL.revokeObjectURL(a.href), 6000)
-    showToast('✅ Staženo ' + added + ' dokumentů')
+    showToast(selhalo ? '⚠️ Staženo ' + added + ' dokumentů, ' + selhalo + ' se nepodařilo stáhnout — ZIP je neúplný' : '✅ Staženo ' + added + ' dokumentů')
   } catch(e) {
     console.error('[downloadAllDocs]', e)
     showToast('❌ Chyba při stahování: ' + (e.message||''))
@@ -50466,8 +50468,9 @@ async function downloadAllDocs(workerId) {
 
 // Schválení dokumentu (admin, detail pracovníka)
 async function approveDocWd(id, workerId) {
-  const { error } = await sb.from('documents').update({ status:'ok', reviewed_at: new Date().toISOString(), reject_reason: null }).eq('id', id)
+  const { data: schvaleno, error } = await sb.from('documents').update({ status:'ok', reviewed_at: new Date().toISOString(), reject_reason: null }).eq('id', id).select('id')
   if (error) { showToast('❌ Chyba: ' + error.message); return }
+  if (!schvaleno || !schvaleno.length) { showToast('❌ Dokument se neschválil — už neexistuje nebo chybí oprávnění'); loadWdDocs(workerId); return }
   showToast('✅ Dokument schválen')
   loadWdDocs(workerId)
 }
@@ -50482,20 +50485,21 @@ async function rejectDocWd(id, workerId) {
   // odjakživa a appka s ním zachází úplně stejně (viz `isRejected` níž), takže
   // odmítnutí funguje i bez migrace — jen se to jinak jmenuje.
   // Zároveň zkoušíme uložit důvod; když sloupec reject_reason chybí, jde to bez něj.
-  let error = null, ulozenyDuvod = duvod
+  let error = null, ulozenyDuvod = duvod, nulaRadku = false
   for (const stav of ['rejected', 'unreadable']) {
     for (const sDuvodem of [true, false]) {
       const upd = { status: stav, reviewed_at: new Date().toISOString() }
       if (sDuvodem) upd.reject_reason = duvod
-      const r = await sb.from('documents').update(upd).eq('id', id)
+      const r = await sb.from('documents').update(upd).eq('id', id).select('id')
+      if (!r.error && (!r.data || !r.data.length)) { error = { message: 'Dokument se nezměnil — už neexistuje nebo chybí oprávnění' }; nulaRadku = true; break }
       if (!r.error) { error = null; ulozenyDuvod = sDuvodem ? duvod : null; break }
       error = r.error
       // Nesouvisí to se sloupcem ani s pravidlem? Pak dál zkoušet nemá smysl.
       if (!/reject_reason|status_check|column|schema cache|constraint/i.test(r.error.message || '')) break
     }
-    if (!error) break
+    if (!error || nulaRadku) break
   }
-  if (error) { showToast('❌ Chyba: ' + error.message); return }
+  if (error) { showToast('❌ Chyba: ' + error.message); if (nulaRadku) loadWdDocs(workerId); return }
   if (!ulozenyDuvod) showToast('⚠️ Důvod se neuložil — chybí sloupec reject_reason')
   // Pošli pracovníkovi oznámení. Že dostal zprávu, se řekne, jen když opravdu
   // odešla (audit 30. 9. 2026 — dřív se to hlásilo vždycky).
