@@ -20034,6 +20034,14 @@ function bezpecnyNazevSouboru(text) {
   return String(text || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '')
     .replace(/[^a-zA-Z0-9]+/g, '_').replace(/^_+|_+$/g, '')
 }
+// Název faktury (bez .pdf): Rechnung_<jméno>_KW<týden> (majitel 15. 11. 2026:
+// „musí se to jmenovat německy Rechnung, jméno toho člověka a KW"). Bez týdne
+// (starší faktura za období) zůstane číslo faktury, ať název není prázdný.
+function nazevFakturyNemecky(jmeno, kw, cislo) {
+  const t = parseInt(kw, 10)
+  const cis = String(cislo || '').replace(/[^a-zA-Z0-9_-]/g, '')
+  return ['Rechnung', bezpecnyNazevSouboru(jmeno), t ? 'KW' + t : cis].filter(Boolean).join('_')
+}
 // Kolikátá strana dokladu (1 = přední). Pracovník má značku v názvu
 // „op_strana2_2026-10-01.pdf" (v cestě „…_strana2.pdf"), správce
 // „scan.pdf (strana 2)". Čte se stejně jako v api/klient-dochazka.js.
@@ -23272,6 +23280,7 @@ function zobrazZalohovyDoklad(d) {
   window._lastInvoice = null       // ať se z toho nedá odeslat faktura
   window._lastInvoiceNum = d.cislo
   window._lastInvoiceName = d.dodavatel.jmeno
+  window._lastInvoiceKw = ''   // zálohová nemá týden — ať nezůstane z předchozí faktury
   overlay.style.display = 'block'
   overlay.style.zIndex = '10060'
   document.body.style.overflow = 'hidden'
@@ -24017,14 +24026,13 @@ async function odeslatFakturyPosli() {
       try { token = (await sb.auth.getSession())?.data?.session?.access_token || null } catch (e) {}
       const cis = String(r.invoice_number || '').replace(/[^a-zA-Z0-9_-]/g, '')
       const kdo = r.worker?.full_name || r.supplier_name || ''
-      const who = kdo.normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-zA-Z0-9]+/g, '_').replace(/^_+|_+$/g, '')
       let resp
       // Časový limit: při ztrátě spojení by „Odesílám…" visela napořád a zamkla celou dávku.
       // Vypršení po zahájení požadavku = nejisté odeslání (rezervace zůstane, e-mail mohl odejít).
       const acOdes = new AbortController(); const ctOdes = setTimeout(() => acOdes.abort(), 60000)
       try { resp = await fetch('/api/odeslat-fakturu', { method: 'POST', signal: acOdes.signal,
         headers: { 'content-type': 'application/json', ...(token ? { authorization: 'Bearer ' + token } : {}) },
-        body: JSON.stringify({ to: email, invoiceId: String(r.id), pokus, fileName: 'Rechnung_' + cis + (who ? '_' + who : '') + '.pdf', pdfBase64: b64,
+        body: JSON.stringify({ to: email, invoiceId: String(r.id), pokus, fileName: nazevFakturyNemecky(kdo, r.kw, cis) + '.pdf', pdfBase64: b64,
           subject: 'Rechnung ' + (r.invoice_number || '') + ' — ' + kdo + ' — KW ' + r.kw + '/' + r.kw_year,
           text: 'Guten Tag,\n\nanbei erhalten Sie die Rechnung Nr. ' + (r.invoice_number || '') + ' (' + kdo + ') für KW ' + r.kw + '/' + r.kw_year + '.\n\nMit freundlichen Grüßen\nStavKo' }) }) }
       catch (ne) { clearTimeout(ctOdes); const e2 = new Error('spojení se přerušilo — zkontrolujte schránku, e-mail mohl odejít'); e2._nejasne = true; throw e2 }
@@ -24926,12 +24934,10 @@ async function downloadInvoicePdf(id) {
   const r = _invCache.find(x => x.id === id)
   const url = safeInvoiceUrl(r && r.pdf_url)
   if (!r || !url) { showToast('⚠️ U této faktury není PDF'); return }
-  const who = (r.worker?.full_name || r.supplier_name || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '')
-    .replace(/[^a-zA-Z0-9]+/g, '_').replace(/^_+|_+$/g, '')
   // Lomítko v čísle faktury by z názvu udělalo cestu — do souboru pouštíme jen písmena a číslice.
   const cis = String(r.invoice_number || '').replace(/[^a-zA-Z0-9_-]/g, '')
-  // Německy, ať se soubor nemusí po stažení přejmenovávat: Rechnung_číslo_jméno
-  const name = 'Rechnung_' + cis + (who ? '_' + who : '') + '.pdf'
+  // Německy, ať se soubor nemusí po stažení přejmenovávat: Rechnung_jméno_KW<týden>
+  const name = nazevFakturyNemecky(r.worker?.full_name || r.supplier_name, r.kw, cis) + '.pdf'
   try {
     const resp = await fetch(url)
     if (!resp.ok) throw new Error('HTTP ' + resp.status)
@@ -25001,8 +25007,7 @@ async function printInvoicePdf(rawUrl, id) {
 // Název faktury ze složky bez přípony — stejný jako u „Stáhnout"
 // (downloadInvoicePdf): Rechnung_<číslo>_<jméno>.
 function nazevFakturyZeSlozky(r) {
-  const cis = String(r?.invoice_number || '').replace(/[^a-zA-Z0-9_-]/g, '')
-  return ['Rechnung', cis, bezpecnyNazevSouboru(r?.worker?.full_name || r?.supplier_name)].filter(Boolean).join('_')
+  return nazevFakturyNemecky(r?.worker?.full_name || r?.supplier_name, r?.kw, r?.invoice_number)
 }
 
 // Odkaz na PDF ve veřejném úložišti, který se uloží pod německým názvem.
@@ -32992,7 +32997,7 @@ async function nactiMojeFaktury() {
     const obdobi = r.kw ? ('KW ' + r.kw + '/' + r.kw_year) : (r.period_from ? (_invDmy(r.period_from) + ' – ' + _invDmy(r.period_to)) : '')
     // Stáhne se jako Rechnung_<číslo>_<jméno>.pdf, ne pod názvem z úložiště (1. 11. 2026).
     const url = odkazStahnoutNemecky(bezpecneDokumentyUrl(r.pdf_url),
-      nazevFakturyZeSlozky({ invoice_number: r.invoice_number, worker: { full_name: currentProfile?.full_name } }) + '.pdf')
+      nazevFakturyZeSlozky({ invoice_number: r.invoice_number, kw: r.kw, worker: { full_name: currentProfile?.full_name } }) + '.pdf')
     return `<div style="display:flex;align-items:center;gap:10px;padding:9px 0;border-bottom:1px solid var(--brd)">
       <div style="min-width:0;flex:1">
         <div style="font-size:13px;font-weight:800;color:var(--text)">č. ${escAttr(r.invoice_number || '—')}</div>
@@ -45321,6 +45326,7 @@ function renderInvoice(d, lang = 'en') {
   document.body.style.overflow = 'hidden'
   window._lastInvoiceNum = d.invoiceNum || ''
   window._lastInvoiceName = d.workerName || ''
+  window._lastInvoiceKw = d.week || ''
   // Data faktury si podrž — odeslání do StavKo i e-mail z nich staví záznam
   window._lastInvoice = d
   _invSentNote = ''
@@ -45484,9 +45490,7 @@ async function buildInvoicePdf() {
 // Název souboru faktury — bez diakritiky a mezer, ať projde všude
 function invoiceFileName() {
   const num = (window._lastInvoiceNum || '').toString().replace(/[^a-zA-Z0-9_-]/g, '')
-  const who = (window._lastInvoiceName || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '')
-    .replace(/[^a-zA-Z0-9]+/g, '_').replace(/^_+|_+$/g, '')
-  return 'Rechnung' + (num ? '_' + num : '') + (who ? '_' + who : '') + '.pdf'
+  return nazevFakturyNemecky(window._lastInvoiceName, window._lastInvoiceKw, num) + '.pdf'
 }
 
 // ===== ULOŽIT FAKTURU JAKO PDF — vždy přesně jedna stránka A4 =====
