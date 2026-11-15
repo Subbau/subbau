@@ -9293,6 +9293,25 @@ function nactiFakturyNaPozadi() {
     if (_invZnovu) { _invZnovu = false; nactiFakturyNaPozadi() }
   })
 }
+// POČET NEVYŘÍZENÝCH FAKTUR PŘI PŘIHLÁŠENÍ (15. 11. 2026, nález Codexu).
+// Celá složka faktur se při přihlášení záměrně nenačítá (stovky dotazů), takže
+// položka v menu by o fakturách, které přišly, když tu správce nebyl (víkend),
+// nevěděla, dokud složku neotevře. Proto jeden malý dotaz jen na faktury ve stavu
+// „nové" (id + skupina člověka); celá složka se tím nenačítá. Jakmile se složka
+// načte, počítá se z ní a tohle číslo se přestane používat.
+let _invPocetZeStartu = 0, _invNacteno = false
+async function nactiPocetNovychFaktur() {
+  try {
+    if (typeof sb === 'undefined' || !sb || !currentUser || _invNacteno) return
+    const { data, error } = await dotahniStranky(od => sb.from('worker_invoices')
+      .select('id, worker_id, worker:profiles(team_id)').or('status.eq.new,status.is.null')
+      .order('id').range(od, od + 999), 1000, 6, 200)
+    if (error || !Array.isArray(data) || _invNacteno) return
+    const skryti = await skrytiLideIds()
+    _invPocetZeStartu = data.filter(r => !jeSkrytaFirmaPracovnika(r.worker) && !skryti.has(r.worker_id)).length
+    refreshInvoiceBadge()
+  } catch (e) { console.warn('[faktury] počet nových:', e?.message || e) }
+}
 function startInvoiceRealtime() {
   if (typeof sb === 'undefined' || !sb) return
   if (invoiceRealtimeSub) { try { sb.removeChannel(invoiceRealtimeSub) } catch(e) {} invoiceRealtimeSub = null }
@@ -9780,6 +9799,7 @@ function startAdminRealtime() {
   // worker_invoices neexistuje a odběr se nepovede — kdyby visel na společném
   // kanálu, shodil by s sebou živou aktualizaci celého admina.
   startInvoiceRealtime()
+  nactiPocetNovychFaktur()
   _startAdminRealtimeWatchdog()
   _startAdminFallbackPolling()
 
@@ -10428,6 +10448,8 @@ function uklidRelace() {
   if (typeof chatRealtimeSub !== 'undefined' && chatRealtimeSub) { try { sb.removeChannel(chatRealtimeSub) } catch(e) {} chatRealtimeSub = null }
   if (typeof adminChatRealtimeSub !== 'undefined' && adminChatRealtimeSub) { try { sb.removeChannel(adminChatRealtimeSub) } catch(e) {} adminChatRealtimeSub = null }
   if (typeof invoiceRealtimeSub !== 'undefined' && invoiceRealtimeSub) { try { sb.removeChannel(invoiceRealtimeSub) } catch(e) {} invoiceRealtimeSub = null }
+  // Faktury patří přihlášenému správci: další účet v téže záložce nesmí zdědit jeho číslo u položky v menu.
+  try { _invCache = []; _invNacteno = false; _invPocetZeStartu = 0; refreshInvoiceBadge() } catch (e) { console.warn('[úklid relace] faktury:', e && e.message) }
   if (window._adminChatBadgeInt) { clearInterval(window._adminChatBadgeInt); window._adminChatBadgeInt = null }
   if (window._osvecChatBadgeInt) { clearInterval(window._osvecChatBadgeInt); window._osvecChatBadgeInt = null }
   if (window._audioKeepAliveInt) { clearInterval(window._audioKeepAliveInt); window._audioKeepAliveInt = null }
@@ -22627,6 +22649,7 @@ async function loadWorkerInvoices() {
   // ještě seznamem ID lidí ze schovaných firem — ať filtr nepovolí tiše.
   const skrytiFakt = await skrytiLideIds()
   _invCache = (data || []).filter(r => !jeSkrytaFirmaPracovnika(r.worker) && !skrytiFakt.has(r.worker_id))
+  _invNacteno = true
   // Tři nezávislá čtení naráz (dřív za sebou): firma v týdnu faktury podle docházky,
   // šedé řádky a štítky odeslání. Zapisují do různých údajů; šedé řádky se doplní k týdnům
   // bez faktury, takže se s firmami faktur nepřekrývají.
@@ -24706,7 +24729,7 @@ function zobrazZadostiOSmazani(workers) {
 }
 
 function refreshInvoiceBadge() {
-  const n = _invCache.filter(r => (r.status || 'new') === 'new').length
+  const n = _invNacteno ? _invCache.filter(r => (r.status || 'new') === 'new').length : _invPocetZeStartu
   ;['inv-new-badge', 'inv-new-badge-mob'].forEach(id => {
     const el = document.getElementById(id)
     if (!el) return
