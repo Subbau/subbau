@@ -9097,6 +9097,19 @@ function ukazDenikNaPrihlaseni() {
   el.style.display = 'block'
 }
 
+// KÓD SPRÁVCE MÍSTO JMÉNA (majitel 17. 11. 2026): ve spodku menu a v horní liště na
+// telefonu se správci neukazuje jméno, ale kód — první písmeno jména a čtyři číslice.
+// Číslice se počítají z ID účtu: u jednoho účtu jsou pořád stejné a nikde se neukládají.
+// Je to JEN zobrazení. Skutečné jméno zůstává v profilu i v Historii úprav; který kód
+// patří komu, je vidět ve filtru „Kdo měnil" v Historii úprav (jen vedení).
+function kodSpravce(p) {
+  const id = String((p && p.id) || '')
+  if (!id) return ''
+  const m = bezpecnyNazevSouboru((p && (p.full_name || p.email)) || '').match(/[A-Za-z]/)
+  let h = 2166136261
+  for (let i = 0; i < id.length; i++) { h ^= id.charCodeAt(i); h = Math.imul(h, 16777619) }
+  return (m ? m[0] : 'X').toUpperCase() + String(1000 + ((h >>> 0) % 9000))
+}
 function showAdmin(profile) {
   setTimeout(() => { try { spustHlidacPomalosti() } catch (e) { console.warn('[pomalost]', e) } }, 0)
   if (window.skryjBoot) window.skryjBoot()   // úvodní obrazovka pryč — víme, co ukázat
@@ -9122,13 +9135,14 @@ function showAdmin(profile) {
       h.style.display = window.innerWidth <= 900 ? 'flex' : 'none'
     })
   }
+  const kodSpr = kodSpravce(profile)   // místo jména (viz kodSpravce)
   const man = document.getElementById('mob-admin-user-name')
-  if (man) man.textContent = profile?.full_name || ''
-  document.getElementById('sb-name').textContent = profile.full_name || profile.email || ''
+  if (man) man.textContent = kodSpr || profile?.full_name || ''
+  document.getElementById('sb-name').textContent = kodSpr || profile.full_name || profile.email || ''
   const roleLabels = {admin:'Admin',osvec:'OSVČ',partak:'Parťák',klient:'Klient'}
   document.getElementById('sb-role').textContent = roleLabels[profile.role] || profile.role
   // Profil bez jména nesmí shodit start správce (audit 30. 9. 2026).
-  document.getElementById('sb-av').textContent = String(profile.full_name || profile.email || '?').split(' ').filter(Boolean).map(n=>n[0]).join('').slice(0,2)
+  document.getElementById('sb-av').textContent = kodSpr ? kodSpr.charAt(0) : String(profile.full_name || profile.email || '?').split(' ').filter(Boolean).map(n=>n[0]).join('').slice(0,2)
   loadDashboard()
   // Vrátit správce tam, kde skončil. Až po načtení nástěnky, ať se nepřepíše.
   setTimeout(obnovPosledniSekci, 0)
@@ -21644,11 +21658,16 @@ async function closeTutorialAndMark() {
 // ne odvolatelný souhlas — odvoláním by jinak musela zpracování ukončit.
 // 2026-10-07: odběratel dostává i pracovní doklady (Stavbyplán) — nová věta.
 // 2026-10-08: majitel — jedna fajfka místo čtyř bodů (text oddílů beze změny).
-const SOUHLAS_VERZE = '2026-10-08'
+// 2026-11-17: majitel — nový oddíl „O aplikaci" (k čemu slouží OSVČ, vznikla s pomocí
+// umělé inteligence, jde ji kdykoli opustit — žádost o smazání účtu v Profilu) a oddíl
+// „Jak vaše údaje chráníme". Píše se jen to, co appka opravdu dělá — žádný slib,
+// že data nemohou uniknout (to nejde slíbit nikde).
+// Mezi zpracovatele doplněn Wedos — faktury odcházejí i z firemní schránky.
+const SOUHLAS_VERZE = '2026-11-17'
 // Zaměstnanec firmy a dodavatel jako s.r.o. OSVČ nejsou — prohlášení OSVČ by
 // podepsali nepravdivě. Dostanou text bez něj pod vlastní verzí, aby z dokladu
 // bylo jasné, co přesně viděli.
-const SOUHLAS_VERZE_BEZ_OSVC = '2026-10-08-bez-osvc'
+const SOUHLAS_VERZE_BEZ_OSVC = '2026-11-17-bez-osvc'
 const SOUHLAS_TEXT = {
   nadpis: 'Než začnete: osobní údaje, poloha a prohlášení OSVČ',
   uvod: 'Aplikaci docházky provozuje SubBau s.r.o. Přečtěte si prosím, jak zacházíme s vašimi údaji, a na konci to jedním zaškrtnutím potvrďte. Potvrzení si uložíme i s datem a časem.',
@@ -21682,14 +21701,23 @@ const SOUHLAS_TEXT = {
       'Faktury a výkazy posíláme účetní a daňovému poradci.']],
     ['Komu údaje dál předáváme', [
       'Odběratelům, účetní a daňovému poradci (viz výše) a úřadům, pokud to vyžaduje zákon.',
-      'Firmám, které pro nás aplikaci technicky provozují: Supabase (databáze a soubory, servery v EU), Vercel (provoz aplikace), Brevo (odesílání e-mailů).',
+      'Firmám, které pro nás aplikaci technicky provozují: Supabase (databáze a soubory, servery v EU), Vercel (provoz aplikace), Brevo a Wedos (odesílání e-mailů).',
       'Popis práce posíláme k automatickému překladu do němčiny a angličtiny službám Google Translate a MyMemory.',
       'Některé z těchto firem sídlí mimo EU (např. v USA); údaje k nim mohou odcházet jen se zárukami, které vyžaduje GDPR.']],
     ['Jak dlouho údaje uchováváme', [
       'Po dobu spolupráce a potom jen tak dlouho, jak vyžadují zákony (účetní a daňové doklady až 10 let) nebo jak je potřeba k vyřízení případných sporů.']],
+    ['Jak vaše údaje chráníme', [
+      'Údaje jsou uložené na serverech v Evropské unii a mezi vaším telefonem a serverem se přenášejí šifrovaně.',
+      'Heslo se ukládá jen jako nečitelný otisk — přečíst si ho nemůže nikdo, ani kancelář (ta vám může jen nastavit nové).',
+      'Vaše údaje neprodáváme a nepoužíváme je k reklamě. Předáváme je jen těm, kdo jsou uvedeni v oddílech výše.',
+      'Žádná ochrana není stoprocentní. Kdyby došlo k úniku údajů, který by vás mohl ohrozit, dáme vědět vám i Úřadu pro ochranu osobních údajů.']],
     ['Vaše práva', [
       'Máte právo vědět, jaké údaje o vás máme, nechat je opravit nebo smazat (pokud je nemusíme uchovávat ze zákona), omezit jejich zpracování, vznést námitku proti zpracování z oprávněného zájmu a dostat své údaje v běžném formátu. Napište na info@subbau.cz.',
       'Stížnost můžete podat u Úřadu pro ochranu osobních údajů (Pplk. Sochora 27, 170 00 Praha 7, www.uoou.cz).']],
+    ['O aplikaci', [
+      'Aplikace slouží OSVČ ke snadnému fakturování, k evidenci odpracovaných hodin a k tomu, aby měli v pořádku doklady potřebné pro práci v Německu.',
+      'Aplikace byla vytvořena s pomocí umělé inteligence (AI).',
+      'Aplikaci můžete kdykoli svobodně opustit: stačí ji přestat používat a v sekci Profil požádat o smazání účtu. Doklady, které musíme uchovávat ze zákona, zůstanou po zákonnou dobu.']],
     ['Prohlášení OSVČ', [
       'Práci pro SubBau s.r.o. vykonávám jako osoba samostatně výdělečně činná na základě vlastního živnostenského oprávnění, vlastním jménem a na vlastní odpovědnost. Nejsem zaměstnancem SubBau s.r.o.',
       'Daně, sociální a zdravotní pojištění si platím sám (sama).',
@@ -21724,7 +21752,8 @@ function souhlasTextPro(osvc) {
   return {
     nadpis: 'Než začnete: osobní údaje a poloha',
     uvod: T.uvod,
-    oddily: T.oddily.filter(([n]) => n !== 'Prohlášení OSVČ'),
+    // Bez prohlášení OSVČ a bez vět, které o OSVČ mluví (účel v oddílu „O aplikaci").
+    oddily: T.oddily.filter(([n]) => n !== 'Prohlášení OSVČ').map(([n, odst]) => [n, odst.filter(o => !/OSVČ/.test(o))]),
     body: T.body.filter(k => k !== 'osvc'),
     potvrzeni: 'Přečetl(a) jsem si vše výše a beru na vědomí, jak SubBau s.r.o. zpracovává moje osobní údaje a doklady, že aplikace při zápisu příchodu a odchodu zjistí polohu mého telefonu a že docházku, výkazy, popis práce, fotky ze stavby a pracovní doklady vidí kancelář a dostává je odběratel a účetní.',
   }
@@ -32871,7 +32900,7 @@ async function _histNactiJmena() {
   const moznosti = (sel, prvni, kdo) => {
     const el = document.getElementById(sel); if (!el) return
     const bylo = el.value
-    el.innerHTML = `<option value="">${prvni}</option>` + kdo.map(p => `<option value="${escAttr(String(p.id))}">${escAttr(p.full_name || '—')}${p.role === 'admin' ? ' (vedení)' : ''}</option>`).join('')
+    el.innerHTML = `<option value="">${prvni}</option>` + kdo.map(p => `<option value="${escAttr(String(p.id))}">${escAttr(p.full_name || '—')}${p.role === 'admin' ? ' (vedení) · ' + escAttr(kodSpravce(p)) : ''}</option>`).join('')
     el.value = kdo.some(p => String(p.id) === bylo) ? bylo : ''
   }
   // „Kdo měnil" jen kancelář — kroky pracovníků se do historie nepíšou.
