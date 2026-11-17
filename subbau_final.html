@@ -9102,13 +9102,56 @@ function ukazDenikNaPrihlaseni() {
 // Číslice se počítají z ID účtu: u jednoho účtu jsou pořád stejné a nikde se neukládají.
 // Je to JEN zobrazení. Skutečné jméno zůstává v profilu i v Historii úprav; který kód
 // patří komu, je vidět ve filtru „Kdo měnil" v Historii úprav (jen vedení).
-function kodSpravce(p) {
+function _kodSpravceZaklad(p) {
   const id = String((p && p.id) || '')
-  if (!id) return ''
+  if (!id) return null
   const m = bezpecnyNazevSouboru((p && (p.full_name || p.email)) || '').match(/[A-Za-z]/)
   let h = 2166136261
   for (let i = 0; i < id.length; i++) { h ^= id.charCodeAt(i); h = Math.imul(h, 16777619) }
-  return (m ? m[0] : 'X').toUpperCase() + String(1000 + ((h >>> 0) % 9000))
+  return { pismeno: (m ? m[0] : 'X').toUpperCase(), cislo: 1000 + ((h >>> 0) % 9000) }
+}
+// Kódy VŠECH správců naráz (nález Codexu 17. 11. 2026): čtyři číslice z ID se u dvou lidí
+// se stejným písmenem mohou sejít a kód by pak nešel přiřadit jednomu člověku. Druhý
+// v pořadí (podle ID účtu) proto dostane nejbližší volné číslo. Počítá se ze stejného
+// seznamu pro spodek menu i pro Historii úprav, takže kód je na obou místech tentýž.
+let _kodySpravcu = null   // Map: ID účtu → kód; null = seznam správců se ještě nenačetl
+function sestavKodySpravcu(spravci) {
+  const kody = new Map(), obsazeno = new Set()
+  ;[...(spravci || [])].filter(p => p && p.id).sort((a, b) => String(a.id) < String(b.id) ? -1 : String(a.id) > String(b.id) ? 1 : 0).forEach(p => {
+    const z = _kodSpravceZaklad(p)
+    if (!z || kody.has(String(p.id))) return
+    let c = z.cislo
+    for (let i = 0; i < 9000 && obsazeno.has(z.pismeno + c); i++) c = c >= 9999 ? 1000 : c + 1
+    obsazeno.add(z.pismeno + c); kody.set(String(p.id), z.pismeno + c)
+  })
+  return kody
+}
+function kodSpravce(p) {
+  const id = String((p && p.id) || '')
+  if (!id) return ''
+  if (_kodySpravcu && _kodySpravcu.has(id)) return _kodySpravcu.get(id)
+  const z = _kodSpravceZaklad(p)
+  return z.pismeno + z.cislo
+}
+// Spodek menu a horní lišta na telefonu: kód místo jména (bez účtu zůstane, co tam bylo).
+function ukazKodSpravce(profile) {
+  const kod = kodSpravce(profile)
+  if (!kod) return
+  const man = document.getElementById('mob-admin-user-name'); if (man) man.textContent = kod
+  const jm = document.getElementById('sb-name'); if (jm) jm.textContent = kod
+  const av = document.getElementById('sb-av'); if (av) av.textContent = kod.charAt(0)
+}
+async function nactiKodySpravcu() {
+  try {
+    if (typeof sb === 'undefined' || !sb || !currentUser) return false
+    const uid = currentUser.id
+    const { data, error } = await sb.from('profiles').select('id, full_name, email').eq('role', 'admin')
+    if (error || !Array.isArray(data)) return false
+    if (!currentUser || currentUser.id !== uid) return false   // odpověď patří tomu, kdo se ptal
+    _kodySpravcu = sestavKodySpravcu(data)
+    if (currentProfile && currentProfile.role === 'admin') ukazKodSpravce(currentProfile)
+    return true
+  } catch (e) { console.warn('[kód správce]', e?.message || e); return false }
 }
 function showAdmin(profile) {
   setTimeout(() => { try { spustHlidacPomalosti() } catch (e) { console.warn('[pomalost]', e) } }, 0)
@@ -9135,14 +9178,17 @@ function showAdmin(profile) {
       h.style.display = window.innerWidth <= 900 ? 'flex' : 'none'
     })
   }
-  const kodSpr = kodSpravce(profile)   // místo jména (viz kodSpravce)
   const man = document.getElementById('mob-admin-user-name')
-  if (man) man.textContent = kodSpr || profile?.full_name || ''
-  document.getElementById('sb-name').textContent = kodSpr || profile.full_name || profile.email || ''
+  if (man) man.textContent = profile?.full_name || ''
+  document.getElementById('sb-name').textContent = profile.full_name || profile.email || ''
   const roleLabels = {admin:'Admin',osvec:'OSVČ',partak:'Parťák',klient:'Klient'}
   document.getElementById('sb-role').textContent = roleLabels[profile.role] || profile.role
   // Profil bez jména nesmí shodit start správce (audit 30. 9. 2026).
-  document.getElementById('sb-av').textContent = kodSpr ? kodSpr.charAt(0) : String(profile.full_name || profile.email || '?').split(' ').filter(Boolean).map(n=>n[0]).join('').slice(0,2)
+  document.getElementById('sb-av').textContent = String(profile.full_name || profile.email || '?').split(' ').filter(Boolean).map(n=>n[0]).join('').slice(0,2)
+  // Místo jména kód (viz kodSpravce): hned z vlastního účtu, po načtení seznamu správců
+  // se případně opraví na číslo bez shody s jiným správcem.
+  ukazKodSpravce(profile)
+  nactiKodySpravcu()
   loadDashboard()
   // Vrátit správce tam, kde skončil. Až po načtení nástěnky, ať se nepřepíše.
   setTimeout(obnovPosledniSekci, 0)
@@ -10467,6 +10513,7 @@ function uklidRelace() {
   if (typeof chatRealtimeSub !== 'undefined' && chatRealtimeSub) { try { sb.removeChannel(chatRealtimeSub) } catch(e) {} chatRealtimeSub = null }
   if (typeof adminChatRealtimeSub !== 'undefined' && adminChatRealtimeSub) { try { sb.removeChannel(adminChatRealtimeSub) } catch(e) {} adminChatRealtimeSub = null }
   if (typeof invoiceRealtimeSub !== 'undefined' && invoiceRealtimeSub) { try { sb.removeChannel(invoiceRealtimeSub) } catch(e) {} invoiceRealtimeSub = null }
+  _kodySpravcu = null   // kódy správců se s dalším přihlášením načtou znovu
   // Faktury patří přihlášenému správci: další účet v téže záložce nesmí zdědit jeho číslo u položky v menu.
   try { _invCache = []; _invNacteno = false; _invPocetZeStartu = 0; refreshInvoiceBadge() } catch (e) { console.warn('[úklid relace] faktury:', e && e.message) }
   if (window._adminChatBadgeInt) { clearInterval(window._adminChatBadgeInt); window._adminChatBadgeInt = null }
@@ -32886,10 +32933,11 @@ function _histZmenyHtml(z) {
 // za otevření — změny jmen v historii nesou zapsané snímky kdo_jmeno/komu_jmeno.
 async function _histNactiJmena() {
   const [lide, tymy, podsk, skup] = await Promise.all([
-    sb.from('profiles').select('id, full_name, role').order('full_name'),
+    sb.from('profiles').select('id, full_name, role, email').order('full_name'),
     sb.from('teams').select('id, name'),
     sb.from('subteams').select('id, name'),
-    sb.from('skupinky').select('id, nazev')
+    sb.from('skupinky').select('id, nazev'),
+    nactiKodySpravcu()   // kódy správců bez shod — stejné jako ve spodku menu
   ])
   const m = new Map()
   for (const p of lide.data || []) m.set(String(p.id), p.full_name || '')
@@ -32897,15 +32945,16 @@ async function _histNactiJmena() {
   for (const t of podsk.data || []) m.set(String(t.id), t.name || '')
   for (const t of skup.data || []) m.set(String(t.id), t.nazev || '')
   _histJmena = m
-  const moznosti = (sel, prvni, kdo) => {
+  // sKodem = u vedení i kód ze spodku menu (jen „Kdo měnil" — tam se dohledává, kdo je kdo).
+  const moznosti = (sel, prvni, kdo, sKodem) => {
     const el = document.getElementById(sel); if (!el) return
     const bylo = el.value
-    el.innerHTML = `<option value="">${prvni}</option>` + kdo.map(p => `<option value="${escAttr(String(p.id))}">${escAttr(p.full_name || '—')}${p.role === 'admin' ? ' (vedení) · ' + escAttr(kodSpravce(p)) : ''}</option>`).join('')
+    el.innerHTML = `<option value="">${prvni}</option>` + kdo.map(p => `<option value="${escAttr(String(p.id))}">${escAttr(p.full_name || '—')}${p.role === 'admin' ? ' (vedení)' + (sKodem ? ' · ' + escAttr(kodSpravce(p)) : '') : ''}</option>`).join('')
     el.value = kdo.some(p => String(p.id) === bylo) ? bylo : ''
   }
   // „Kdo měnil" jen kancelář — kroky pracovníků se do historie nepíšou.
   const kancelar = (lide.data || []).filter(p => !HIST_ROLE_PRACOVNIKU.includes(String(p.role || '').trim().toLowerCase()))
-  moznosti('hist-kdo', 'Kdo měnil: všichni', kancelar)
+  moznosti('hist-kdo', 'Kdo měnil: všichni', kancelar, true)
   moznosti('hist-komu', 'Komu: všem', lide.data || [])
   const ob = document.getElementById('hist-oblast')
   if (ob) {
