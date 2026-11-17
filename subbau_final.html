@@ -9099,9 +9099,12 @@ function ukazDenikNaPrihlaseni() {
 
 // KÓD SPRÁVCE MÍSTO JMÉNA (majitel 17. 11. 2026): ve spodku menu a v horní liště na
 // telefonu se správci neukazuje jméno, ale kód — první písmeno jména a čtyři číslice.
-// Číslice se počítají z ID účtu: u jednoho účtu jsou pořád stejné a nikde se neukládají.
 // Je to JEN zobrazení. Skutečné jméno zůstává v profilu i v Historii úprav; který kód
 // patří komu, je vidět ve filtru „Kdo měnil" v Historii úprav (jen vedení).
+// Kód se každému správci JEDNOU uloží do profilu (profiles.kod_spravce, migrace
+// supabase-migrace-kod-spravce.sql) a pak se už nemění — ani když přibude jiný správce,
+// ani když se změní jméno. Jedinečnost hlídá databáze. Výchozí číslice jsou z ID účtu;
+// dokud migrace neproběhla nebo se kód ještě neuložil, ukazuje se tenhle dočasný kód.
 function _kodSpravceZaklad(p) {
   const id = String((p && p.id) || '')
   if (!id) return null
@@ -9110,19 +9113,34 @@ function _kodSpravceZaklad(p) {
   for (let i = 0; i < id.length; i++) { h ^= id.charCodeAt(i); h = Math.imul(h, 16777619) }
   return { pismeno: (m ? m[0] : 'X').toUpperCase(), cislo: 1000 + ((h >>> 0) % 9000) }
 }
-// Kódy VŠECH správců naráz (nález Codexu 17. 11. 2026): čtyři číslice z ID se u dvou lidí
-// se stejným písmenem mohou sejít a kód by pak nešel přiřadit jednomu člověku. Druhý
-// v pořadí (podle ID účtu) proto dostane nejbližší volné číslo. Počítá se ze stejného
-// seznamu pro spodek menu i pro Historii úprav, takže kód je na obou místech tentýž.
+// Kódy VŠECH správců naráz (nálezy Codexu 17. 11. 2026). Uložený kód platí vždy a nemění
+// se. Kdo ho uložený nemá, dostane dočasný: čtyři číslice z ID se u dvou lidí se stejným
+// písmenem mohou sejít, proto druhý v pořadí (podle ID účtu) dostane nejbližší volné
+// číslo — a nikdy ne číslo, které má někdo uložené. Počítá se ze stejného seznamu pro
+// spodek menu i pro Historii úprav, takže kód je na obou místech tentýž.
 let _kodySpravcu = null   // Map: ID účtu → kód; null = seznam správců se ještě nenačetl
+function _kodSpravcePlatny(k) { return /^[A-Z][0-9]{4}$/.test(String(k == null ? '' : k)) }
+// Nejbližší volný kód od základu (písmeno + číslo); null, kdyby bylo všech 9000 obsazených.
+function _kodSpravceVolny(z, obsazeno) {
+  let c = z.cislo
+  for (let i = 0; i < 9000; i++) {
+    if (!obsazeno.has(z.pismeno + c)) return z.pismeno + c
+    c = c >= 9999 ? 1000 : c + 1
+  }
+  return null
+}
 function sestavKodySpravcu(spravci) {
   const kody = new Map(), obsazeno = new Set()
-  ;[...(spravci || [])].filter(p => p && p.id).sort((a, b) => String(a.id) < String(b.id) ? -1 : String(a.id) > String(b.id) ? 1 : 0).forEach(p => {
-    const z = _kodSpravceZaklad(p)
-    if (!z || kody.has(String(p.id))) return
-    let c = z.cislo
-    for (let i = 0; i < 9000 && obsazeno.has(z.pismeno + c); i++) c = c >= 9999 ? 1000 : c + 1
-    obsazeno.add(z.pismeno + c); kody.set(String(p.id), z.pismeno + c)
+  const rada = [...(spravci || [])].filter(p => p && p.id).sort((a, b) => String(a.id) < String(b.id) ? -1 : String(a.id) > String(b.id) ? 1 : 0)
+  rada.forEach(p => {   // 1) uložené kódy
+    if (!_kodSpravcePlatny(p.kod_spravce) || kody.has(String(p.id)) || obsazeno.has(p.kod_spravce)) return
+    obsazeno.add(p.kod_spravce); kody.set(String(p.id), p.kod_spravce)
+  })
+  rada.forEach(p => {   // 2) dočasné pro ostatní
+    if (kody.has(String(p.id))) return
+    const z = _kodSpravceZaklad(p), kod = z && _kodSpravceVolny(z, obsazeno)
+    if (!kod) return
+    obsazeno.add(kod); kody.set(String(p.id), kod)
   })
   return kody
 }
@@ -9141,13 +9159,56 @@ function ukazKodSpravce(profile) {
   const jm = document.getElementById('sb-name'); if (jm) jm.textContent = kod
   const av = document.getElementById('sb-av'); if (av) av.textContent = kod.charAt(0)
 }
-async function nactiKodySpravcu() {
+// Chybí sloupec kod_spravce (migrace ještě neproběhla)? Pak se jede na dočasných kódech.
+function _kodSpravceChybiSloupec(e) {
+  const kod = String(e?.code || ''), msg = String(e?.message || '')
+  return kod === '42703' || kod === 'PGRST204' || /kod_spravce/i.test(msg)
+}
+// Načtení neběží dvakrát naráz (start + otevření Historie úprav) — druhé volání počká na první.
+let _kodySpravcuBezi = null
+function nactiKodySpravcu() {
+  if (_kodySpravcuBezi) return _kodySpravcuBezi
+  const beh = _nactiKodySpravcu()
+  _kodySpravcuBezi = beh
+  const hotovo = () => { if (_kodySpravcuBezi === beh) _kodySpravcuBezi = null }
+  beh.then(hotovo, hotovo)
+  return beh
+}
+async function _nactiKodySpravcu() {
   try {
     if (typeof sb === 'undefined' || !sb || !currentUser) return false
     const uid = currentUser.id
-    const { data, error } = await sb.from('profiles').select('id, full_name, email').eq('role', 'admin')
-    if (error || !Array.isArray(data)) return false
-    if (!currentUser || currentUser.id !== uid) return false   // odpověď patří tomu, kdo se ptal
+    const plati = () => !!currentUser && currentUser.id === uid   // odpověď patří tomu, kdo se ptal
+    const cti = sloupce => sb.from('profiles').select(sloupce).eq('role', 'admin')
+    let ulozene = true
+    let { data, error } = await cti('id, full_name, email, kod_spravce')
+    if (error && _kodSpravceChybiSloupec(error)) { ulozene = false; ;({ data, error } = await cti('id, full_name, email')) }
+    if (error || !Array.isArray(data) || !plati()) return false
+    // Vlastní kód si správce JEDNOU uloží (jen když ho ještě nemá). Začíná se od kódu,
+    // který by měl jako dočasný; shodu s cizím uloženým kódem odmítne databáze (23505)
+    // a zkusí se další číslo. Cizí profily se tu nepřepisují — každý si uloží svůj.
+    const ja = ulozene ? data.find(p => String(p.id) === String(uid)) : null
+    if (ja && !_kodSpravcePlatny(ja.kod_spravce)) {
+      const obsazeno = new Set(data.map(p => p.kod_spravce).filter(_kodSpravcePlatny))
+      const z = _kodSpravceZaklad(ja)
+      // první pokus = dočasný kód, který teď vidí (ať se po uložení nezmění)
+      let kod = sestavKodySpravcu(data).get(String(uid)) || (z && _kodSpravceVolny(z, obsazeno))
+      for (let pokus = 0; kod && pokus < 25; pokus++) {
+        const { data: zapsano, error: chybaZapisu } = await sb.from('profiles').update({ kod_spravce: kod })
+          .eq('id', uid).is('kod_spravce', null).select('id, kod_spravce')
+        if (!plati()) return false
+        if (chybaZapisu && String(chybaZapisu.code) === '23505') { obsazeno.add(kod); kod = z && _kodSpravceVolny(z, obsazeno); continue }
+        if (chybaZapisu) { console.warn('[kód správce] uložení:', chybaZapisu.message || chybaZapisu); break }
+        if (zapsano && zapsano.length && _kodSpravcePlatny(zapsano[0].kod_spravce)) ja.kod_spravce = zapsano[0].kod_spravce
+        else {
+          // nic se nezapsalo: kód mezitím uložila jiná záložka — přečíst, co platí
+          const { data: ted } = await sb.from('profiles').select('kod_spravce').eq('id', uid).limit(1)
+          if (!plati()) return false
+          if (ted && ted[0] && _kodSpravcePlatny(ted[0].kod_spravce)) ja.kod_spravce = ted[0].kod_spravce
+        }
+        break
+      }
+    }
     _kodySpravcu = sestavKodySpravcu(data)
     if (currentProfile && currentProfile.role === 'admin') ukazKodSpravce(currentProfile)
     return true
@@ -10513,7 +10574,7 @@ function uklidRelace() {
   if (typeof chatRealtimeSub !== 'undefined' && chatRealtimeSub) { try { sb.removeChannel(chatRealtimeSub) } catch(e) {} chatRealtimeSub = null }
   if (typeof adminChatRealtimeSub !== 'undefined' && adminChatRealtimeSub) { try { sb.removeChannel(adminChatRealtimeSub) } catch(e) {} adminChatRealtimeSub = null }
   if (typeof invoiceRealtimeSub !== 'undefined' && invoiceRealtimeSub) { try { sb.removeChannel(invoiceRealtimeSub) } catch(e) {} invoiceRealtimeSub = null }
-  _kodySpravcu = null   // kódy správců se s dalším přihlášením načtou znovu
+  _kodySpravcu = null; _kodySpravcuBezi = null   // kódy správců se s dalším přihlášením načtou znovu
   // Faktury patří přihlášenému správci: další účet v téže záložce nesmí zdědit jeho číslo u položky v menu.
   try { _invCache = []; _invNacteno = false; _invPocetZeStartu = 0; refreshInvoiceBadge() } catch (e) { console.warn('[úklid relace] faktury:', e && e.message) }
   if (window._adminChatBadgeInt) { clearInterval(window._adminChatBadgeInt); window._adminChatBadgeInt = null }
@@ -32880,7 +32941,7 @@ const HIST_POLE = {
   break2_start: 'Začátek 2. pauzy', break2_end: 'Konec 2. pauzy', breaks: 'Pauzy', total_hours: 'Hodiny', site_name: 'Stavba',
   work_description: 'Popis práce', location_address: 'Místo (GPS)', address_source: 'Zdroj adresy', odchylka_ok: 'Odchylka schválena',
   photo_urls: 'Fotky', bez_vyplaty: 'Bez výplaty', bez_provize_den: 'Bez provize', vyplata_castka: 'Výplata', vyplata_poznamka: 'Poznámka k výplatě',
-  full_name: 'Jméno', phone: 'Telefon', email: 'E-mail', role: 'Role', is_active: 'Aktivní', team_id: 'Skupina', subteam_id: 'Podskupina',
+  full_name: 'Jméno', phone: 'Telefon', email: 'E-mail', role: 'Role', kod_spravce: 'Kód správce', is_active: 'Aktivní', team_id: 'Skupina', subteam_id: 'Podskupina',
   hourly_rate: 'Sazba', hourly_rate_worker: 'Sazba pracovníka', profession: 'Profese', narodnost: 'Národnost', nemcina: 'Němčina',
   has_car: 'Má auto', can_track_hours: 'Zapisuje docházku', ve_vykazu: 'Ve výkazu', accommodation_address: 'Adresa ubytování',
   avatar_url: 'Fotka', registration_status: 'Registrace', invoice_color: 'Barva faktury', invoice_design: 'Vzhled faktury',
