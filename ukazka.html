@@ -22889,18 +22889,18 @@ async function souhlasPredNavodem() {
     stavajici = !novy && souhlasPlatiProVsechny(osvc)
     if (!novy && !stavajici) return checkShowTutorial()
     const verze = souhlasVerze(osvc)
-    const klicMistni = 'souhlas_' + currentUser.id + '_' + verze
-    if (lsGet(klicMistni)) return checkShowTutorial()
-    // Stávající člověk si okno dnes už odložil — do zítřka mu dát pokoj.
     const uid = currentUser.id
+    const klicMistni = 'souhlas_' + uid + '_' + verze
+    if (souhlasMistnePotvrzen(uid, verze)) return checkShowTutorial()
+    // Stávající člověk si okno dnes už odložil — do zítřka mu dát pokoj.
     if (stavajici && souhlasDnesOdlozeno(uid, verze)) return checkShowTutorial()
     const stav = await souhlasStav(verze)
     // Dotaz trvá až 10 s. Mezitím se člověk mohl odhlásit (okno by překrylo přihlášení),
     // potvrdit nebo odložit okno z jiného souběžného volání — pak už se nic neukazuje.
     if (!currentUser || currentUser.id !== uid || !currentProfile) return
-    if (lsGet(klicMistni)) return checkShowTutorial()
+    if (souhlasMistnePotvrzen(uid, verze)) return checkShowTutorial()
     if (stavajici && souhlasDnesOdlozeno(uid, verze)) return checkShowTutorial()
-    if (stav === 'ma') { lsSet(klicMistni, '1'); return checkShowTutorial() }
+    if (stav === 'ma') { _souhlasPotvrzeno.add(uid + '|' + verze); lsSet(klicMistni, '1'); return checkShowTutorial() }
     if (stav === 'neni-tabulka') return checkShowTutorial()
     // Stávající člověk a nejde zjistit, jestli už potvrdil (síť): nezdržovat ho
     // u příchodu, zeptá se to při dalším otevření appky.
@@ -22923,6 +22923,13 @@ async function souhlasPredNavodem() {
 // — je to ohled na lidi, ne zámek; po lhůtě už okno bez potvrzení dál nepustí.
 const SOUHLAS_VSICHNI_OSVC_OD = '2027-01-01'
 const SOUHLAS_ODKLAD_DNI = 7
+// Co se v téhle záložce už stalo — pro zařízení, kde nejde zapsat do úložiště
+// (jinak by souběžná kontrola okno vrátila hned po potvrzení nebo odkladu).
+const _souhlasPotvrzeno = new Set()      // 'uid|verze'
+let _souhlasOdlozenoPamet = null         // { uid, verze, den }
+function souhlasMistnePotvrzen(uid, verze) {
+  return !!lsGet('souhlas_' + uid + '_' + verze) || _souhlasPotvrzeno.has(uid + '|' + verze)
+}
 
 function souhlasPlatiProVsechny(osvc, dnes = localDateStr()) {
   return !!osvc && dnes >= SOUHLAS_VSICHNI_OSVC_OD
@@ -22938,7 +22945,9 @@ function souhlasOdklad(uid, verze) {
 
 // Odložil si okno dnes? Platí jen ve lhůtě — po ní už odklad nic nepřeskočí.
 function souhlasDnesOdlozeno(uid, verze, dnes = localDateStr()) {
-  return (souhlasOdklad(uid, verze) || {}).odlozeno === dnes && !!souhlasOdkladDo(uid, verze, dnes)
+  const m = _souhlasOdlozenoPamet
+  const vPameti = !!m && m.uid === uid && m.verze === verze && m.den === dnes
+  return (vPameti || (souhlasOdklad(uid, verze) || {}).odlozeno === dnes) && !!souhlasOdkladDo(uid, verze, dnes)
 }
 
 // Poslední den, kdy jde okno ještě odložit (včetně), nebo null, když už nejde.
@@ -23006,6 +23015,7 @@ function ukazSouhlas(volby) {
       if (hlaska) { hlaska.textContent = 'Lhůta pro odložení už skončila. Potvrďte prosím podmínky.'; hlaska.style.display = 'block' }
       return
     }
+    _souhlasOdlozenoPamet = { uid: uidOdklad, verze, den: localDateStr() }
     lsSet('souhlas_odklad_' + uidOdklad + '_' + verze, JSON.stringify({ prvni: o.prvni, odlozeno: localDateStr() }))
     ov.remove(); document.body.style.overflow = ''
     checkShowTutorial()
@@ -23019,6 +23029,11 @@ function ukazSouhlas(volby) {
 }
 
 async function potvrdSouhlas(ov) {
+  // Komu potvrzení patří, se určí HNED: ukládání trvá až 15 s a v téže záložce se
+  // mezitím může přihlásit někdo jiný — jeho účtu se potvrzení připsat nesmí.
+  const uid = currentUser && currentUser.id
+  if (!uid) return
+  const jmenoKdo = currentProfile?.full_name || null, emailKdo = currentUser?.email || currentProfile?.email || null
   const ok = ov.querySelector('#souhlas-ok'), chyba = ov.querySelector('#souhlas-chyba')
   ok.disabled = true; ok.textContent = 'Ukládám…'; chyba.style.display = 'none'
   const osvc = ov._souhlasOsvc !== false, verze = souhlasVerze(osvc)
@@ -23031,8 +23046,8 @@ async function potvrdSouhlas(ov) {
   const vse = !!ov.querySelector('input[data-bod="vse"]')?.checked
   const body = { vse }
   souhlasTextPro(osvc).body.forEach(k => { body[k] = vse })
-  const zaznam = { worker_id: currentUser.id, verze, text_otisk: otisk, text, body,
-    jmeno: currentProfile?.full_name || null, email: currentUser?.email || currentProfile?.email || null,
+  const zaznam = { worker_id: uid, verze, text_otisk: otisk, text, body,
+    jmeno: jmenoKdo, email: emailKdo,
     zarizeni: String(navigator.userAgent || '').slice(0, 400) }
   let error = null
   try { ({ error } = await souhlasCasovyLimit(sb.from('souhlasy').insert(zaznam), 15000)) } catch (e) { error = e }
@@ -23048,8 +23063,11 @@ async function potvrdSouhlas(ov) {
     chyba.style.display = 'block'
     return
   }
-  lsSet('souhlas_' + currentUser.id + '_' + verze, '1')
-  ov.remove(); document.body.style.overflow = ''
+  _souhlasPotvrzeno.add(uid + '|' + verze)
+  lsSet('souhlas_' + uid + '_' + verze, '1')
+  ov.remove()
+  if (!currentUser || currentUser.id !== uid) return      // mezitím odhlášen nebo jiný účet — jeho obrazovky se to netýká
+  document.body.style.overflow = ''
   checkShowTutorial()
   if (window._dokladyPoSouhlasu) { window._dokladyPoSouhlasu = false; setTimeout(checkMissingDocsAlert, 1500) }
 }
