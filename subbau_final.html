@@ -21781,12 +21781,13 @@ async function closeTutorialAndMark() {
 // neúčtuje, co appka dělá za člověka, že je propojená s odběratelem a že ji člověk
 // používá na vlastní odpovědnost. Totéž je v potvrzovací větě. Píše se jen to, co
 // platí: žádné „výhradně" — účely zpracování v oddílu „Proč to děláme" zůstávají.
-// Text bez OSVČ se nemění, proto mu zůstává verze 2026-11-17-bez-osvc.
-const SOUHLAS_VERZE = '2026-11-23'
+// 2026-11-23b: majitel — do oddílu „O aplikaci" věta, že po ukončení spolupráce se
+// přístup do appky odebírá (platí pro všechny, proto nová verze i u textu bez OSVČ).
+const SOUHLAS_VERZE = '2026-11-23b'
 // Zaměstnanec firmy a dodavatel jako s.r.o. OSVČ nejsou — prohlášení OSVČ by
 // podepsali nepravdivě. Dostanou text bez něj pod vlastní verzí, aby z dokladu
 // bylo jasné, co přesně viděli.
-const SOUHLAS_VERZE_BEZ_OSVC = '2026-11-17-bez-osvc'
+const SOUHLAS_VERZE_BEZ_OSVC = '2026-11-23b-bez-osvc'
 // Oddíly, které dostane jen OSVČ (ostatním je souhlasTextPro vynechá).
 const SOUHLAS_ODDILY_JEN_OSVC = ['Aplikaci používáte dobrovolně a zdarma', 'Prohlášení OSVČ']
 const SOUHLAS_TEXT = {
@@ -21838,7 +21839,8 @@ const SOUHLAS_TEXT = {
     ['O aplikaci', [
       'Aplikace slouží OSVČ ke snadnému fakturování, k evidenci odpracovaných hodin a k tomu, aby měli v pořádku doklady potřebné pro práci v Německu.',
       'Aplikace byla vytvořena s pomocí umělé inteligence (AI).',
-      'Aplikaci můžete kdykoli svobodně opustit: stačí ji přestat používat a v sekci Profil požádat o smazání účtu. Doklady, které musíme uchovávat ze zákona, zůstanou po zákonnou dobu.']],
+      'Aplikaci můžete kdykoli svobodně opustit: stačí ji přestat používat a v sekci Profil požádat o smazání účtu. Doklady, které musíme uchovávat ze zákona, zůstanou po zákonnou dobu.',
+      'Po ukončení spolupráce vám přístup do aplikace odebereme. Výkazy a faktury si proto stáhněte včas; později si o ně můžete napsat na info@subbau.cz.']],
     ['Aplikaci používáte dobrovolně a zdarma', [
       'Používání aplikace je dobrovolné. Odpracované hodiny, adresu stavby i faktury nám můžete předávat také postaru, mimo aplikaci — stačí se domluvit s kanceláří.',
       'Aplikace je pro vás zdarma. SubBau s.r.o. vám za její používání nic neúčtuje.',
@@ -21917,28 +21919,74 @@ async function souhlasStav(verze = souhlasVerze(souhlasJeOsvc(currentProfile))) 
 
 // Volá se místo checkShowTutorial() po přihlášení pracovníka.
 async function souhlasPredNavodem() {
+  let stavajici = false      // stávající OSVČ po 1. 1. 2027 (ne nový člověk)
   try {
     if (window.__demoDATA) return checkShowTutorial()          // ukázka pro prodej: bez právního textu firmy
     if (!currentUser?.id || !currentProfile || currentProfile.role === 'admin') return checkShowTutorial()
+    const osvc = souhlasJeOsvc(currentProfile)
     const novy = !lsGet('tutorial_seen_' + currentUser.id) && currentProfile.tutorial_done !== true
-    if (!novy) return checkShowTutorial()
-    const verze = souhlasVerze(souhlasJeOsvc(currentProfile))
+    stavajici = !novy && souhlasPlatiProVsechny(osvc)
+    if (!novy && !stavajici) return checkShowTutorial()
+    const verze = souhlasVerze(osvc)
     const klicMistni = 'souhlas_' + currentUser.id + '_' + verze
     if (lsGet(klicMistni)) return checkShowTutorial()
+    // Stávající člověk si okno dnes už odložil — do zítřka mu dát pokoj.
+    if (stavajici && (souhlasOdklad(currentUser.id, verze) || {}).odlozeno === localDateStr()) return checkShowTutorial()
     const stav = await souhlasStav(verze)
     if (stav === 'ma') { lsSet(klicMistni, '1'); return checkShowTutorial() }
     if (stav === 'neni-tabulka') return checkShowTutorial()
-    ukazSouhlas()      // 'nema' i 'chyba': radši ukázat (dvojí potvrzení nevadí)
+    // Stávající člověk a nejde zjistit, jestli už potvrdil (síť): nezdržovat ho
+    // u příchodu, zeptá se to při dalším otevření appky.
+    if (stavajici && stav === 'chyba') return checkShowTutorial()
+    ukazSouhlas({ odklad: stavajici })      // nový: 'nema' i 'chyba' radši ukázat (dvojí potvrzení nevadí)
   } catch (e) {
     console.warn('[souhlas]', e?.message)
+    if (stavajici) return checkShowTutorial()
     ukazSouhlas()
   }
 }
 
-function ukazSouhlas() {
+// Majitel 23. 11. 2026: od 1. 1. 2027 potvrdí aktuální text KAŽDÝ OSVČ, ne jen nový —
+// jednou, při otevření appky, dokud u své verze nemá doklad. Zaměstnanců firem
+// a s.r.o. se to netýká (ti dál potvrzují jen jako noví).
+// Aby okno nikoho nepřipravilo o půlhodinu při ranním příchodu (příchod se
+// zaokrouhluje nahoru), jde ho stávajícímu člověku odložit: jednou denně, nejdéle
+// SOUHLAS_ODKLAD_DNI dní od prvního zobrazení. Odklad si pamatuje jen tohle zařízení
+// — je to ohled na lidi, ne zámek; po lhůtě už okno bez potvrzení dál nepustí.
+const SOUHLAS_VSICHNI_OSVC_OD = '2027-01-01'
+const SOUHLAS_ODKLAD_DNI = 7
+
+function souhlasPlatiProVsechny(osvc, dnes = localDateStr()) {
+  return !!osvc && dnes >= SOUHLAS_VSICHNI_OSVC_OD
+}
+
+// Odklad na tomhle zařízení: { prvni: den prvního zobrazení, odlozeno: den posledního odkladu }.
+function souhlasOdklad(uid, verze) {
+  try {
+    const o = JSON.parse(lsGet('souhlas_odklad_' + uid + '_' + verze) || 'null')
+    return o && typeof o === 'object' && /^\d{4}-\d{2}-\d{2}$/.test(o.prvni || '') ? o : null
+  } catch (e) { return null }
+}
+
+// Poslední den, kdy jde okno ještě odložit (včetně), nebo null, když už nejde.
+function souhlasOdkladDo(uid, verze, dnes = localDateStr()) {
+  const prvni = (souhlasOdklad(uid, verze) || {}).prvni || dnes
+  const konec = new Date(prvni + 'T12:00:00')
+  konec.setDate(konec.getDate() + SOUHLAS_ODKLAD_DNI - 1)
+  const posledni = localDateStr(konec)
+  return dnes >= prvni && dnes <= posledni ? posledni : null
+}
+
+function ukazSouhlas(volby) {
   if (document.getElementById('souhlas-overlay')) return
   const osvc = souhlasJeOsvc(currentProfile)
   const T = souhlasTextPro(osvc), verze = souhlasVerze(osvc)
+  // Odklad jen stávajícímu člověku (volby.odklad) a jen dokud běží lhůta.
+  const uidOdklad = currentUser && currentUser.id
+  const odkladDo = volby && volby.odklad && uidOdklad ? souhlasOdkladDo(uidOdklad, verze) : null
+  if (volby && volby.odklad && uidOdklad && !souhlasOdklad(uidOdklad, verze)) {
+    lsSet('souhlas_odklad_' + uidOdklad + '_' + verze, JSON.stringify({ prvni: localDateStr(), odlozeno: null }))
+  }
   const ov = document.createElement('div')
   ov.id = 'souhlas-overlay'
   ov._souhlasOsvc = osvc     // potvrdSouhlas uloží tutéž variantu, i kdyby se profil mezitím změnil
@@ -21958,6 +22006,8 @@ function ukazSouhlas() {
     </div>
     <div id="souhlas-chyba" style="display:none;background:#f7e9e5;color:#9c3b22;border-radius:10px;padding:10px 12px;margin-bottom:10px;font-weight:700"></div>
     <button id="souhlas-ok" disabled style="width:100%;padding:15px;border:none;border-radius:13px;background:#9c3b22;color:#fff;font-size:16px;font-weight:800;font-family:inherit;cursor:pointer;opacity:.45">Potvrzuji a pokračuji</button>
+    ${odkladDo ? `<button id="souhlas-pozdeji" style="width:100%;margin-top:10px;padding:12px;border:1.5px solid #d8cfc2;border-radius:13px;background:#fff;color:#4a4038;font-size:14px;font-weight:700;font-family:inherit;cursor:pointer">Potvrdím později</button>
+    <p style="text-align:center;font-size:12.5px;color:#8a7f72;margin:6px 0 0">Odložit jde jednou denně, nejdéle do ${escAttr(new Date(odkladDo + 'T12:00:00').toLocaleDateString('cs-CZ'))}. Pak už bez potvrzení aplikace dál nepustí.</p>` : ''}
     <button id="souhlas-ne" style="width:100%;margin-top:10px;padding:12px;border:1.5px solid #d8cfc2;border-radius:13px;background:#fff;color:#4a4038;font-size:14px;font-weight:700;font-family:inherit;cursor:pointer">Nesouhlasím — odhlásit se</button>
     <p style="text-align:center;font-size:12.5px;color:#8a7f72;margin-top:14px">Dotazy: info@subbau.cz · verze textu ${verze}</p>
   </div>`
@@ -21969,6 +22019,14 @@ function ukazSouhlas() {
     ok.disabled = !vse; ok.style.opacity = vse ? '1' : '.45'
   })
   ok.onclick = () => potvrdSouhlas(ov)
+  const pozdeji = ov.querySelector('#souhlas-pozdeji')
+  if (pozdeji) pozdeji.onclick = () => {
+    const o = souhlasOdklad(uidOdklad, verze) || { prvni: localDateStr() }
+    lsSet('souhlas_odklad_' + uidOdklad + '_' + verze, JSON.stringify({ prvni: o.prvni, odlozeno: localDateStr() }))
+    ov.remove(); document.body.style.overflow = ''
+    checkShowTutorial()
+    if (window._dokladyPoSouhlasu) { window._dokladyPoSouhlasu = false; setTimeout(checkMissingDocsAlert, 1500) }
+  }
   ov.querySelector('#souhlas-ne').onclick = () => {
     if (!confirm('Bez potvrzení nelze aplikaci používat. Pokud máte otázky, napište na info@subbau.cz nebo zavolejte do kanceláře. Opravdu se odhlásit?')) return
     ov.remove(); document.body.style.overflow = ''
