@@ -7653,6 +7653,7 @@ function _dnPanel(sekce, text, extra) {
       try {
         if (document.visibilityState === 'hidden') {
           _dn.skryto = { od: Date.now() }
+          _dn.bezOdeslani.od = 0     // schovaná appka: „relace nefunguje" se počítá jen z doby na očích (i když se schová mezi dvěma tiky)
           // Jen uložit (fronta, počty oken, výpadek) — souhrny až po vypršení okna nebo při zavření.
           _dnPotvrdOdlozeneVse(); _dnUlozOknaASit(); clearTimeout(_dn.ulozCasovac); _dnUlozFrontu()
         } else {
@@ -22015,8 +22016,12 @@ function ukazSouhlas(volby) {
   // (zařízení bez úložiště, soukromé okno) a šlo by odkládat donekonečna — pak bez odkladu.
   let odkladDo = null
   if (volby && volby.odklad && uidOdklad) {
-    if (!souhlasOdklad(uidOdklad, verze)) lsSet('souhlas_odklad_' + uidOdklad + '_' + verze, JSON.stringify({ prvni: localDateStr(), odlozeno: null }))
-    if (souhlasOdklad(uidOdklad, verze)) odkladDo = souhlasOdkladDo(uidOdklad, verze)
+    const klicOdkladu = 'souhlas_odklad_' + uidOdklad + '_' + verze
+    const zaznam = souhlasOdklad(uidOdklad, verze) || { prvni: localDateStr(), odlozeno: null }
+    // Zkušební zápis téhož záznamu: nabízet odklad, který se pak nepovede uložit, nemá smysl.
+    if (lsSet(klicOdkladu, JSON.stringify({ prvni: zaznam.prvni, odlozeno: zaznam.odlozeno || null })) && souhlasOdklad(uidOdklad, verze)) {
+      odkladDo = souhlasOdkladDo(uidOdklad, verze)
+    }
   }
   const ov = document.createElement('div')
   ov.id = 'souhlas-overlay'
@@ -22113,6 +22118,9 @@ async function potvrdSouhlas(ov) {
   lsSet('souhlas_' + uid + '_' + verze, '1')
   ov.remove()
   if (!currentUser || currentUser.id !== uid) return      // mezitím odhlášen nebo jiný účet — jeho obrazovky se to netýká
+  // Tentýž člověk se mezitím odhlásil a přihlásil a dostal nové okno téže varianty — je vyřízené.
+  { const nove = document.getElementById('souhlas-overlay'); if (nove && (nove._souhlasOsvc !== false) === osvc) nove.remove() }
+  if (document.getElementById('souhlas-overlay')) return   // jiná varianta textu: tu musí potvrdit zvlášť
   document.body.style.overflow = ''
   checkShowTutorial()
   if (window._dokladyPoSouhlasu) { window._dokladyPoSouhlasu = false; setTimeout(checkMissingDocsAlert, 1500) }
