@@ -8887,6 +8887,8 @@ function showLogin(duvod) {
   // I bez tlačítka Odhlásit (appka přišla o přihlášení): rozběhnuté měření polohy
   // a pozdní poloha patří tomu, kdo byl přihlášený (2. 11. 2026).
   ukonciPovinnouPolohu()
+  // Okno s podmínkami patří přihlášenému — nesmí zůstat viset nad přihlášením (23. 11. 2026).
+  { const so = document.getElementById('souhlas-overlay'); if (so) so.remove() }
   if (window.skryjBoot) window.skryjBoot()   // úvodní obrazovka pryč — víme, co ukázat
   document.getElementById('login').style.display = 'flex'
   document.getElementById('app').style.display = 'none'
@@ -21931,8 +21933,14 @@ async function souhlasPredNavodem() {
     const klicMistni = 'souhlas_' + currentUser.id + '_' + verze
     if (lsGet(klicMistni)) return checkShowTutorial()
     // Stávající člověk si okno dnes už odložil — do zítřka mu dát pokoj.
-    if (stavajici && (souhlasOdklad(currentUser.id, verze) || {}).odlozeno === localDateStr()) return checkShowTutorial()
+    const uid = currentUser.id
+    if (stavajici && souhlasDnesOdlozeno(uid, verze)) return checkShowTutorial()
     const stav = await souhlasStav(verze)
+    // Dotaz trvá až 10 s. Mezitím se člověk mohl odhlásit (okno by překrylo přihlášení),
+    // potvrdit nebo odložit okno z jiného souběžného volání — pak už se nic neukazuje.
+    if (!currentUser || currentUser.id !== uid || !currentProfile) return
+    if (lsGet(klicMistni)) return checkShowTutorial()
+    if (stavajici && souhlasDnesOdlozeno(uid, verze)) return checkShowTutorial()
     if (stav === 'ma') { lsSet(klicMistni, '1'); return checkShowTutorial() }
     if (stav === 'neni-tabulka') return checkShowTutorial()
     // Stávající člověk a nejde zjistit, jestli už potvrdil (síť): nezdržovat ho
@@ -21941,6 +21949,7 @@ async function souhlasPredNavodem() {
     ukazSouhlas({ odklad: stavajici })      // nový: 'nema' i 'chyba' radši ukázat (dvojí potvrzení nevadí)
   } catch (e) {
     console.warn('[souhlas]', e?.message)
+    if (!currentUser || !currentProfile) return
     if (stavajici) return checkShowTutorial()
     ukazSouhlas()
   }
@@ -21968,6 +21977,11 @@ function souhlasOdklad(uid, verze) {
   } catch (e) { return null }
 }
 
+// Odložil si okno dnes? Platí jen ve lhůtě — po ní už odklad nic nepřeskočí.
+function souhlasDnesOdlozeno(uid, verze, dnes = localDateStr()) {
+  return (souhlasOdklad(uid, verze) || {}).odlozeno === dnes && !!souhlasOdkladDo(uid, verze, dnes)
+}
+
 // Poslední den, kdy jde okno ještě odložit (včetně), nebo null, když už nejde.
 function souhlasOdkladDo(uid, verze, dnes = localDateStr()) {
   const prvni = (souhlasOdklad(uid, verze) || {}).prvni || dnes
@@ -21983,9 +21997,12 @@ function ukazSouhlas(volby) {
   const T = souhlasTextPro(osvc), verze = souhlasVerze(osvc)
   // Odklad jen stávajícímu člověku (volby.odklad) a jen dokud běží lhůta.
   const uidOdklad = currentUser && currentUser.id
-  const odkladDo = volby && volby.odklad && uidOdklad ? souhlasOdkladDo(uidOdklad, verze) : null
-  if (volby && volby.odklad && uidOdklad && !souhlasOdklad(uidOdklad, verze)) {
-    lsSet('souhlas_odklad_' + uidOdklad + '_' + verze, JSON.stringify({ prvni: localDateStr(), odlozeno: null }))
+  // Den prvního zobrazení se musí povést uložit: bez něj by lhůta neměla od čeho běžet
+  // (zařízení bez úložiště, soukromé okno) a šlo by odkládat donekonečna — pak bez odkladu.
+  let odkladDo = null
+  if (volby && volby.odklad && uidOdklad) {
+    if (!souhlasOdklad(uidOdklad, verze)) lsSet('souhlas_odklad_' + uidOdklad + '_' + verze, JSON.stringify({ prvni: localDateStr(), odlozeno: null }))
+    if (souhlasOdklad(uidOdklad, verze)) odkladDo = souhlasOdkladDo(uidOdklad, verze)
   }
   const ov = document.createElement('div')
   ov.id = 'souhlas-overlay'
@@ -22007,7 +22024,7 @@ function ukazSouhlas(volby) {
     <div id="souhlas-chyba" style="display:none;background:#f7e9e5;color:#9c3b22;border-radius:10px;padding:10px 12px;margin-bottom:10px;font-weight:700"></div>
     <button id="souhlas-ok" disabled style="width:100%;padding:15px;border:none;border-radius:13px;background:#9c3b22;color:#fff;font-size:16px;font-weight:800;font-family:inherit;cursor:pointer;opacity:.45">Potvrzuji a pokračuji</button>
     ${odkladDo ? `<button id="souhlas-pozdeji" style="width:100%;margin-top:10px;padding:12px;border:1.5px solid #d8cfc2;border-radius:13px;background:#fff;color:#4a4038;font-size:14px;font-weight:700;font-family:inherit;cursor:pointer">Potvrdím později</button>
-    <p style="text-align:center;font-size:12.5px;color:#8a7f72;margin:6px 0 0">Odložit jde jednou denně, nejdéle do ${escAttr(new Date(odkladDo + 'T12:00:00').toLocaleDateString('cs-CZ'))}. Pak už bez potvrzení aplikace dál nepustí.</p>` : ''}
+    <p id="souhlas-pozdeji-radek" style="text-align:center;font-size:12.5px;color:#8a7f72;margin:6px 0 0">Odložit jde jednou denně, nejdéle do ${escAttr(new Date(odkladDo + 'T12:00:00').toLocaleDateString('cs-CZ'))}. Pak už bez potvrzení aplikace dál nepustí.</p>` : ''}
     <button id="souhlas-ne" style="width:100%;margin-top:10px;padding:12px;border:1.5px solid #d8cfc2;border-radius:13px;background:#fff;color:#4a4038;font-size:14px;font-weight:700;font-family:inherit;cursor:pointer">Nesouhlasím — odhlásit se</button>
     <p style="text-align:center;font-size:12.5px;color:#8a7f72;margin-top:14px">Dotazy: info@subbau.cz · verze textu ${verze}</p>
   </div>`
@@ -22021,7 +22038,15 @@ function ukazSouhlas(volby) {
   ok.onclick = () => potvrdSouhlas(ov)
   const pozdeji = ov.querySelector('#souhlas-pozdeji')
   if (pozdeji) pozdeji.onclick = () => {
-    const o = souhlasOdklad(uidOdklad, verze) || { prvni: localDateStr() }
+    const o = souhlasOdklad(uidOdklad, verze)
+    // Okno mohlo zůstat otevřené přes půlnoc na konci lhůty — pak už odložit nejde.
+    if (!o || !souhlasOdkladDo(uidOdklad, verze)) {
+      const radek = ov.querySelector('#souhlas-pozdeji-radek'); if (radek) radek.remove()
+      pozdeji.remove()
+      const hlaska = ov.querySelector('#souhlas-chyba')
+      if (hlaska) { hlaska.textContent = 'Lhůta pro odložení už skončila. Potvrďte prosím podmínky.'; hlaska.style.display = 'block' }
+      return
+    }
     lsSet('souhlas_odklad_' + uidOdklad + '_' + verze, JSON.stringify({ prvni: o.prvni, odlozeno: localDateStr() }))
     ov.remove(); document.body.style.overflow = ''
     checkShowTutorial()

@@ -62,7 +62,7 @@ const html = `<!doctype html>
 <body>
   <h1>Zásady ochrany osobních údajů</h1>
   <p class="pod">SubBau s.r.o. · aplikace Docházka · verze textu ${e(SOUHLAS_VERZE)} · tuto stránku appka generuje ze stejného textu, který lidé v aplikaci odsouhlasí</p>
-  <p>Aplikaci docházky provozuje SubBau s.r.o. Tahle stránka vysvětluje, jak s osobními údaji zacházíme — v appce samotné to každý potvrdí jedním zaškrtnutím při prvním přihlášení.</p>
+  <p>Aplikaci docházky provozuje SubBau s.r.o. Tahle stránka vysvětluje, jak s osobními údaji zacházíme — v appce samotné to lidé potvrzují jedním zaškrtnutím: noví při prvním přihlášení, OSVČ od 1. 1. 2027 při každé nové verzi textu.</p>
   ${oddilyHtml}
   <div class="ramecek">
     <h2 style="margin-top:0">Smazání účtu</h2>
