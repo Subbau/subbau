@@ -2404,6 +2404,8 @@ setTimeout(function brzda() {
           <div id="dash-chat-alerts" style="display:none;margin-bottom:16px"></div>
           <!-- Čekající registrace -->
           <div id="dash-pending-registrations" style="display:none;margin-bottom:16px"></div>
+          <!-- Kdo sám požádal o odebrání přístupu (odebírá kancelář, do 48 hodin) -->
+          <div id="dash-odebrani-pristupu" style="display:none"></div>
           <div id="dash-mmi-presuny" style="display:none"></div>
           <div id="dash-sazby-nula" style="display:none"></div>
           <div id="dash-unclosed-shifts" style="display:none;margin-bottom:16px"></div>
@@ -5338,6 +5340,8 @@ setTimeout(function brzda() {
       Vaše registrace byla přijata. Administrátor StavKo ji co nejdříve zkontroluje a schválí.<br><br>
       Po schválení budete moci aplikaci plně používat.
     </p>
+    <!-- Jen po odebrání přístupu na vlastní žádost: faktury a výkazy ke stažení -->
+    <div id="pending-stahnout" style="display:none;text-align:left;margin-bottom:20px"></div>
     <div style="padding:14px;background:#fff;border-radius:10px;border:1px solid var(--brd);margin-bottom:20px;font-size:13px;color:var(--text2)">
       📧 V případě dotazů nás kontaktujte na<br><b>info@ukazka.cz</b>
     </div>
@@ -9716,18 +9720,22 @@ async function _initAppInner(user) {
     })()
     // Spusť heartbeat — značí pracovníka jako "online" (každých 5 min)
     startHeartbeat(user.id)
+    // Komu kancelář odebrala přístup na jeho vlastní žádost (23. 11. 2026), tomu už
+    // nic nevyskakuje — ani doklady, ani páteční výkaz: nic z toho nemá kam zapsat.
+    const odebranoNaZadost = !profile.is_active && profile.registration_status !== 'pending' && !!profile.pristup_odebran_na_zadost_at
     // Chybí povinné dokumenty? Vyskočí okno, které jde zavřít jen křížkem.
-    setTimeout(() => { try { checkMissingDocsAlert() } catch(e) { console.warn(e) } }, 1200)
+    if (!odebranoNaZadost) setTimeout(() => { try { checkMissingDocsAlert() } catch(e) { console.warn(e) } }, 1200)
     // Zaměstnanec firmy neřeší fakturaci ani nic kolem živnosti — schovej mu to.
     try { upravMobilProZamestnance(profile) } catch(e) { console.warn('[zaměstnanec firmy]', e) }
     // V pátek připomeň podpis výkazu hodin — bez podpisu není doklad k faktuře.
-    try { pripomenVykazVPatek(profile) } catch(e) { console.warn('[páteční výkaz]', e) }
+    if (!odebranoNaZadost) try { pripomenVykazVPatek(profile) } catch(e) { console.warn('[páteční výkaz]', e) }
   }
 
   // Nemá přístup do aplikace — buď registrace ještě není schválená,
   // nebo mu admin přístup odebral v sekci Přístupy (registration_status='removed').
   if (!profile.is_active && role !== 'admin') {
-    showPending(profile.registration_status === 'pending' ? 'pending' : 'removed')
+    showPending(profile.registration_status === 'pending' ? 'pending'
+      : (profile.pristup_odebran_na_zadost_at ? 'odebrano' : 'removed'))
     return
   }
 
@@ -11227,13 +11235,24 @@ function showLoginForm() {
   const ff = document.getElementById('form-forgot'); if (ff) ff.style.display = 'none'
 }
 
-// mode: 'pending' = čeká na schválení registrace, 'removed' = admin odebral přístup do aplikace
+// mode: 'pending' = čeká na schválení registrace, 'removed' = admin odebral přístup do aplikace,
+// 'odebrano' = kancelář odebrala přístup na žádost člověka z Profilu (23. 11. 2026) —
+// nic nezapíše, ale své faktury a výkazy si tu stáhne.
 function showPending(mode) {
   if (window.skryjBoot) window.skryjBoot()   // úvodní obrazovka pryč — víme, co ukázat
   const ico = document.getElementById('pending-icon')
   const ttl = document.getElementById('pending-title')
   const txt = document.getElementById('pending-text')
-  if (mode === 'removed') {
+  const stah = document.getElementById('pending-stahnout')
+  if (stah) { stah.style.display = 'none'; stah.innerHTML = '' }
+  if (mode === 'odebrano') {
+    const kdy = new Date(currentProfile && currentProfile.pristup_odebran_na_zadost_at)
+    if (ico) ico.textContent = '🔒'
+    if (ttl) ttl.textContent = 'Přístup do aplikace je odebrán'
+    if (txt) txt.innerHTML = 'Přístup jsme vám odebrali na vaši žádost' + (isNaN(kdy) ? '' : ' (' + escAttr(kdy.toLocaleDateString('cs-CZ')) + ')')
+      + '. V aplikaci už nic nezapíšete.<br><br>Své faktury a výkazy hodin si můžete stáhnout níže. Kdybyste chtěli přístup zpět, napište nám.'
+    nactiStazeniPoOdebrani()
+  } else if (mode === 'removed') {
     if (ico) ico.textContent = '🔒'
     if (ttl) ttl.textContent = 'Přístup do aplikace pozastaven'
     if (txt) txt.innerHTML = 'StavKo vám dočasně pozastavil přihlášení do aplikace.<br><br>Pokud jde o omyl, ozvěte se nám a přístup vám obnovíme.'
@@ -15461,6 +15480,7 @@ async function loadDashboard() {
   const pVac = loadVacationAlerts().catch(e => console.warn('[plocha] dovolené:', e))
   const pLong = loadLongDayAlert().catch(e => console.warn('[plocha] dlouhé směny:', e))
   nactiPresunyMmiNaNastenku().catch(e => console.warn('[plocha] přesuny MMI:', e))
+  nactiOdebraniPristupuNaNastenku().catch(e => console.warn('[plocha] odebrání přístupu:', e))
   srovnejNaplanovaneSazby().catch(e => console.warn('[plocha] naplánované sazby:', e))
     .then(() => nactiNuloveSazbyNaNastenku()).catch(e => console.warn('[plocha] nulové sazby:', e))
   // Výkon (1. 10. 2026): přehled chybějících dokladů a poslední záznamy docházky na
@@ -22750,7 +22770,9 @@ async function closeTutorialAndMark() {
 // platí: žádné „výhradně" — účely zpracování v oddílu „Proč to děláme" zůstávají.
 // 2026-11-23b: majitel — do oddílu „O aplikaci" věta, že po ukončení spolupráce se
 // přístup do appky odebírá (platí pro všechny, proto nová verze i u textu bez OSVČ).
-const SOUHLAS_VERZE = '2026-11-23b'
+// 2026-11-23c: majitel — OSVČ si může v Profilu požádat o odebrání přístupu (kancelář
+// ho odebere do 48 hodin). Věta je v oddílu jen pro OSVČ, text bez OSVČ se nemění.
+const SOUHLAS_VERZE = '2026-11-23c'
 // Zaměstnanec firmy a dodavatel jako s.r.o. OSVČ nejsou — prohlášení OSVČ by
 // podepsali nepravdivě. Dostanou text bez něj pod vlastní verzí, aby z dokladu
 // bylo jasné, co přesně viděli.
@@ -22810,6 +22832,7 @@ const SOUHLAS_TEXT = {
       'Po ukončení spolupráce vám přístup do aplikace odebereme. Výkazy a faktury si proto stáhněte včas; později si o ně můžete napsat na info@ukazka.cz.']],
     ['Aplikaci používáte dobrovolně a zdarma', [
       'Používání aplikace je dobrovolné. Odpracované hodiny, adresu stavby i faktury nám můžete předávat také postaru, mimo aplikaci — stačí se domluvit s kanceláří.',
+      'O odebrání přístupu do aplikace můžete kdykoli požádat odkazem v sekci Profil. Přístup vám odebereme do 48 hodin; do té doby můžete žádost vzít zpět. Potom už v aplikaci nic nezapíšete, jen si stáhnete své výkazy a faktury. Údaje zapsané do té doby uchováváme dál podle oddílu „Jak dlouho údaje uchováváme“.',
       'Aplikace je pro vás zdarma. StavKo s.r.o. vám za její používání nic neúčtuje.',
       'Aplikace vám má práci usnadnit: hodiny spočítá z příchodu, přestávek a odchodu, adresu stavby doplní z polohy telefonu a z odpracovaných hodin připraví fakturu. Nemusíte tak hodiny ani adresy vypisovat ručně a zpětně dokládat, kde jste pracovali.',
       'Aplikace je propojená s odběratelem v Německu: výkaz hodin dostává přímo z ní (viz oddíl „Co vidí odběratel a účetní“), takže mu hodiny nemusíte dokládat zvlášť.',
@@ -32878,6 +32901,166 @@ async function zrusitZadostOSmazaniUctu() {
   loadMobProfil(currentProfile)
 }
 
+// ODEBRÁNÍ PŘÍSTUPU NA VLASTNÍ ŽÁDOST (majitel 23. 11. 2026). OSVČ používá appku
+// dobrovolně; v Profilu má větu s tučným „klikněte zde". Kliknutím jen POŽÁDÁ —
+// přístup odebírá kancelář ručně z Přehledu (do 48 hodin, viz
+// nactiOdebraniPristupuNaNastenku) a do té doby jde žádost vzít zpět. Odebráním se
+// nic nemaže: účet je archivovaný stejně jako po „Odebrat přístup" v Přístupech a
+// člověk má místo appky obrazovku se staženími (showPending('odebrano')).
+// Text slibuje jen to, co appka dělá: historie (hodiny, faktury) kanceláři zůstává.
+// Bez sloupců z migrace odebrani-pristupu se blok vůbec neukáže.
+const ODEBRANI_PRISTUPU_LHUTA_H = 48
+function odebraniPristupuJde(profile) {
+  return !!profile && ('odebrani_pristupu_zadost_at' in profile) && souhlasJeOsvc(profile)
+}
+function _odebraniCas(d) {
+  return d.toLocaleDateString('cs-CZ') + ' ' + d.toLocaleTimeString('cs-CZ', { hour: '2-digit', minute: '2-digit' })
+}
+function odebraniPristupuHtml(profile) {
+  if (!odebraniPristupuJde(profile)) return ''
+  const kdy = profile.odebrani_pristupu_zadost_at
+  if (!kdy) return `<div id="odebrani-pristupu-blok" style="margin-top:14px;font-size:12.5px;color:var(--text3);line-height:1.55">Aplikaci používáte dobrovolně. Pokud chcete přístup do aplikace odebrat, <b id="odebrani-pristupu-klik" role="button" tabindex="0" onclick="pozadatOOdebraniPristupu()" onkeydown="if(event.key==='Enter')pozadatOOdebraniPristupu()" style="color:var(--text2);cursor:pointer">klikněte zde</b> — kancelář vám ho do ${ODEBRANI_PRISTUPU_LHUTA_H} hodin odebere. Potom už v aplikaci nic nezapíšete, jen si stáhnete své výkazy a faktury. Hodiny a faktury zapsané do té doby u nás zůstávají kvůli vyúčtování.</div>`
+  const d = new Date(kdy)
+  const konec = isNaN(d) ? null : new Date(d.getTime() + ODEBRANI_PRISTUPU_LHUTA_H * 3600000)
+  const poLhute = !!konec && Date.now() > konec.getTime()
+  return `<div id="odebrani-pristupu-blok" style="margin-top:14px;padding:12px 14px;background:#fdecea;border:1.5px solid var(--red);border-radius:10px">
+    <div style="font-size:12.5px;font-weight:700;color:var(--red)">Požádal(a) jste o odebrání přístupu${isNaN(d) ? '' : ' (' + escAttr(_odebraniCas(d)) + ')'}</div>
+    <div style="font-size:12px;color:var(--text2);margin-top:4px;line-height:1.5">${poLhute
+      ? `Lhůta ${ODEBRANI_PRISTUPU_LHUTA_H} hodin už uplynula — ozvěte se prosím kanceláři na info@ukazka.cz.`
+      : `Kancelář vám přístup odebere do ${ODEBRANI_PRISTUPU_LHUTA_H} hodin${konec ? ', nejpozději ' + escAttr(_odebraniCas(konec)) : ''}.`} Do té doby aplikaci dál běžně používáte a žádost můžete vzít zpět.</div>
+    <button onclick="zrusitZadostOOdebraniPristupu()" style="width:100%;margin-top:10px;padding:9px;background:#fff;color:var(--red);border:1.5px solid var(--red);border-radius:8px;font-size:12.5px;font-weight:700;cursor:pointer;font-family:inherit">Vzít žádost zpět</button>
+  </div>`
+}
+// Překreslí jen tenhle blok — zbytek Profilu (rozepsaný telefon, faktura) zůstane, jak je.
+function _odebraniPristupuPrekresli() {
+  const el = document.getElementById('odebrani-pristupu-blok')
+  if (el && currentProfile) el.outerHTML = odebraniPristupuHtml(currentProfile)
+}
+// Zapíše (chci = true) nebo zruší žádost. Když zápis neodpoví nebo vyprší čas, mohl
+// přesto dorazit — stav se proto přečte znovu a hláška se řídí tím, co v databázi
+// opravdu je. Vrací null, když se mezitím přihlásil někdo jiný.
+let _odebraniPristupuBezi = false
+async function _odebraniPristupuZapis(chci) {
+  const uid = currentUser.id
+  const withTimeout = (p, ms) => Promise.race([p, new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), ms))])
+  let radek, chyba = null
+  try {
+    const { data, error } = await withTimeout(sb.from('profiles')
+      .update({ odebrani_pristupu_zadost_at: chci ? new Date().toISOString() : null })
+      .eq('id', uid).select('id, is_active, odebrani_pristupu_zadost_at'), 12000)
+    if (error) chyba = error
+    else if (data && data.length) radek = data[0]
+  } catch (e) { chyba = e }
+  if (!radek) {
+    try {
+      const r = await withTimeout(sb.from('profiles').select('id, is_active, odebrani_pristupu_zadost_at').eq('id', uid).maybeSingle(), 8000)
+      if (!r.error && r.data) radek = r.data
+    } catch (e) {}
+  }
+  if (!currentUser || currentUser.id !== uid || !currentProfile) return null
+  if (radek) currentProfile.odebrani_pristupu_zadost_at = radek.odebrani_pristupu_zadost_at || null
+  return {
+    ok: !!radek && !!radek.odebrani_pristupu_zadost_at === !!chci,
+    znamo: !!radek,
+    odebrano: !!radek && radek.is_active === false,
+    chyba
+  }
+}
+async function pozadatOOdebraniPristupu() {
+  if (!currentUser || !odebraniPristupuJde(currentProfile) || _odebraniPristupuBezi) return
+  if (!confirm('Opravdu chcete požádat o odebrání přístupu do aplikace?\n\nKancelář StavKo vám přístup do ' + ODEBRANI_PRISTUPU_LHUTA_H + ' hodin odebere. Potom už v aplikaci nic nezapíšete — jen si stáhnete své výkazy a faktury. Do té doby aplikaci dál běžně používáte a žádost můžete vzít zpět.')) return
+  _odebraniPristupuBezi = true
+  try {
+    const r = await _odebraniPristupuZapis(true)
+    if (!r) return
+    showToast(r.ok ? '✅ Žádost o odebrání přístupu odeslána'
+      : (r.znamo ? '❌ Žádost se neuložila' + (r.chyba ? ': ' + r.chyba.message : '') : '⚠️ Nepodařilo se ověřit, jestli se žádost uložila — zkuste to prosím znovu'))
+    _odebraniPristupuPrekresli()
+  } finally { _odebraniPristupuBezi = false }
+}
+async function zrusitZadostOOdebraniPristupu() {
+  if (!currentUser || !odebraniPristupuJde(currentProfile) || _odebraniPristupuBezi) return
+  _odebraniPristupuBezi = true
+  try {
+    const r = await _odebraniPristupuZapis(false)
+    if (!r) return
+    showToast(r.ok ? '✅ Žádost jste vzali zpět — přístup vám zůstává'
+      : (r.odebrano ? 'ℹ️ Kancelář vám přístup mezitím odebrala — žádost už vzít zpět nejde. Napište prosím na info@ukazka.cz.'
+        : (r.znamo ? '❌ Žádost se nepodařilo vzít zpět' + (r.chyba ? ': ' + r.chyba.message : '') : '⚠️ Nepodařilo se ověřit, jestli je žádost zrušená — zkuste to prosím znovu')))
+    _odebraniPristupuPrekresli()
+  } finally { _odebraniPristupuBezi = false }
+}
+
+// Po odebrání přístupu na vlastní žádost: jen ke čtení — odeslané faktury (PDF)
+// a výkazy hodin po týdnech. Výkaz se skládá z docházky stejně jako v appce, ale
+// přes náhled (returnHtmlOnly), který nic neukládá.
+async function nactiStazeniPoOdebrani() {
+  const box = document.getElementById('pending-stahnout')
+  if (!box || !currentUser) return
+  const uid = currentUser.id
+  const nadpis = t => `<div style="font-size:12px;font-weight:800;color:var(--text3);text-transform:uppercase;letter-spacing:.4px;margin:14px 0 4px">${t}</div>`
+  const obal = h => `<div style="background:#fff;border:1px solid var(--brd);border-radius:10px;padding:4px 14px 10px">${h}</div>`
+  const hlaska = t => `<div style="font-size:13px;color:var(--text3);padding:8px 0">${t}</div>`
+  box.style.display = 'block'
+  box.innerHTML = obal(hlaska('Načítám faktury a výkazy…'))
+  const bezpecne = p => Promise.resolve(p).catch(e => ({ data: null, error: e || { message: 'chyba' } }))
+  const [rF, rT] = await Promise.all([
+    bezpecne(sb.from('worker_invoices')
+      .select('id, invoice_number, kw, kw_year, period_from, period_to, total_amount, pdf_url, sent_at')
+      .eq('worker_id', uid).order('sent_at', { ascending: false }).limit(1000)),
+    bezpecne(_tydnyDochazkyPracovnika())
+  ])
+  // Mezitím se odhlásil nebo přihlásil někdo jiný — pozdní odpověď se zahodí.
+  if (!currentUser || currentUser.id !== uid || document.getElementById('pending-app').style.display === 'none') return
+
+  let faktury
+  if (rF.error || !rF.data) faktury = hlaska('Faktury se nepodařilo načíst. Zkuste stránku načíst znovu.')
+  else if (!rF.data.length) faktury = hlaska('Žádné odeslané faktury.')
+  else faktury = rF.data.map(r => {
+    const obdobi = r.kw ? ('KW ' + r.kw + '/' + r.kw_year) : (r.period_from ? (_invDmy(r.period_from) + ' – ' + _invDmy(r.period_to)) : '')
+    const url = odkazStahnoutNemecky(bezpecneDokumentyUrl(r.pdf_url),
+      nazevFakturyZeSlozky({ invoice_number: r.invoice_number, kw: r.kw, worker: { full_name: currentProfile?.full_name } }) + '.pdf')
+    return `<div data-stahnout-fakturu style="display:flex;align-items:center;gap:10px;padding:9px 0;border-bottom:1px solid var(--brd)">
+      <div style="min-width:0;flex:1">
+        <div style="font-size:13px;font-weight:800;color:var(--text)">č. ${escAttr(r.invoice_number || '—')}</div>
+        <div style="font-size:11.5px;color:var(--text3)">${escAttr(obdobi)} · ${(Number(r.total_amount) || 0).toFixed(2)} €</div>
+      </div>
+      ${url ? `<a href="${escAttr(url)}" target="_blank" rel="noopener" style="flex-shrink:0;padding:7px 10px;font-size:12px;background:#211D1A;color:#E8A13A;border-radius:7px;text-decoration:none;font-weight:700">Stáhnout</a>`
+        : '<span style="flex-shrink:0;font-size:11px;color:var(--text3)">bez souboru</span>'}
+    </div>`
+  }).join('')
+
+  let vykazy
+  if (rT.error || !rT.data) vykazy = hlaska('Výkazy se nepodařilo načíst. Zkuste stránku načíst znovu.')
+  else {
+    const tydny = new Map()
+    rT.data.forEach(r => {
+      if (!r.kw || !r.kw_year) return
+      const k = r.kw + '/' + r.kw_year
+      const t = tydny.get(k) || { kw: Number(r.kw), rok: Number(r.kw_year), hodin: 0 }
+      t.hodin += Number(r.total_hours) || 0
+      tydny.set(k, t)
+    })
+    const rady = [...tydny.values()].sort((a, b) => (b.rok - a.rok) || (b.kw - a.kw))
+    vykazy = !rady.length ? hlaska('Žádná zapsaná docházka.') : rady.map(t => `<div data-stahnout-vykaz style="display:flex;align-items:center;justify-content:space-between;gap:10px;padding:9px 0;border-bottom:1px solid var(--brd)">
+      <div style="font-size:13px;color:var(--text)"><b>Týden ${t.kw}/${t.rok}</b> <span style="font-size:11.5px;color:var(--text3)">· ${(Math.round(t.hodin * 100) / 100)} h</span></div>
+      <button onclick="otevriVykazPoOdebrani(${t.kw},${t.rok})" style="flex-shrink:0;padding:7px 10px;font-size:12px;background:#211D1A;color:#E8A13A;border:none;border-radius:7px;cursor:pointer;font-family:inherit;font-weight:700">Otevřít</button>
+    </div>`).join('')
+  }
+  box.innerHTML = nadpis('Moje faktury') + obal(faktury) + nadpis('Výkazy hodin') + obal(vykazy)
+}
+async function otevriVykazPoOdebrani(week, year) {
+  if (!currentUser) return
+  const uid = currentUser.id, jmeno = currentProfile?.full_name || 'Pracovník'
+  try {
+    const html = await exportWorkerKW(uid, jmeno, week, year, 'cs', null, true)
+    if (!html || !currentUser || currentUser.id !== uid) return
+    printInPage(html, ['Stundennachweis', 'KW' + week, year, bezpecnyNazevSouboru(jmeno)].filter(Boolean).join('_') + '.html')
+  } catch (e) {
+    showToast('❌ Výkaz se nepodařilo připravit' + (e && e.message ? ': ' + e.message : ''))
+  }
+}
+
 function loadMobProfil(profile) {
   const initials = (profile.full_name||'?').split(' ').map(n=>n[0]).join('').slice(0,2).toUpperCase()
   const avatarInner = profile.avatar_url
@@ -32934,6 +33117,7 @@ function loadMobProfil(profile) {
       <div style="display:flex;justify-content:space-between;padding:9px 0;border-bottom:1px solid var(--brd)"><span style="font-size:12px;color:var(--text3)">${l}</span><span style="font-size:13px;font-weight:600;color:#211D1A">${escAttr(v)}</span></div>`).join('')}
       <div id="mob-puntiky"></div>
       ${zadostOSmazaniHtml(profile)}
+      ${odebraniPristupuHtml(profile)}
       ${(isMobile() && !isAppInstalled()) ? `
       <button onclick="installApp()" style="width:100%;margin-top:14px;padding:12px;background:#f4efe7;color:#211D1A;border:1.5px solid var(--brd);border-radius:10px;font-size:13px;font-weight:700;cursor:pointer;font-family:inherit;display:flex;align-items:center;justify-content:center;gap:8px"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:1em;height:1em;flex-shrink:0"><rect x="5" y="2" width="14" height="20" rx="2"/><path d="M12 18h.01"/></svg> Stáhnout aplikaci do telefonu</button>` : ''}
     </div>`
@@ -36053,6 +36237,87 @@ async function nactiPresunyMmiNaNastenku() {
   </div>`
 }
 const mmiKlicPresunu = (p) => MMI_KLIC_VIDENO + p.clovek_id + '|' + p.den + '|' + p.kdy
+
+// KDO ODEBÍRÁ PŘÍSTUP (majitel 23. 11. 2026: „nám jako adminům se to ukáže na
+// dashboardu, tenhle odebírá přístup, a do 48 h se odebere"). Člověk o to požádal
+// sám v Profilu (pozadatOOdebraniPristupu); odebírá kancelář ručně tlačítkem tady.
+// Po odebrání je to běžná archivace (jako „Odebrat přístup" v Přístupech) + značka
+// pristup_odebran_na_zadost_at, podle které dostane obrazovku se staženími.
+async function nactiOdebraniPristupuNaNastenku() {
+  const box = document.getElementById('dash-odebrani-pristupu')
+  if (!box || !_jeAdminPrihlasen()) return
+  const skryt = () => { box.style.display = 'none'; box.innerHTML = '' }
+  // Bez migrace sloupec není — dotaz by jen plnil deník chybou „column does not exist".
+  if (!('odebrani_pristupu_zadost_at' in currentProfile)) return skryt()
+  const { data, error } = await sb.from('profiles')
+    .select('id, full_name, email, team_id, odebrani_pristupu_zadost_at')
+    .in('role', ['osvec', 'partak']).eq('is_active', true)
+    .not('odebrani_pristupu_zadost_at', 'is', null)
+    .order('odebrani_pristupu_zadost_at', { ascending: true })
+  // Chyba čtení není „nikdo nežádá" — zůstane, co tu bylo naposledy.
+  if (error) { console.warn('[plocha] odebrání přístupu se nenačetlo:', error.message); return }
+  const lide = (data || []).filter(w => w.odebrani_pristupu_zadost_at && !jeSkrytaFirmaPracovnika(w))
+  if (!lide.length) return skryt()
+  const ted = Date.now()
+  const stav = iso => {
+    const x = new Date(iso)
+    if (isNaN(x)) return { kdy: '', zbyva: '', po: false }
+    const ms = x.getTime() + ODEBRANI_PRISTUPU_LHUTA_H * 3600000 - ted
+    const h = Math.floor(Math.abs(ms) / 3600000), m = Math.floor(Math.abs(ms) / 60000) % 60
+    const doba = h ? h + ' h' : m + ' min'
+    return { kdy: _odebraniCas(x), po: ms < 0, zbyva: ms < 0 ? `lhůta ${ODEBRANI_PRISTUPU_LHUTA_H} h uplynula před ${doba}` : 'zbývá ' + doba }
+  }
+  const n = lide.length
+  box.style.display = 'block'
+  box.innerHTML = `<div data-odebrani-pristupu style="background:var(--amber-l);border-left:4px solid var(--amber);border-radius:8px;padding:12px 16px;margin-bottom:16px">
+    <div style="font-size:13px;font-weight:700;color:var(--amber);margin-bottom:2px">🚪 ${n} ${n === 1 ? 'člověk odebírá' : (n < 5 ? 'lidé odebírají' : 'lidí odebírá')} přístup do aplikace</div>
+    <div style="font-size:11.5px;color:var(--text3);margin-bottom:6px">Požádali o to sami v Profilu. Přístup odeberte do ${ODEBRANI_PRISTUPU_LHUTA_H} hodin od žádosti.</div>
+    ${lide.map(w => {
+      const s = stav(w.odebrani_pristupu_zadost_at)
+      return `<div data-odebira="${escAttr(w.id)}" style="display:flex;justify-content:space-between;align-items:center;gap:8px;padding:6px 0;border-bottom:1px solid rgba(0,0,0,0.08)">
+        <div style="min-width:0">
+          <div style="font-size:13px;font-weight:600">${escAttr(w.full_name || '—')}</div>
+          <div style="font-size:11px;color:var(--text3)">požádal(a) ${escAttr(s.kdy)} · <span style="${s.po ? 'color:var(--red);font-weight:700' : ''}">${escAttr(s.zbyva)}</span></div>
+        </div>
+        <div style="display:flex;gap:6px;flex-shrink:0">
+          <button onclick="openWorkerModal('${jsStr(w.id)}')" style="padding:6px 11px;background:#fff;color:var(--text2,#444);border:1px solid var(--brd);border-radius:6px;cursor:pointer;font-size:12px;font-weight:700;font-family:inherit;white-space:nowrap">Otevřít</button>
+          <button onclick="odeberPristupNaZadost('${jsStr(w.id)}','${jsStr(w.full_name || '')}')" style="padding:6px 12px;background:var(--red);color:#fff;border:none;border-radius:6px;cursor:pointer;font-size:12px;font-weight:700;font-family:inherit;white-space:nowrap">Odebrat přístup</button>
+        </div>
+      </div>`
+    }).join('')}
+  </div>`
+}
+const _odebiraniBezi = new Set()
+async function odeberPristupNaZadost(workerId, workerName) {
+  if (_odebiraniBezi.has(workerId)) return
+  _odebiraniBezi.add(workerId)
+  try {
+    // Dnešní otevřená směna: po odebrání si odchod sám nezapíše — ať to kancelář ví předem.
+    let smena = ''
+    try {
+      const { data: otev } = await sb.from('attendance').select('check_in')
+        .eq('worker_id', workerId).eq('work_date', localDateStr()).is('check_out', null).limit(1)
+      if (otev && otev.length) smena = '\n\nPOZOR: dnes má otevřenou směnu (příchod ' + String(otev[0].check_in || '').slice(0, 5)
+        + '). Po odebrání si odchod sám nezapíše — zapište ho za něj.'
+    } catch (e) { console.warn('[odebrání přístupu] dnešní směna se nenačetla:', e?.message) }
+    if (!confirm(`Odebrat přístup: ${workerName}?\n\nPožádal(a) o to sám/sama v Profilu. Do aplikace už nic nezapíše, jen si stáhne své výkazy a faktury.\n\nZůstane v Přístupech (tam jde přístup obnovit), z ostatních seznamů zmizí. Historie zůstane celá.` + smena)) return
+    // Podmíněně: kdo žádost mezitím vzal zpět (nebo už je odebraný), toho se zápis nedotkne.
+    const { data, error } = await sb.from('profiles')
+      .update({ is_active: false, registration_status: 'removed', pristup_odebran_na_zadost_at: new Date().toISOString() })
+      .eq('id', workerId).eq('is_active', true).not('odebrani_pristupu_zadost_at', 'is', null)
+      .select('id,is_active')
+    if (error) { showToast('❌ Chyba: ' + error.message); return }
+    if (!data || !data.length || data[0].is_active !== false) {
+      showToast('ℹ️ Nic se nezměnilo — žádost mezitím vzal(a) zpět, nebo už je vyřízená')
+      nactiOdebraniPristupuNaNastenku()
+      return
+    }
+    showToast(`✅ Přístup odebrán: ${workerName}`)
+    nactiOdebraniPristupuNaNastenku()
+    // Ze seznamu pracovníků musí zmizet hned (stejně jako po odebrání v Přístupech).
+    try { loadWorkers() } catch (e) {}
+  } finally { _odebiraniBezi.delete(workerId) }
+}
 
 // NULOVÁ HODINOVKA NEBO PROVIZE NA NÁSTĚNCE. Majitel 31. 10. 2026: „pokud je
 // zadaná nula, ať už v provizích nebo v hodinovce toho člověka, musí mě to
