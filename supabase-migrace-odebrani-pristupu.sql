@@ -108,9 +108,10 @@ begin
     end if;
   end if;
 
-  -- Přístup ztrácí člověk, který o to sám požádal — ať už tlačítkem na Přehledu,
-  -- nebo v Přístupech: značka se doplní sama, aby dostal obrazovku se staženími.
-  if old.is_active is true and new.is_active is not true
+  -- Kancelář odebírá přístup člověku, který o to sám požádal — ať už tlačítkem na
+  -- Přehledu, nebo v Přístupech: značka se doplní sama, aby dostal obrazovku se
+  -- staženími. Jen u zápisu kanceláře (pracovník si značku nezíská ani takhle).
+  if v_duveryhodny and old.is_active is true and new.is_active is not true
      and new.odebrani_pristupu_zadost_at is not null
      and new.pristup_odebran_na_zadost_at is null then
     new.pristup_odebran_na_zadost_at := now();
