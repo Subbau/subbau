@@ -31978,7 +31978,7 @@ function odebraniPristupuHtml(profile) {
     <div style="font-size:12px;color:var(--text2);margin-top:4px;line-height:1.5">${poLhute
       ? `Lhůta ${ODEBRANI_PRISTUPU_LHUTA_H} hodin už uplynula — ozvěte se prosím kanceláři na info@subbau.cz.`
       : `Kancelář vám přístup odebere do ${ODEBRANI_PRISTUPU_LHUTA_H} hodin${konec ? ', nejpozději ' + escAttr(_odebraniCas(konec)) : ''}.`} Do té doby aplikaci dál běžně používáte a žádost můžete vzít zpět.</div>
-    <button onclick="zrusitZadostOOdebraniPristupu()" style="width:100%;margin-top:10px;padding:9px;background:#fff;color:var(--red);border:1.5px solid var(--red);border-radius:8px;font-size:12.5px;font-weight:700;cursor:pointer;font-family:inherit">Vzít žádost zpět</button>
+    <button onclick="zrusitZadostOOdebraniPristupu('${jsStr(kdy)}')" style="width:100%;margin-top:10px;padding:9px;background:#fff;color:var(--red);border:1.5px solid var(--red);border-radius:8px;font-size:12.5px;font-weight:700;cursor:pointer;font-family:inherit">Vzít žádost zpět</button>
   </div>`
 }
 // Překreslí jen tenhle blok — zbytek Profilu (rozepsaný telefon, faktura) zůstane, jak je.
@@ -31993,9 +31993,12 @@ function _odebraniPristupuPrekresli() {
 // neříká „neuložilo se", ale „nevíme", a až zápis doběhne, Profil se podle něj dorovná.
 // Vrací null, když se mezitím přihlásil někdo jiný.
 let _odebraniPristupuBezi = false
-async function _odebraniPristupuZapis(chci) {
+let _odebraniZmenaKdy = 0   // kdy tahle záložka naposledy sama změnila stav žádosti (starší odpověď heartbeatu ho pak nepřepíše)
+async function _odebraniPristupuZapis(chci, zobrazena) {
   const uid = currentUser.id
-  const puvodni = currentProfile.odebrani_pristupu_zadost_at || null
+  // Zpět se bere žádost, která je vidět v rámečku (její čas nese tlačítko) — profil v paměti
+  // už může mít novější, když se překreslení odložilo (rozepsaný telefon).
+  const puvodni = (chci ? null : zobrazena) || currentProfile.odebrani_pristupu_zadost_at || null
   const SLOUPCE = 'id, is_active, odebrani_pristupu_zadost_at, pristup_odebran_na_zadost_at'
   const withTimeout = (p, ms) => Promise.race([p, new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), ms))])
   const prevezmi = radek => {
@@ -32013,10 +32016,15 @@ async function _odebraniPristupuZapis(chci) {
       else if (data && data.length) radek = data[0]
     } catch (e) {
       chyba = e; nejiste = true
-      zapis.then(r => {
-        if (!r || r.error || !r.data || !r.data.length) return
+      // Až zápis doběhne, přečte se stav ČERSTVĚ — sama pozdní odpověď může být starší
+      // než to, co mezitím přišlo odjinud (žádost zrušená na druhém zařízení).
+      zapis.then(async () => {
         if (!currentUser || currentUser.id !== uid || !currentProfile) return
-        prevezmi(r.data[0])
+        let r
+        try { r = await sb.from('profiles').select(SLOUPCE).eq('id', uid).maybeSingle() } catch (x) { return }
+        if (!r || r.error || !r.data) return
+        if (!currentUser || currentUser.id !== uid || !currentProfile || _odebraniPristupuBezi) return
+        prevezmi(r.data); _odebraniZmenaKdy = Date.now()
         if (!odebranoZaBehu()) _odebraniPristupuPrekresli()
       }).catch(() => {})
     }
@@ -32028,7 +32036,7 @@ async function _odebraniPristupuZapis(chci) {
     } catch (e) {}
   }
   if (!currentUser || currentUser.id !== uid || !currentProfile) return null
-  if (radek) prevezmi(radek)
+  if (radek) { prevezmi(radek); _odebraniZmenaKdy = Date.now() }
   const ted = radek ? (radek.odebrani_pristupu_zadost_at || null) : undefined
   return {
     ok: !!radek && radek.is_active !== false && !!ted === !!chci,
@@ -32054,11 +32062,11 @@ async function pozadatOOdebraniPristupu() {
     if (!odebranoZaBehu()) _odebraniPristupuPrekresli()
   } finally { _odebraniPristupuBezi = false }
 }
-async function zrusitZadostOOdebraniPristupu() {
+async function zrusitZadostOOdebraniPristupu(zobrazena) {
   if (!currentUser || !odebraniPristupuJde(currentProfile) || _odebraniPristupuBezi) return
   _odebraniPristupuBezi = true
   try {
-    const r = await _odebraniPristupuZapis(false)
+    const r = await _odebraniPristupuZapis(false, zobrazena)
     if (!r) return
     showToast(r.ok ? '✅ Žádost jste vzali zpět — přístup vám zůstává'
       : (r.odebrano ? 'ℹ️ Kancelář vám přístup mezitím odebrala — žádost už vzít zpět nejde. Napište prosím na info@subbau.cz.'
@@ -32084,32 +32092,42 @@ function odebranoZaBehu() {
   // Pojistka proti smyčce: jedno přenačtení za minutu.
   let posledni = 0
   try { posledni = Number(sessionStorage.getItem('sb_odebrano_restart')) || 0 } catch (e) {}
-  if (Date.now() - posledni < 60000) { showPending('odebrano'); return true }
-  try { sessionStorage.setItem('sb_odebrano_restart', String(Date.now())) } catch (e) {}
-  _odebranoPrenacti()
+  const restart = () => {
+    try { sessionStorage.setItem('sb_odebrano_restart', String(Date.now())) } catch (e) {}
+    _odebranoPrenacti()
+  }
+  const zbyva = 60000 - (Date.now() - posledni)
+  if (zbyva > 0) {
+    // Obrazovka bez přístupu hned; okna otevřená nad ní (rozepsaný odchod) zavře až
+    // přenačtení, které proběhne, jakmile minuta uplyne.
+    showPending('odebrano')
+    if (!window._odebranoRestartCeka) window._odebranoRestartCeka = setTimeout(() => { window._odebranoRestartCeka = null; restart() }, zbyva + 200)
+    return true
+  }
+  restart()
   return true
 }
-// Po návratu do appky (telefon spal, živé spojení neběželo): komu běží žádost, tomu
-// se stav přístupu přečte znovu. Jeden malý dotaz; lidí bez žádosti se netýká.
-let _odebraniKontrolaKdy = 0
-async function odebraniZkontrolujPoNavratu() {
-  if (!currentUser || !currentProfile || !currentProfile.odebrani_pristupu_zadost_at) return
-  if (!odebraniPristupuJde(currentProfile) || _odebraniPristupuBezi) return
-  if (Date.now() - _odebraniKontrolaKdy < 30000) return
-  _odebraniKontrolaKdy = Date.now()
-  const uid = currentUser.id, bylo = currentProfile.odebrani_pristupu_zadost_at
-  let r
-  try { r = await sb.from('profiles').select('id, is_active, odebrani_pristupu_zadost_at, pristup_odebran_na_zadost_at').eq('id', uid).maybeSingle() } catch (e) { return }
-  if (!r || r.error || !r.data) return
-  if (!currentUser || currentUser.id !== uid || !currentProfile || _odebraniPristupuBezi) return
-  if (currentProfile.odebrani_pristupu_zadost_at !== bylo) return   // mezitím změněno odjinud (živé spojení, vlastní klik)
-  currentProfile.odebrani_pristupu_zadost_at = r.data.odebrani_pristupu_zadost_at || null
-  if (r.data.is_active === false) { currentProfile.is_active = false; currentProfile.pristup_odebran_na_zadost_at = r.data.pristup_odebran_na_zadost_at || null }
-  if (!odebranoZaBehu()) _odebraniPristupuPrekresli()
+// Stav přístupu chodí rovnou s heartbeatem (pingPresence — při návratu do appky a
+// každých pět minut, žádný dotaz navíc). Když živé spojení neběželo (telefon spal)
+// a kancelář mezitím přístup na žádost odebrala, appka se zavře; žádost podaná nebo
+// vzatá zpět na jiném zařízení se v Profilu dorovná.
+function odebraniPristupuZHeartbeatu(uid, radek, odeslano) {
+  if (!radek || !currentUser || currentUser.id !== uid || !currentProfile || _odebraniPristupuBezi) return
+  if (radek.is_active === false && radek.pristup_odebran_na_zadost_at) {
+    currentProfile.is_active = false
+    currentProfile.pristup_odebran_na_zadost_at = radek.pristup_odebran_na_zadost_at
+    currentProfile.odebrani_pristupu_zadost_at = radek.odebrani_pristupu_zadost_at || null
+    odebranoZaBehu()
+    return
+  }
+  if (_odebraniZmenaKdy >= odeslano) return   // tahle záložka stav mezitím změnila sama — odpověď je starší
+  const ms = v => v ? new Date(v).getTime() : 0
+  const nove = radek.odebrani_pristupu_zadost_at || null
+  if (ms(nove) !== ms(currentProfile.odebrani_pristupu_zadost_at)) {
+    currentProfile.odebrani_pristupu_zadost_at = nove
+    _odebraniPristupuPrekresli()
+  }
 }
-document.addEventListener('visibilitychange', () => {
-  if (document.visibilityState === 'visible') odebraniZkontrolujPoNavratu().catch(() => {})
-})
 
 // Po odebrání přístupu na vlastní žádost: jen ke čtení — odeslané faktury (PDF)
 // a výkazy hodin po týdnech. Výkaz se skládá z docházky stejně jako v appce, ale
@@ -35428,8 +35446,9 @@ function _odebraniVykresli() {
 }
 function odebraniPristupuTik() {
   if (!_jeAdminPrihlasen() || document.visibilityState !== 'visible' || _activeAdminView() !== 'dashboard') return
+  // Přepočet z načteného vždy — i když se nové načtení nepovede, lhůta a barva sedí.
+  _odebraniVykresli()
   if (Date.now() - _odebraniNactenoKdy > 5 * 60000) nactiOdebraniPristupuNaNastenku().catch(e => console.warn('[plocha] odebrání přístupu:', e))
-  else _odebraniVykresli()
 }
 // Živá změna profilu: týká se pruhu? (Heartbeat a jiné úpravy profilu dotaz nespouštějí.)
 function odebraniPristupuSeTyka(payload) {
@@ -37738,13 +37757,20 @@ function heartbeatDoDeniku(druh, e) {
 async function pingPresence(userId) {
   if (!userId || !navigator.onLine) return
   try {
+    // S heartbeatem se rovnou vrací stav přístupu (jen když sloupce z migrace existují):
+    // viz odebraniPristupuZHeartbeatu.
+    const sPristupem = !!currentUser && currentUser.id === userId && !!currentProfile && ('pristup_odebran_na_zadost_at' in currentProfile)
+    const odeslano = Date.now()
     const { data, error } = await sb.from('profiles')
       .update({ last_seen_at: new Date().toISOString() })
       .eq('id', userId)
-      .select('id, last_seen_at')
+      .select(sPristupem ? 'id, last_seen_at, is_active, odebrani_pristupu_zadost_at, pristup_odebran_na_zadost_at' : 'id, last_seen_at')
     if (error) { console.warn('[heartbeat] zápis selhal:', error.message); heartbeatDoDeniku('chyba', error); return }
     if (!data || !data.length) { console.warn('[heartbeat] UPDATE neovlivnil žádný řádek (RLS?) pro', userId); heartbeatDoDeniku('nic', null) }
-    else { _heartbeatSelhani = 0; console.log('[heartbeat] last_seen_at zapsáno:', data[0].last_seen_at) }
+    else {
+      _heartbeatSelhani = 0; console.log('[heartbeat] last_seen_at zapsáno:', data[0].last_seen_at)
+      if (sPristupem) try { odebraniPristupuZHeartbeatu(userId, data[0], odeslano) } catch (x) { console.warn('[heartbeat] stav přístupu:', x && x.message) }
+    }
   } catch(e) { console.warn('[heartbeat] výjimka:', e); heartbeatDoDeniku('vyjimka', e) }
 }
 function startHeartbeat(userId) {
