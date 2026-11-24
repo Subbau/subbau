@@ -9722,7 +9722,7 @@ async function _initAppInner(user) {
     startHeartbeat(user.id)
     // Komu kancelář odebrala přístup na jeho vlastní žádost (23. 11. 2026), tomu už
     // nic nevyskakuje — ani doklady, ani páteční výkaz: nic z toho nemá kam zapsat.
-    const odebranoNaZadost = !profile.is_active && profile.registration_status !== 'pending' && !!profile.pristup_odebran_na_zadost_at
+    const odebranoNaZadost = jeOdebranNaZadost(profile)
     // Chybí povinné dokumenty? Vyskočí okno, které jde zavřít jen křížkem.
     if (!odebranoNaZadost) setTimeout(() => { try { checkMissingDocsAlert() } catch(e) { console.warn(e) } }, 1200)
     // Zaměstnanec firmy neřeší fakturaci ani nic kolem živnosti — schovej mu to.
@@ -11256,6 +11256,7 @@ function showPending(mode) {
     if (ttl) ttl.textContent = 'Přístup do aplikace je odebrán'
     if (txt) txt.innerHTML = 'Přístup jsme vám odebrali na vaši žádost' + (isNaN(kdy) ? '' : ' (' + escAttr(kdy.toLocaleDateString('cs-CZ')) + ')')
       + '. V aplikaci už nic nezapíšete.<br><br>Své faktury a výkazy hodin si můžete stáhnout níže. Kdybyste chtěli přístup zpět, napište nám.'
+    try { hideBanner() } catch (e) {}   // lišta oznámení (s „Porozuměl jsem") sem nepatří
     nactiStazeniPoOdebrani()
   } else if (mode === 'removed') {
     if (ico) ico.textContent = '🔒'
@@ -21161,6 +21162,7 @@ function startOsvecRealtime() {
       if (payload && payload.new) {
         if (currentProfile) Object.assign(currentProfile, payload.new)
       }
+      window._profilZiveKdy = Date.now()   // viz _odebraniPristupuZapis (pořadí odpovědi zápisu a živé změny)
       // Kancelář právě odebrala přístup na žádost → appka se zavře hned (viz odebranoZaBehu).
       if (odebranoZaBehu()) return
       // Docházka se obnovuje i po heartbeatu, jako dřív (stav směny po návratu do appky)
@@ -32920,7 +32922,15 @@ async function zrusitZadostOSmazaniUctu() {
 // Bez sloupců z migrace odebrani-pristupu se blok vůbec neukáže.
 const ODEBRANI_PRISTUPU_LHUTA_H = 48
 function odebraniPristupuJde(profile) {
-  return !!profile && ('odebrani_pristupu_zadost_at' in profile) && souhlasJeOsvc(profile)
+  // Role přesně tak, jak ji čte Přehled kanceláře (nactiOdebraniPristupuNaNastenku) —
+  // žádost, kterou by kancelář neviděla, se nenabízí.
+  return !!profile && ('odebrani_pristupu_zadost_at' in profile) && (profile.role === 'osvec' || profile.role === 'partak') && souhlasJeOsvc(profile)
+}
+// Člověk, kterému kancelář odebrala přístup na jeho žádost: má jen obrazovku se staženími.
+function jeOdebranNaZadost(p) {
+  p = p || currentProfile
+  return !!p && !p.is_active && p.registration_status !== 'pending' && !!p.pristup_odebran_na_zadost_at
+    && (p.role || '').trim().toLowerCase() !== 'admin'
 }
 function _odebraniCas(d) {
   return d.toLocaleDateString('cs-CZ') + ' ' + d.toLocaleTimeString('cs-CZ', { hour: '2-digit', minute: '2-digit' })
@@ -32965,6 +32975,7 @@ async function _odebraniPristupuZapis(chci, zobrazena) {
     if (radek.is_active === false) { currentProfile.is_active = false; currentProfile.pristup_odebran_na_zadost_at = radek.pristup_odebran_na_zadost_at || null }
   }
   let radek, chyba = null, nejiste = false
+  const zacatek = Date.now()
   if (chci || puvodni) {
     let q = sb.from('profiles').update({ odebrani_pristupu_zadost_at: chci ? new Date().toISOString() : null }).eq('id', uid)
     q = chci ? q.is('odebrani_pristupu_zadost_at', null) : q.eq('odebrani_pristupu_zadost_at', puvodni)
@@ -32988,7 +32999,10 @@ async function _odebraniPristupuZapis(chci, zobrazena) {
       }).catch(() => {})
     }
   }
-  if (!radek) {
+  // Bez odpovědi se stav přečte. Čte se i tehdy, když během zápisu dorazila živá změna
+  // profilu: ta může být novější než odpověď zápisu (žádost zrušená na druhém zařízení)
+  // a starší odpověď by ji v Profilu přepsala.
+  if (!radek || (window._profilZiveKdy || 0) >= zacatek) {
     try {
       const r = await withTimeout(sb.from('profiles').select(SLOUPCE).eq('id', uid).maybeSingle(), 8000)
       if (!r.error && r.data) radek = r.data
@@ -33048,22 +33062,15 @@ function odebranoZaBehu() {
   if ((currentProfile.role || '').trim().toLowerCase() === 'admin') return false
   const p = document.getElementById('pending-app')
   if (p && p.style.display !== 'none') return true   // už je na obrazovce bez přístupu
-  // Pojistka proti smyčce: jedno přenačtení za minutu.
-  let posledni = 0
-  try { posledni = Number(sessionStorage.getItem('sb_odebrano_restart')) || 0 } catch (e) {}
-  const restart = () => {
-    try { sessionStorage.setItem('sb_odebrano_restart', String(Date.now())) } catch (e) {}
-    _odebranoPrenacti()
-  }
-  const zbyva = 60000 - (Date.now() - posledni)
-  if (zbyva > 0) {
-    // Obrazovka bez přístupu hned; okna otevřená nad ní (rozepsaný odchod) zavře až
-    // přenačtení, které proběhne, jakmile minuta uplyne.
-    showPending('odebrano')
-    if (!window._odebranoRestartCeka) window._odebranoRestartCeka = setTimeout(() => { window._odebranoRestartCeka = null; restart() }, zbyva + 200)
-    return true
-  }
-  restart()
+  // Přenačtení zavře i okna otevřená nad appkou (rozepsaný odchod). Pojistka proti
+  // smyčce: nejvýš tři přenačtení za minutu — pak už jen obrazovka bez přístupu.
+  let casy = []
+  try { casy = (JSON.parse(sessionStorage.getItem('sb_odebrano_restart') || '[]') || []).filter(x => Date.now() - x < 60000) } catch (e) { casy = [] }
+  if (!Array.isArray(casy)) casy = []
+  if (casy.length >= 3) { showPending('odebrano'); return true }
+  casy.push(Date.now())
+  try { sessionStorage.setItem('sb_odebrano_restart', JSON.stringify(casy)) } catch (e) {}
+  _odebranoPrenacti()
   return true
 }
 // Stav přístupu chodí rovnou s heartbeatem (pingPresence — při návratu do appky a
@@ -36371,7 +36378,7 @@ function _odebraniVykresli() {
   const box = document.getElementById('dash-odebrani-pristupu')
   if (!box) return
   const lide = _odebraniLide.filter(w => !jeSkrytaFirmaPracovnika(w))
-  if (!lide.length) { if (box.innerHTML) box.innerHTML = ''; box.style.display = 'none'; return }
+  if (!lide.length) { if (box.innerHTML) box.innerHTML = ''; delete box.dataset.odebraniHtml; box.style.display = 'none'; return }
   const ted = Date.now()
   const stav = iso => {
     const x = new Date(iso)
@@ -49177,6 +49184,9 @@ function oznameniJeProMe(a) {
 }
 
 async function loadAnnouncement() {
+  // Komu kancelář odebrala přístup na jeho žádost, tomu se lišta neukazuje —
+  // „Porozuměl jsem" by jinak zapsalo potvrzení i z obrazovky bez přístupu.
+  if (jeOdebranNaZadost()) { hideBanner(); return }
   try {
     // Jen AKTIVNÍ oznámení. Bez téhle podmínky svítilo lidem dál i to, které admin
     // deaktivoval — zhaslo až po smazání, což deaktivaci dělalo k ničemu.
