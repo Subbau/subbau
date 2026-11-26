@@ -57,7 +57,7 @@ ok(!/odchod_/.test(API), 'odkaz pro odběratele o té poloze vůbec neví')
   }
   ok(cisto, 'v PDF výkazech se poloha při odchodu nikde nepoužívá')
 }
-ok(/Vidí to jen SubBau/.test(zdroj), 'a je u toho napsané, že to vidí jen SubBau')
+ok(/Vidí to jen Moje Stavba/.test(zdroj), 'a je u toho napsané, že to vidí jen SubBau')
 ok(!/TAHLE_VETA_TAM_NENI/.test(zdroj), 'kontrolní měření: test umí i nenajít')
 
 console.log('\n3) Jak to vypadá správci v kartě pracovníka')
