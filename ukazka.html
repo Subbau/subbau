@@ -18627,7 +18627,10 @@ async function _ulozZmenseninu(slozka, blob) {
 // Fotka míří do našeho úložiště? (avatar_url ukládá pracovník — než na adresu sáhne
 // účet správce, ověří se, že to není cizí doména.)
 function fotkaJeZNasehoUloziste(u) {
-  try { return new URL(u).origin === new URL(SUPABASE_URL).origin } catch (e) { return false }
+  try {
+    const a = new URL(u)
+    return a.origin === new URL(SUPABASE_URL).origin && a.pathname.indexOf('/storage/v1/object/public/avatars/') === 0
+  } catch (e) { return false }
 }
 // Vypadá hotová zmenšenina rozbitě? Spodní čtvrtina (a víc) řádků je jednolitá bílá
 // (plátno, na které se fotka nenakreslila) nebo jednolitá šedá (tak prohlížeč dokreslí
@@ -18639,10 +18642,12 @@ async function _zmenseninaVypadaRozbite(blob) {
     adresa = URL.createObjectURL(blob)
     const obr = await new Promise((ok, ne) => { const i = new Image(); i.onload = () => ok(i); i.onerror = ne; i.src = adresa })
     if (typeof obr.decode === 'function') { try { await obr.decode() } catch (e) { return true } }
-    const w = obr.naturalWidth, h = obr.naturalHeight
-    if (!(w > 0 && h > 0)) return true
+    if (!(obr.naturalWidth > 0 && obr.naturalHeight > 0)) return true
+    // Na místě malé kopie může ležet i velký soubor — plátno nejvýš 300 px na šířku.
+    const mer = Math.min(1, 300 / obr.naturalWidth)
+    const w = Math.max(1, Math.round(obr.naturalWidth * mer)), h = Math.max(1, Math.round(obr.naturalHeight * mer))
     c = document.createElement('canvas'); c.width = w; c.height = h
-    const x = c.getContext('2d'); x.drawImage(obr, 0, 0)
+    const x = c.getContext('2d'); x.drawImage(obr, 0, 0, w, h)
     const d = x.getImageData(0, 0, w, h).data
     let prazdnych = 0
     for (let y = h - 1; y >= 0; y--) {
@@ -18667,28 +18672,33 @@ const ZMENSENINY_VIDENO_KLIC = 'sb_zmenseniny_videno'
 function _zmenseninyVideno() {
   try { const o = JSON.parse(localStorage.getItem(ZMENSENINY_VIDENO_KLIC) || '{}'); return (o && typeof o === 'object' && !Array.isArray(o)) ? o : {} } catch (e) { return {} }
 }
-function _zmenseninyVidenoUloz(o) { try { localStorage.setItem(ZMENSENINY_VIDENO_KLIC, JSON.stringify(o)) } catch (e) {} }
-// OPRAVA ROZBITÝCH ZMENŠENIN, KTERÉ UŽ V ÚLOŽIŠTI JSOU. Běží u správce na pozadí
-// (zmenseninyNaPozadi). Projde fotky se značkou m=1, zmenšeninu stáhne a prohlédne;
-// rozbitou (nebo chybějící) vyrobí znovu z velké fotky a adrese dá nové ?v=, aby ji
-// prohlížeče i Stavbyplán načetly čerstvou. Když zmenšenina vyrobit nejde ani teď
-// (velká fotka sama není celá), značka m=1 se sundá a seznamy ukážou velkou.
+// Před zápisem se přečte, co mezitím uložila jiná záložka, a sloučí se to.
+function _zmenseninyVidenoUloz(o) { try { localStorage.setItem(ZMENSENINY_VIDENO_KLIC, JSON.stringify(Object.assign(_zmenseninyVideno(), o))) } catch (e) {} }
+// ROZBITÉ ZMENŠENINY, KTERÉ UŽ V ÚLOŽIŠTI JSOU. Běží u správce na pozadí
+// (zmenseninyNaPozadi). Projde fotky se značkou m=1, zmenšeninu stáhne a prohlédne.
+// Když vypadá rozbitě (nebo chybí), stáhne velkou fotku a zkusí si z ní zmenšeninu
+// vyrobit v paměti:
+//  - čerstvá vypadá stejně „rozbitě" → planý poplach (bílé tričko na bílém pozadí),
+//    nic se nemění;
+//  - jinak se adrese SUNDÁ značka m=1 a dá nové ?v= — seznamy hned ukážou velkou
+//    fotku. Do úložiště se tady NEZAPISUJE (zápis by mohl přepsat fotku, kterou si
+//    pracovník právě mění); novou zmenšeninu doplní týdenní doplnZmenseninyFotek.
 // Adresa má pořád tvar …/avatar.jpg?v=<čas>[&m=1] — na ten spoléhá i Stavbyplán.
 let _zmenseninyOpravaBezi = false
 async function opravRozbiteZmenseniny(znovuVse) {
   if (_zmenseninyOpravaBezi || !_jeAdminPrihlasen()) return null
   _zmenseninyOpravaBezi = true
   const kdo = currentUser && currentUser.id
-  const v = { zkontrolovano: 0, rozbitych: 0, opraveno: 0, bezZnacky: 0, neslo: 0 }
+  const v = { zkontrolovano: 0, rozbitych: 0, bezZnacky: 0, planych: 0, neslo: 0 }
+  const videno = {}
   try {
     const { data, error } = await sb.from('profiles').select('id, avatar_url').not('avatar_url', 'is', null)
     if (error) return null
-    const videno = znovuVse ? {} : _zmenseninyVideno()
+    const drive = znovuVse ? {} : _zmenseninyVideno()
     for (const p of (data || [])) {
       if (!_jeAdminPrihlasen() || !currentUser || currentUser.id !== kdo) break   // odhlášení práci ukončí
       const u = String(p.avatar_url || '')
-      const slozka = (u.match(/\/avatars\/([^/?#]+)\/avatar\.jpg(\?|$)/) || [])[1]
-      if (!slozka || !/[?&]m=1(&|$)/.test(u) || videno[p.id] === u || !fotkaJeZNasehoUloziste(u)) continue
+      if (!/\/avatars\/[^/?#]+\/avatar\.jpg\?/.test(u) || !/[?&]m=1(&|$)/.test(u) || drive[p.id] === u || !fotkaJeZNasehoUloziste(u)) continue
       try {
         const rm = await fetch(fotkaDoSeznamu(u), { mode: 'cors' })
         let rozbita
@@ -18697,21 +18707,21 @@ async function opravRozbiteZmenseniny(znovuVse) {
         else { const mb = await rm.blob(); rozbita = (await _fotkaJeCela(mb)) === false || await _zmenseninaVypadaRozbite(mb) }
         v.zkontrolovano++
         if (!rozbita) { videno[p.id] = u; continue }
-        v.rozbitych++
         const rv = await fetch(u, { mode: 'cors' })
-        if (!rv.ok) throw new Error('HTTP ' + rv.status)
-        const maMini = await _ulozZmenseninu(slozka, await rv.blob())
-        const nova = u.split('?')[0] + '?v=' + Date.now() + (maMini ? '&m=1' : '')
+        if (!rv.ok && rv.status !== 400 && rv.status !== 404) throw new Error('HTTP ' + rv.status)
+        const cerstva = rv.ok ? await _zmenseninaZBlobu(await rv.blob()) : null
+        if (cerstva && rm.ok && await _zmenseninaVypadaRozbite(cerstva)) { v.planych++; videno[p.id] = u; continue }
+        v.rozbitych++
+        const nova = u.split('?')[0] + '?v=' + Date.now()
         const { data: z, error: e } = await sb.from('profiles').update({ avatar_url: nova }).eq('id', p.id).eq('avatar_url', u).select('id')
-        if (e || !z || !z.length) throw new Error(e ? e.message : 'nezměněno')
-        videno[p.id] = nova
-        if (maMini) v.opraveno++; else v.bezZnacky++
-      } catch (e) { v.neslo++; console.warn('[zmenšeniny] oprava', p.id, e?.message || e) }
+        if (e) throw new Error(e.message)
+        if (z && z.length) v.bezZnacky++          // jinak si fotku mezitím změnil sám — nová adresa přijde na řadu příště
+      } catch (e) { v.neslo++; console.warn('[zmenšeniny] kontrola', p.id, e?.message || e) }
     }
     _zmenseninyVidenoUloz(videno)
     console.log('[zmenšeniny] kontrola: ' + JSON.stringify(v))
     // Do deníku jen počty (žádná jména ani adresy) a jen když se něco našlo.
-    if (v.rozbitych || v.neslo) { try { denikChybZapis('fotky|zmenseniny', 'Kontrola zmenšenin fotek: rozbitých ' + v.rozbitych + ', opraveno ' + v.opraveno + ', bez zmenšeniny ' + v.bezZnacky + ', nešlo ' + v.neslo, v, { zdroj: 'auto' }) } catch (x) { console.warn('[deník chyb]', x) } }
+    if (v.rozbitych || v.neslo) denikChybZapis('fotky|zmenseniny', 'Kontrola zmenšenin fotek: rozbitých ' + v.rozbitych + ', značka sundána ' + v.bezZnacky + ', planých poplachů ' + v.planych + ', nešlo ' + v.neslo, v, { zdroj: 'auto' })
     return v
   } finally { _zmenseninyOpravaBezi = false }
 }
