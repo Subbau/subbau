@@ -17609,24 +17609,151 @@ async function nahrajFotkuOverene(bucket, cesta, soubor, options) {
   return { error: posledniChyba || new Error('Nahrávání se opakovaně nepodařilo ověřit — zkuste to prosím na lepším signálu') }
 }
 
-async function _ulozZmenseninu(slozka, blob) {
-  let adresa = null
+// ZMENŠENINA SE PO SOBĚ KONTROLUJE (25. 11. 2026; majitel: „jakto že u Stavbyplánu
+// fotky nezlobí a u nás ano"). Stavbyplán ukazuje VELKOU fotku (avatar.jpg), seznamy
+// docházky zmenšeninu (avatar-mini.jpg) — a ta byla u některých lidí bílá nebo
+// dokreslená jen nahoře, přestože velká je v pořádku. Dřív se plátno nejdřív vybílilo
+// a fotka se na něj nakreslila bez kontroly: když prohlížeč nakreslil jen kus (nebo
+// nic), uložila se bílá zmenšenina, dostala značku m=1 a seznamy ji ukazovaly napořád.
+// Teď se zmenšenina uloží, jen když
+//  - zdroj je celý soubor (JPEG končí značkou konce FF D9; useknutý soubor ji nemá),
+//  - prohlížeč fotku opravdu nakreslil přes celé plátno: kreslí se na PRŮHLEDNÉ plátno
+//    a čte se průhlednost — kde se nic nenakreslilo, zůstala díra.
+// Jinak se vrací false: adresa nedostane m=1 a seznamy ukážou velkou fotku jako dřív.
+// true = celý JPEG, false = useknutý, null = není JPEG nebo se to nedá zjistit.
+async function _fotkaJeCela(blob) {
+  try {
+    if (!blob || blob.size < 4) return false
+    const zac = new Uint8Array(await blob.slice(0, 2).arrayBuffer())
+    if (zac[0] !== 0xFF || zac[1] !== 0xD8) return null
+    const kon = new Uint8Array(await blob.slice(Math.max(0, blob.size - 64)).arrayBuffer())
+    for (let i = kon.length - 2; i >= 0; i--) if (kon[i] === 0xFF && kon[i + 1] === 0xD9) return true
+    return false
+  } catch (e) { return null }
+}
+// Z fotky udělá zmenšeninu 300×400. Vrací Blob, nebo null (zdroj není celý, fotka
+// nejde přečíst nebo se nenakreslila přes celé plátno).
+async function _zmenseninaZBlobu(blob) {
+  if (await _fotkaJeCela(blob) === false) return null
+  let adresa = null, c = null
   try {
     adresa = URL.createObjectURL(blob)
     const obr = await new Promise((ok, ne) => { const i = new Image(); i.onload = () => ok(i); i.onerror = ne; i.src = adresa })
-    const c = document.createElement('canvas'); c.width = 300; c.height = 400
+    if (typeof obr.decode === 'function') { try { await obr.decode() } catch (e) { return null } }
+    if (!(obr.naturalWidth > 0 && obr.naturalHeight > 0)) return null
+    c = document.createElement('canvas'); c.width = 300; c.height = 400
     const x = c.getContext('2d')
     x.imageSmoothingQuality = 'high'
-    x.fillStyle = '#fff'; x.fillRect(0, 0, 300, 400)
     // Ořez na střed jako object-fit: cover v řádcích (fotky jsou 3:4, takže se nic neusekne)
     const m = Math.max(300 / obr.naturalWidth, 400 / obr.naturalHeight)
     const w = obr.naturalWidth * m, h = obr.naturalHeight * m
     x.drawImage(obr, (300 - w) / 2, (400 - h) / 2, w, h)
-    const mini = await new Promise((ok, ne) => { try { c.toBlob(ok, 'image/jpeg', 0.75) } catch (e) { ne(e) } })
+    const d = x.getImageData(0, 0, 300, 400).data
+    for (let i = 3; i < d.length; i += 4) if (d[i] < 250) return null   // díra = nenakreslilo se celé
+    return await new Promise((ok, ne) => { try { c.toBlob(ok, 'image/jpeg', 0.75) } catch (e) { ne(e) } }) || null
+  } catch (e) { return null } finally {
+    try { if (adresa) URL.revokeObjectURL(adresa) } catch (e) {}
+    try { if (c) { c.width = 0; c.height = 0 } } catch (e) {}   // uvolní paměť plátna (Safari)
+  }
+}
+async function _ulozZmenseninu(slozka, blob) {
+  try {
+    const mini = await _zmenseninaZBlobu(blob)
     if (!mini) return false
     const { error } = await nahrajFotkuOverene('avatars', slozka + '/avatar-mini.jpg', mini, { contentType: 'image/jpeg', upsert: true })
     return !error
-  } catch (e) { return false } finally { try { if (adresa) URL.revokeObjectURL(adresa) } catch (e) {} }
+  } catch (e) { return false }
+}
+// Fotka míří do našeho úložiště? (avatar_url ukládá pracovník — než na adresu sáhne
+// účet správce, ověří se, že to není cizí doména.)
+function fotkaJeZNasehoUloziste(u) {
+  try { return new URL(u).origin === new URL(SUPABASE_URL).origin } catch (e) { return false }
+}
+// Vypadá hotová zmenšenina rozbitě? Spodní čtvrtina (a víc) řádků je jednolitá bílá
+// (plátno, na které se fotka nenakreslila) nebo jednolitá šedá (tak prohlížeč dokreslí
+// useknutý soubor). U skutečné fotky jsou dole ramena a oblečení — přes celou šířku
+// jednolitá bílá ani šedá tam není. Mylný poplach nevadí: zmenšenina se jen vyrobí znovu.
+async function _zmenseninaVypadaRozbite(blob) {
+  let adresa = null, c = null
+  try {
+    adresa = URL.createObjectURL(blob)
+    const obr = await new Promise((ok, ne) => { const i = new Image(); i.onload = () => ok(i); i.onerror = ne; i.src = adresa })
+    if (typeof obr.decode === 'function') { try { await obr.decode() } catch (e) { return true } }
+    const w = obr.naturalWidth, h = obr.naturalHeight
+    if (!(w > 0 && h > 0)) return true
+    c = document.createElement('canvas'); c.width = w; c.height = h
+    const x = c.getContext('2d'); x.drawImage(obr, 0, 0)
+    const d = x.getImageData(0, 0, w, h).data
+    let prazdnych = 0
+    for (let y = h - 1; y >= 0; y--) {
+      let bila = true, seda = true
+      for (let xx = 0; xx < w && (bila || seda); xx += 3) {
+        const i = (y * w + xx) * 4, r = d[i], g = d[i + 1], bb = d[i + 2]
+        if (r < 244 || g < 244 || bb < 244) bila = false
+        if (r < 122 || r > 134 || g < 122 || g > 134 || bb < 122 || bb > 134) seda = false
+      }
+      if (!bila && !seda) break
+      prazdnych++
+    }
+    return prazdnych >= h * 0.25
+  } catch (e) { return true } finally {
+    try { if (adresa) URL.revokeObjectURL(adresa) } catch (e) {}
+    try { if (c) { c.width = 0; c.height = 0 } } catch (e) {}
+  }
+}
+// Které adresy fotek už tenhle prohlížeč zkontroloval (id → adresa). Fotka se kontroluje
+// jednou; nová fotka má novou adresu (?v=), takže přijde na řadu sama.
+const ZMENSENINY_VIDENO_KLIC = 'sb_zmenseniny_videno'
+function _zmenseninyVideno() {
+  try { const o = JSON.parse(localStorage.getItem(ZMENSENINY_VIDENO_KLIC) || '{}'); return (o && typeof o === 'object' && !Array.isArray(o)) ? o : {} } catch (e) { return {} }
+}
+function _zmenseninyVidenoUloz(o) { try { localStorage.setItem(ZMENSENINY_VIDENO_KLIC, JSON.stringify(o)) } catch (e) {} }
+// OPRAVA ROZBITÝCH ZMENŠENIN, KTERÉ UŽ V ÚLOŽIŠTI JSOU. Běží u správce na pozadí
+// (zmenseninyNaPozadi). Projde fotky se značkou m=1, zmenšeninu stáhne a prohlédne;
+// rozbitou (nebo chybějící) vyrobí znovu z velké fotky a adrese dá nové ?v=, aby ji
+// prohlížeče i Stavbyplán načetly čerstvou. Když zmenšenina vyrobit nejde ani teď
+// (velká fotka sama není celá), značka m=1 se sundá a seznamy ukážou velkou.
+// Adresa má pořád tvar …/avatar.jpg?v=<čas>[&m=1] — na ten spoléhá i Stavbyplán.
+let _zmenseninyOpravaBezi = false
+async function opravRozbiteZmenseniny(znovuVse) {
+  if (_zmenseninyOpravaBezi || !_jeAdminPrihlasen()) return null
+  _zmenseninyOpravaBezi = true
+  const kdo = currentUser && currentUser.id
+  const v = { zkontrolovano: 0, rozbitych: 0, opraveno: 0, bezZnacky: 0, neslo: 0 }
+  try {
+    const { data, error } = await sb.from('profiles').select('id, avatar_url').not('avatar_url', 'is', null)
+    if (error) return null
+    const videno = znovuVse ? {} : _zmenseninyVideno()
+    for (const p of (data || [])) {
+      if (!_jeAdminPrihlasen() || !currentUser || currentUser.id !== kdo) break   // odhlášení práci ukončí
+      const u = String(p.avatar_url || '')
+      const slozka = (u.match(/\/avatars\/([^/?#]+)\/avatar\.jpg(\?|$)/) || [])[1]
+      if (!slozka || !/[?&]m=1(&|$)/.test(u) || videno[p.id] === u || !fotkaJeZNasehoUloziste(u)) continue
+      try {
+        const rm = await fetch(fotkaDoSeznamu(u), { mode: 'cors' })
+        let rozbita
+        if (rm.status === 400 || rm.status === 404) rozbita = true           // zmenšenina v úložišti není
+        else if (!rm.ok) throw new Error('HTTP ' + rm.status)
+        else { const mb = await rm.blob(); rozbita = (await _fotkaJeCela(mb)) === false || await _zmenseninaVypadaRozbite(mb) }
+        v.zkontrolovano++
+        if (!rozbita) { videno[p.id] = u; continue }
+        v.rozbitych++
+        const rv = await fetch(u, { mode: 'cors' })
+        if (!rv.ok) throw new Error('HTTP ' + rv.status)
+        const maMini = await _ulozZmenseninu(slozka, await rv.blob())
+        const nova = u.split('?')[0] + '?v=' + Date.now() + (maMini ? '&m=1' : '')
+        const { data: z, error: e } = await sb.from('profiles').update({ avatar_url: nova }).eq('id', p.id).eq('avatar_url', u).select('id')
+        if (e || !z || !z.length) throw new Error(e ? e.message : 'nezměněno')
+        videno[p.id] = nova
+        if (maMini) v.opraveno++; else v.bezZnacky++
+      } catch (e) { v.neslo++; console.warn('[zmenšeniny] oprava', p.id, e?.message || e) }
+    }
+    _zmenseninyVidenoUloz(videno)
+    console.log('[zmenšeniny] kontrola: ' + JSON.stringify(v))
+    // Do deníku jen počty (žádná jména ani adresy) a jen když se něco našlo.
+    if (v.rozbitych || v.neslo) { try { denikChybZapis('fotky|zmenseniny', 'Kontrola zmenšenin fotek: rozbitých ' + v.rozbitych + ', opraveno ' + v.opraveno + ', bez zmenšeniny ' + v.bezZnacky + ', nešlo ' + v.neslo, v, { zdroj: 'auto' }) } catch (x) { console.warn('[deník chyb]', x) } }
+    return v
+  } finally { _zmenseninyOpravaBezi = false }
 }
 // Zmenšenina fotky ZE STAVBY pro galerii u správce (appka 15. 10. 2026: galerie
 // natahovala přímo originály z telefonu a byla kvůli tomu k ničemu pomalá).
@@ -17669,9 +17796,7 @@ async function doplnZmenseninyFotek(tise) {
     if (!slozka || /[?&]m=1(&|$)/.test(u)) continue
     // avatar_url je uložen pracovníkem — než na něj uděláme fetch z účtu správce,
     // ověř, že opravdu míří na náš Supabase storage, ne na cizí doménu.
-    let hostitelOk = false
-    try { hostitelOk = new URL(u).origin === new URL(SUPABASE_URL).origin } catch (e) {}
-    if (!hostitelOk) { chyby++; console.warn('[zmenšeniny]', p.id, 'avatar_url mimo očekávanou doménu, přeskočeno'); continue }
+    if (!fotkaJeZNasehoUloziste(u)) { chyby++; console.warn('[zmenšeniny]', p.id, 'avatar_url mimo očekávanou doménu, přeskočeno'); continue }
     try {
       const r = await fetch(u, { mode: 'cors' })
       if (!r.ok) throw new Error('HTTP ' + r.status)
@@ -17692,12 +17817,17 @@ async function doplnZmenseninyFotek(tise) {
 function zmenseninyNaPozadi() {
   let kdy = 0
   try { kdy = Number(localStorage.getItem('sb_zmenseniny_kontrola') || 0) } catch (e) {}
-  if (Date.now() - kdy < 7 * 24 * 3600 * 1000) return
+  const doplnit = Date.now() - kdy >= 7 * 24 * 3600 * 1000
   setTimeout(async () => {
-    try {
-      const v = await doplnZmenseninyFotek(true)
-      if (v && !v.chyby) { try { localStorage.setItem('sb_zmenseniny_kontrola', String(Date.now())) } catch (e) {} }
-    } catch (e) { console.warn('[zmenšeniny]', e?.message || e) }
+    if (doplnit) {
+      try {
+        const v = await doplnZmenseninyFotek(true)
+        if (v && !v.chyby) { try { localStorage.setItem('sb_zmenseniny_kontrola', String(Date.now())) } catch (e) {} }
+      } catch (e) { console.warn('[zmenšeniny]', e?.message || e) }
+    }
+    // Kontrola hotových zmenšenin (25. 11. 2026): každá adresa jednou, takže při dalším
+    // přihlášení už jen nové fotky.
+    try { await opravRozbiteZmenseniny() } catch (e) { console.warn('[zmenšeniny] oprava:', e?.message || e) }
   }, 30000)
 }
 function fotkaIniciraly(jmeno) {
