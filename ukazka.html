@@ -55948,55 +55948,78 @@ document.addEventListener('visibilitychange', () => {
 // po psaní (Výkaz hodin, jméno vedoucího) zůstala spodní lišta viset uprostřed
 // obrazovky — tam, kde byla nad klávesnicí. Appka lištou nehýbe (je position:
 // fixed; bottom:0), iPhone po schování klávesnice nevrátí výšku okna. Tady se to
-// pozná (nikdo nepíše a okno je pořád o klávesnici nižší / posunuté / lišta
+// pozná (klávesnice je pryč a okno je pořád o klávesnici nižší / posunuté / lišta
 // nesedí na spodku) a okno se přinutí přepočítat. Co naměřil a zda to pomohlo,
 // jde do deníku chyb (lista-po-klavesnici) — v počítači se to vyzkoušet nedá.
+// Hlídá se jen tam, kde je spodní lišta pracovníka opravdu vidět; ne během tahu
+// prstem (podpis) ani rolování.
 ;(function () {
   if (typeof isIOS !== 'function' || !isIOS()) return
   let nejvyssi = 0, sirka = 0, hlaseno = 0, marne = 0, casovac = null, opravuju = false
+  let prstu = 0, rolovaniKdy = 0, metaPuvodni = null
   const POLE = 'input:not([type=checkbox]):not([type=radio]):not([type=button]):not([type=file]):not([type=range]),textarea,select,[contenteditable="true"]'
-  const pise = () => { const a = document.activeElement; return !!(a && a.matches && a.matches(POLE)) }
-  const zmer = () => {
+  const vPoli = () => { const a = document.activeElement; return !!(a && a.matches && a.matches(POLE)) }
+  // Píše = kurzor je v poli A klávesnice je podle viditelného okna opravdu venku
+  // (iPhone po „schovat klávesnici" nechá kurzor v poli — to už psaní není).
+  const pise = () => {
+    if (!vPoli()) return false
     const vv = window.visualViewport
+    return !(vv && nejvyssi && vv.height >= nejvyssi - 150)
+  }
+  const lista = () => {
     const nav = document.querySelector('.mob-nav')
-    const navVidet = !!nav && getComputedStyle(nav).display !== 'none'
-    return { ih: window.innerHeight, nej: nejvyssi,
+    if (!nav || !nav.getClientRects().length) return null       // schovaná i přes rodiče
+    const q = nav.getBoundingClientRect()
+    return q.height > 0 ? q : null
+  }
+  const zmer = () => {
+    const vv = window.visualViewport, q = lista()
+    return { ih: window.innerHeight, iw: window.innerWidth, nej: nejvyssi,
       vvh: vv ? Math.round(vv.height) : null, vvt: vv ? Math.round(vv.offsetTop) : null,
       zoom: vv ? Math.round(vv.scale * 100) / 100 : null,
-      nav: navVidet ? Math.round(nav.getBoundingClientRect().bottom) : null }
+      nav: q ? Math.round(q.bottom) : null }
   }
+  const priblizeno = m => m.zoom !== null && Math.abs(m.zoom - 1) > 0.01
   const nesedi = m => {
-    if (m.zoom !== null && Math.abs(m.zoom - 1) > 0.01) return false     // přiblížení prsty není chyba
+    if (m.nav === null || priblizeno(m)) return false
     if (m.nej && m.ih < m.nej - 150) return true
     if (m.nej && m.vvh !== null && m.vvh < m.nej - 150) return true
     if (m.vvt !== null && m.vvt > 2) return true
-    return m.nav !== null && Math.abs(m.nav - m.ih) > 2
+    return Math.abs(m.nav - m.ih) > 2
   }
-  const zPlochy = () => window.navigator.standalone === true
   const zapis = (zprava, detail, trida) => {
     if (typeof denikChybZapis === 'function') denikChybZapis('lista-po-klavesnici', zprava, detail, { trida, zdroj: 'auto' })
+  }
+  const vratMeta = () => {
+    if (metaPuvodni === null) return
+    const meta = document.querySelector('meta[name="viewport"]')
+    if (meta) meta.setAttribute('content', metaPuvodni)
+    metaPuvodni = null
   }
   const prepocitej = krok => {
     if (krok === 1) {                        // 1. pokus: popostrčit stránku o bod a zpět
       const y = window.scrollY
       window.scrollTo(window.scrollX, y + 1)
-      requestAnimationFrame(() => window.scrollTo(window.scrollX, y))
+      const zpet = () => { if (Math.abs(window.scrollY - (y + 1)) < 1) window.scrollTo(window.scrollX, y) }
+      requestAnimationFrame(zpet); setTimeout(zpet, 60)
       return
     }
     const meta = document.querySelector('meta[name="viewport"]')   // 2. pokus: znovu nastavit okno
-    if (!meta) return
-    const puvodni = meta.getAttribute('content')
-    meta.setAttribute('content', puvodni + ', height=device-height')
-    requestAnimationFrame(() => meta.setAttribute('content', puvodni))
+    if (!meta || metaPuvodni !== null) return
+    metaPuvodni = meta.getAttribute('content')
+    meta.setAttribute('content', metaPuvodni + ', height=device-height')
+    requestAnimationFrame(vratMeta); setTimeout(vratMeta, 60)    // časovač: snímek se na schované appce nespustí
   }
+  const rusi = () => prstu > 0 || Date.now() - rolovaniKdy < 400
   const kontrola = () => {
     // Třikrát marně = dál to nezkoušet (ať se appka netočí v kruhu s oknem).
     if (opravuju || marne >= 3 || document.visibilityState !== 'visible') return
+    if (rusi()) { naplanuj(); return }
     if (window.innerWidth !== sirka) { sirka = window.innerWidth; nejvyssi = 0 }   // otočení telefonu
-    if (pise()) return
+    if (!lista() || pise()) return
     const pred = zmer()
     if (!nesedi(pred)) {
-      if (window.innerHeight > nejvyssi) nejvyssi = window.innerHeight
+      if (!priblizeno(pred) && !vPoli() && window.innerHeight > nejvyssi) nejvyssi = window.innerHeight
       return
     }
     opravuju = true
@@ -56004,29 +56027,40 @@ document.addEventListener('visibilitychange', () => {
     setTimeout(() => {
       const po1 = zmer()
       const dokonci = po2 => {
+        vratMeta()
         opravuju = false
-        if (pise()) return
         const po = po2 || po1
+        // Mezitím se něco změnilo (píše, otočil, přiblížil, schoval appku, lišta zmizela):
+        // výsledek neplatí, nepočítá se ani nezapisuje.
+        if (pise() || rusi() || po.nav === null || priblizeno(po) || po.iw !== pred.iw || document.visibilityState !== 'visible') return
         marne = nesedi(po) ? marne + 1 : 0
         if (hlaseno < 3) {
           hlaseno++
           zapis(nesedi(po) ? 'Spodní lišta po klávesnici nesedí — nepodařilo se srovnat' : 'Spodní lišta po klávesnici neseděla — srovnáno',
-            { pred, po1, po2: po2 || null, zPlochy: zPlochy() }, nesedi(po) ? 'varovani' : 'udalost')
+            { pred, po1, po2: po2 || null, zPlochy: window.navigator.standalone === true }, nesedi(po) ? 'varovani' : 'udalost')
         }
       }
-      if (pise() || !nesedi(po1)) { dokonci(null); return }
+      if (pise() || rusi() || document.visibilityState !== 'visible' || po1.iw !== pred.iw || !nesedi(po1)) { dokonci(null); return }
       prepocitej(2)
       setTimeout(() => dokonci(zmer()), 400)
     }, 350)
   }
-  const naplanuj = () => { clearTimeout(casovac); casovac = setTimeout(kontrola, 450) }
+  function naplanuj() { clearTimeout(casovac); casovac = setTimeout(kontrola, 450) }
   document.addEventListener('focusout', e => {
     if (!e.target || !e.target.matches || !e.target.matches(POLE)) return
     naplanuj()
-    setTimeout(kontrola, 1300)                // klávesnice sjíždí i déle
+    setTimeout(naplanuj, 900)                 // klávesnice sjíždí i déle
   }, true)
-  if (window.visualViewport) window.visualViewport.addEventListener('resize', naplanuj)
-  document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') naplanuj() })
+  document.addEventListener('touchstart', e => { prstu = e.touches.length }, { capture: true, passive: true })
+  const pustil = e => { prstu = e.touches.length }
+  document.addEventListener('touchend', pustil, { capture: true, passive: true })
+  document.addEventListener('touchcancel', pustil, { capture: true, passive: true })
+  window.addEventListener('scroll', () => { if (!opravuju) rolovaniKdy = Date.now() }, { passive: true })
+  if (window.visualViewport) {
+    window.visualViewport.addEventListener('resize', naplanuj)
+    window.visualViewport.addEventListener('scroll', naplanuj)
+  }
+  document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') naplanuj(); else vratMeta() })
   naplanuj()
 })()
 // Poslední příkaz hlavního skriptu (2. 11. 2026, deník chyb): raný odchyt
