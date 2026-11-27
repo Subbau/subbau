@@ -54996,7 +54996,7 @@ document.addEventListener('visibilitychange', () => {
 ;(function () {
   if (typeof isIOS !== 'function' || !isIOS()) return
   let nejvyssi = 0, sirka = 0, hlaseno = 0, marne = 0, casovac = null, opravuju = false
-  let prstu = 0, rolovaniKdy = 0, metaPuvodni = null
+  let prstu = 0, rolovaniKdy = 0, metaPuvodni = null, vlastniPosunDo = 0, schovani = 0
   const POLE = 'input:not([type=checkbox]):not([type=radio]):not([type=button]):not([type=file]):not([type=range]),textarea,select,[contenteditable="true"]'
   const vPoli = () => { const a = document.activeElement; return !!(a && a.matches && a.matches(POLE)) }
   // Píše = kurzor je v poli A klávesnice je podle viditelného okna opravdu venku
@@ -55039,8 +55039,9 @@ document.addEventListener('visibilitychange', () => {
   const prepocitej = krok => {
     if (krok === 1) {                        // 1. pokus: popostrčit stránku o bod a zpět
       const y = window.scrollY
+      vlastniPosunDo = Date.now() + 150           // vlastní popostrčení se nepočítá za rolování
       window.scrollTo(window.scrollX, y + 1)
-      const zpet = () => { if (Math.abs(window.scrollY - (y + 1)) < 1) window.scrollTo(window.scrollX, y) }
+      const zpet = () => { if (prstu === 0 && Math.abs(window.scrollY - (y + 1)) < 1) window.scrollTo(window.scrollX, y) }
       requestAnimationFrame(zpet); setTimeout(zpet, 60)
       return
     }
@@ -55053,7 +55054,8 @@ document.addEventListener('visibilitychange', () => {
   const rusi = () => prstu > 0 || Date.now() - rolovaniKdy < 400
   const kontrola = () => {
     // Třikrát marně = dál to nezkoušet (ať se appka netočí v kruhu s oknem).
-    if (opravuju || marne >= 3 || document.visibilityState !== 'visible') return
+    if (marne >= 3 || document.visibilityState !== 'visible') return
+    if (opravuju) { naplanuj(); return }       // běží pokus — podívat se až po něm
     if (rusi()) { naplanuj(); return }
     if (window.innerWidth !== sirka) { sirka = window.innerWidth; nejvyssi = 0 }   // otočení telefonu
     if (!lista() || pise()) return
@@ -55063,6 +55065,7 @@ document.addEventListener('visibilitychange', () => {
       return
     }
     opravuju = true
+    const schovaniPred = schovani
     prepocitej(1)
     setTimeout(() => {
       const po1 = zmer()
@@ -55072,7 +55075,8 @@ document.addEventListener('visibilitychange', () => {
         const po = po2 || po1
         // Mezitím se něco změnilo (píše, otočil, přiblížil, schoval appku, lišta zmizela):
         // výsledek neplatí, nepočítá se ani nezapisuje.
-        if (pise() || rusi() || po.nav === null || priblizeno(po) || po.iw !== pred.iw || document.visibilityState !== 'visible') return
+        // Zkusí se to znovu, až bude klid (jinak by poslední posun okna zapadl).
+        if (pise() || rusi() || po.nav === null || priblizeno(po) || po.iw !== pred.iw || schovani !== schovaniPred || document.visibilityState !== 'visible') { naplanuj(); return }
         marne = nesedi(po) ? marne + 1 : 0
         if (hlaseno < 3) {
           hlaseno++
@@ -55080,7 +55084,7 @@ document.addEventListener('visibilitychange', () => {
             { pred, po1, po2: po2 || null, zPlochy: window.navigator.standalone === true }, nesedi(po) ? 'varovani' : 'udalost')
         }
       }
-      if (pise() || rusi() || document.visibilityState !== 'visible' || po1.iw !== pred.iw || !nesedi(po1)) { dokonci(null); return }
+      if (pise() || rusi() || schovani !== schovaniPred || document.visibilityState !== 'visible' || po1.iw !== pred.iw || !nesedi(po1)) { dokonci(null); return }
       prepocitej(2)
       setTimeout(() => dokonci(zmer()), 400)
     }, 350)
@@ -55095,12 +55099,12 @@ document.addEventListener('visibilitychange', () => {
   const pustil = e => { prstu = e.touches.length }
   document.addEventListener('touchend', pustil, { capture: true, passive: true })
   document.addEventListener('touchcancel', pustil, { capture: true, passive: true })
-  window.addEventListener('scroll', () => { if (!opravuju) rolovaniKdy = Date.now() }, { passive: true })
+  window.addEventListener('scroll', () => { if (Date.now() > vlastniPosunDo) rolovaniKdy = Date.now() }, { passive: true })
   if (window.visualViewport) {
     window.visualViewport.addEventListener('resize', naplanuj)
     window.visualViewport.addEventListener('scroll', naplanuj)
   }
-  document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') naplanuj(); else vratMeta() })
+  document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') naplanuj(); else { schovani++; vratMeta() } })
   naplanuj()
 })()
 // Poslední příkaz hlavního skriptu (2. 11. 2026, deník chyb): raný odchyt
