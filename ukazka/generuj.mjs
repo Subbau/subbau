@@ -103,6 +103,13 @@ s = s.replace(/<link[^>]*href="\/favicon[^"]*"[^>]*>/g, '<!-- ukázka: bez ikony
 s = s.replace(/<link[^>]*href="\/apple-touch-icon[^"]*"[^>]*>/g, '<!-- ukázka: bez ikony ze serveru -->');
 // Ukázka má vlastní neutrální ikonu (appka ji od 11. 10. 2026 bere jen ze souborů).
 s = s.replace('<!-- ukázka: bez ikony ze serveru -->', '<link rel="icon" type="image/svg+xml" href="' + logoSvg('#E8A13A', '#211D1A') + '">');
+// Vlastní ikona ukázky jako soubor (27. 11. 2026, majitel: „StavKo dej jinačí ikonu,
+// ať to není stejné"). Safari ikonu z vloženého SVG nebere a sáhl by po /favicon.ico
+// a /apple-touch-icon.png ostré appky — ukázka by pak měla její logo.
+s = s.replace('<!-- ukázka: bez ikony ze serveru -->',
+  '<link rel="icon" type="image/png" sizes="32x32" href="/ukazka-ikona-32.png?v=1">\n<link rel="apple-touch-icon" sizes="180x180" href="/ukazka-ikona-180.png?v=1">');
+// Název při přidání na plochu: ukázka, ne ostrá appka.
+s = s.replace(/(<meta name="(?:apple-mobile-web-app-title|application-name)" content=")[^"]*(">)/g, '$1' + FIRMA + '$2');
 
 // --- 4c) SKUTEČNÉ OSOBNÍ ÚDAJE
 // V appce jsou natvrdo telefony na vedení, jména a údaje německého odběratele

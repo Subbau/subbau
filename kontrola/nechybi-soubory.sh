@@ -11,6 +11,8 @@ NUTNE=(
   zasady.html          # veřejné zásady ochrany osobních údajů (App Store/Google Play)
   sw.js manifest.json
   favicon.ico favicon-32.png icon-192.png icon-512.png apple-touch-icon.png
+  icon-192-maska.png icon-512-maska.png   # ikony pro kulaté masky Androidu
+  ukazka-ikona-32.png ukazka-ikona-180.png # vlastní ikona ukázky
   api/klient-dochazka.js api/send-invoice.js
   api/admin-update-worker.js api/check-expiring-docs.js
   # Deník chyb (2. 11. 2026): zápis bez přihlášení a serverový zápis — bez nich
