@@ -8098,6 +8098,9 @@ function _dnAnonZa(z, vynutit) {
   const kde = String(z.kde), d = z.detail || {}, pocet = d.pocet || 1
   const stari = Date.now() - (Date.parse(d.vznikla || '') || Date.now())
   const sUctem = !!_dnUcetZRelace()
+  // Čerstvý řádek chvíli počká: hláška, která k němu patří (ozvěna do 1,5 s), se
+  // připisuje jen do kopie v telefonu — odeslaný řádek by ji už nedostal.
+  if (!vynutit && stari < DN_ODKLAD_MS + 100) return DN_ODKLAD_MS + 100 - stari
   if (!DN_ANON.test(kde)) {
     if (vynutit || _dnJa() || kde === 'pomalost' || d.t === 'mereni') return Infinity
     return sUctem ? Math.max(0, DN_ANON_S_UCTEM_MS - stari) : 0
@@ -9447,7 +9450,9 @@ if (isRecoveryMode) {
     const tvar = v => (/^[\w.-]{1,60}$/.test(v || '') ? v : undefined)
     const kod = tvar(h.get('error_code') || q.get('error_code')), chyba = tvar(h.get('error') || q.get('error'))
     if (!kod && !chyba) return
-    window._odkazZEmailuSelhal = { kod: kod || chyba, ukazano: false }   // showLogin k tomu ukáže hlášku
+    // Hlášku a formulář na nový odkaz jen k propadlému nebo už použitému odkazu (otp_expired)
+    // — jiná chyba v adrese (třeba výpadek serveru) není důvod posílat člověka pro nový.
+    if (kod === 'otp_expired') window._odkazZEmailuSelhal = { kod, ukazano: false }   // showLogin k tomu ukáže hlášku
     denikChybZapis('odkaz-z-emailu', 'Odkaz z e-mailu nefunguje (' + (kod || chyba) + ')', { error_code: kod, chyba, typ: tvar(h.get('type') || q.get('type')) })
     // Nespolknout potichu (kritika 20c, spojení 2. 11. 2026) — značku [deník chyb]
     // konzole deníku vynechá, takže se to nezacyklí.
@@ -10021,8 +10026,13 @@ function stopaPrihlasovaciObrazovky(duvod) {
     const d = String(duvod || '?')
     const bezne = /^(nepřihlášen|tlačítko Odhlásit|nové heslo|\?)$/.test(d)
     const pred = radkyDenikuPrihlaseni(7).slice(0, -1)   // poslední řádek je právě tohle zobrazení
+    // „nepřihlášen" na telefonu, kde appka už dřív běžela (v deníku přihlášení je něco
+    // staršího než tohle načtení), není první návštěva — přihlášení tu bylo a zmizelo.
+    let uzTuBezela = false
+    try { const vse = JSON.parse(lsGet(DENIK_KLIC) || '[]'); uzTuBezela = Array.isArray(vse) && vse.some(z => z && Date.now() - Date.parse(z.t) > 60000 && Date.now() - Date.parse(z.t) < 24 * 3600 * 1000) } catch (e) { uzTuBezela = false }
     const text = 'Přihlašovací obrazovka — ' + d + (pred.length ? ' · před tím: ' + pred.join('; ') : '')
-    denikChybZapis('prihlasovani|obrazovka', text.slice(0, 480), { duvod: duvodBezDiakritiky(d) }, { trida: bezne ? 'udalost' : 'chyba' })
+    denikChybZapis('prihlasovani|obrazovka', text.slice(0, 480), { duvod: duvodBezDiakritiky(d) },
+      { trida: !bezne ? 'chyba' : (d === 'nepřihlášen' && uzTuBezela ? 'varovani' : 'udalost') })
   } catch (e) { console.warn('[deník chyb]', e) }
 }
 // Hlášky v rámečcích přihlašovací stránky (přihlášení, registrace, zapomenuté heslo,
@@ -10033,7 +10043,7 @@ function hlidejHlaskyPrihlaseni() {
     if (typeof MutationObserver !== 'function' || window._hlaskyPrihlaseniHlidane) return
     window._hlaskyPrihlaseniHlidane = true
     const POLE = { 'login-err': 'login-email', 'reg-err': 'reg-email', 'reg-ok': 'reg-email', 'forgot-err': 'forgot-email', 'forgot-ok': 'forgot-email', 'recovery-err': '', 'recovery-ok': '' }
-    const naposled = {}
+    const naposled = {}, kdy = {}
     for (const id of Object.keys(POLE)) {
       const el = document.getElementById(id)
       if (!el) continue
@@ -10042,8 +10052,10 @@ function hlidejHlaskyPrihlaseni() {
           const videt = el.style.display !== 'none' && el.offsetParent !== null
           const text = videt ? String(el.textContent || '').replace(/\s+/g, ' ').trim() : ''
           if (!text) { naposled[id] = ''; return }
-          if (naposled[id] === text) return
-          naposled[id] = text
+          // Stejná hláška znovu: rámeček se schová a ukáže v jednom kroku, takže se pozná
+          // jen podle času — po 2,5 s je to další pokus (deník ho přičte k prvnímu).
+          if (naposled[id] === text && Date.now() - (kdy[id] || 0) < 2500) return
+          naposled[id] = text; kdy[id] = Date.now()
           const pole = POLE[id] ? document.getElementById(POLE[id]) : null
           if (typeof _dnHlaskaPrihlaseni === 'function') _dnHlaskaPrihlaseni(text, id, pole ? pole.value : '')
         } catch (e) { console.warn('[hlášky přihlášení]', e && e.message) }
@@ -11211,11 +11223,13 @@ async function doLogin() {
     // Počet úhozů do pole Heslo (jen počet, nikdy znaky): pozná se, jestli člověk psal
     // a nic se nezapsalo (klávesnice telefonu), nebo do pole nepsal vůbec.
     try { if (typeof _dnPrihlaseni === 'function') _dnPrihlaseni('prazdne', { code: 'chybi-' + chybi + '-uhozu-' + Math.min(Number(window._hesloUhozu) || 0, 999) }, email) } catch (x) { console.warn('[deník chyb]', x) } // eslint-disable-line no-undef
+    window._hesloUhozu = 0     // počítá se vždy jen od minulého pokusu (změny pole, ne znaky)
     err.style.display = 'block'
     try { document.getElementById(chybi === 'heslo' ? 'login-pwd' : 'login-email').focus() } catch (e) { console.warn('[přihlášení] kurzor do pole:', e && e.message) }
     return
   }
 
+  window._hesloUhozu = 0
   loginInProgress = true
   btn.textContent = 'Přihlašuji...'
   btn.disabled = true
