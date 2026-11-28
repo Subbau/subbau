@@ -8106,7 +8106,7 @@ function _dnPosliAnon(vynutit) {
     if (_dn.anonBezi) return true
     // Odstup 30 s: řádek, který přišel mezitím, dřív neodešel, dokud nepřišel další
     // (28. 11. 2026) — teď si odeslání naplánuje na konec odstupu.
-    if (Date.now() < _dn.anonKdy) { if (!vynutit) _dnPlanujAnon(_dn.anonKdy - Date.now() + 300); return false }
+    if (Date.now() < _dn.anonKdy) { if (!vynutit) _dnPlanujDalsiAnon(); return false }
     const kruh = _dnNactiPred()
     const jdou = kruh.filter(z => _dnAnonSmi(z, vynutit)).slice(-10)
     if (!jdou.length) return vynutit
@@ -8118,22 +8118,49 @@ function _dnPosliAnon(vynutit) {
     if (_dnBajtu(telo) > 7000) { tela = tela.map(x => Object.assign({}, x, { detail: Object.assign({}, x.detail, { stack: undefined, ua: undefined, souvisi: undefined }) })); telo = JSON.stringify({ zaznamy: tela }) }
     if (_dnBajtu(telo) > 7000) return false
     _dn.anonBezi = true; _dn.anonPozdeji = false
+    let vyrizeno = false
+    _dn.anonLeti = new Set(jdou.map(z => z._id))     // denikPoPrihlaseni je nesmí převzít, dokud server neodpoví
     _dn.anonKdy = vynutit ? 0 : Date.now() + 30000
     _denikFetchPuvodni('/api/chyba', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: telo, keepalive: true, credentials: 'omit' })
       .then(r => {
-        if (r.status === 429) { _dn.anonKdy = Date.now() + (Number(r.headers.get('Retry-After')) || 600) * 1000; return }
+        // Retry-After může být i 1 s — vlastní odstup 30 s se tím nesmí zkrátit.
+        if (r.status === 429) { _dn.anonKdy = Math.max(_dn.anonKdy, Date.now() + Math.max(30, Number(r.headers.get('Retry-After')) || 600) * 1000); return }
         if (![204, 400, 403, 413].includes(r.status)) return
+        vyrizeno = true
         const ids = new Set(jdou.map(z => z._id))
         lsSet(DN_KLIC_PRED, JSON.stringify(_dnNactiPred().map(z => (z && ids.has(z._id) ? Object.assign(z, { _anon: true }) : z))))
       })
-      .catch(() => {})
+      .catch(e => { console.warn('[deník chyb] bez přihlášení neodešlo:', e && e.name) })
       .then(() => {
         _dn.anonBezi = false
-        // Co přibylo během odesílání (nebo se nevešlo do deseti), pošle se po odstupu samo.
-        try { if (!vynutit && !_dnJa() && _dnNactiPred().some(z => _dnAnonSmi(z, false))) _dnPlanujAnon(Math.max(_dn.anonKdy - Date.now(), 0) + 300) } catch (e) {}
+        _dn.anonLeti = null
+        _dn.anonNezdaru = vyrizeno ? 0 : (_dn.anonNezdaru || 0) + 1
+        // Mezitím se člověk přihlásil: co letělo a server to nepřevzal, převezme teď jeho
+        // účet (denikPoPrihlaseni letící řádky nechal být, aby nešly dvakrát).
+        if (_dnJa()) { try { denikPoPrihlaseni() } catch (e) { console.warn('[deník chyb]', e && e.message) } return }
+        if (!vynutit) _dnPlanujDalsiAnon()
       })
     return true
   } catch (e) { _dn.anonBezi = false; return false }
+}
+// Kdy má smysl zkusit odeslání bez přihlášení příště: hned po odstupu, když je co
+// poslat; chyba kódu, která ještě čeká na své 2 minuty, až po nich. Po třech
+// nezdarech za sebou (síť, 5xx, 429) se samo neplánuje — jinak by se při výpadku
+// točilo donekonečna; zkusí to další řádek nebo návrat spojení (kontrola 28. 11. 2026).
+function _dnPlanujDalsiAnon() {
+  try {
+    if (_dnJa() || navigator.onLine === false || (_dn.anonNezdaru || 0) >= 3) return
+    let za = Infinity
+    for (const z of _dnNactiPred()) {
+      if (!z || z._anon || !DN_ANON.test(String(z.kde))) continue
+      if (_dnAnonSmi(z, false)) { za = Math.min(za, Math.max(_dn.anonKdy - Date.now(), 0) + 300); break }
+      if (/^js-(chyba|neosetrena)(\||$)/.test(z.kde)) {
+        const d = z.detail || {}
+        if (/^(login|start|heslo)$/.test(d.sekce || 'start')) za = Math.min(za, Math.max(120500 - (Date.now() - (Date.parse(d.vznikla || '') || Date.now())), Math.max(_dn.anonKdy - Date.now(), 0) + 300))
+      }
+    }
+    if (za !== Infinity) _dnPlanujAnon(za)
+  } catch (e) { console.warn('[deník chyb]', e && e.message) }
 }
 // Jeden časovač; dřívější termín má přednost před pozdějším (dřív první naplánovaný
 // — třeba 2 min kvůli chybě kódu — zablokoval každý další).
@@ -8254,8 +8281,14 @@ function denikPoPrihlaseni() {
     if (DN_DEMO) return
     const kdo = _dnJa()
     if (!kdo) return
-    const kruh = _dnNactiPred().filter(z => z && !z._anon)
-    lsRemove(DN_KLIC_PRED)
+    // Řádek, který právě letí bez přihlášení na server, se nepřebírá — jinak by byl
+    // v deníku dvakrát (kontrola 28. 11. 2026). Zůstane v telefonu; po odpovědi serveru
+    // ho buď označí _anon, nebo ho převezme druhé volání z _dnPosliAnon.
+    const anonLeti = _dn.anonLeti
+    const vsechny = _dnNactiPred()
+    const kruh = vsechny.filter(z => z && !z._anon && !(anonLeti && anonLeti.has(z._id)))
+    const necham = anonLeti ? vsechny.filter(z => z && !z._anon && anonLeti.has(z._id)) : []
+    if (necham.length) lsSet(DN_KLIC_PRED, JSON.stringify(necham)); else lsRemove(DN_KLIC_PRED)
     const jmeno = _dnJmeno()
     for (const z of kruh) {
       const d = Object.assign({}, z.detail, { pred: true, verze: (z.detail && z.detail.verze) || DN_VERZE, _id: (z.detail && z.detail._id) || z._id || _dnNoveId() })
@@ -11095,7 +11128,7 @@ async function doLogin() {
       : chybi === 'email' ? 'Napište e-mail — pole E-mail je prázdné.' : 'Napište heslo — pole Heslo je prázdné.'
     try { if (typeof _dnPrihlaseni === 'function') _dnPrihlaseni('prazdne', { code: 'chybi-' + chybi }, email) } catch (x) { console.warn('[deník chyb]', x) } // eslint-disable-line no-undef
     err.style.display = 'block'
-    try { document.getElementById(chybi === 'heslo' ? 'login-pwd' : 'login-email').focus() } catch (e) {}
+    try { document.getElementById(chybi === 'heslo' ? 'login-pwd' : 'login-email').focus() } catch (e) { console.warn('[přihlášení] kurzor do pole:', e && e.message) }
     return
   }
 
