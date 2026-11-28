@@ -53,10 +53,27 @@ const MAX_ZAZNAMU = 10;
 const DRUHY = new Set([
   'js-chyba', 'js-neosetrena', 'zdroj-nenacten',
   'start-knihovna', 'start-nedobehl', 'start-brzda',
-  'prihlaseni', 'heslo-obnova', 'registrace', 'registrace-profil',
+  'prihlaseni', 'prihlasovani', 'heslo-obnova', 'registrace', 'registrace-profil',
   'odkaz-z-emailu', 'relace-znovu', 'relace-nefunguje', 'podpis-firmy',
   'klient', 'sw',
 ]);
+
+// VŠECHNO Z PŘIHLAŠOVACÍ STRÁNKY (28. 11. 2026, majitel: „všechno ale opravdu
+// všechno musí jít do deníku, abych byl schopnej ti to poslat a né čekat, až mi
+// někdo pošle chybu"). Kdo stojí na přihlašovací stránce a v telefonu nemá ani
+// uložené přihlášení, tomu appka pošle bez přihlášení každý řádek (hlášku,
+// konzoli, nepovedený dotaz…), ne jen druhy ze seznamu výš — ty dřív čekaly
+// v telefonu na přihlášení, ke kterému u nového člověka s propadlým odkazem
+// nikdy nedošlo. Server proto bere každý druh správného tvaru KROMĚ vyhrazených:
+//   server      zapisují jen funkce na serveru (zapisChybuServeru) — z prohlížeče
+//               by šel podvrhnout
+//   pomalost    měření rychlosti, bez přihlášení se neposílá
+// DRUHY výš zůstává seznamem druhů, které appka posílá HNED (i s uloženým
+// přihlášením), a hlídá ho zkouška (jeden seznam na třech místech).
+// Na ochraně se nic nemění: jen z naší stránky, tělo do 8 kB, 10 záznamů,
+// věta i podrobnosti se čistí, kdo je vždy prázdné, stropy platí dál.
+const VYHRAZENE = new Set(['server', 'pomalost']);
+const PRIJIMANE = { has: (druh) => typeof druh === 'string' && !VYHRAZENE.has(druh) };
 
 const ipKlienta = (req) =>
   String((req.headers && req.headers['x-forwarded-for']) || '').split(',')[0].trim() || 'neznama';
@@ -116,7 +133,7 @@ module.exports = async function handler(req, res) {
     if (bajtu(syrove) > MAX_TELO) { res.status(413).json({ ok: false, chyba: 'velke' }); return; }
 
     const seznam = telo && Array.isArray(telo.zaznamy) ? telo.zaznamy : (telo && typeof telo === 'object' ? [telo] : []);
-    const radky = seznam.slice(0, MAX_ZAZNAMU).map((z) => D.cistyZaznamBezPrihlaseni(z, DRUHY)).filter(Boolean);
+    const radky = seznam.slice(0, MAX_ZAZNAMU).map((z) => D.cistyZaznamBezPrihlaseni(z, PRIJIMANE)).filter(Boolean);
     if (!radky.length) { res.status(400).json({ ok: false, chyba: 'nic_platneho' }); return; }
 
     const v = await D.vlozDoDeniku(radky, klic, 5000);
@@ -141,3 +158,4 @@ module.exports = async function handler(req, res) {
 };
 
 module.exports.DRUHY = DRUHY;
+module.exports.VYHRAZENE = VYHRAZENE;
