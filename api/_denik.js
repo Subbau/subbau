@@ -309,7 +309,8 @@ function cistyZaznamBezPrihlaseni(z, druhy) {
   // Cíl za svislítkem se ukládá tak, jak přišel — nesmí proto nést adresu, klíč ani uuid
   // (28. 11. 2026: bez přihlášení se nově bere každý druh). Takový cíl se zahodí, druh zůstane.
   if (m[2] && (/:\/\//.test(m[2]) || /^\|(?:https?|ftp|file|blob|data|mailto):/i.test(m[2]) || /\beyJ[A-Za-z0-9_-]{5,}/.test(m[2])
-      || /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}/i.test(m[2]) || /\d{6,}/.test(m[2]))) kde = m[1];
+      || /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}/i.test(m[2]) || /\d{6,}/.test(m[2])
+      || /^\|\//.test(m[2]) || /[A-Za-z0-9_-]{24,}/.test(m[2]))) kde = m[1];
   const d = cistyDetail(z.detail);
   if (d.pocet !== undefined) d.pocet = Math.min(d.pocet, POCET_BEZ_PRIHLASENI);
   // _id řádku (slučování dvojího odeslání v prohlížeči deníku) smí ležet
